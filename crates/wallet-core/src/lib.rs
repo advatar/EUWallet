@@ -14,9 +14,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use crypto_backend::AwsLc;
+use crypto_traits::Alg;
 use oid4vp::{Env, Input, ResolvedTrust, SelectedCredential, State};
 use presenter::{minimum_claim_set, ConsentScreen, PaymentScreen, ScreenDescription};
 use serde::{Deserialize, Serialize};
+use trust::{ServiceType, TrustStore};
 
 /// Which flow the wallet is currently driving, so a device signature is routed to the right
 /// machine (presentation's key-binding JWT vs. payment's SCA authentication code).
@@ -64,10 +66,10 @@ pub enum Event {
     SetClock { epoch: i64 },
     /// A remote authorization request (compact JWS) arrived via deep link / browser.
     AuthorizationRequestReceived { request: Vec<u8> },
-    /// The shell resolved RP trust/JWKS for the pending request.
-    RpTrustResolved {
-        registered: bool,
-        rp_public_key: Vec<u8>,
+    /// The shell fetched the RP's certificate chain (DER, leaf-first) for the pending request.
+    /// Whether the RP is *registered* is decided IN-CORE against the trusted list — not here.
+    RpCertChainResolved {
+        rp_cert_chain: Vec<Vec<u8>>,
         registered_redirect_uris: Vec<String>,
     },
     /// The user approved the consent screen.
@@ -119,6 +121,8 @@ pub struct Core {
     pay_seen_nonces: Vec<u64>,
     pay_pending: Option<(String, u64)>, // (response_uri, nonce) of the in-flight payment
     active: ActiveFlow,
+    // Trust: the verified trusted list, used to decide RP registration in-core (not shell-supplied).
+    trust_store: TrustStore,
 }
 
 impl Core {
@@ -137,6 +141,44 @@ impl Core {
             pay_seen_nonces: Vec::new(),
             pay_pending: None,
             active: ActiveFlow::None,
+            trust_store: TrustStore::new(),
+        }
+    }
+
+    /// Install/update the signed trusted list (rollback-protected). The RP-registration decision is
+    /// then made in-core against these anchors — never a shell-supplied boolean.
+    pub fn load_trust_list(
+        &mut self,
+        signed_list: &[u8],
+        operator_public_key: &[u8],
+    ) -> Result<(), String> {
+        let list = trust::parse_and_verify(
+            signed_list,
+            operator_public_key,
+            &AwsLc,
+            Alg::Es256,
+            self.now_epoch,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        self.trust_store.update(list).map_err(|e| format!("{e:?}"))
+    }
+
+    /// Decide whether an RP cert chain is a registered relying party, in-core, via the trusted
+    /// list + X.509 profile. Returns `(registered, rp_public_key_raw)`.
+    fn resolve_rp(&self, chain: &[Vec<u8>]) -> (bool, Vec<u8>) {
+        let anchors = self
+            .trust_store
+            .parsed_anchors(ServiceType::RelyingPartyAccessCa);
+        match x509::check_relying_party(chain, &anchors, self.now_epoch, &AwsLc) {
+            Ok(_) => {
+                let key = chain
+                    .first()
+                    .and_then(|der| x509::parse_cert(der).ok())
+                    .map(|c| c.public_key_raw)
+                    .unwrap_or_default();
+                (true, key)
+            }
+            Err(_) => (false, Vec::new()),
         }
     }
 
@@ -156,15 +198,18 @@ impl Core {
                 self.active = ActiveFlow::Presentation;
                 self.drive(Input::AuthorizationRequest(request))
             }
-            Event::RpTrustResolved {
-                registered,
-                rp_public_key,
+            Event::RpCertChainResolved {
+                rp_cert_chain,
                 registered_redirect_uris,
-            } => self.drive(Input::RpTrustResolved(ResolvedTrust {
-                registered,
-                rp_public_key,
-                registered_redirect_uris,
-            })),
+            } => {
+                // The registration decision is computed here, in-core, from the trusted list.
+                let (registered, rp_public_key) = self.resolve_rp(&rp_cert_chain);
+                self.drive(Input::RpTrustResolved(ResolvedTrust {
+                    registered,
+                    rp_public_key,
+                    registered_redirect_uris,
+                }))
+            }
             Event::UserConsented => self.drive(Input::ConsentGranted),
             Event::UserDeclined => self.drive(Input::ConsentDeclined),
             Event::DeviceSignatureProduced { signature } => match self.active {
@@ -381,6 +426,19 @@ impl WalletEngine {
         Arc::new(WalletEngine {
             inner: Mutex::new(Core::new(wallet_client_id, device_key_ref)),
         })
+    }
+
+    /// Install/update the signed trusted list. Returns "" on success, else an error string.
+    pub fn load_trust_list(&self, signed_list: Vec<u8>, operator_public_key: Vec<u8>) -> String {
+        match self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .load_trust_list(&signed_list, &operator_public_key)
+        {
+            Ok(()) => String::new(),
+            Err(e) => e,
+        }
     }
 
     /// Load a held credential: the issuer JWT plus a JSON object mapping claim name -> disclosure.

@@ -12,6 +12,27 @@ fn b64(b: &[u8]) -> String {
     Base64UrlUnpadded::encode_string(b)
 }
 
+// Real openssl-generated RP chain: rp.der (leaf) issued by ca.der; rp.pkcs8.der is the leaf key.
+const CA_DER: &[u8] = include_bytes!("../../x509/tests/vectors/ca.der");
+const RP_DER: &[u8] = include_bytes!("../../x509/tests/vectors/rp.der");
+const RP_PKCS8: &[u8] = include_bytes!("../../x509/tests/vectors/rp.pkcs8.der");
+
+/// A signed trusted list granting the CA as an RP-access CA.
+fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
+    let header = b64(br#"{"alg":"ES256"}"#);
+    let payload = b64(serde_json::json!({
+        "seq": 1, "valid_from": 0, "valid_until": 4_000_000_000i64,
+        "anchors": [{ "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" }]
+    })
+    .to_string()
+    .as_bytes());
+    let si = format!("{header}.{payload}");
+    let sig = operator
+        .sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
+    format!("{si}.{}", b64(&sig)).into_bytes()
+}
+
 /// Issue an SD-JWT VC; return (issuer_jwt, disclosures_by_claim).
 fn issue(
     issuer: &SoftwareSigner,
@@ -64,7 +85,9 @@ fn sign_request(rp: &SoftwareSigner, nonce: u64, requested: &[&str]) -> Vec<u8> 
 fn full_presentation_through_wallet_core_with_data_minimisation() {
     let issuer = SoftwareSigner::generate_p256().unwrap();
     let device = SoftwareSigner::generate_p256().unwrap();
-    let rp = SoftwareSigner::generate_p256().unwrap();
+    // The RP signs its request with the private key of its real (openssl) reader certificate.
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let trust_operator = SoftwareSigner::generate_p256().unwrap();
 
     // Wallet holds a PID with TWO claims.
     let (issuer_jwt, by_claim) = issue(
@@ -82,6 +105,12 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
     core.handle_event(Event::SetClock {
         epoch: 1_790_000_000,
     });
+    // Install the signed trusted list; RP registration is now decided in-core against it.
+    core.load_trust_list(
+        &signed_trust_list(&trust_operator),
+        trust_operator.public_key_raw(),
+    )
+    .expect("trust list loads");
 
     // RP requests ONLY age_over_18.
     const NONCE: u64 = 424242;
@@ -94,10 +123,10 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
         "got {fx:?}"
     );
 
-    // 2) trust resolved (real RP key) → PersistNonce + Render(consent)
-    let fx = core.handle_event(Event::RpTrustResolved {
-        registered: true,
-        rp_public_key: rp.public_key_raw().to_vec(),
+    // 2) the shell supplies the RP CERT CHAIN; the core validates it against the trusted list
+    //    (registration is NOT a shell boolean) → PersistNonce + Render(consent)
+    let fx = core.handle_event(Event::RpCertChainResolved {
+        rp_cert_chain: vec![RP_DER.to_vec()],
         registered_redirect_uris: vec![],
     });
     let screen = fx.iter().find_map(|e| match e {

@@ -64,8 +64,7 @@ public final class EffectExecutor {
             return WalletEventJSON.presentationDelivered()
         case .resolveRpTrust(let clientId):
             let t = await trust.resolve(clientId: clientId)
-            return WalletEventJSON.rpTrustResolved(
-                registered: t.registered, rpPublicKey: t.rpPublicKey, redirectUris: t.redirectUris)
+            return WalletEventJSON.rpCertChainResolved(chain: t.certChain, redirectUris: t.redirectUris)
         case .persistNonce(let nonce):
             try? storage.put(key: "nonce:\(nonce)", value: Data())
             return nil

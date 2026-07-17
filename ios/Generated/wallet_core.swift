@@ -437,6 +437,24 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
 
 
 
@@ -457,6 +475,11 @@ public protocol WalletEngineProtocol : AnyObject {
      * Load a held credential: the issuer JWT plus a JSON object mapping claim name -> disclosure.
      */
     func loadCredential(issuerJwt: String, disclosuresByClaimJson: String) 
+    
+    /**
+     * Install/update the signed trusted list. Returns "" on success, else an error string.
+     */
+    func loadTrustList(signedList: Data, operatorPublicKey: Data)  -> String
     
 }
 
@@ -550,6 +573,18 @@ open func loadCredential(issuerJwt: String, disclosuresByClaimJson: String) {try
 }
 }
     
+    /**
+     * Install/update the signed trusted list. Returns "" on success, else an error string.
+     */
+open func loadTrustList(signedList: Data, operatorPublicKey: Data) -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_load_trust_list(self.uniffiClonePointer(),
+        FfiConverterData.lower(signedList),
+        FfiConverterData.lower(operatorPublicKey),$0
+    )
+})
+}
+    
 
 }
 
@@ -623,6 +658,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_load_credential() != 40264) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_load_trust_list() != 63474) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_constructor_walletengine_new() != 57779) {

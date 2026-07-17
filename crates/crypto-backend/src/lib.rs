@@ -164,6 +164,15 @@ impl SoftwareSigner {
         Ok(SoftwareSigner { key, public_raw })
     }
 
+    /// Load an existing P-256 key from PKCS#8 DER (e.g. an issuer/RP server key). Produces
+    /// JOSE/COSE fixed `r||s` signatures.
+    pub fn from_pkcs8_der(pkcs8: &[u8]) -> Result<Self, CryptoError> {
+        let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8)
+            .map_err(|_| CryptoError::Backend("pkcs8 load failed".into()))?;
+        let public_raw = key.public_key().as_ref().to_vec();
+        Ok(SoftwareSigner { key, public_raw })
+    }
+
     /// The raw uncompressed public-key point (`0x04||X||Y`), the form [`AwsLc`] verifies against.
     pub fn public_key_raw(&self) -> &[u8] {
         &self.public_raw

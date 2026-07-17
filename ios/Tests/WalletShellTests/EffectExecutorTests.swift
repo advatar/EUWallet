@@ -11,7 +11,7 @@ final class MockEngine: WalletEngineDriving {
         if eventJson.contains("\"authorizationRequestReceived\"") {
             return #"[{"type":"resolveRpTrust","clientId":"rp.example"}]"#
         }
-        if eventJson.contains("\"rpTrustResolved\"") {
+        if eventJson.contains("\"rpCertChainResolved\"") {
             return #"[{"type":"persistNonce","nonce":42},{"type":"render","screen":{"screen":"consent","rpDisplayName":"Example RP","purpose":"Prove age","requestedClaims":["age_over_18"]}}]"#
         }
         if eventJson.contains("\"userConsented\"") {
@@ -42,7 +42,7 @@ final class EffectExecutorTests: XCTestCase {
             signer: signer,
             http: http,
             storage: InMemoryStorage(),
-            trust: StubTrustResolver(registered: true),
+            trust: StubTrustResolver(certChain: [Data([1, 2, 3])]),
             render: render)
     }
 

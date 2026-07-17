@@ -90,9 +90,10 @@ public enum WalletEventJSON {
     public static func authorizationRequestReceived(_ request: Data) -> String {
         #"{"type":"authorizationRequestReceived","request":\#(byteArray(request))}"#
     }
-    public static func rpTrustResolved(registered: Bool, rpPublicKey: Data, redirectUris: [String]) -> String {
+    public static func rpCertChainResolved(chain: [Data], redirectUris: [String]) -> String {
+        let certs = chain.map { byteArray($0) }.joined(separator: ",")
         let uris = redirectUris.map { "\"\($0)\"" }.joined(separator: ",")
-        return #"{"type":"rpTrustResolved","registered":\#(registered),"rpPublicKey":\#(byteArray(rpPublicKey)),"registeredRedirectUris":[\#(uris)]}"#
+        return #"{"type":"rpCertChainResolved","rpCertChain":[\#(certs)],"registeredRedirectUris":[\#(uris)]}"#
     }
     public static func userConsented() -> String { #"{"type":"userConsented"}"# }
     public static func userDeclined() -> String { #"{"type":"userDeclined"}"# }
@@ -111,7 +112,8 @@ public enum WalletEventJSON {
     }
 }
 
-/// Resolves an RP's registration + JWKS (network I/O; injected so it can be stubbed in tests).
+/// Fetches an RP's certificate chain (network I/O; injected so it can be stubbed in tests). The
+/// registration DECISION is made in the Rust core against the trusted list — not here.
 public protocol TrustResolver {
-    func resolve(clientId: String) async -> (registered: Bool, rpPublicKey: Data, redirectUris: [String])
+    func resolve(clientId: String) async -> (certChain: [Data], redirectUris: [String])
 }

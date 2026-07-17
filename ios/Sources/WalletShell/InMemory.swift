@@ -28,13 +28,15 @@ public final class StubSigner: Signer {
     }
 }
 
-/// A fixed trust resolver for tests/previews.
+/// A fixed trust resolver for tests/previews (returns a canned RP certificate chain).
 public final class StubTrustResolver: TrustResolver {
-    private let result: (Bool, Data, [String])
-    public init(registered: Bool = true, rpPublicKey: Data = Data(), redirectUris: [String] = []) {
-        self.result = (registered, rpPublicKey, redirectUris)
+    private let chain: [Data]
+    private let uris: [String]
+    public init(certChain: [Data] = [], redirectUris: [String] = []) {
+        self.chain = certChain
+        self.uris = redirectUris
     }
-    public func resolve(clientId: String) async -> (registered: Bool, rpPublicKey: Data, redirectUris: [String]) {
-        result
+    public func resolve(clientId: String) async -> (certChain: [Data], redirectUris: [String]) {
+        (chain, uris)
     }
 }
