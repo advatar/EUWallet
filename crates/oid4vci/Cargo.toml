@@ -12,3 +12,9 @@ crypto-traits = { path = "../crypto-traits" }
 mdoc = { path = "../mdoc" }
 sdjwt = { path = "../sdjwt" }
 x509 = { path = "../x509" }
+# Credential offer / proof-of-possession JWT are JSON + base64url (from the budget).
+serde_json = { workspace = true }
+base64ct = { workspace = true }
+
+[lints]
+workspace = true

@@ -19,6 +19,7 @@ mdoc = { path = "../mdoc" }
 sdjwt = { path = "../sdjwt" }
 x509 = { path = "../x509" }
 oid4vp = { path = "../oid4vp" }
+oid4vci = { path = "../oid4vci" }
 serde_json = { workspace = true }
 base64ct = { workspace = true }
 

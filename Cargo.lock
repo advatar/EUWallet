@@ -326,6 +326,7 @@ dependencies = [
  "cose",
  "crypto-traits",
  "mdoc",
+ "oid4vci",
  "oid4vp",
  "sdjwt",
  "serde_json",
@@ -600,9 +601,11 @@ dependencies = [
 name = "oid4vci"
 version = "0.0.1"
 dependencies = [
+ "base64ct",
  "crypto-traits",
  "mdoc",
  "sdjwt",
+ "serde_json",
  "x509",
 ]
 
