@@ -17,6 +17,7 @@ members = [
     "crates/status",
     "crates/wua",
     "crates/presenter",
+    "crates/zkp",
     "crates/wallet-core",
 ]
 
