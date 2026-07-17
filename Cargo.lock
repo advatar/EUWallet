@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -580,6 +586,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "miniz_oxide"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -946,9 +961,13 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 name = "status"
 version = "0.0.1"
 dependencies = [
+ "base64ct",
  "cose",
+ "crypto-backend",
  "crypto-traits",
+ "miniz_oxide",
  "sdjwt",
+ "serde_json",
 ]
 
 [[package]]
@@ -1044,8 +1063,11 @@ dependencies = [
 name = "trust"
 version = "0.0.1"
 dependencies = [
+ "base64ct",
  "cose",
+ "crypto-backend",
  "crypto-traits",
+ "serde_json",
  "x509",
 ]
 
@@ -1285,8 +1307,11 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "wua"
 version = "0.0.1"
 dependencies = [
+ "base64ct",
  "cose",
+ "crypto-backend",
  "crypto-traits",
+ "serde_json",
  "x509",
 ]
 

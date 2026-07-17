@@ -11,3 +11,13 @@ publish.workspace = true
 crypto-traits = { path = "../crypto-traits" }
 cose = { path = "../cose" }
 sdjwt = { path = "../sdjwt" }
+serde_json = { workspace = true }
+base64ct = { workspace = true }
+# Pure-Rust DEFLATE for the Token Status List `lst` (RFC 1951). No C, no zlib system dep.
+miniz_oxide = "0.8"
+
+[dev-dependencies]
+crypto-backend = { path = "../crypto-backend" }
+
+[lints]
+workspace = true
