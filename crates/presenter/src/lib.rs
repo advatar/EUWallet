@@ -11,10 +11,12 @@
 
 use cose::cbor::Value;
 use crypto_traits::Digest;
+use serde::{Deserialize, Serialize};
 
 /// Closed vocabulary of screen archetypes. No expressions/conditionals live in a description:
 /// all branching happened upstream in the protocol machines.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "screen", rename_all = "camelCase")]
 pub enum ScreenDescription {
     Loading,
     Error { code: String, message: String },
@@ -29,7 +31,8 @@ pub enum ScreenDescription {
 }
 
 /// A fully-resolved consent screen. RP-supplied strings enter ONLY as validated data here.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConsentScreen {
     pub rp_display_name: String,
     pub purpose: String,

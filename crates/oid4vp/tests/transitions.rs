@@ -32,6 +32,7 @@ fn req() -> AuthRequest {
         response_uri: "https://rp.example/resp".into(),
         redirect_uri: None,
         purpose: Some("age verification".into()),
+        requested_claims: vec!["age_over_18".into()],
         signed_payload: b"request-object".to_vec(),
         signature: b"sig".to_vec(),
         request_alg: Alg::Es256,

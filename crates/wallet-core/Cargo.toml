@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 crypto-traits = { path = "../crypto-traits" }
+crypto-backend = { path = "../crypto-backend" }
 cose = { path = "../cose" }
 mdoc = { path = "../mdoc" }
 sdjwt = { path = "../sdjwt" }
@@ -20,3 +21,8 @@ trust = { path = "../trust" }
 status = { path = "../status" }
 wua = { path = "../wua" }
 presenter = { path = "../presenter" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+base64ct = { workspace = true }

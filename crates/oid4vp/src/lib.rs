@@ -86,6 +86,9 @@ pub struct AuthRequest {
     pub response_uri: String,
     pub redirect_uri: Option<String>,
     pub purpose: Option<String>,
+    /// Claim names the RP asked for (a simplified stand-in for the DCQL query). Used for data
+    /// minimisation upstream (the wallet discloses only the requested-and-held subset).
+    pub requested_claims: Vec<String>,
     pub signed_payload: Vec<u8>,
     pub signature: Vec<u8>,
     pub request_alg: Alg,
@@ -389,6 +392,15 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         .and_then(|v| v.as_str())
         .map(String::from);
     let purpose = p.get("purpose").and_then(|v| v.as_str()).map(String::from);
+    let requested_claims = p
+        .get("claims")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let signed_payload = format!("{}.{}", parts[0], parts[1]).into_bytes();
     let signature = Base64UrlUnpadded::decode_vec(parts[2]).map_err(|_| ())?;
@@ -400,6 +412,7 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         response_uri,
         redirect_uri,
         purpose,
+        requested_claims,
         signed_payload,
         signature,
         request_alg,
