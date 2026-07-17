@@ -15,8 +15,17 @@ use std::sync::{Arc, Mutex};
 
 use crypto_backend::AwsLc;
 use oid4vp::{Env, Input, ResolvedTrust, SelectedCredential, State};
-use presenter::{minimum_claim_set, ConsentScreen, ScreenDescription};
+use presenter::{minimum_claim_set, ConsentScreen, PaymentScreen, ScreenDescription};
 use serde::{Deserialize, Serialize};
+
+/// Which flow the wallet is currently driving, so a device signature is routed to the right
+/// machine (presentation's key-binding JWT vs. payment's SCA authentication code).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveFlow {
+    None,
+    Presentation,
+    Payment,
+}
 
 uniffi::setup_scaffolding!();
 
@@ -65,10 +74,17 @@ pub enum Event {
     UserConsented,
     /// The user declined.
     UserDeclined,
-    /// The device produced the key-binding signature the core requested.
+    /// The device produced the signature the core requested (routed to the active flow —
+    /// presentation's key-binding JWT or payment's SCA authentication code).
     DeviceSignatureProduced { signature: Vec<u8> },
     /// The shell confirmed the vp_token reached the response_uri.
     PresentationDelivered,
+    /// A payment authorization request (PSD2/TS12) arrived.
+    PaymentAuthorizationRequestReceived { request: Vec<u8> },
+    /// The user approved the payment confirmation screen.
+    PaymentApproved,
+    /// The user declined the payment.
+    PaymentDeclined,
 }
 
 /// Everything the core asks the shell to do (serialised to JSON at the FFI boundary).
@@ -98,6 +114,11 @@ pub struct Core {
     credential: Option<HeldCredential>,
     session: Option<SessionInfo>,
     now_epoch: i64,
+    // Payment SCA flow.
+    payment: payment::State,
+    pay_seen_nonces: Vec<u64>,
+    pay_pending: Option<(String, u64)>, // (response_uri, nonce) of the in-flight payment
+    active: ActiveFlow,
 }
 
 impl Core {
@@ -112,6 +133,10 @@ impl Core {
             credential: None,
             session: None,
             now_epoch: 0,
+            payment: payment::State::Idle,
+            pay_seen_nonces: Vec::new(),
+            pay_pending: None,
+            active: ActiveFlow::None,
         }
     }
 
@@ -128,6 +153,7 @@ impl Core {
                 Vec::new()
             }
             Event::AuthorizationRequestReceived { request } => {
+                self.active = ActiveFlow::Presentation;
                 self.drive(Input::AuthorizationRequest(request))
             }
             Event::RpTrustResolved {
@@ -141,10 +167,20 @@ impl Core {
             })),
             Event::UserConsented => self.drive(Input::ConsentGranted),
             Event::UserDeclined => self.drive(Input::ConsentDeclined),
-            Event::DeviceSignatureProduced { signature } => {
-                self.drive(Input::DeviceSignatureProduced(signature))
-            }
+            Event::DeviceSignatureProduced { signature } => match self.active {
+                // Route the device signature to whichever flow requested it.
+                ActiveFlow::Payment => {
+                    self.drive_payment(payment::Input::AuthCodeSignatureProduced(signature))
+                }
+                _ => self.drive(Input::DeviceSignatureProduced(signature)),
+            },
             Event::PresentationDelivered => self.drive(Input::PresentationDelivered),
+            Event::PaymentAuthorizationRequestReceived { request } => {
+                self.active = ActiveFlow::Payment;
+                self.drive_payment(payment::Input::PaymentAuthorizationRequest(request))
+            }
+            Event::PaymentApproved => self.drive_payment(payment::Input::UserApproved),
+            Event::PaymentDeclined => self.drive_payment(payment::Input::UserDeclined),
         }
     }
 
@@ -190,6 +226,68 @@ impl Core {
             .into_iter()
             .flat_map(|o| self.translate(o))
             .collect()
+    }
+
+    fn drive_payment(&mut self, input: payment::Input) -> Vec<Effect> {
+        let (next, outputs) = {
+            let env = payment::Env {
+                seen_nonces: &self.pay_seen_nonces,
+                device_key_ref: &self.config.device_key_ref,
+            };
+            payment::step(&self.payment, &input, &env)
+        };
+        self.payment = next;
+
+        // Capture the response endpoint + nonce when the confirmation screen is reached.
+        if let payment::State::AwaitingConfirmation(req) = &self.payment {
+            self.pay_pending = Some((req.response_uri.clone(), req.nonce));
+        }
+        // Record the nonce as used once the payment is authorized (replay protection).
+        if let payment::State::Authorized { .. } = &self.payment {
+            if let Some((_, nonce)) = self.pay_pending {
+                if !self.pay_seen_nonces.contains(&nonce) {
+                    self.pay_seen_nonces.push(nonce);
+                }
+            }
+        }
+
+        outputs
+            .into_iter()
+            .flat_map(|o| self.translate_payment(o))
+            .collect()
+    }
+
+    fn translate_payment(&mut self, output: payment::Output) -> Vec<Effect> {
+        use payment::Output as PO;
+        match output {
+            PO::RenderPaymentConfirmation {
+                payee,
+                amount_minor,
+                currency,
+            } => vec![Effect::Render {
+                screen: ScreenDescription::PaymentConfirmation(PaymentScreen {
+                    payee,
+                    amount_minor,
+                    currency,
+                }),
+            }],
+            PO::SignAuthCode {
+                key_ref,
+                signing_input,
+            } => vec![Effect::Sign {
+                key_ref,
+                payload: signing_input,
+            }],
+            PO::SendAuthorization(code) => {
+                let url = self
+                    .pay_pending
+                    .as_ref()
+                    .map(|(u, _)| u.clone())
+                    .unwrap_or_default();
+                vec![Effect::Http { url, body: code }]
+            }
+            PO::Close => vec![Effect::Close],
+        }
     }
 
     /// The disclosures to reveal = the requested-and-held claims (data minimisation).

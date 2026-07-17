@@ -23,6 +23,12 @@ final class MockEngine: WalletEngineDriving {
         if eventJson.contains("\"presentationDelivered\"") {
             return #"[{"type":"close"}]"#
         }
+        if eventJson.contains("\"paymentAuthorizationRequestReceived\"") {
+            return #"[{"type":"render","screen":{"screen":"paymentConfirmation","payee":"Acme Store","amountMinor":1299,"currency":"EUR"}}]"#
+        }
+        if eventJson.contains("\"paymentApproved\"") {
+            return #"[{"type":"sign","keyRef":"device-key","payload":[7,7,7]},{"type":"http","url":"https://psp.example/authorize","body":[8,8,8]}]"#
+        }
         return "[]"
     }
 }
@@ -74,5 +80,24 @@ final class EffectExecutorTests: XCTestCase {
         let executor = makeExecutor(signer: StubSigner(), http: StubHttpClient()) { rendered.append($0) }
         await executor.send(eventJson: WalletEventJSON.userDeclined())
         XCTAssertTrue(rendered.isEmpty)
+    }
+
+    func testPaymentRendersConfirmationThenSignsAuthCode() async {
+        var rendered: [ScreenDescription] = []
+        let signer = StubSigner()
+        let http = StubHttpClient()
+        let executor = makeExecutor(signer: signer, http: http) { rendered.append($0) }
+
+        await executor.send(eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(Data([1])))
+        guard case .paymentConfirmation(let payee, let amount, let currency)? = rendered.last else {
+            return XCTFail("expected a payment confirmation screen, got \(String(describing: rendered.last))")
+        }
+        XCTAssertEqual(payee, "Acme Store")
+        XCTAssertEqual(amount, 1299)
+        XCTAssertEqual(currency, "EUR")
+
+        await executor.send(eventJson: WalletEventJSON.paymentApproved())
+        XCTAssertEqual(signer.signedPayloads.first, Data([7, 7, 7])) // SCA auth code signed
+        XCTAssertEqual(http.posted.first?.0, "https://psp.example/authorize")
     }
 }

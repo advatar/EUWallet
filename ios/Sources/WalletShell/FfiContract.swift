@@ -15,10 +15,12 @@ public enum ScreenDescription: Decodable, Equatable {
     case loading
     case error(code: String, message: String)
     case consent(relyingPartyName: String, purpose: String, requestedClaims: [String])
+    case paymentConfirmation(payee: String, amountMinor: UInt64, currency: String)
     case other(String)
 
     private enum CodingKeys: String, CodingKey {
         case screen, code, message, rpDisplayName, purpose, requestedClaims
+        case payee, amountMinor, currency
     }
 
     public init(from decoder: Decoder) throws {
@@ -34,6 +36,11 @@ public enum ScreenDescription: Decodable, Equatable {
                 relyingPartyName: try c.decode(String.self, forKey: .rpDisplayName),
                 purpose: try c.decode(String.self, forKey: .purpose),
                 requestedClaims: try c.decode([String].self, forKey: .requestedClaims))
+        case "paymentConfirmation":
+            self = .paymentConfirmation(
+                payee: try c.decode(String.self, forKey: .payee),
+                amountMinor: try c.decode(UInt64.self, forKey: .amountMinor),
+                currency: try c.decode(String.self, forKey: .currency))
         case let other: self = .other(other)
         }
     }
@@ -93,6 +100,11 @@ public enum WalletEventJSON {
         #"{"type":"deviceSignatureProduced","signature":\#(byteArray(signature))}"#
     }
     public static func presentationDelivered() -> String { #"{"type":"presentationDelivered"}"# }
+    public static func paymentAuthorizationRequestReceived(_ request: Data) -> String {
+        #"{"type":"paymentAuthorizationRequestReceived","request":\#(byteArray(request))}"#
+    }
+    public static func paymentApproved() -> String { #"{"type":"paymentApproved"}"# }
+    public static func paymentDeclined() -> String { #"{"type":"paymentDeclined"}"# }
 
     private static func byteArray(_ data: Data) -> String {
         "[" + data.map { String($0) }.joined(separator: ",") + "]"

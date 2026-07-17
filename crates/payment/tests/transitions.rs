@@ -115,6 +115,7 @@ fn req(payee: &str, amount: u64, currency: &str, nonce: u64) -> PaymentRequest {
         amount_minor: amount,
         currency: currency.into(),
         nonce,
+        response_uri: String::new(),
     }
 }
 

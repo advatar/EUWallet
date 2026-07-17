@@ -28,6 +28,9 @@ pub struct PaymentRequest {
     pub currency: String,
     /// Transaction nonce (replay protection).
     pub nonce: u64,
+    /// Where the authentication code is posted (the payment service). Empty if delivered
+    /// out of band by the shell.
+    pub response_uri: String,
 }
 
 /// The dynamic-linking binding the device signs, plus a summary for the SCA screen.
@@ -187,5 +190,10 @@ fn parse_request(bytes: &[u8]) -> Result<PaymentRequest, ()> {
             .ok_or(())?
             .to_string(),
         nonce: v.get("nonce").and_then(|x| x.as_u64()).ok_or(())?,
+        response_uri: v
+            .get("response_uri")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string(),
     })
 }

@@ -27,9 +27,43 @@ public struct ScreenRenderer: View {
             }.accessibilityElement(children: .combine)
         case .consent(let rp, let purpose, let claims):
             ConsentView(rp: rp, purpose: purpose, claims: claims, onConsent: onConsent, onDecline: onDecline)
+        case .paymentConfirmation(let payee, let amountMinor, let currency):
+            PaymentConfirmationView(
+                payee: payee, amountMinor: amountMinor, currency: currency,
+                onConsent: onConsent, onDecline: onDecline)
         case .other(let name):
             Text(name)
         }
+    }
+}
+
+/// The payment SCA screen — deliberately distinct from the identity consent screen. Shows exactly
+/// the amount and payee the user is authorising (what-you-see-is-what-you-authorise).
+struct PaymentConfirmationView: View {
+    let payee: String
+    let amountMinor: UInt64
+    let currency: String
+    let onConsent: () -> Void
+    let onDecline: () -> Void
+
+    private var amountText: String {
+        String(format: "%.2f %@", Double(amountMinor) / 100.0, currency)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Confirm payment").font(.headline)
+            Text(amountText).font(.largeTitle.bold())
+            Text("to \(payee)").font(.subheadline)
+            Spacer()
+            HStack {
+                Button("Cancel", role: .cancel, action: onDecline)
+                Spacer()
+                Button("Pay \(amountText)", action: onConsent).buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .accessibilityElement(children: .contain)
     }
 }
 

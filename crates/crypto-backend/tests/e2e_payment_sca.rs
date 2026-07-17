@@ -47,6 +47,7 @@ fn payment_sca_dynamic_linking_end_to_end() {
         amount_minor: 1299,
         currency: "EUR".into(),
         nonce: 7,
+        response_uri: String::new(),
     };
     assert!(AwsLc
         .verify(

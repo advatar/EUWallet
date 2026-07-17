@@ -31,6 +31,7 @@ trust = { path = "../trust" }
 status = { path = "../status" }
 wua = { path = "../wua" }
 presenter = { path = "../presenter" }
+payment = { path = "../payment" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

@@ -1230,6 +1230,7 @@ dependencies = [
  "mdoc",
  "oid4vci",
  "oid4vp",
+ "payment",
  "presenter",
  "sdjwt",
  "serde",
