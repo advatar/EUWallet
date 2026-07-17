@@ -169,3 +169,16 @@ fn verify_detects_forged_issuer_signature() {
     let err = verify_issuer_signed(&issued, &crypto, &crypto, b"pub", Alg::Es256).unwrap_err();
     assert!(matches!(err, MdocError::Cose(_)));
 }
+
+#[test]
+fn issuer_signed_item_bytes_roundtrip() {
+    let item = IssuerSignedItem {
+        digest_id: 3,
+        random: vec![9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6],
+        element_id: "birth_date".into(),
+        element_value: Value::Text("1990-01-01".into()),
+    };
+    let bytes = item.to_item_bytes();
+    let back = IssuerSignedItem::from_item_bytes(&bytes).expect("decode");
+    assert_eq!(item, back);
+}

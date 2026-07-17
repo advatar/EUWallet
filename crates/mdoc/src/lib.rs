@@ -155,6 +155,12 @@ impl IssuerSignedItem {
         tag24(self.to_value().to_canonical())
     }
 
+    /// Parse an `IssuerSignedItemBytes` (tag-24 wrapper) received from the wire back into an item.
+    pub fn from_item_bytes(bytes: &[u8]) -> Result<Self, MdocError> {
+        let inner = untag24(bytes)?;
+        Self::from_value(&cbor::from_canonical_slice(&inner)?)
+    }
+
     /// The SHA-256 digest of the `IssuerSignedItemBytes`, via the crypto boundary.
     pub fn digest(&self, digest: &dyn Digest) -> Digest32 {
         digest.sha256(&self.to_item_bytes())
