@@ -19,8 +19,16 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "screen", rename_all = "camelCase")]
 pub enum ScreenDescription {
     Loading,
-    Error { code: String, message: String },
+    Error {
+        code: String,
+        message: String,
+    },
     Consent(ConsentScreen),
+    /// Payment Strong Customer Authentication confirmation. Deliberately a SEPARATE archetype from
+    /// `Consent`: the register forbids mixing payment transaction data with identity consent
+    /// screens. Shows exactly what the user is authorising (amount + payee) — what-you-see-is-
+    /// what-you-authorise, dynamically linked by the payment machine.
+    PaymentConfirmation(PaymentScreen),
     CredentialList,
     CredentialDetail,
     IssuanceOffer,
@@ -28,6 +36,16 @@ pub enum ScreenDescription {
     ScanQr,
     AuthPrompt,
     TransactionHistory,
+}
+
+/// A fully-resolved payment SCA confirmation screen (PSD2 dynamic linking surfaces here).
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentScreen {
+    pub payee: String,
+    /// Amount in minor units (e.g. cents) to avoid floating-point ambiguity.
+    pub amount_minor: u64,
+    pub currency: String,
 }
 
 /// A fully-resolved consent screen. RP-supplied strings enter ONLY as validated data here.
@@ -107,6 +125,12 @@ fn to_value(screen: &ScreenDescription) -> Value {
                     .map(Value::Text)
                     .collect(),
             ),
+        ]),
+        ScreenDescription::PaymentConfirmation(p) => Value::Array(vec![
+            tag("paymentConfirmation"),
+            Value::Text(p.payee.clone()),
+            Value::Uint(p.amount_minor),
+            Value::Text(p.currency.clone()),
         ]),
         ScreenDescription::CredentialList => Value::Array(vec![tag("credentialList")]),
         ScreenDescription::CredentialDetail => Value::Array(vec![tag("credentialDetail")]),
