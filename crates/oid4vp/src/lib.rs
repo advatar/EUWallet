@@ -10,7 +10,9 @@
 //! traceability matrix (plan Section 12), and this machine is the refinement of the Lean model
 //! in [`model`] (plan Section 10) and the subject of the Tamarin analysis (plan Section 11).
 
-use crypto_traits::{Alg, Verifier};
+use base64ct::{Base64UrlUnpadded, Encoding};
+use crypto_traits::{Alg, Digest, Verifier};
+use serde_json::Value as Json;
 
 /// States of the remote-presentation flow.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,14 +23,33 @@ pub enum State {
     ResolvingTrust(Box<AuthRequest>),
     /// HLR-VP-S-003 — all guards passed; request is signed, bound, fresh, purposeful.
     RequestValidated(Box<AuthRequest>),
-    /// HLR-VP-S-004 — showing the user what will be disclosed; awaiting their decision.
-    AwaitingConsent(Box<AuthRequest>),
+    /// HLR-VP-S-004 — consent granted; the key-binding JWT is being signed by the device key
+    /// (Secure Enclave), via a `SignKeyBinding` effect. Nothing has left the wallet yet.
+    AwaitingDeviceSignature(Box<PendingPresentation>),
     /// HLR-VP-S-005 — vp_token emitted; awaiting the shell's delivery acknowledgement.
     Presenting,
     /// HLR-VP-S-006 — exchange finished successfully.
     Done,
     /// HLR-VP-S-007 — exchange refused; the reason is the tripped guard.
     Aborted(AbortReason),
+}
+
+/// The SD-JWT VC the wallet will present, chosen during consent (data-minimised upstream).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedCredential {
+    /// The issuer-signed JWT (compact JWS).
+    pub issuer_jwt: String,
+    /// The disclosures to reveal (already minimised to the requested-and-held set).
+    pub disclosures: Vec<String>,
+}
+
+/// In-flight presentation awaiting the device signature over the key-binding JWT.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingPresentation {
+    /// `<issuer-jwt>~<disclosure>~...~` (no KB-JWT yet).
+    pub presentation: String,
+    /// ASCII(`<kb-header-b64>.<kb-payload-b64>`) — the bytes the device key signs.
+    pub kb_signing_input: String,
 }
 
 /// Every abort reason is the name of the guard that tripped (or an explicit user refusal).
@@ -51,6 +72,8 @@ pub enum AbortReason {
     MalformedRequest,
     /// HLR-VP-G-008 — user declined at the consent screen.
     UserDeclined,
+    /// HLR-VP-G-009 — consent granted but no credential was selected to present.
+    NoCredential,
 }
 
 /// Parsed, still-untrusted Authorization Request. Parsing does NOT imply validity; the guards
@@ -83,6 +106,8 @@ pub enum Input {
     RpTrustResolved(ResolvedTrust),
     ConsentGranted,
     ConsentDeclined,
+    /// The device (Secure Enclave) produced the key-binding signature we requested.
+    DeviceSignatureProduced(Vec<u8>),
     PresentationDelivered,
 }
 
@@ -98,13 +123,19 @@ pub enum Output {
         rp_client_id: String,
         purpose: String,
     },
+    /// Sign the key-binding JWT with the device key (Secure Enclave / StrongBox in the shell).
+    /// The private key never crosses the FFI — only these bytes go out and a signature comes back.
+    SignKeyBinding {
+        key_ref: String,
+        signing_input: Vec<u8>,
+    },
     /// Post the vp_token to the response_uri (direct_post.jwt).
     SendVpToken(Vec<u8>),
     /// Tear down the exchange.
     Close,
 }
 
-/// Pure, already-resolved data the guards read. The shell assembles this; the core does no I/O.
+/// Pure, already-resolved data the machine reads. The shell assembles this; the core does no I/O.
 pub struct Env<'a> {
     /// The value RPs MUST put in `aud`; anything else is a mix-up attempt.
     pub wallet_client_id: &'a str,
@@ -112,6 +143,14 @@ pub struct Env<'a> {
     pub seen_nonces: &'a [u64],
     /// Signature verifier over the crypto boundary (pure CPU, no I/O).
     pub verifier: &'a dyn Verifier,
+    /// Digest for the KB-JWT `sd_hash` (pure CPU).
+    pub digest: &'a dyn Digest,
+    /// Unix seconds supplied by the shell (the core has no clock) for the KB-JWT `iat`.
+    pub now_epoch: i64,
+    /// The credential chosen to present (set once consent is granted).
+    pub selected_credential: Option<&'a SelectedCredential>,
+    /// Opaque handle to the device key the shell will sign the KB-JWT with.
+    pub device_key_ref: &'a str,
 }
 
 /// Security guards — each pure, individually testable, and mapped 1:1 to an [`AbortReason`].
@@ -225,10 +264,27 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
             )
         }
 
-        // HLR-VP-T-004 — user consents → build & send the vp_token.
+        // HLR-VP-T-004 — user consents → build the presentation + KB-JWT signing input, then ask
+        // the device (Secure Enclave) to sign it. Nothing leaves the wallet yet.
         (State::RequestValidated(req), Input::ConsentGranted) => {
-            let token = build_vp_token(req);
-            (State::Presenting, vec![Output::SendVpToken(token)])
+            let Some(cred) = env.selected_credential else {
+                return (State::Aborted(AbortReason::NoCredential), vec![]);
+            };
+            let presentation = build_presentation(&cred.issuer_jwt, &cred.disclosures);
+            let sd_hash = base64url(&env.digest.sha256(presentation.as_bytes()));
+            let kb_signing_input =
+                kb_jwt_signing_input(req.nonce, &req.client_id, env.now_epoch, &sd_hash);
+            let signing_bytes = kb_signing_input.clone().into_bytes();
+            (
+                State::AwaitingDeviceSignature(Box::new(PendingPresentation {
+                    presentation,
+                    kb_signing_input,
+                })),
+                vec![Output::SignKeyBinding {
+                    key_ref: env.device_key_ref.to_string(),
+                    signing_input: signing_bytes,
+                }],
+            )
         }
         // HLR-VP-T-005 — user refuses → abort, disclose nothing.
         (State::RequestValidated(_), Input::ConsentDeclined) => (
@@ -236,7 +292,18 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
             vec![Output::Close],
         ),
 
-        // HLR-VP-T-006 — delivery acknowledged → done.
+        // HLR-VP-T-006 — device signature ready → assemble the key-bound vp_token and send it.
+        (State::AwaitingDeviceSignature(p), Input::DeviceSignatureProduced(sig)) => {
+            let kb_jwt = format!("{}.{}", p.kb_signing_input, base64url(sig));
+            // `presentation` already ends with '~'; the KB-JWT occupies the final slot.
+            let vp_token = format!("{}{}", p.presentation, kb_jwt);
+            (
+                State::Presenting,
+                vec![Output::SendVpToken(vp_token.into_bytes())],
+            )
+        }
+
+        // HLR-VP-T-007 — delivery acknowledged → done.
         (State::Presenting, Input::PresentationDelivered) => (State::Done, vec![Output::Close]),
 
         // HLR-VP-T-999 — any other (state, input) pair is a defensive no-op.
@@ -244,16 +311,99 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
     }
 }
 
-/// Parse an authorization request object (JWT/JAR). Skeleton: decode headers/claims into
-/// [`AuthRequest`]. Returns `Err(())` on malformed input. Delegates real JWT parsing to `sdjwt`.
-fn parse_request(_bytes: &[u8]) -> Result<AuthRequest, ()> {
-    Err(())
+fn base64url(bytes: &[u8]) -> String {
+    Base64UrlUnpadded::encode_string(bytes)
 }
 
-/// Build the vp_token to return. Skeleton: delegates to `presenter`/`mdoc`/`sdjwt` to produce the
-/// canonical, key-bound presentation. Kept free of I/O.
-fn build_vp_token(_req: &AuthRequest) -> Vec<u8> {
-    Vec::new()
+/// Build `<issuer-jwt>~<disclosure>~...~` (the SD-JWT VC presentation without the KB-JWT).
+fn build_presentation(issuer_jwt: &str, disclosures: &[String]) -> String {
+    let mut s = String::from(issuer_jwt);
+    for d in disclosures {
+        s.push('~');
+        s.push_str(d);
+    }
+    s.push('~');
+    s
+}
+
+/// Construct the key-binding JWT signing input: ASCII(`<header-b64>.<payload-b64>`) over a
+/// `kb+jwt` binding the presentation (`sd_hash`) to this RP (`aud`) and this request (`nonce`).
+fn kb_jwt_signing_input(nonce: u64, aud: &str, iat: i64, sd_hash: &str) -> String {
+    let header = base64url(br#"{"alg":"ES256","typ":"kb+jwt"}"#);
+    let payload = serde_json::json!({
+        "nonce": nonce,
+        "aud": aud,
+        "iat": iat,
+        "sd_hash": sd_hash,
+    });
+    let payload_b64 = base64url(
+        serde_json::to_string(&payload)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    format!("{header}.{payload_b64}")
+}
+
+/// Parse an authorization request object (a compact JWS). Extracts the claims and the exact
+/// signing input + signature so the `request_object_is_signed_and_bound` guard can verify it
+/// against the RP key the shell resolves. Returns `Err(())` on malformed input.
+fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
+    let s = core::str::from_utf8(bytes).map_err(|_| ())?;
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 3 {
+        return Err(());
+    }
+    let header_bytes = Base64UrlUnpadded::decode_vec(parts[0]).map_err(|_| ())?;
+    let header: Json = serde_json::from_slice(&header_bytes).map_err(|_| ())?;
+    let request_alg = match header.get("alg").and_then(|v| v.as_str()) {
+        Some("ES256") => Alg::Es256,
+        Some("ES384") => Alg::Es384,
+        Some("EdDSA") => Alg::EdDsa,
+        _ => return Err(()),
+    };
+    let payload_bytes = Base64UrlUnpadded::decode_vec(parts[1]).map_err(|_| ())?;
+    let p: Json = serde_json::from_slice(&payload_bytes).map_err(|_| ())?;
+
+    let client_id = p
+        .get("client_id")
+        .and_then(|v| v.as_str())
+        .ok_or(())?
+        .to_string();
+    // The OpenID4VP nonce is a string on the wire; we model it as u64 to line up with the Lean
+    // model, so accept either a JSON number or a numeric string.
+    let nonce = p
+        .get("nonce")
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+        .ok_or(())?;
+    let audience = p.get("aud").and_then(|v| v.as_str()).ok_or(())?.to_string();
+    let response_uri = p
+        .get("response_uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let redirect_uri = p
+        .get("redirect_uri")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let purpose = p.get("purpose").and_then(|v| v.as_str()).map(String::from);
+
+    let signed_payload = format!("{}.{}", parts[0], parts[1]).into_bytes();
+    let signature = Base64UrlUnpadded::decode_vec(parts[2]).map_err(|_| ())?;
+
+    Ok(AuthRequest {
+        client_id,
+        nonce,
+        audience,
+        response_uri,
+        redirect_uri,
+        purpose,
+        signed_payload,
+        signature,
+        request_alg,
+    })
 }
 
 /// Reference model that MIRRORS the Lean Tier-2 model (formal/lean/WalletModel.lean).

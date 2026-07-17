@@ -41,8 +41,22 @@ pub enum SdJwtError {
     UnsupportedHashAlg,
     /// A presented disclosure's digest was not present in the SD-JWT's `_sd` array → tampering.
     UnknownDisclosure,
+    /// The key-binding JWT was missing, or its aud/nonce/sd_hash did not match expectations.
+    KeyBindingMismatch,
     /// The signature did not verify.
     Crypto(CryptoError),
+}
+
+/// What the relying party checks the holder's key-binding JWT against.
+pub struct KeyBindingCheck<'a> {
+    /// The holder/device public key (raw), from the credential's `cnf` in production.
+    pub device_public_key: &'a [u8],
+    /// The RP's client_id — must equal the KB-JWT `aud`.
+    pub expected_aud: &'a str,
+    /// The nonce from the RP's request — must equal the KB-JWT `nonce`.
+    pub expected_nonce: u64,
+    /// The algorithm the device signs with.
+    pub device_alg: Alg,
 }
 
 impl From<CryptoError> for SdJwtError {
@@ -209,6 +223,68 @@ impl SdJwtVc {
             }
         }
         Ok(result)
+    }
+}
+
+impl SdJwtVc {
+    /// Full presentation verification (RP side): verify the issuer signature and disclosures,
+    /// then verify the holder's key-binding JWT — its signature (device key), `aud` (this RP),
+    /// `nonce` (this request), and `sd_hash` (binds to exactly these disclosures). Returns the
+    /// disclosed claims only if everything checks out.
+    pub fn verify_presentation(
+        &self,
+        verifier: &dyn Verifier,
+        digest: &dyn crypto_traits::Digest,
+        issuer_public_key: &[u8],
+        issuer_alg: Alg,
+        kb: &KeyBindingCheck,
+    ) -> Result<serde_json::Map<String, Json>, SdJwtError> {
+        let claims = self.verify_and_disclose(verifier, digest, issuer_public_key, issuer_alg)?;
+
+        let kb_jwt = self
+            .key_binding_jwt
+            .as_ref()
+            .ok_or(SdJwtError::KeyBindingMismatch)?;
+        let (header, payload_bytes, signing_input, signature) = split_jws(kb_jwt)?;
+        let kb_alg = parse_jose_alg(&header)?;
+        if kb_alg != kb.device_alg {
+            return Err(SdJwtError::KeyBindingMismatch);
+        }
+        verifier.verify(
+            kb.device_alg,
+            kb.device_public_key,
+            signing_input.as_bytes(),
+            &signature,
+        )?;
+
+        let payload: Json =
+            serde_json::from_slice(&payload_bytes).map_err(|_| SdJwtError::InvalidJson)?;
+        let obj = payload.as_object().ok_or(SdJwtError::InvalidJson)?;
+
+        if obj.get("aud").and_then(|v| v.as_str()) != Some(kb.expected_aud) {
+            return Err(SdJwtError::KeyBindingMismatch);
+        }
+        let nonce = obj.get("nonce").and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        });
+        if nonce != Some(kb.expected_nonce) {
+            return Err(SdJwtError::KeyBindingMismatch);
+        }
+
+        // sd_hash must be base64url(SHA-256(<issuer-jwt>~<disclosure>~...~)).
+        let mut presentation = String::from(&self.issuer_jwt);
+        for d in &self.disclosures {
+            presentation.push('~');
+            presentation.push_str(d);
+        }
+        presentation.push('~');
+        let want = Base64UrlUnpadded::encode_string(&digest.sha256(presentation.as_bytes()));
+        if obj.get("sd_hash").and_then(|v| v.as_str()) != Some(want.as_str()) {
+            return Err(SdJwtError::KeyBindingMismatch);
+        }
+
+        Ok(claims)
     }
 }
 

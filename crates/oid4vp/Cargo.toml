@@ -13,7 +13,7 @@ mdoc = { path = "../mdoc" }
 sdjwt = { path = "../sdjwt" }
 x509 = { path = "../x509" }
 cose = { path = "../cose" }
-
-[dev-dependencies]
-# Only used by the Tier-2 conformance test to parse the Lean oracle's trace JSON.
+# Request objects and the key-binding JWT are JOSE/JSON; base64url + strict JSON from the budget.
+# serde_json also parses the Tier-2 Lean oracle's trace JSON in tests/conformance.rs.
 serde_json = { workspace = true }
+base64ct = { workspace = true }

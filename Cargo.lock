@@ -127,6 +127,7 @@ dependencies = [
  "cose",
  "crypto-traits",
  "mdoc",
+ "oid4vp",
  "sdjwt",
  "serde_json",
  "x509",
@@ -334,6 +335,7 @@ dependencies = [
 name = "oid4vp"
 version = "0.0.1"
 dependencies = [
+ "base64ct",
  "cose",
  "crypto-traits",
  "mdoc",

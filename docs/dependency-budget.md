@@ -15,7 +15,9 @@ directly by a protocol/codec crate — they are reached only through `crypto-tra
 | `mdoc` | `cose` (path) | mdoc structures over the shared CBOR/COSE codec. |
 | `sdjwt` | `serde_json`, `base64ct` | Strict JSON parsing and base64url are not worth hand-rolling; both are small, vetted, and in the budget. Signatures via `crypto-traits`. |
 | `x509` | `der`, `x509-cert` | Vetted RustCrypto DER/X.509 parsers. Parsing + profile evaluation are *logic*, not crypto; certificate-signature verification goes through `crypto-traits`. |
-| `oid4vp`,`oid4vci`,`iso18013-5`,`trust`,`status`,`wua`,`presenter` | (path deps only, so far) | Protocol/trust logic over the codecs + crypto boundary. |
+| `oid4vp` | `serde_json`, `base64ct` | Parses the JOSE request object and builds the key-binding JWT (JSON + base64url). Signatures via `crypto-traits`. |
+| `presenter` | `cose` (path) | Canonical consent hashing via the shared CBOR codec. |
+| `oid4vci`,`iso18013-5`,`trust`,`status`,`wua` | (path deps only, so far) | Protocol/trust logic over the codecs + crypto boundary. |
 | `wallet-core` | (path deps only) | Facade; will add `uniffi` at the FFI step (Section 3). |
 
 ## Approved shared crates (`[workspace.dependencies]`)

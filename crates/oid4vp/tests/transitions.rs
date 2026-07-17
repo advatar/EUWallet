@@ -1,7 +1,9 @@
 //! oid4vp transition tests (plan Section 5.1): the happy path plus EVERY abort path, each mapped
 //! to the guard that trips it. Crypto is a stub over crypto-traits.
-use crypto_traits::{Alg, CryptoError, Verifier};
-use oid4vp::{step, AbortReason, AuthRequest, Env, Input, Output, ResolvedTrust, State};
+use crypto_traits::{Alg, CryptoError, Digest, Verifier};
+use oid4vp::{
+    step, AbortReason, AuthRequest, Env, Input, Output, ResolvedTrust, SelectedCredential, State,
+};
 
 struct Accept;
 impl Verifier for Accept {
@@ -13,6 +15,12 @@ struct Reject;
 impl Verifier for Reject {
     fn verify(&self, _a: Alg, _pk: &[u8], _m: &[u8], _s: &[u8]) -> Result<(), CryptoError> {
         Err(CryptoError::Backend("no".into()))
+    }
+}
+struct StubDigest;
+impl Digest for StubDigest {
+    fn sha256(&self, _data: &[u8]) -> [u8; 32] {
+        [0u8; 32]
     }
 }
 
@@ -38,18 +46,34 @@ fn trust() -> ResolvedTrust {
     }
 }
 
-fn env<'a>(seen: &'a [u64], v: &'a dyn Verifier) -> Env<'a> {
+fn env<'a>(seen: &'a [u64], v: &'a dyn Verifier, d: &'a dyn Digest) -> Env<'a> {
     Env {
         wallet_client_id: "wallet.example",
         seen_nonces: seen,
         verifier: v,
+        digest: d,
+        now_epoch: 1_790_000_000,
+        selected_credential: None,
+        device_key_ref: "device-key",
     }
 }
 
 #[test]
 fn happy_path_idle_free_to_done() {
     let seen: Vec<u64> = vec![];
-    let e = env(&seen, &Accept);
+    let cred = SelectedCredential {
+        issuer_jwt: "hdr.pay.sig".into(),
+        disclosures: vec!["disc1".into()],
+    };
+    let e = Env {
+        wallet_client_id: "wallet.example",
+        seen_nonces: &seen,
+        verifier: &Accept,
+        digest: &StubDigest,
+        now_epoch: 1_790_000_000,
+        selected_credential: Some(&cred),
+        device_key_ref: "device-key",
+    };
 
     // ResolvingTrust -> RequestValidated with PersistNonce + RenderConsent.
     let (s, out) = step(
@@ -69,10 +93,24 @@ fn happy_path_idle_free_to_done() {
         ]
     );
 
-    // Consent -> Presenting with SendVpToken (nothing leaves before this).
+    // Consent -> AwaitingDeviceSignature, emitting a device-signing effect. Nothing has left yet.
     let (s, out) = step(&s, &Input::ConsentGranted, &e);
+    assert!(matches!(s, State::AwaitingDeviceSignature(_)));
+    assert_eq!(out.len(), 1);
+    assert!(matches!(out[0], Output::SignKeyBinding { .. }));
+
+    // Device signature arrives -> Presenting, emitting the assembled vp_token.
+    let (s, out) = step(&s, &Input::DeviceSignatureProduced(vec![0xAB; 64]), &e);
     assert_eq!(s, State::Presenting);
-    assert_eq!(out, vec![Output::SendVpToken(vec![])]);
+    match &out[0] {
+        Output::SendVpToken(token) => {
+            let t = String::from_utf8(token.clone()).unwrap();
+            // vp_token = <issuer-jwt>~<disclosure>~<kb-jwt>
+            assert!(t.starts_with("hdr.pay.sig~disc1~"));
+            assert_eq!(t.matches('~').count(), 2);
+        }
+        other => panic!("expected SendVpToken, got {other:?}"),
+    }
 
     // Delivered -> Done.
     let (s, out) = step(&s, &Input::PresentationDelivered, &e);
@@ -93,6 +131,10 @@ fn resolve_with(
         wallet_client_id: wallet_id,
         seen_nonces: seen,
         verifier: v,
+        digest: &StubDigest,
+        now_epoch: 1_790_000_000,
+        selected_credential: None,
+        device_key_ref: "device-key",
     };
     step(
         &State::ResolvingTrust(Box::new(r)),
@@ -153,7 +195,7 @@ fn abort_empty_signature() {
 #[test]
 fn consent_declined_aborts_without_disclosure() {
     let seen: Vec<u64> = vec![];
-    let e = env(&seen, &Accept);
+    let e = env(&seen, &Accept, &StubDigest);
     let (s, out) = step(
         &State::RequestValidated(Box::new(req())),
         &Input::ConsentDeclined,
@@ -166,7 +208,7 @@ fn consent_declined_aborts_without_disclosure() {
 #[test]
 fn malformed_request_aborts() {
     let seen: Vec<u64> = vec![];
-    let e = env(&seen, &Accept);
+    let e = env(&seen, &Accept, &StubDigest);
     let (s, _) = step(
         &State::Idle,
         &Input::AuthorizationRequest(vec![0xff, 0xff]),
