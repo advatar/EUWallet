@@ -10,6 +10,7 @@ directly by a protocol/codec crate — they are reached only through `crypto-tra
 | Crate | External runtime deps | Why permitted |
 |---|---|---|
 | `crypto-traits` | — | Pure trait definitions; the crypto boundary. |
+| `crypto-backend` | `aws-lc-rs` | The real (FIPS-capable) implementation of `crypto-traits`: verify/digest/HKDF/AES-GCM/random + a software ECDSA signer for tests/issuers. The ONLY crate that links a crypto primitive. Codecs never depend on it. |
 | `cose` | — | Canonical CBOR + COSE_Sign1 are hand-written; crypto via `crypto-traits`. |
 | `mdoc` | `cose` (path) | mdoc structures over the shared CBOR/COSE codec. |
 | `sdjwt` | `serde_json`, `base64ct` | Strict JSON parsing and base64url are not worth hand-rolling; both are small, vetted, and in the budget. Signatures via `crypto-traits`. |

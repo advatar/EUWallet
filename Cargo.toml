@@ -5,6 +5,7 @@
 resolver = "2"
 members = [
     "crates/crypto-traits",
+    "crates/crypto-backend",
     "crates/cose",
     "crates/mdoc",
     "crates/sdjwt",

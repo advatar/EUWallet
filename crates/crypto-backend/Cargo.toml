@@ -1,0 +1,25 @@
+[package]
+name = "crypto-backend"
+description = "aws-lc-rs implementation of the crypto-traits boundary (verify/digest/kdf/aead/random) + a software signer for tests/issuers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }
+aws-lc-rs = { workspace = true }
+
+[dev-dependencies]
+# Integration tests exercise REAL crypto through the actual codecs (acyclic: these depend on
+# crypto-traits, not on crypto-backend).
+cose = { path = "../cose" }
+mdoc = { path = "../mdoc" }
+sdjwt = { path = "../sdjwt" }
+x509 = { path = "../x509" }
+serde_json = { workspace = true }
+base64ct = { workspace = true }
+
+[lints]
+workspace = true

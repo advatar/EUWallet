@@ -47,8 +47,11 @@ pub struct ParsedCert {
     pub tbs_der: Vec<u8>,
     pub signature: Vec<u8>,
     pub sig_alg: Alg,
-    /// SubjectPublicKeyInfo (DER) — the public key used to verify a child certificate.
+    /// SubjectPublicKeyInfo (DER).
     pub spki_der: Vec<u8>,
+    /// The raw public key (uncompressed EC point `0x04||X||Y`) — the form the crypto backend
+    /// verifies a child certificate's signature against.
+    pub public_key_raw: Vec<u8>,
     pub subject: String,
     pub issuer: String,
     pub not_before: i64,
@@ -79,6 +82,12 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
         .subject_public_key_info
         .to_der()
         .map_err(|_| X509Error::Der)?;
+    let public_key_raw = tbs
+        .subject_public_key_info
+        .subject_public_key
+        .as_bytes()
+        .ok_or(X509Error::Der)?
+        .to_vec();
 
     let not_before = tbs.validity.not_before.to_unix_duration().as_secs() as i64;
     let not_after = tbs.validity.not_after.to_unix_duration().as_secs() as i64;
@@ -118,6 +127,7 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
         signature,
         sig_alg,
         spki_der,
+        public_key_raw,
         subject: tbs.subject.to_string(),
         issuer: tbs.issuer.to_string(),
         not_before,
@@ -173,7 +183,7 @@ pub fn validate_path(
         verifier
             .verify(
                 child.sig_alg,
-                &parent.spki_der,
+                &parent.public_key_raw,
                 &child.tbs_der,
                 &child.signature,
             )
