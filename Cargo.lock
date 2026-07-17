@@ -283,7 +283,9 @@ dependencies = [
 name = "presenter"
 version = "0.0.1"
 dependencies = [
+ "cose",
  "crypto-traits",
+ "sha2",
 ]
 
 [[package]]

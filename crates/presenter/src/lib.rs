@@ -1,9 +1,15 @@
 #![forbid(unsafe_code)]
-//! `presenter` — Pure snapshot->ScreenDescription presenter with a closed screen vocabulary and consent hashing
+//! `presenter` — pure snapshot->ScreenDescription presenter with a closed screen vocabulary and
+//! canonical consent hashing.
 //!
 //! See docs/IMPLEMENTATION_PLAN.md Section 7.
-//! Skeleton only: public shapes are sketched; implementation follows the plan.
+//!
+//! The presenter lives inside the core and emits fully-resolved [`ScreenDescription`]s (no
+//! expressions/conditionals — all branching happened upstream). The consent screen is encoded
+//! with the deterministic CBOR codec and hashed, so both platforms provably show the same consent
+//! payload: what-you-see-is-what-you-sign, bindable to the presentation/QES intent.
 
+use cose::cbor::Value;
 use crypto_traits::Digest;
 
 /// Closed vocabulary of screen archetypes. No expressions/conditionals live in a description:
@@ -62,13 +68,60 @@ pub fn present(snapshot: &Snapshot) -> ScreenDescription {
     }
 }
 
-/// Canonical (deterministic) serialization of a screen for hashing/logging. Skeleton:
-/// replace with a stable canonical encoder (see plan Section 7).
-pub fn canonical_bytes(screen: &ScreenDescription) -> Vec<u8> {
-    format!("{screen:?}").into_bytes()
+/// Compute the minimum claim set to disclose: the requested claims we actually hold, deduped and
+/// sorted for a deterministic consent screen. Never disclose a claim that was not requested.
+pub fn minimum_claim_set(requested: &[String], held: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = requested
+        .iter()
+        .filter(|r| held.contains(r))
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
-/// What-you-see-is-what-you-sign: the consent hash is computed INSIDE the core.
+/// Encode a screen as a canonical CBOR value: a fixed-shape array `[tag, fields...]`. Using the
+/// deterministic codec (not a debug format) makes the bytes — and therefore the hash — stable and
+/// identical across platforms and compiler versions.
+fn to_value(screen: &ScreenDescription) -> Value {
+    let tag = |t: &str| Value::Text(t.into());
+    match screen {
+        ScreenDescription::Loading => Value::Array(vec![tag("loading")]),
+        ScreenDescription::Error { code, message } => Value::Array(vec![
+            tag("error"),
+            Value::Text(code.clone()),
+            Value::Text(message.clone()),
+        ]),
+        ScreenDescription::Consent(c) => Value::Array(vec![
+            tag("consent"),
+            Value::Text(c.rp_display_name.clone()),
+            Value::Text(c.purpose.clone()),
+            Value::Array(
+                c.requested_claims
+                    .iter()
+                    .cloned()
+                    .map(Value::Text)
+                    .collect(),
+            ),
+        ]),
+        ScreenDescription::CredentialList => Value::Array(vec![tag("credentialList")]),
+        ScreenDescription::CredentialDetail => Value::Array(vec![tag("credentialDetail")]),
+        ScreenDescription::IssuanceOffer => Value::Array(vec![tag("issuanceOffer")]),
+        ScreenDescription::PresentQr => Value::Array(vec![tag("presentQr")]),
+        ScreenDescription::ScanQr => Value::Array(vec![tag("scanQr")]),
+        ScreenDescription::AuthPrompt => Value::Array(vec![tag("authPrompt")]),
+        ScreenDescription::TransactionHistory => Value::Array(vec![tag("transactionHistory")]),
+    }
+}
+
+/// Canonical (deterministic) serialization of a screen for hashing and the transaction log.
+pub fn canonical_bytes(screen: &ScreenDescription) -> Vec<u8> {
+    to_value(screen).to_canonical()
+}
+
+/// What-you-see-is-what-you-sign: the consent hash is computed INSIDE the core over the canonical
+/// bytes, then bound to the presentation/signature and recorded in the transaction log.
 pub fn consent_hash(digest: &dyn Digest, screen: &ScreenDescription) -> [u8; 32] {
     digest.sha256(&canonical_bytes(screen))
 }

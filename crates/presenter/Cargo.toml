@@ -9,3 +9,11 @@ publish.workspace = true
 
 [dependencies]
 crypto-traits = { path = "../crypto-traits" }
+# Reuse the canonical CBOR codec so the consent hash is deterministic and stable across platforms.
+cose = { path = "../cose" }
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[lints]
+workspace = true
