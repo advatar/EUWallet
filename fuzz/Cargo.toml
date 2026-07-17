@@ -14,6 +14,8 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 mdoc = { path = "../crates/mdoc" }
 cose = { path = "../crates/cose" }
+x509 = { path = "../crates/x509" }
+sdjwt = { path = "../crates/sdjwt" }
 
 [[bin]]
 name = "mdoc_cbor"
@@ -28,6 +30,20 @@ bench = false
 [[bin]]
 name = "cose_cbor"
 path = "fuzz_targets/cose_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sdjwt_parse"
+path = "fuzz_targets/sdjwt_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "x509_parse"
+path = "fuzz_targets/x509_parse.rs"
 test = false
 doc = false
 bench = false
