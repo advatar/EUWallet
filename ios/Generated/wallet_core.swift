@@ -477,9 +477,19 @@ public protocol WalletEngineProtocol : AnyObject {
     func loadCredential(issuerJwt: String, disclosuresByClaimJson: String) 
     
     /**
+     * Register the device public key the WUA attests (raw uncompressed point).
+     */
+    func loadDeviceKey(devicePublicKey: Data) 
+    
+    /**
      * Install/update the signed trusted list. Returns "" on success, else an error string.
      */
     func loadTrustList(signedList: Data, operatorPublicKey: Data)  -> String
+    
+    /**
+     * Verify + store the Wallet Unit Attestation. Returns "" on success, else an error string.
+     */
+    func loadWua(wuaJwt: Data, providerPublicKey: Data)  -> String
     
 }
 
@@ -574,6 +584,16 @@ open func loadCredential(issuerJwt: String, disclosuresByClaimJson: String) {try
 }
     
     /**
+     * Register the device public key the WUA attests (raw uncompressed point).
+     */
+open func loadDeviceKey(devicePublicKey: Data) {try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_load_device_key(self.uniffiClonePointer(),
+        FfiConverterData.lower(devicePublicKey),$0
+    )
+}
+}
+    
+    /**
      * Install/update the signed trusted list. Returns "" on success, else an error string.
      */
 open func loadTrustList(signedList: Data, operatorPublicKey: Data) -> String {
@@ -581,6 +601,18 @@ open func loadTrustList(signedList: Data, operatorPublicKey: Data) -> String {
     uniffi_wallet_core_fn_method_walletengine_load_trust_list(self.uniffiClonePointer(),
         FfiConverterData.lower(signedList),
         FfiConverterData.lower(operatorPublicKey),$0
+    )
+})
+}
+    
+    /**
+     * Verify + store the Wallet Unit Attestation. Returns "" on success, else an error string.
+     */
+open func loadWua(wuaJwt: Data, providerPublicKey: Data) -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_load_wua(self.uniffiClonePointer(),
+        FfiConverterData.lower(wuaJwt),
+        FfiConverterData.lower(providerPublicKey),$0
     )
 })
 }
@@ -660,7 +692,13 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallet_core_checksum_method_walletengine_load_credential() != 40264) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_wallet_core_checksum_method_walletengine_load_device_key() != 64325) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_wallet_core_checksum_method_walletengine_load_trust_list() != 63474) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_load_wua() != 52241) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_constructor_walletengine_new() != 57779) {

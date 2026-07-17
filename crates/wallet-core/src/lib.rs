@@ -27,9 +27,25 @@ enum ActiveFlow {
     None,
     Presentation,
     Payment,
+    Issuance,
 }
 
 uniffi::setup_scaffolding!();
+
+fn parse_format(s: &str) -> Option<oid4vci::CredentialFormat> {
+    match s {
+        "mso_mdoc" => Some(oid4vci::CredentialFormat::MsoMdoc),
+        "dc+sd-jwt" | "vc+sd-jwt" => Some(oid4vci::CredentialFormat::DcSdJwt),
+        _ => None,
+    }
+}
+
+fn format_name(f: oid4vci::CredentialFormat) -> &'static str {
+    match f {
+        oid4vci::CredentialFormat::MsoMdoc => "mso_mdoc",
+        oid4vci::CredentialFormat::DcSdJwt => "dc+sd-jwt",
+    }
+}
 
 /// A credential the wallet holds: the issuer-signed JWT plus its disclosures keyed by claim name,
 /// so the core can disclose exactly the requested-and-held subset.
@@ -87,6 +103,23 @@ pub enum Event {
     PaymentApproved,
     /// The user declined the payment.
     PaymentDeclined,
+    /// A credential offer (OID4VCI) arrived, with the issuer's cert chain (issuer trust is decided
+    /// in-core against the trusted list — not a shell boolean).
+    CredentialOfferReceived {
+        offer: Vec<u8>,
+        issuer_cert_chain: Vec<Vec<u8>>,
+        issuer_id: String,
+    },
+    /// The shell pushed a PAR request (auth-code flow); reports whether PKCE S256 was used.
+    ParPushed { pkce_s256: bool },
+    /// The browser returned an authorization code.
+    AuthorizationCodeReturned { code: Vec<u8> },
+    /// The user entered the pre-authorized transaction code / PIN.
+    TransactionCodeEntered { code: Vec<u8> },
+    /// The token endpoint responded (sender-bound + a fresh c_nonce).
+    TokenReceived { bound: bool, c_nonce: u64 },
+    /// The credential endpoint returned a credential.
+    CredentialReceived { format: String, bytes: Vec<u8> },
 }
 
 /// Everything the core asks the shell to do (serialised to JSON at the FFI boundary).
@@ -103,6 +136,17 @@ pub enum Effect {
     Sign { key_ref: String, payload: Vec<u8> },
     /// Perform an HTTP POST (TLS handled by the OS), then send back `PresentationDelivered`.
     Http { url: String, body: Vec<u8> },
+    // --- Issuance (OID4VCI) actions ---
+    /// Push a PAR request, then send back `ParPushed`.
+    PushPar,
+    /// Open the browser for the authorization-code flow, then send back `AuthorizationCodeReturned`.
+    OpenAuthBrowser,
+    /// Prompt the user for the transaction code, then send back `TransactionCodeEntered`.
+    PromptTxCode,
+    /// Exchange the code for a token, then send back `TokenReceived`.
+    RequestToken,
+    /// Request the credential with the assembled proof, then send back `CredentialReceived`.
+    RequestCredential { proof_jwt: Vec<u8> },
     /// Tear down the exchange.
     Close,
 }
@@ -123,6 +167,13 @@ pub struct Core {
     active: ActiveFlow,
     // Trust: the verified trusted list, used to decide RP registration in-core (not shell-supplied).
     trust_store: TrustStore,
+    // Issuance (OID4VCI) flow.
+    issuance: oid4vci::State,
+    iss_seen_c_nonces: Vec<u64>,
+    device_public_key: Vec<u8>,
+    wua: Option<wua::WalletUnitAttestation>,
+    issuer_trusted_current: bool,
+    issuer_id_current: String,
 }
 
 impl Core {
@@ -142,7 +193,33 @@ impl Core {
             pay_pending: None,
             active: ActiveFlow::None,
             trust_store: TrustStore::new(),
+            issuance: oid4vci::State::Idle,
+            iss_seen_c_nonces: Vec::new(),
+            device_public_key: Vec::new(),
+            wua: None,
+            issuer_trusted_current: false,
+            issuer_id_current: String::new(),
         }
+    }
+
+    /// Register the device public key (the Secure Enclave key the WUA attests). Needed to check
+    /// `proof_key_attested` in-core.
+    pub fn load_device_key(&mut self, device_public_key: Vec<u8>) {
+        self.device_public_key = device_public_key;
+    }
+
+    /// Verify + store the Wallet Unit Attestation from the provider. Returns "" on success.
+    pub fn load_wua(&mut self, wua_jwt: &[u8], provider_public_key: &[u8]) -> Result<(), String> {
+        let att = wua::parse_and_verify(
+            wua_jwt,
+            provider_public_key,
+            &AwsLc,
+            Alg::Es256,
+            self.now_epoch,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        self.wua = Some(att);
+        Ok(())
     }
 
     /// Install/update the signed trusted list (rollback-protected). The RP-registration decision is
@@ -217,6 +294,9 @@ impl Core {
                 ActiveFlow::Payment => {
                     self.drive_payment(payment::Input::AuthCodeSignatureProduced(signature))
                 }
+                ActiveFlow::Issuance => {
+                    self.drive_issuance(oid4vci::Input::ProofSignatureProduced(signature))
+                }
                 _ => self.drive(Input::DeviceSignatureProduced(signature)),
             },
             Event::PresentationDelivered => self.drive(Input::PresentationDelivered),
@@ -226,6 +306,42 @@ impl Core {
             }
             Event::PaymentApproved => self.drive_payment(payment::Input::UserApproved),
             Event::PaymentDeclined => self.drive_payment(payment::Input::UserDeclined),
+            Event::CredentialOfferReceived {
+                offer,
+                issuer_cert_chain,
+                issuer_id,
+            } => {
+                self.active = ActiveFlow::Issuance;
+                // Issuer trust is decided in-core against the trusted list (PID/attestation CAs).
+                self.issuer_trusted_current = self.resolve_issuer(&issuer_cert_chain);
+                self.issuer_id_current = issuer_id;
+                self.drive_issuance(oid4vci::Input::CredentialOffer(offer))
+            }
+            Event::ParPushed { pkce_s256 } => {
+                self.drive_issuance(oid4vci::Input::ParPushed { pkce_s256 })
+            }
+            Event::AuthorizationCodeReturned { code } => {
+                self.drive_issuance(oid4vci::Input::AuthCodeReturned(code))
+            }
+            Event::TransactionCodeEntered { code } => {
+                self.drive_issuance(oid4vci::Input::TxCodeEntered(code))
+            }
+            Event::TokenReceived { bound, c_nonce } => {
+                let effects = self.drive_issuance(oid4vci::Input::TokenResponse { bound, c_nonce });
+                // Record the c_nonce as used once we proceed to prove possession (replay guard).
+                if matches!(self.issuance, oid4vci::State::ProvingPossession { .. })
+                    && !self.iss_seen_c_nonces.contains(&c_nonce)
+                {
+                    self.iss_seen_c_nonces.push(c_nonce);
+                }
+                effects
+            }
+            Event::CredentialReceived { format, bytes } => match parse_format(&format) {
+                Some(f) => {
+                    self.drive_issuance(oid4vci::Input::CredentialResponse { format: f, bytes })
+                }
+                None => Vec::new(),
+            },
         }
     }
 
@@ -271,6 +387,73 @@ impl Core {
             .into_iter()
             .flat_map(|o| self.translate(o))
             .collect()
+    }
+
+    /// Is the issuer chain trusted? Validated in-core against the PID/attestation CAs in the list.
+    fn resolve_issuer(&self, chain: &[Vec<u8>]) -> bool {
+        let mut anchors = self.trust_store.parsed_anchors(ServiceType::PidProvider);
+        anchors.extend(
+            self.trust_store
+                .parsed_anchors(ServiceType::AttestationProvider),
+        );
+        !anchors.is_empty() && x509::validate_path(chain, &anchors, self.now_epoch, &AwsLc).is_ok()
+    }
+
+    fn drive_issuance(&mut self, input: oid4vci::Input) -> Vec<Effect> {
+        // proof_key_attested is computed in-core: the loaded WUA must verify AND bind this device
+        // key at High assurance — never a shell boolean.
+        let proof_key_attested = self
+            .wua
+            .as_ref()
+            .map(|w| w.is_valid_for(&self.device_public_key, wua::AssuranceLevel::High))
+            .unwrap_or(false);
+
+        let (next, outputs) = {
+            let env = oid4vci::Env {
+                issuer_trusted: self.issuer_trusted_current,
+                proof_key_attested,
+                seen_c_nonces: &self.iss_seen_c_nonces,
+                device_key_ref: &self.config.device_key_ref,
+                issuer_id: &self.issuer_id_current,
+                now_epoch: self.now_epoch,
+            };
+            oid4vci::step(&self.issuance, &input, &env)
+        };
+        self.issuance = next;
+
+        outputs
+            .into_iter()
+            .map(|o| self.translate_issuance(o))
+            .collect()
+    }
+
+    fn translate_issuance(&self, output: oid4vci::Output) -> Effect {
+        use oid4vci::Output as O;
+        match output {
+            O::PushPar => Effect::PushPar,
+            O::OpenAuthBrowser => Effect::OpenAuthBrowser,
+            O::PromptTxCode => Effect::PromptTxCode,
+            O::RequestToken => Effect::RequestToken,
+            O::SignProof {
+                key_ref,
+                signing_input,
+            } => Effect::Sign {
+                key_ref,
+                payload: signing_input,
+            },
+            O::RequestCredential { proof_jwt } => Effect::RequestCredential { proof_jwt },
+            O::Close => Effect::Close,
+        }
+    }
+
+    /// The most recently issued credential (format + bytes), if issuance completed.
+    pub fn issued_credential(&self) -> Option<(String, Vec<u8>)> {
+        match &self.issuance {
+            oid4vci::State::CredentialIssued { format, credential } => {
+                Some((format_name(*format).to_string(), credential.clone()))
+            }
+            _ => None,
+        }
     }
 
     fn drive_payment(&mut self, input: payment::Input) -> Vec<Effect> {
@@ -437,6 +620,27 @@ impl WalletEngine {
             .lock()
             .expect("poisoned")
             .load_trust_list(&signed_list, &operator_public_key)
+        {
+            Ok(()) => String::new(),
+            Err(e) => e,
+        }
+    }
+
+    /// Register the device public key the WUA attests (raw uncompressed point).
+    pub fn load_device_key(&self, device_public_key: Vec<u8>) {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .load_device_key(device_public_key);
+    }
+
+    /// Verify + store the Wallet Unit Attestation. Returns "" on success, else an error string.
+    pub fn load_wua(&self, wua_jwt: Vec<u8>, provider_public_key: Vec<u8>) -> String {
+        match self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .load_wua(&wua_jwt, &provider_public_key)
         {
             Ok(()) => String::new(),
             Err(e) => e,

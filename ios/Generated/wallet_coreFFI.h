@@ -276,9 +276,19 @@ RustBuffer uniffi_wallet_core_fn_method_walletengine_handle_event_json(void*_Non
 void uniffi_wallet_core_fn_method_walletengine_load_credential(void*_Nonnull ptr, RustBuffer issuer_jwt, RustBuffer disclosures_by_claim_json, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_DEVICE_KEY
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_DEVICE_KEY
+void uniffi_wallet_core_fn_method_walletengine_load_device_key(void*_Nonnull ptr, RustBuffer device_public_key, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_TRUST_LIST
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_TRUST_LIST
 RustBuffer uniffi_wallet_core_fn_method_walletengine_load_trust_list(void*_Nonnull ptr, RustBuffer signed_list, RustBuffer operator_public_key, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_WUA
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_WUA
+RustBuffer uniffi_wallet_core_fn_method_walletengine_load_wua(void*_Nonnull ptr, RustBuffer wua_jwt, RustBuffer provider_public_key, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_WALLET_CORE_RUSTBUFFER_ALLOC
@@ -573,9 +583,21 @@ uint16_t uniffi_wallet_core_checksum_method_walletengine_load_credential(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_DEVICE_KEY
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_DEVICE_KEY
+uint16_t uniffi_wallet_core_checksum_method_walletengine_load_device_key(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_TRUST_LIST
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_TRUST_LIST
 uint16_t uniffi_wallet_core_checksum_method_walletengine_load_trust_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_WUA
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_WUA
+uint16_t uniffi_wallet_core_checksum_method_walletengine_load_wua(void
     
 );
 #endif
