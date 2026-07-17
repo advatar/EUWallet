@@ -16,7 +16,7 @@ pub enum Alg {
     EdDsa,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CryptoError {
     NotFound,
     Unsupported,

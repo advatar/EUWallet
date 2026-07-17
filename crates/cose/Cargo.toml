@@ -10,5 +10,8 @@ publish.workspace = true
 [dependencies]
 crypto-traits = { path = "../crypto-traits" }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lints]
 workspace = true

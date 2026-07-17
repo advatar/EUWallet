@@ -13,6 +13,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 mdoc = { path = "../crates/mdoc" }
+cose = { path = "../crates/cose" }
 
 [[bin]]
 name = "mdoc_cbor"
@@ -23,3 +24,10 @@ bench = false
 
 # Detach from the parent workspace so the fuzz build has its own graph.
 [workspace]
+
+[[bin]]
+name = "cose_cbor"
+path = "fuzz_targets/cose_cbor.rs"
+test = false
+doc = false
+bench = false
