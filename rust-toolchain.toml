@@ -1,0 +1,6 @@
+# Pin the exact Rust toolchain so every developer and CI runner builds identically.
+# See docs/IMPLEMENTATION_PLAN.md Section 0/1.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+targets = ["aarch64-apple-ios", "aarch64-apple-ios-sim", "aarch64-apple-darwin"]

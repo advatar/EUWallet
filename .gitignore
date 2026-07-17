@@ -1,0 +1,17 @@
+/target
+**/*.rs.bk
+.DS_Store
+# iOS
+ios/.build
+ios/DerivedData
+*.xcuserstate
+# Lean
+formal/lean/.lake
+formal/lean/build
+# Fuzz
+fuzz/target
+fuzz/corpus
+fuzz/artifacts
+# Python
+tools/**/.venv
+__pycache__/

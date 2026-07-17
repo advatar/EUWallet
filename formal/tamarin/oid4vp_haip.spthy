@@ -1,0 +1,126 @@
+/*
+  Tier-3 symbolic analysis of the HAIP-constrained OpenID4VP presentation exchange.
+  See docs/IMPLEMENTATION_PLAN.md Section 11.
+
+  This models the PROTOCOL DESIGN against a Dolev-Yao network attacker (who controls the
+  network: reads, blocks, injects, reorders). It proves properties that implementation-level
+  testing (Tier 1) and the state-machine model (Tier 2) cannot: network-level attacks such
+  as request/response mix-up, replay, and leakage of the disclosed claim.
+
+  Precedent: the FAPI 2.0 Security Profile shipped with a formal analysis of exactly this shape.
+
+  Run:
+    tamarin-prover --prove oid4vp_haip.spthy
+  (Install: `brew install tamarin-prover/tap/tamarin-prover`, or see https://tamarin-prover.com )
+
+  NOTE: this is a faithful STARTING model of the HAIP subset (signed request object, nonce,
+  audience/client_id binding, key-bound presentation). Some lemmas may need `reuse`/`sources`
+  helper lemmas or an oracle to fully automate; each lemma states the intended guarantee.
+*/
+
+theory OID4VP_HAIP
+begin
+
+builtins: signing, hashing, asymmetric-encryption
+
+/* ------------------------------------------------------------------ */
+/* Public-key infrastructure: register long-term keys for RPs and the  */
+/* wallet's holder-binding key. `!Ltk` is a persistent fact.           */
+/* ------------------------------------------------------------------ */
+rule Register_pk:
+    [ Fr(~ltk) ]
+  -->
+    [ !Ltk($A, ~ltk), !Pk($A, pk(~ltk)), Out(pk(~ltk)) ]
+
+/* The attacker may compromise a party's long-term key (models insider / leaked keys). */
+rule Reveal_ltk:
+    [ !Ltk($A, ~ltk) ]
+  --[ Reveal($A) ]->
+    [ Out(~ltk) ]
+
+/* ------------------------------------------------------------------ */
+/* Relying Party sends a SIGNED, BOUND authorization request:          */
+/* it contains a fresh nonce, the RP's client_id, and the audience     */
+/* (the wallet). HAIP requires the request object to be signed.        */
+/* ------------------------------------------------------------------ */
+rule RP_Request:
+    [ Fr(~nonce)
+    , !Ltk($RP, ltkRP)
+    ]
+  --[ RPSends($RP, $Wallet, ~nonce) ]->
+    [ Out( <$RP, $Wallet, ~nonce, sign(<'req', $RP, $Wallet, ~nonce>, ltkRP)> )
+    , RP_Await($RP, $Wallet, ~nonce)
+    ]
+
+/* ------------------------------------------------------------------ */
+/* Wallet receives a request, verifies the RP signature and that the   */
+/* audience is itself, then produces a key-bound presentation over the */
+/* SAME nonce and the SAME client_id (mix-up / replay defence).        */
+/* `~claim` is the selectively disclosed attribute value.              */
+/* ------------------------------------------------------------------ */
+rule Wallet_Present:
+    [ In( <$RP, $Wallet, nonce, sig> )
+    , !Pk($RP, pkRP)
+    , !Ltk($Wallet, ltkW)
+    , Fr(~claim)
+    ]
+  --[ Verify(verify(sig, <'req', $RP, $Wallet, nonce>, pkRP))
+    , WalletPresents($Wallet, $RP, nonce, ~claim)
+    , SecretClaim($Wallet, $RP, ~claim)
+    ]->
+    [ Out( <$Wallet, $RP, nonce, ~claim, sign(<'vp', $Wallet, $RP, nonce, ~claim>, ltkW)> ) ]
+
+/* ------------------------------------------------------------------ */
+/* Relying Party accepts a presentation only if it is bound to the     */
+/* nonce it issued and signed by the wallet.                           */
+/* ------------------------------------------------------------------ */
+rule RP_Accept:
+    [ RP_Await($RP, $Wallet, nonce)
+    , In( <$Wallet, $RP, nonce, claim, vpsig> )
+    , !Pk($Wallet, pkW)
+    ]
+  --[ Verify(verify(vpsig, <'vp', $Wallet, $RP, nonce, claim>, pkW))
+    , RPAccepts($RP, $Wallet, nonce, claim)
+    ]->
+    [ ]
+
+/* ================================================================== */
+/* LEMMAS                                                              */
+/* ================================================================== */
+
+/* Sanity: an honest run can complete (there exists a trace where the RP accepts). */
+lemma executable:
+  exists-trace
+  "Ex RP W n c #i. RPAccepts(RP, W, n, c) @ #i"
+
+/* Injective agreement / no replay: whenever an honest RP accepts a presentation on a
+   nonce, the wallet actually presented on that same nonce, and this correspondence is
+   injective (each acceptance matches a distinct presentation) — i.e. no replay/mix-up,
+   unless a relevant long-term key was revealed. */
+lemma injective_agreement:
+  "All RP W n c #i.
+      RPAccepts(RP, W, n, c) @ #i
+    ==>
+      ( (Ex #j. WalletPresents(W, RP, n, c) @ #j & #j < #i)
+        & not (Ex RP2 W2 c2 #i2.
+                 RPAccepts(RP2, W2, n, c2) @ #i2 & not (#i2 = #i)) )
+      | (Ex #r. Reveal(W) @ #r)
+      | (Ex #r. Reveal(RP) @ #r)"
+
+/* Secrecy of the disclosed claim: the attacker never learns a claim that an honest wallet
+   disclosed to an honest RP, unless a long-term key was revealed. */
+lemma claim_secrecy:
+  "All W RP c #i.
+      SecretClaim(W, RP, c) @ #i & not (Ex #r. Reveal(W) @ #r) & not (Ex #r. Reveal(RP) @ #r)
+    ==>
+      not (Ex #k. K(c) @ #k)"
+
+/* Nonce freshness at acceptance: an accepted nonce was one an RP genuinely issued. */
+lemma nonce_authentic:
+  "All RP W n c #i.
+      RPAccepts(RP, W, n, c) @ #i
+    ==>
+      (Ex #j. RPSends(RP, W, n) @ #j & #j < #i)
+      | (Ex #r. Reveal(RP) @ #r)"
+
+end

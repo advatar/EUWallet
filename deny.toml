@@ -1,0 +1,28 @@
+# cargo-deny: enforces the dependency budget (docs/dependency-budget.md).
+# Run: cargo deny check
+[graph]
+targets = [
+    { triple = "aarch64-apple-ios" },
+    { triple = "aarch64-apple-darwin" },
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+# `cargo audit` also runs in CI; this covers the build graph.
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"        # no `*` version requirements
+# Deny heavyweight/unwanted crates sneaking into the core here as they appear, e.g.:
+# deny = [{ name = "openssl" }]  # crypto must go through crypto-traits, not openssl
+
+[licenses]
+version = 2
+allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

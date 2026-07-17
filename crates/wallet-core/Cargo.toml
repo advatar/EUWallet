@@ -1,0 +1,22 @@
+[package]
+name = "wallet-core"
+description = "Facade: owns the Event/Effect enums, the sans-IO run loop, and the UniFFI-exposed API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }
+cose = { path = "../cose" }
+mdoc = { path = "../mdoc" }
+sdjwt = { path = "../sdjwt" }
+x509 = { path = "../x509" }
+oid4vp = { path = "../oid4vp" }
+oid4vci = { path = "../oid4vci" }
+iso18013-5 = { path = "../iso18013-5" }
+trust = { path = "../trust" }
+status = { path = "../status" }
+wua = { path = "../wua" }
+presenter = { path = "../presenter" }

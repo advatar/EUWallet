@@ -1,0 +1,13 @@
+[package]
+name = "iso18013-5"
+description = "ISO/IEC 18013-5 proximity: device engagement + session, sans-IO (opaque transport bytes)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }
+mdoc = { path = "../mdoc" }
+cose = { path = "../cose" }

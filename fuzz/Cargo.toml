@@ -1,0 +1,25 @@
+# cargo-fuzz workspace (plan Section 9). Detached from the main workspace on purpose.
+# Requires the nightly toolchain: `rustup toolchain install nightly`.
+# Run a target:  cargo +nightly fuzz run mdoc_cbor -- -max_total_time=60
+[package]
+name = "euwallet-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mdoc = { path = "../crates/mdoc" }
+
+[[bin]]
+name = "mdoc_cbor"
+path = "fuzz_targets/mdoc_cbor.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent workspace so the fuzz build has its own graph.
+[workspace]

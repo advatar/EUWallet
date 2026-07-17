@@ -1,0 +1,57 @@
+# EUDI Wallet — Cargo workspace root.
+# Architecture: sans-IO Rust behavior core + thin native shells (see docs/IMPLEMENTATION_PLAN.md).
+# The dependency budget lives in docs/dependency-budget.md and is enforced by deny.toml.
+[workspace]
+resolver = "2"
+members = [
+    "crates/crypto-traits",
+    "crates/cose",
+    "crates/mdoc",
+    "crates/sdjwt",
+    "crates/x509",
+    "crates/oid4vp",
+    "crates/oid4vci",
+    "crates/iso18013-5",
+    "crates/trust",
+    "crates/status",
+    "crates/wua",
+    "crates/presenter",
+    "crates/wallet-core",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.97"
+license = "Apache-2.0"
+publish = false
+
+# `cfg(kani)` is set only by the Kani model checker (Tier 1, plan Section 9); tell rustc it is
+# an expected cfg so normal builds don't warn about the proof harnesses.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+# ---------------------------------------------------------------------------
+# DEPENDENCY BUDGET (the ONLY external crates permitted in the core).
+# These are declared here but intentionally NOT yet referenced by any crate:
+# the skeleton compiles with zero external dependencies. As each module is
+# implemented per the plan, opt in with `dep = { workspace = true }`.
+# Every addition must be justified in docs/dependency-budget.md and pass
+# `cargo deny check`. Do NOT add a general-purpose framework here.
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# Serialization / encoding primitives (small, audited)
+serde      = { version = "1", default-features = false, features = ["derive", "alloc"] }
+# serde_json needs std; use it only in dev/test/tooling, never in the no_std core path.
+serde_json = { version = "1" }
+ciborium   = { version = "0.2" }          # profiled/canonical CBOR (mdoc/cose) — or replace with hand-rolled
+base64ct   = { version = "1", default-features = false, features = ["alloc"] }
+hex        = { version = "0.4", default-features = false, features = ["alloc"] }
+# Error ergonomics
+thiserror  = { version = "1" }
+# Cryptography — ONLY behind crypto-traits; never called directly by protocol crates.
+aws-lc-rs  = { version = "1" }            # FIPS-capable; satisfies "never roll your own crypto"
+# Property testing (dev-dependency only)
+proptest   = { version = "1" }
+# FFI
+uniffi     = { version = "0.28" }

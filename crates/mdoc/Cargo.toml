@@ -1,0 +1,15 @@
+[package]
+name = "mdoc"
+description = "Deterministic/canonical CBOR + ISO/IEC 18013-5 mdoc structures."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }
+cose = { path = "../cose" }
+
+[dev-dependencies]
+proptest = { workspace = true }

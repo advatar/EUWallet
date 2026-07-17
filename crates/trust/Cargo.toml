@@ -1,0 +1,13 @@
+[package]
+name = "trust"
+description = "Trusted lists (ETSI 119 612/119 602) and trust anchors — parsing pure, fetch is an effect."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }
+x509 = { path = "../x509" }
+cose = { path = "../cose" }

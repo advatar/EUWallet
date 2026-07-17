@@ -1,0 +1,7 @@
+[
+  {"events":[{"kind":"request","nonce":1},{"kind":"validateSig"},{"kind":"consent"},{"kind":"disclose"}],"expect":{"state":"presenting","disclosed":true,"sigValidated":true,"consented":true}},
+  {"events":[{"kind":"request","nonce":2},{"kind":"validateSig"},{"kind":"disclose"}],"expect":{"state":"aborted","disclosed":false,"sigValidated":true,"consented":false}},
+  {"events":[{"kind":"request","nonce":3},{"kind":"consent"},{"kind":"disclose"}],"expect":{"state":"aborted","disclosed":false,"sigValidated":false,"consented":false}},
+  {"events":[{"kind":"request","nonce":4},{"kind":"validateSig"},{"kind":"consent"},{"kind":"disclose"},{"kind":"request","nonce":4}],"expect":{"state":"aborted","disclosed":true,"sigValidated":true,"consented":true}},
+  {"events":[{"kind":"request","nonce":5},{"kind":"validateSig"}],"expect":{"state":"validated","disclosed":false,"sigValidated":true,"consented":false}}
+]

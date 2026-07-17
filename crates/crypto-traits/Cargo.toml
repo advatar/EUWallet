@@ -1,0 +1,10 @@
+[package]
+name = "crypto-traits"
+description = "Cryptographic trait boundary — the core depends only on these, never on a concrete crypto impl."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

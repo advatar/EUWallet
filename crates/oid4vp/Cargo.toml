@@ -1,0 +1,19 @@
+[package]
+name = "oid4vp"
+description = "OpenID4VP 1.0 remote presentation — sans-IO, HAIP-constrained state machine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }
+mdoc = { path = "../mdoc" }
+sdjwt = { path = "../sdjwt" }
+x509 = { path = "../x509" }
+cose = { path = "../cose" }
+
+[dev-dependencies]
+# Only used by the Tier-2 conformance test to parse the Lean oracle's trace JSON.
+serde_json = { workspace = true }

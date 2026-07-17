@@ -1,0 +1,13 @@
+name = "WalletModel"
+defaultTargets = ["WalletModel"]
+
+# Tier-2 formal model (plan Section 10). No mathlib dependency: builds offline and fast.
+# The library holds the state-machine model and the machine-checked invariant proofs.
+# The `traces` executable exports conformance traces as JSON for the Rust core to replay.
+
+[[lean_lib]]
+name = "WalletModel"
+
+[[lean_exe]]
+name = "traces"
+root = "Traces"

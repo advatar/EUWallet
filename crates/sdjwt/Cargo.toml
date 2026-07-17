@@ -1,0 +1,11 @@
+[package]
+name = "sdjwt"
+description = "SD-JWT VC (draft-17) + JOSE/JWS over crypto-traits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }

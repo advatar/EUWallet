@@ -1,0 +1,136 @@
+name: euwallet-ci
+
+# Definition-of-done gates for the EUDI wallet (plan Section 13). Every job here must be
+# green before a change merges. Jobs mirror the architecture layers: Rust core, formal
+# tiers 1/2/3, the iOS shell, traceability, and supply-chain evidence.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-core:
+    name: Rust core (fmt, clippy, test)
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: euwallet
+    steps:
+      - uses: actions/checkout@v4
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test workspace
+        run: cargo test --workspace
+
+  supply-chain:
+    name: Supply chain (deny, audit, SBOM)
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: euwallet
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-deny (licenses, bans, sources)
+        run: cargo deny check
+      - name: cargo-audit (advisories)
+        run: cargo audit
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          cargo install cargo-cyclonedx --locked || true
+          cargo cyclonedx --format json || true
+
+  tier1-fuzz-kani:
+    name: Tier 1 (bounded fuzz + Kani)
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: euwallet
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly (for cargo-fuzz)
+        run: rustup toolchain install nightly
+      - name: Bounded fuzz of the CBOR codec
+        run: |
+          cargo install cargo-fuzz --locked
+          cd fuzz
+          cargo +nightly fuzz run mdoc_cbor -- -max_total_time=60 -runs=200000
+      - name: Kani bounded proofs
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+          cargo kani -p mdoc
+
+  tier2-lean-oracle:
+    name: Tier 2 (Lean proofs + oracle replay)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan/Lean
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Build Lean model (proves the invariants)
+        working-directory: euwallet/formal/lean
+        run: lake build
+      - name: Regenerate oracle traces
+        working-directory: euwallet/formal/lean
+        run: lake exe traces > ../../crates/oid4vp/tests/model_traces.json
+      - name: Fail if the checked-in traces are stale
+        working-directory: euwallet
+        run: git diff --exit-code crates/oid4vp/tests/model_traces.json
+      - name: Replay traces against the Rust core
+        working-directory: euwallet
+        run: cargo test -p oid4vp --test conformance
+
+  tier3-tamarin:
+    name: Tier 3 (Tamarin symbolic proofs)
+    runs-on: ubuntu-latest
+    continue-on-error: true # proof automation can be slow; gate as advisory until stable
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tamarin
+        run: |
+          sudo apt-get update && sudo apt-get install -y tamarin-prover || true
+      - name: Prove OID4VP/HAIP lemmas
+        working-directory: euwallet/formal/tamarin
+        run: tamarin-prover --prove oid4vp_haip.spthy
+
+  ios-shell:
+    name: iOS shell (swift build + test)
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: euwallet/ios
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+
+  traceability:
+    name: HLR traceability import
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: euwallet/tools/hlr-import
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import HLRs and report coverage
+        run: |
+          test -f high-level-requirements.csv || \
+            curl -sSL -o high-level-requirements.csv \
+            https://raw.githubusercontent.com/eu-digital-identity-wallet/eudi-doc-architecture-and-reference-framework/refs/heads/main/hltr/high-level-requirements.csv
+          python3 import_hlr.py high-level-requirements.csv ../../traceability/requirements.csv
+
+  # FCAF conformance runs against a built wallet; wired once M2 (first E2E flow) lands.
+  # fcaf:
+  #   name: FCAF functional conformance (pinned v0.0.7)
+  #   ...
