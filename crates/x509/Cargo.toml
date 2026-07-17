@@ -9,3 +9,10 @@ publish.workspace = true
 
 [dependencies]
 crypto-traits = { path = "../crypto-traits" }
+# Vetted RustCrypto DER/X.509 parsers. Parsing and profile evaluation are LOGIC, not crypto;
+# the one crypto step (verifying each certificate signature) goes through crypto-traits.
+der = "0.7"
+x509-cert = "0.2"
+
+[lints]
+workspace = true

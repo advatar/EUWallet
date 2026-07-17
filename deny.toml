@@ -13,7 +13,8 @@ yanked = "deny"
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"        # no `*` version requirements
+wildcards = "deny"             # no `*` version requirements on crates.io deps
+allow-wildcard-paths = true    # ...but intra-workspace `path = "..."` deps are fine
 # Deny heavyweight/unwanted crates sneaking into the core here as they appear, e.g.:
 # deny = [{ name = "openssl" }]  # crypto must go through crypto-traits, not openssl
 
