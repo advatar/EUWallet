@@ -9,3 +9,13 @@ publish.workspace = true
 
 [dependencies]
 crypto-traits = { path = "../crypto-traits" }
+serde_json = { workspace = true }
+base64ct = { workspace = true }
+
+[dev-dependencies]
+# Real SHA-256 for a Digest impl in tests, so disclosure digests can be checked against
+# published SD-JWT VC vectors. Not a runtime dependency (crypto reaches the crate via crypto-traits).
+sha2 = "0.10"
+
+[lints]
+workspace = true
