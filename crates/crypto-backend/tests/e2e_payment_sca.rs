@@ -14,8 +14,7 @@ fn payment_sca_dynamic_linking_end_to_end() {
         device_key_ref: "device-key",
     };
 
-    let request =
-        br#"{"payee":"Acme Store","amount_minor":1299,"currency":"EUR","nonce":7}"#.to_vec();
+    let request = br#"{"creditor_name":"Acme Store","creditor_account":"DE89370400440532013000","amount_minor":1299,"currency":"EUR","transaction_id":"txn-1","nonce":7}"#.to_vec();
 
     // Machine: request → confirmation → approve → SignAuthCode(binding).
     let (s, _) = step(
@@ -43,9 +42,11 @@ fn payment_sca_dynamic_linking_end_to_end() {
 
     // Payment service verifies the code against the ACTUAL transaction (real crypto).
     let actual = PaymentRequest {
-        payee: "Acme Store".into(),
+        creditor_name: "Acme Store".into(),
+        creditor_account: "DE89370400440532013000".into(),
         amount_minor: 1299,
         currency: "EUR".into(),
+        transaction_id: "txn-1".into(),
         nonce: 7,
         response_uri: String::new(),
     };
@@ -77,7 +78,7 @@ fn payment_sca_dynamic_linking_end_to_end() {
 
     // ...and against a tampered payee.
     let tampered_payee = PaymentRequest {
-        payee: "Evil Corp".into(),
+        creditor_name: "Evil Corp".into(),
         ..actual
     };
     assert!(

@@ -14,12 +14,13 @@ fn payment_sca_through_wallet_core() {
     });
 
     // Payment request arrives.
-    let request = br#"{"payee":"Acme Store","amount_minor":1299,"currency":"EUR","nonce":7,"response_uri":"https://psp.example/authorize"}"#.to_vec();
+    let request = br#"{"creditor_name":"Acme Store","creditor_account":"DE89370400440532013000","amount_minor":1299,"currency":"EUR","transaction_id":"txn-1","nonce":7,"response_uri":"https://psp.example/authorize"}"#.to_vec();
     let fx = core.handle_event(Event::PaymentAuthorizationRequestReceived { request });
     match fx.as_slice() {
         [Effect::Render { screen }] => match screen {
             presenter::ScreenDescription::PaymentConfirmation(p) => {
-                assert_eq!(p.payee, "Acme Store");
+                assert_eq!(p.creditor_name, "Acme Store");
+                assert_eq!(p.creditor_account, "DE89370400440532013000");
                 assert_eq!(p.amount_minor, 1299);
                 assert_eq!(p.currency, "EUR");
             }
@@ -58,9 +59,11 @@ fn payment_sca_through_wallet_core() {
     // The PSP verifies the code against the true transaction (real crypto), and dynamic linking
     // rejects any tampering.
     let actual = PaymentRequest {
-        payee: "Acme Store".into(),
+        creditor_name: "Acme Store".into(),
+        creditor_account: "DE89370400440532013000".into(),
         amount_minor: 1299,
         currency: "EUR".into(),
+        transaction_id: "txn-1".into(),
         nonce: 7,
         response_uri: String::new(),
     };

@@ -38,11 +38,13 @@ pub enum ScreenDescription {
     TransactionHistory,
 }
 
-/// A fully-resolved payment SCA confirmation screen (PSD2 dynamic linking surfaces here).
+/// A fully-resolved payment SCA confirmation screen (PSD2 dynamic linking surfaces here). Shows
+/// the creditor name AND account so the payer is aware of exactly who is paid (RTS Art. 5(1)).
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaymentScreen {
-    pub payee: String,
+    pub creditor_name: String,
+    pub creditor_account: String,
     /// Amount in minor units (e.g. cents) to avoid floating-point ambiguity.
     pub amount_minor: u64,
     pub currency: String,
@@ -128,7 +130,8 @@ fn to_value(screen: &ScreenDescription) -> Value {
         ]),
         ScreenDescription::PaymentConfirmation(p) => Value::Array(vec![
             tag("paymentConfirmation"),
-            Value::Text(p.payee.clone()),
+            Value::Text(p.creditor_name.clone()),
+            Value::Text(p.creditor_account.clone()),
             Value::Uint(p.amount_minor),
             Value::Text(p.currency.clone()),
         ]),

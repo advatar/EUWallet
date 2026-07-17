@@ -15,12 +15,12 @@ public enum ScreenDescription: Decodable, Equatable {
     case loading
     case error(code: String, message: String)
     case consent(relyingPartyName: String, purpose: String, requestedClaims: [String])
-    case paymentConfirmation(payee: String, amountMinor: UInt64, currency: String)
+    case paymentConfirmation(creditorName: String, creditorAccount: String, amountMinor: UInt64, currency: String)
     case other(String)
 
     private enum CodingKeys: String, CodingKey {
         case screen, code, message, rpDisplayName, purpose, requestedClaims
-        case payee, amountMinor, currency
+        case creditorName, creditorAccount, amountMinor, currency
     }
 
     public init(from decoder: Decoder) throws {
@@ -38,7 +38,8 @@ public enum ScreenDescription: Decodable, Equatable {
                 requestedClaims: try c.decode([String].self, forKey: .requestedClaims))
         case "paymentConfirmation":
             self = .paymentConfirmation(
-                payee: try c.decode(String.self, forKey: .payee),
+                creditorName: try c.decode(String.self, forKey: .creditorName),
+                creditorAccount: try c.decode(String.self, forKey: .creditorAccount),
                 amountMinor: try c.decode(UInt64.self, forKey: .amountMinor),
                 currency: try c.decode(String.self, forKey: .currency))
         case let other: self = .other(other)

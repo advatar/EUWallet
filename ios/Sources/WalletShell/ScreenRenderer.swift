@@ -27,10 +27,10 @@ public struct ScreenRenderer: View {
             }.accessibilityElement(children: .combine)
         case .consent(let rp, let purpose, let claims):
             ConsentView(rp: rp, purpose: purpose, claims: claims, onConsent: onConsent, onDecline: onDecline)
-        case .paymentConfirmation(let payee, let amountMinor, let currency):
+        case .paymentConfirmation(let creditorName, let creditorAccount, let amountMinor, let currency):
             PaymentConfirmationView(
-                payee: payee, amountMinor: amountMinor, currency: currency,
-                onConsent: onConsent, onDecline: onDecline)
+                payee: creditorName, account: creditorAccount, amountMinor: amountMinor,
+                currency: currency, onConsent: onConsent, onDecline: onDecline)
         case .other(let name):
             Text(name)
         }
@@ -41,6 +41,7 @@ public struct ScreenRenderer: View {
 /// the amount and payee the user is authorising (what-you-see-is-what-you-authorise).
 struct PaymentConfirmationView: View {
     let payee: String
+    let account: String
     let amountMinor: UInt64
     let currency: String
     let onConsent: () -> Void
@@ -55,6 +56,7 @@ struct PaymentConfirmationView: View {
             Text("Confirm payment").font(.headline)
             Text(amountText).font(.largeTitle.bold())
             Text("to \(payee)").font(.subheadline)
+            Text(account).font(.caption).foregroundStyle(.secondary)
             Spacer()
             HStack {
                 Button("Cancel", role: .cancel, action: onDecline)

@@ -12,7 +12,7 @@ fn env<'a>(seen: &'a [u64]) -> Env<'a> {
 
 fn req_json(payee: &str, amount: u64, currency: &str, nonce: u64) -> Vec<u8> {
     format!(
-        r#"{{"payee":"{payee}","amount_minor":{amount},"currency":"{currency}","nonce":{nonce}}}"#
+        r#"{{"creditor_name":"{payee}","creditor_account":"DE89370400440532013000","amount_minor":{amount},"currency":"{currency}","transaction_id":"txn-1","nonce":{nonce}}}"#
     )
     .into_bytes()
 }
@@ -30,7 +30,8 @@ fn happy_path_to_authorized() {
     assert_eq!(
         out,
         vec![Output::RenderPaymentConfirmation {
-            payee: "Acme Store".into(),
+            creditor_name: "Acme Store".into(),
+            creditor_account: "DE89370400440532013000".into(),
             amount_minor: 1299,
             currency: "EUR".into()
         }]
@@ -111,9 +112,11 @@ fn user_declines() {
 
 fn req(payee: &str, amount: u64, currency: &str, nonce: u64) -> PaymentRequest {
     PaymentRequest {
-        payee: payee.into(),
+        creditor_name: payee.into(),
+        creditor_account: "DE89370400440532013000".into(),
         amount_minor: amount,
         currency: currency.into(),
+        transaction_id: "txn-1".into(),
         nonce,
         response_uri: String::new(),
     }

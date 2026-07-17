@@ -18,14 +18,23 @@
 
 use cose::cbor::Value;
 
-/// A payment authorization request presented to the wallet.
+/// A payment authorization request presented to the wallet (TS12 / PSD2 shape).
+///
+/// PSD2 RTS Art. 5 requires the authentication code to be specific to the **amount** and the
+/// **payee**. The payee here is the *creditor* — both its display name and its account (IBAN) —
+/// so the code binds the account the money actually goes to, not just a display string.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentRequest {
-    pub payee: String,
+    /// Creditor (payee) display name shown to the user.
+    pub creditor_name: String,
+    /// Creditor account identifier (e.g. IBAN) the funds are sent to.
+    pub creditor_account: String,
     /// Amount in minor units (cents) — integer, never a float.
     pub amount_minor: u64,
     /// ISO 4217 currency code.
     pub currency: String,
+    /// Merchant/PSP transaction reference.
+    pub transaction_id: String,
     /// Transaction nonce (replay protection).
     pub nonce: u64,
     /// Where the authentication code is posted (the payment service). Empty if delivered
@@ -80,9 +89,11 @@ pub enum Input {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Output {
-    /// Render the DEDICATED payment confirmation screen (never the identity consent screen).
+    /// Render the DEDICATED payment confirmation screen (never the identity consent screen). Shows
+    /// the creditor (name + account) and amount the payer is authorising (RTS Art. 5(1)).
     RenderPaymentConfirmation {
-        payee: String,
+        creditor_name: String,
+        creditor_account: String,
         amount_minor: u64,
         currency: String,
     },
@@ -108,9 +119,11 @@ pub struct Env<'a> {
 pub fn dynamic_linking_binding(req: &PaymentRequest) -> Vec<u8> {
     Value::Array(vec![
         Value::Text("eudi-payment-sca-v1".into()),
-        Value::Text(req.payee.clone()),
+        Value::Text(req.creditor_name.clone()),
+        Value::Text(req.creditor_account.clone()),
         Value::Uint(req.amount_minor),
         Value::Text(req.currency.clone()),
+        Value::Text(req.transaction_id.clone()),
         Value::Uint(req.nonce),
     ])
     .to_canonical()
@@ -125,14 +138,15 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                 if req.amount_minor == 0 {
                     return (State::Aborted(AbortReason::InvalidAmount), vec![]);
                 }
-                if req.payee.trim().is_empty() {
+                if req.creditor_name.trim().is_empty() || req.creditor_account.trim().is_empty() {
                     return (State::Aborted(AbortReason::PayeeMissing), vec![]);
                 }
                 if env.seen_nonces.contains(&req.nonce) {
                     return (State::Aborted(AbortReason::NonceReplayed), vec![]);
                 }
                 let out = Output::RenderPaymentConfirmation {
-                    payee: req.payee.clone(),
+                    creditor_name: req.creditor_name.clone(),
+                    creditor_account: req.creditor_account.clone(),
                     amount_minor: req.amount_minor,
                     currency: req.currency.clone(),
                 };
@@ -177,23 +191,14 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
 
 fn parse_request(bytes: &[u8]) -> Result<PaymentRequest, ()> {
     let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ())?;
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|x| x.to_string());
     Ok(PaymentRequest {
-        payee: v
-            .get("payee")
-            .and_then(|x| x.as_str())
-            .ok_or(())?
-            .to_string(),
+        creditor_name: s("creditor_name").ok_or(())?,
+        creditor_account: s("creditor_account").ok_or(())?,
         amount_minor: v.get("amount_minor").and_then(|x| x.as_u64()).ok_or(())?,
-        currency: v
-            .get("currency")
-            .and_then(|x| x.as_str())
-            .ok_or(())?
-            .to_string(),
+        currency: s("currency").ok_or(())?,
+        transaction_id: s("transaction_id").unwrap_or_default(),
         nonce: v.get("nonce").and_then(|x| x.as_u64()).ok_or(())?,
-        response_uri: v
-            .get("response_uri")
-            .and_then(|x| x.as_str())
-            .unwrap_or_default()
-            .to_string(),
+        response_uri: s("response_uri").unwrap_or_default(),
     })
 }

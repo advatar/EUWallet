@@ -24,7 +24,7 @@ final class MockEngine: WalletEngineDriving {
             return #"[{"type":"close"}]"#
         }
         if eventJson.contains("\"paymentAuthorizationRequestReceived\"") {
-            return #"[{"type":"render","screen":{"screen":"paymentConfirmation","payee":"Acme Store","amountMinor":1299,"currency":"EUR"}}]"#
+            return #"[{"type":"render","screen":{"screen":"paymentConfirmation","creditorName":"Acme Store","creditorAccount":"DE89","amountMinor":1299,"currency":"EUR"}}]"#
         }
         if eventJson.contains("\"paymentApproved\"") {
             return #"[{"type":"sign","keyRef":"device-key","payload":[7,7,7]},{"type":"http","url":"https://psp.example/authorize","body":[8,8,8]}]"#
@@ -89,7 +89,7 @@ final class EffectExecutorTests: XCTestCase {
         let executor = makeExecutor(signer: signer, http: http) { rendered.append($0) }
 
         await executor.send(eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(Data([1])))
-        guard case .paymentConfirmation(let payee, let amount, let currency)? = rendered.last else {
+        guard case .paymentConfirmation(let payee, _, let amount, let currency)? = rendered.last else {
             return XCTFail("expected a payment confirmation screen, got \(String(describing: rendered.last))")
         }
         XCTAssertEqual(payee, "Acme Store")

@@ -306,12 +306,14 @@ impl Core {
         use payment::Output as PO;
         match output {
             PO::RenderPaymentConfirmation {
-                payee,
+                creditor_name,
+                creditor_account,
                 amount_minor,
                 currency,
             } => vec![Effect::Render {
                 screen: ScreenDescription::PaymentConfirmation(PaymentScreen {
-                    payee,
+                    creditor_name,
+                    creditor_account,
                     amount_minor,
                     currency,
                 }),
