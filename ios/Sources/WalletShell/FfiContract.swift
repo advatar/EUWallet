@@ -7,7 +7,7 @@ public protocol WalletEngineDriving: AnyObject {
     /// Drive one event (JSON) → a JSON array of effects (or a `{"error":...}` object).
     func handleEventJson(eventJson: String) -> String
     /// Load a held credential: issuer JWT + JSON object mapping claim name → disclosure.
-    func loadCredential(issuerJwt: String, disclosuresByClaimJson: String)
+    func loadCredential(issuerJwt: String, disclosuresByClaimJson: String, statusIndex: UInt64?)
 }
 
 /// Mirror of `presenter::ScreenDescription` (internally tagged by `screen`).

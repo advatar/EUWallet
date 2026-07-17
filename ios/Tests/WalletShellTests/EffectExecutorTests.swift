@@ -6,7 +6,7 @@ import XCTest
 /// http, renderer, trust) on the host without linking the xcframework. The core's own logic is
 /// tested in Rust (wallet-core/tests/e2e_flow.rs).
 final class MockEngine: WalletEngineDriving {
-    func loadCredential(issuerJwt: String, disclosuresByClaimJson: String) {}
+    func loadCredential(issuerJwt: String, disclosuresByClaimJson: String, statusIndex: UInt64?) {}
     func handleEventJson(eventJson: String) -> String {
         if eventJson.contains("\"authorizationRequestReceived\"") {
             return #"[{"type":"resolveRpTrust","clientId":"rp.example"}]"#

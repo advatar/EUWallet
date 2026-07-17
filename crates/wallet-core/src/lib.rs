@@ -53,6 +53,8 @@ fn format_name(f: oid4vci::CredentialFormat) -> &'static str {
 pub struct HeldCredential {
     pub issuer_jwt: String,
     pub disclosures_by_claim: BTreeMap<String, String>,
+    /// This credential's index in its Token Status List, if it has one. Checked before presenting.
+    pub status_index: Option<u64>,
 }
 
 /// Static wallet configuration.
@@ -174,6 +176,8 @@ pub struct Core {
     wua: Option<wua::WalletUnitAttestation>,
     issuer_trusted_current: bool,
     issuer_id_current: String,
+    // Revocation: the current verified Token Status List, checked before presenting.
+    status_list: Option<status::StatusList>,
 }
 
 impl Core {
@@ -199,7 +203,37 @@ impl Core {
             wua: None,
             issuer_trusted_current: false,
             issuer_id_current: String::new(),
+            status_list: None,
         }
+    }
+
+    /// Verify + store a Token Status List used to check credential revocation before presenting.
+    pub fn load_status_list(
+        &mut self,
+        token: &[u8],
+        provider_public_key: &[u8],
+    ) -> Result<(), String> {
+        let list = status::parse_and_verify(
+            token,
+            provider_public_key,
+            &AwsLc,
+            Alg::Es256,
+            self.now_epoch,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        self.status_list = Some(list);
+        Ok(())
+    }
+
+    /// Should the held credential be blocked from presentation because it is revoked/suspended (or
+    /// its status is unavailable under a fail-closed policy)? Decided in-core.
+    fn status_blocks_presentation(&self) -> bool {
+        let Some(idx) = self.credential.as_ref().and_then(|c| c.status_index) else {
+            return false; // no status list reference → nothing to check
+        };
+        let st = self.status_list.as_ref().map(|l| l.status_at(idx as usize));
+        // Remote presentation is online → fail closed if the status can't be resolved.
+        status::decide(st, status::FailPolicy::FailClosed) == status::Decision::Reject
     }
 
     /// Register the device public key (the Secure Enclave key the WUA attests). Needed to check
@@ -287,7 +321,23 @@ impl Core {
                     registered_redirect_uris,
                 }))
             }
-            Event::UserConsented => self.drive(Input::ConsentGranted),
+            Event::UserConsented => {
+                // Never present a revoked/suspended credential (checked in-core against the
+                // Token Status List) — refuse before disclosing anything.
+                if self.status_blocks_presentation() {
+                    return vec![
+                        Effect::Render {
+                            screen: ScreenDescription::Error {
+                                code: "credential_revoked".into(),
+                                message: "This credential is no longer valid and cannot be shared."
+                                    .into(),
+                            },
+                        },
+                        Effect::Close,
+                    ];
+                }
+                self.drive(Input::ConsentGranted)
+            }
             Event::UserDeclined => self.drive(Input::ConsentDeclined),
             Event::DeviceSignatureProduced { signature } => match self.active {
                 // Route the device signature to whichever flow requested it.
@@ -634,6 +684,19 @@ impl WalletEngine {
             .load_device_key(device_public_key);
     }
 
+    /// Verify + store a Token Status List (for revocation checks). Returns "" on success.
+    pub fn load_status_list(&self, token: Vec<u8>, provider_public_key: Vec<u8>) -> String {
+        match self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .load_status_list(&token, &provider_public_key)
+        {
+            Ok(()) => String::new(),
+            Err(e) => e,
+        }
+    }
+
     /// Verify + store the Wallet Unit Attestation. Returns "" on success, else an error string.
     pub fn load_wua(&self, wua_jwt: Vec<u8>, provider_public_key: Vec<u8>) -> String {
         match self
@@ -648,7 +711,12 @@ impl WalletEngine {
     }
 
     /// Load a held credential: the issuer JWT plus a JSON object mapping claim name -> disclosure.
-    pub fn load_credential(&self, issuer_jwt: String, disclosures_by_claim_json: String) {
+    pub fn load_credential(
+        &self,
+        issuer_jwt: String,
+        disclosures_by_claim_json: String,
+        status_index: Option<u64>,
+    ) {
         let disclosures_by_claim: BTreeMap<String, String> =
             serde_json::from_str(&disclosures_by_claim_json).unwrap_or_default();
         self.inner
@@ -657,6 +725,7 @@ impl WalletEngine {
             .load_credential(HeldCredential {
                 issuer_jwt,
                 disclosures_by_claim,
+                status_index,
             });
     }
 

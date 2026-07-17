@@ -1250,6 +1250,7 @@ dependencies = [
  "crypto-traits",
  "iso18013-5",
  "mdoc",
+ "miniz_oxide",
  "oid4vci",
  "oid4vp",
  "payment",

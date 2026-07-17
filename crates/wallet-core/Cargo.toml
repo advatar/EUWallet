@@ -36,4 +36,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+miniz_oxide = "0.8"
 base64ct = { workspace = true }
