@@ -11,3 +11,9 @@ publish.workspace = true
 crypto-traits = { path = "../crypto-traits" }
 mdoc = { path = "../mdoc" }
 cose = { path = "../cose" }
+
+[dev-dependencies]
+crypto-backend = { path = "../crypto-backend" }
+
+[lints]
+workspace = true

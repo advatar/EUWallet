@@ -510,6 +510,7 @@ name = "iso18013-5"
 version = "0.0.1"
 dependencies = [
  "cose",
+ "crypto-backend",
  "crypto-traits",
  "mdoc",
 ]
