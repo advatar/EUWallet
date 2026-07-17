@@ -10,6 +10,13 @@ targets = [
 version = 2
 yanked = "deny"
 # `cargo audit` also runs in CI; this covers the build graph.
+# "Unmaintained" (not vulnerable) advisories for build-time-only deps pulled in transitively by
+# UniFFI's binding generator. They are not in the wallet's runtime crypto/protocol path. Revisit
+# when UniFFI updates its dependencies.
+ignore = [
+    "RUSTSEC-2025-0141", # bincode (unmaintained) — via uniffi_bindgen
+    "RUSTSEC-2024-0436", # paste (unmaintained) — via uniffi macros
+]
 
 [bans]
 multiple-versions = "warn"
@@ -20,7 +27,8 @@ allow-wildcard-paths = true    # ...but intra-workspace `path = "..."` deps are 
 
 [licenses]
 version = 2
-allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+# MPL-2.0 (UniFFI): OSI-approved, file-level weak copyleft — does not affect our own sources.
+allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0", "MPL-2.0"]
 confidence-threshold = 0.9
 
 [sources]

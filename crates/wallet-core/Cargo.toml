@@ -7,7 +7,17 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+# `lib` for the Rust workspace tests; `staticlib`/`cdylib` for the iOS/Kotlin FFI.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+# The in-crate UniFFI binding generator (see docs: `cargo run --bin uniffi-bindgen`).
+name = "uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+
 [dependencies]
+uniffi = { workspace = true }
 crypto-traits = { path = "../crypto-traits" }
 crypto-backend = { path = "../crypto-backend" }
 cose = { path = "../cose" }

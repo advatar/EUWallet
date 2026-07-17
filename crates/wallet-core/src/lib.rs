@@ -11,11 +11,14 @@
 //! fulfils with the Secure Enclave — the private key never enters the core.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use crypto_backend::AwsLc;
 use oid4vp::{Env, Input, ResolvedTrust, SelectedCredential, State};
 use presenter::{minimum_claim_set, ConsentScreen, ScreenDescription};
 use serde::{Deserialize, Serialize};
+
+uniffi::setup_scaffolding!();
 
 /// A credential the wallet holds: the issuer-signed JWT plus its disclosures keyed by claim name,
 /// so the core can disclose exactly the requested-and-held subset.
@@ -261,5 +264,51 @@ impl Core {
     /// The current presentation state (for the shell / tests to inspect).
     pub fn state(&self) -> &State {
         &self.vp
+    }
+}
+
+/// The UniFFI-exposed handle the native shell (Swift now, Kotlin later) holds. It wraps [`Core`]
+/// behind a mutex and speaks the FFI-friendly JSON API. The whole native surface is intentionally
+/// tiny: construct, load a credential, and drive events.
+#[derive(uniffi::Object)]
+pub struct WalletEngine {
+    inner: Mutex<Core>,
+}
+
+#[uniffi::export]
+impl WalletEngine {
+    /// Create an engine for a wallet instance.
+    #[uniffi::constructor]
+    pub fn new(wallet_client_id: String, device_key_ref: String) -> Arc<Self> {
+        Arc::new(WalletEngine {
+            inner: Mutex::new(Core::new(wallet_client_id, device_key_ref)),
+        })
+    }
+
+    /// Load a held credential: the issuer JWT plus a JSON object mapping claim name -> disclosure.
+    pub fn load_credential(&self, issuer_jwt: String, disclosures_by_claim_json: String) {
+        let disclosures_by_claim: BTreeMap<String, String> =
+            serde_json::from_str(&disclosures_by_claim_json).unwrap_or_default();
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .load_credential(HeldCredential {
+                issuer_jwt,
+                disclosures_by_claim,
+            });
+    }
+
+    /// Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
+    /// event, returns a `{"error": "..."}` object instead of an array.
+    pub fn handle_event_json(&self, event_json: String) -> String {
+        match self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .handle_event_json(&event_json)
+        {
+            Ok(effects) => effects,
+            Err(err) => serde_json::json!({ "error": err }).to_string(),
+        }
     }
 }

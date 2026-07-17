@@ -1,57 +1,75 @@
 import Foundation
 
-/// Drives the sans-IO core: hand it an event, execute the returned effects, feed any
-/// results back as new events. This is the whole "shell" contract (plan Section 2/8).
+/// Drives the sans-IO Rust core: feed it a JSON event, decode the JSON effects it returns,
+/// execute each, and feed any results back as new events — until the cascade drains.
+/// This is the whole "shell" contract (plan Section 2/8). Device signing (`.sign`) goes to the
+/// Secure Enclave; the private key never crosses the FFI.
 public final class EffectExecutor {
-    private let core: WalletCore
+    private let engine: WalletEngineDriving
     private let signer: Signer
     private let http: HttpClient
     private let storage: SecureStorage
+    private let trust: TrustResolver
     private let render: (ScreenDescription) -> Void
 
     public init(
-        core: WalletCore,
+        engine: WalletEngineDriving,
         signer: Signer,
         http: HttpClient,
         storage: SecureStorage,
+        trust: TrustResolver,
         render: @escaping (ScreenDescription) -> Void
     ) {
-        self.core = core
+        self.engine = engine
         self.signer = signer
         self.http = http
         self.storage = storage
+        self.trust = trust
         self.render = render
     }
 
-    /// Send one event and fully drain the resulting effect cascade.
-    public func send(_ event: WalletEvent) async {
-        var queue = core.handle(event)
+    /// Send one JSON event and fully drain the resulting effect cascade.
+    public func send(eventJson: String) async {
+        var queue = decode(engine.handleEventJson(eventJson: eventJson))
         while !queue.isEmpty {
             let effect = queue.removeFirst()
             if let followUp = await execute(effect) {
-                queue.append(contentsOf: core.handle(followUp))
+                queue.append(contentsOf: decode(engine.handleEventJson(eventJson: followUp)))
             }
         }
     }
 
-    /// Execute one effect. Returns a follow-up event when the effect produces a result.
-    private func execute(_ effect: WalletEffect) async -> WalletEvent? {
+    private func decode(_ json: String) -> [WalletEffect] {
+        guard let data = json.data(using: .utf8),
+              let effects = try? JSONDecoder().decode([WalletEffect].self, from: data)
+        else { return [] } // an `{"error":...}` object (or malformed) decodes to no effects
+        return effects
+    }
+
+    /// Execute one effect; return a follow-up event (JSON) when it produces a result.
+    private func execute(_ effect: WalletEffect) async -> String? {
         switch effect {
         case .render(let screen):
-            render(screen)                     // never blocks the core
+            render(screen)
             return nil
-        case .sign(let id, let keyRef, let payload):
+        case .sign(let keyRef, let payload):
             do {
-                let sig = try signer.sign(keyRef: keyRef, payload: payload)
-                return .signatureProduced(id: id, signature: sig)
+                let sig = try signer.sign(keyRef: keyRef, payload: Data(payload))
+                return WalletEventJSON.deviceSignatureProduced(sig)
             } catch {
-                return .userDeclined            // e.g. biometric cancelled
+                return WalletEventJSON.userDeclined() // e.g. biometric cancelled
             }
-        case .http(let id, let url, let body):
-            let (status, data) = await http.post(url: url, body: body)
-            return .httpResponse(id: id, status: status, body: data)
-        case .store(let key, let value):
-            try? storage.put(key: key, value: value)
+        case .http(let url, let body):
+            _ = await http.post(url: url, body: Data(body))
+            return WalletEventJSON.presentationDelivered()
+        case .resolveRpTrust(let clientId):
+            let t = await trust.resolve(clientId: clientId)
+            return WalletEventJSON.rpTrustResolved(
+                registered: t.registered, rpPublicKey: t.rpPublicKey, redirectUris: t.redirectUris)
+        case .persistNonce(let nonce):
+            try? storage.put(key: "nonce:\(nonce)", value: Data())
+            return nil
+        case .close:
             return nil
         }
     }

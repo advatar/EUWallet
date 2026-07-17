@@ -55,4 +55,4 @@ aws-lc-rs  = { version = "1" }            # FIPS-capable; satisfies "never roll 
 # Property testing (dev-dependency only)
 proptest   = { version = "1" }
 # FFI
-uniffi     = { version = "0.28" }
+uniffi     = { version = "0.28", features = ["cli"] }

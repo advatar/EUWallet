@@ -1,41 +1,78 @@
 import XCTest
 @testable import WalletShell
 
-final class EffectExecutorTests: XCTestCase {
-    func testConsentFlowRendersThenReachesCredentialList() async {
-        var rendered: [ScreenDescription] = []
-        let executor = EffectExecutor(
-            core: WalletCore(),
-            signer: StubSigner(),
-            http: StubHttpClient(),
-            storage: InMemoryStorage(),
-            render: { rendered.append($0) }
-        )
-
-        // 1) Incoming request → a consent screen is rendered.
-        await executor.send(.authorizationRequestReceived(Data([1, 2, 3])))
-        guard case .consent(let c)? = rendered.last else {
-            return XCTFail("expected a consent screen, got \(String(describing: rendered.last))")
+/// A scripted engine standing in for the Rust WalletEngine over the JSON contract. It returns the
+/// same effect sequence the real core does, so we can test the SHELL's effect dispatch (signer,
+/// http, renderer, trust) on the host without linking the xcframework. The core's own logic is
+/// tested in Rust (wallet-core/tests/e2e_flow.rs).
+final class MockEngine: WalletEngineDriving {
+    func loadCredential(issuerJwt: String, disclosuresByClaimJson: String) {}
+    func handleEventJson(eventJson: String) -> String {
+        if eventJson.contains("\"authorizationRequestReceived\"") {
+            return #"[{"type":"resolveRpTrust","clientId":"rp.example"}]"#
         }
-        XCTAssertEqual(c.requestedClaims, ["age_over_18"])   // data minimisation
+        if eventJson.contains("\"rpTrustResolved\"") {
+            return #"[{"type":"persistNonce","nonce":42},{"type":"render","screen":{"screen":"consent","rpDisplayName":"Example RP","purpose":"Prove age","requestedClaims":["age_over_18"]}}]"#
+        }
+        if eventJson.contains("\"userConsented\"") {
+            return #"[{"type":"sign","keyRef":"device-key","payload":[1,2,3]}]"#
+        }
+        if eventJson.contains("\"deviceSignatureProduced\"") {
+            return #"[{"type":"http","url":"https://rp.example/response","body":[9,9,9]}]"#
+        }
+        if eventJson.contains("\"presentationDelivered\"") {
+            return #"[{"type":"close"}]"#
+        }
+        return "[]"
+    }
+}
 
-        // 2) User consents → sign → http → the cascade ends on the credential list.
-        await executor.send(.userConsented)
-        XCTAssertEqual(rendered.last, .credentialList)
+final class EffectExecutorTests: XCTestCase {
+    private func makeExecutor(
+        signer: Signer, http: StubHttpClient, render: @escaping (ScreenDescription) -> Void
+    ) -> EffectExecutor {
+        EffectExecutor(
+            engine: MockEngine(),
+            signer: signer,
+            http: http,
+            storage: InMemoryStorage(),
+            trust: StubTrustResolver(registered: true),
+            render: render)
     }
 
-    func testDeclineRendersError() async {
+    func testRequestRendersConsentScreen() async {
         var rendered: [ScreenDescription] = []
-        let executor = EffectExecutor(
-            core: WalletCore(), signer: StubSigner(), http: StubHttpClient(),
-            storage: InMemoryStorage(), render: { rendered.append($0) }
-        )
-        await executor.send(.authorizationRequestReceived(Data()))
-        await executor.send(.userDeclined)
-        if case .error(let code, _)? = rendered.last {
-            XCTAssertEqual(code, "user_declined")
-        } else {
-            XCTFail("expected an error screen")
+        let executor = makeExecutor(signer: StubSigner(), http: StubHttpClient()) { rendered.append($0) }
+
+        await executor.send(eventJson: WalletEventJSON.authorizationRequestReceived(Data([1, 2, 3])))
+
+        guard case .consent(let rp, _, let claims)? = rendered.last else {
+            return XCTFail("expected a consent screen, got \(String(describing: rendered.last))")
         }
+        XCTAssertEqual(rp, "Example RP")
+        XCTAssertEqual(claims, ["age_over_18"]) // data minimisation surfaced to the UI
+    }
+
+    func testConsentTriggersSecureEnclaveSignThenHttpPost() async {
+        let signer = StubSigner()
+        let http = StubHttpClient()
+        let executor = makeExecutor(signer: signer, http: http) { _ in }
+
+        await executor.send(eventJson: WalletEventJSON.userConsented())
+
+        // The device signer was invoked for the key-binding JWT...
+        XCTAssertEqual(signer.signedPayloads.count, 1)
+        XCTAssertEqual(signer.signedPayloads.first, Data([1, 2, 3]))
+        // ...and the resulting vp_token was posted to the RP.
+        XCTAssertEqual(http.posted.count, 1)
+        XCTAssertEqual(http.posted.first?.0, "https://rp.example/response")
+        XCTAssertEqual(http.posted.first?.1, Data([9, 9, 9]))
+    }
+
+    func testDeclineRendersNothingUnexpected() async {
+        var rendered: [ScreenDescription] = []
+        let executor = makeExecutor(signer: StubSigner(), http: StubHttpClient()) { rendered.append($0) }
+        await executor.send(eventJson: WalletEventJSON.userDeclined())
+        XCTAssertTrue(rendered.isEmpty)
     }
 }
