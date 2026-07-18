@@ -22,3 +22,17 @@ name = "IssuanceModel"
 [[lean_exe]]
 name = "traces"
 root = "Traces"
+
+# Conformance oracles for the additional machines: each emits JSON traces the corresponding
+# Rust crate replays against its `model` mirror (plan Section 10).
+[[lean_exe]]
+name = "payment_traces"
+root = "PaymentTraces"
+
+[[lean_exe]]
+name = "proximity_traces"
+root = "ProximityTraces"
+
+[[lean_exe]]
+name = "issuance_traces"
+root = "IssuanceTraces"

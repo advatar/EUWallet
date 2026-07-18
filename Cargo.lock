@@ -513,6 +513,7 @@ dependencies = [
  "crypto-backend",
  "crypto-traits",
  "mdoc",
+ "serde_json",
 ]
 
 [[package]]

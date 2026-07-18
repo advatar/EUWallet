@@ -1,0 +1,8 @@
+[
+  {"events":[{"kind":"startEngagement"},{"kind":"readerEstablish","valid":true},{"kind":"consentGrant"},{"kind":"deviceSign"}],"expect":{"state":"responded","sessionBound":true,"consented":true}},
+  {"events":[{"kind":"startEngagement"},{"kind":"readerEstablish","valid":false}],"expect":{"state":"aborted","sessionBound":false,"consented":false}},
+  {"events":[{"kind":"startEngagement"},{"kind":"readerEstablish","valid":true},{"kind":"consentDecline"}],"expect":{"state":"aborted","sessionBound":true,"consented":false}},
+  {"events":[{"kind":"startEngagement"},{"kind":"consentGrant"}],"expect":{"state":"aborted","sessionBound":false,"consented":false}},
+  {"events":[{"kind":"startEngagement"},{"kind":"readerEstablish","valid":true},{"kind":"terminate"}],"expect":{"state":"terminated","sessionBound":true,"consented":false}},
+  {"events":[{"kind":"startEngagement"},{"kind":"readerEstablish","valid":true}],"expect":{"state":"sessionEstablished","sessionBound":true,"consented":false}}
+]

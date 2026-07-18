@@ -1,0 +1,7 @@
+[
+  {"events":[{"kind":"request","payee":"Acme Store","amount":1299,"nonce":7},{"kind":"approve"},{"kind":"sign"}],"expect":{"state":"authorized","approved":true,"bound":true}},
+  {"events":[{"kind":"request","payee":"Acme Store","amount":1299,"nonce":7},{"kind":"decline"}],"expect":{"state":"aborted","approved":false,"bound":false}},
+  {"events":[{"kind":"request","payee":"Acme Store","amount":1299,"nonce":7},{"kind":"sign"}],"expect":{"state":"awaitingConfirmation","approved":false,"bound":false}},
+  {"events":[{"kind":"request","payee":"Acme Store","amount":0,"nonce":8}],"expect":{"state":"aborted","approved":false,"bound":false}},
+  {"events":[{"kind":"request","payee":"Acme Store","amount":1299,"nonce":7}],"expect":{"state":"awaitingConfirmation","approved":false,"bound":false}}
+]

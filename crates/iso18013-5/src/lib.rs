@@ -214,3 +214,102 @@ fn assemble_device_response(session_transcript: &[u8], signature: &[u8]) -> Vec<
     ])
     .to_canonical()
 }
+
+/// Reference model that MIRRORS the Lean Tier-2 model (formal/lean/ProximityModel.lean).
+///
+/// The Lean model proves the consent / session-binding / ordering invariants and emits
+/// conformance traces; this module is the Rust side those traces replay against (plan Section 10).
+/// The production `step` above must refine it. `tests/conformance.rs` checks they agree.
+pub mod model {
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub enum St {
+        Idle,
+        Engaged,
+        SessionEstablished,
+        SigningResponse,
+        Responded,
+        Aborted,
+        Terminated,
+    }
+
+    #[derive(Clone, Debug)]
+    pub enum Ev {
+        StartEngagement,
+        ReaderEstablish(bool), // valid ⇔ reader key + auth ok AND transcript binds
+        ConsentGrant,
+        ConsentDecline,
+        DeviceSign,
+        Terminate,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Ctx {
+        pub st: St,
+        pub session_bound: bool,
+        pub consented: bool,
+    }
+
+    impl Ctx {
+        pub fn init() -> Self {
+            Ctx { st: St::Idle, session_bound: false, consented: false }
+        }
+    }
+
+    /// Transition function — the exact analogue of `ProximityModel.step` in Lean.
+    pub fn step(mut c: Ctx, ev: &Ev) -> Ctx {
+        match ev {
+            Ev::StartEngagement => {
+                if c.st == St::Idle {
+                    c.st = St::Engaged;
+                }
+            }
+            Ev::ReaderEstablish(valid) => {
+                if c.st == St::Engaged {
+                    if *valid {
+                        c.st = St::SessionEstablished;
+                        c.session_bound = true;
+                    } else {
+                        c.st = St::Aborted; // guard: reader/transcript invalid
+                    }
+                }
+            }
+            Ev::ConsentGrant => match c.st {
+                St::SessionEstablished => {
+                    c.st = St::SigningResponse;
+                    c.consented = true;
+                }
+                St::Engaged => c.st = St::Aborted, // guard: RequestOutOfOrder
+                _ => {}
+            },
+            Ev::ConsentDecline => {
+                if c.st == St::SessionEstablished {
+                    c.st = St::Aborted; // guard: NoConsent
+                }
+            }
+            Ev::DeviceSign => {
+                if c.st == St::SigningResponse {
+                    c.st = St::Responded;
+                }
+            }
+            Ev::Terminate => c.st = St::Terminated,
+        }
+        c
+    }
+
+    pub fn run(evs: &[Ev]) -> Ctx {
+        evs.iter().fold(Ctx::init(), step)
+    }
+
+    /// Stable state string, matching the Lean exporter's `stJson`.
+    pub fn state_name(st: &St) -> &'static str {
+        match st {
+            St::Idle => "idle",
+            St::Engaged => "engaged",
+            St::SessionEstablished => "sessionEstablished",
+            St::SigningResponse => "signingResponse",
+            St::Responded => "responded",
+            St::Aborted => "aborted",
+            St::Terminated => "terminated",
+        }
+    }
+}

@@ -1,0 +1,8 @@
+[
+  {"events":[{"kind":"offer","issuerTrusted":true},{"kind":"token","bound":true,"attested":true},{"kind":"proof"},{"kind":"credential","valid":true}],"expect":{"state":"credentialIssued","issuerTrusted":true,"tokenBound":true,"proofKeyAttested":true}},
+  {"events":[{"kind":"offer","issuerTrusted":false}],"expect":{"state":"aborted","issuerTrusted":false,"tokenBound":false,"proofKeyAttested":false}},
+  {"events":[{"kind":"offer","issuerTrusted":true},{"kind":"token","bound":false,"attested":true}],"expect":{"state":"aborted","issuerTrusted":true,"tokenBound":false,"proofKeyAttested":false}},
+  {"events":[{"kind":"offer","issuerTrusted":true},{"kind":"token","bound":true,"attested":false}],"expect":{"state":"aborted","issuerTrusted":true,"tokenBound":false,"proofKeyAttested":false}},
+  {"events":[{"kind":"offer","issuerTrusted":true},{"kind":"token","bound":true,"attested":true},{"kind":"proof"},{"kind":"credential","valid":false}],"expect":{"state":"aborted","issuerTrusted":true,"tokenBound":true,"proofKeyAttested":true}},
+  {"events":[{"kind":"offer","issuerTrusted":true},{"kind":"token","bound":true,"attested":true},{"kind":"proof"}],"expect":{"state":"requestingCredential","issuerTrusted":true,"tokenBound":true,"proofKeyAttested":true}}
+]

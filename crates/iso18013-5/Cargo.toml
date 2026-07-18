@@ -14,6 +14,8 @@ cose = { path = "../cose" }
 
 [dev-dependencies]
 crypto-backend = { path = "../crypto-backend" }
+# Used by tests/conformance.rs to replay the Lean oracle traces.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

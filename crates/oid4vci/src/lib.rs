@@ -386,3 +386,107 @@ fn validate_issued_credential(format: CredentialFormat, bytes: &[u8]) -> bool {
         CredentialFormat::MsoMdoc => !bytes.is_empty(),
     }
 }
+
+/// Reference model that MIRRORS the Lean Tier-2 model (formal/lean/IssuanceModel.lean).
+///
+/// The Lean model proves the issuer-trust / token-binding / key-attestation invariants and emits
+/// conformance traces; this module is the Rust side those traces replay against (plan Section 10).
+/// The production `step` above must refine it. `tests/conformance.rs` checks they agree.
+pub mod model {
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub enum St {
+        Idle,
+        OfferParsed,
+        ProvingPossession,
+        RequestingCredential,
+        CredentialIssued,
+        Aborted,
+    }
+
+    #[derive(Clone, Debug)]
+    pub enum Ev {
+        Offer(bool),                       // issuer trusted in-core
+        Token { bound: bool, attested: bool }, // sender-bound token + proof-key attested (WUA High)
+        Proof,
+        Credential(bool),
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Ctx {
+        pub st: St,
+        pub issuer_trusted: bool,
+        pub token_bound: bool,
+        pub proof_key_attested: bool,
+    }
+
+    impl Ctx {
+        pub fn init() -> Self {
+            Ctx {
+                st: St::Idle,
+                issuer_trusted: false,
+                token_bound: false,
+                proof_key_attested: false,
+            }
+        }
+    }
+
+    /// Transition function — the exact analogue of `IssuanceModel.step` in Lean.
+    pub fn step(mut c: Ctx, ev: &Ev) -> Ctx {
+        match ev {
+            Ev::Offer(trusted) => {
+                if c.st == St::Idle {
+                    if *trusted {
+                        c.st = St::OfferParsed;
+                        c.issuer_trusted = true;
+                    } else {
+                        c.st = St::Aborted; // guard: IssuerNotTrusted
+                    }
+                }
+            }
+            Ev::Token { bound, attested } => {
+                if c.st == St::OfferParsed {
+                    if !*bound {
+                        c.st = St::Aborted; // guard: TokenNotBound
+                    } else if !*attested {
+                        c.st = St::Aborted; // guard: ProofKeyNotAttested
+                    } else {
+                        c.st = St::ProvingPossession;
+                        c.token_bound = true;
+                        c.proof_key_attested = true;
+                    }
+                }
+            }
+            Ev::Proof => {
+                if c.st == St::ProvingPossession {
+                    c.st = St::RequestingCredential;
+                }
+            }
+            Ev::Credential(valid) => {
+                if c.st == St::RequestingCredential {
+                    if *valid {
+                        c.st = St::CredentialIssued;
+                    } else {
+                        c.st = St::Aborted; // guard: CredentialInvalid
+                    }
+                }
+            }
+        }
+        c
+    }
+
+    pub fn run(evs: &[Ev]) -> Ctx {
+        evs.iter().fold(Ctx::init(), step)
+    }
+
+    /// Stable state string, matching the Lean exporter's `stJson`.
+    pub fn state_name(st: &St) -> &'static str {
+        match st {
+            St::Idle => "idle",
+            St::OfferParsed => "offerParsed",
+            St::ProvingPossession => "provingPossession",
+            St::RequestingCredential => "requestingCredential",
+            St::CredentialIssued => "credentialIssued",
+            St::Aborted => "aborted",
+        }
+    }
+}

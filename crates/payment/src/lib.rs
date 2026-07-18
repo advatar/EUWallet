@@ -202,3 +202,108 @@ fn parse_request(bytes: &[u8]) -> Result<PaymentRequest, ()> {
         response_uri: s("response_uri").unwrap_or_default(),
     })
 }
+
+/// Reference model that MIRRORS the Lean Tier-2 model (formal/lean/PaymentModel.lean).
+///
+/// The Lean model proves the SCA / dynamic-linking / replay invariants and emits conformance
+/// traces; this module is the Rust side those traces are replayed against (plan Section 10). The
+/// production `step` above must refine this model. `tests/conformance.rs` checks they agree.
+pub mod model {
+    /// The payer-visible essence of a payment (the fields dynamic linking binds).
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Payment {
+        pub payee: String,
+        pub amount: u64,
+        pub nonce: u64,
+    }
+
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub enum St {
+        Idle,
+        AwaitingConfirmation(Payment),
+        AwaitingSca(Payment),
+        Authorized(Payment),
+        Aborted,
+    }
+
+    #[derive(Clone, Debug)]
+    pub enum Ev {
+        Request(Payment),
+        Approve,
+        Decline,
+        Sign,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Ctx {
+        pub st: St,
+        pub seen: Vec<u64>,
+        pub confirmed: Option<Payment>,
+        pub approved: bool,
+    }
+
+    impl Ctx {
+        pub fn init() -> Self {
+            Ctx { st: St::Idle, seen: Vec::new(), confirmed: None, approved: false }
+        }
+    }
+
+    /// Transition function — the exact analogue of `PaymentModel.step` in Lean.
+    pub fn step(mut c: Ctx, ev: &Ev) -> Ctx {
+        match ev {
+            Ev::Request(p) => {
+                if let St::Idle = c.st {
+                    if p.amount == 0 {
+                        c.st = St::Aborted; // guard: InvalidAmount
+                    } else if c.seen.contains(&p.nonce) {
+                        c.st = St::Aborted; // guard: NonceReplayed
+                    } else {
+                        c.st = St::AwaitingConfirmation(p.clone());
+                        c.confirmed = Some(p.clone());
+                        c.seen.push(p.nonce);
+                    }
+                }
+            }
+            Ev::Approve => {
+                if let St::AwaitingConfirmation(p) = c.st.clone() {
+                    c.st = St::AwaitingSca(p);
+                    c.approved = true;
+                }
+            }
+            Ev::Decline => {
+                if let St::AwaitingConfirmation(_) = c.st {
+                    c.st = St::Aborted;
+                }
+            }
+            Ev::Sign => {
+                if let St::AwaitingSca(p) = c.st.clone() {
+                    c.st = St::Authorized(p); // binds the payment carried in-flight
+                }
+            }
+        }
+        c
+    }
+
+    pub fn run(evs: &[Ev]) -> Ctx {
+        evs.iter().fold(Ctx::init(), step)
+    }
+
+    /// Stable state string, matching the Lean exporter's `stJson`.
+    pub fn state_name(st: &St) -> &'static str {
+        match st {
+            St::Idle => "idle",
+            St::AwaitingConfirmation(_) => "awaitingConfirmation",
+            St::AwaitingSca(_) => "awaitingSca",
+            St::Authorized(_) => "authorized",
+            St::Aborted => "aborted",
+        }
+    }
+
+    /// Dynamic-linking flag: in the accepting state, is the auth code bound to the confirmed payment?
+    pub fn bound(c: &Ctx) -> bool {
+        match &c.st {
+            St::Authorized(p) => c.confirmed.as_ref() == Some(p),
+            _ => false,
+        }
+    }
+}
