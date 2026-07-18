@@ -10,5 +10,19 @@ publish.workspace = true
 [dependencies]
 crypto-traits = { path = "../crypto-traits" }
 
+# EXPERIMENTAL ZK profile only (feature-gated, off by default): a real Pedersen/Schnorr proof on
+# Ristretto. Pure-Rust, non-proprietary, and isolated behind `ProfileExperimental` — the production
+# default remains the selective-disclosure fallback per the register (TS04 / ARF Topic G). We avoid
+# curve25519-dalek's `zeroize` default and feed hashing from aws-lc SHA-256 (no `sha2` dep).
+curve25519-dalek = { version = "4.1", default-features = false, features = ["alloc"], optional = true }
+crypto-backend = { path = "../crypto-backend", optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+experimental-zk = ["dep:curve25519-dalek", "dep:crypto-backend", "dep:serde_json"]
+
+[dev-dependencies]
+crypto-backend = { path = "../crypto-backend" }
+
 [lints]
 workspace = true

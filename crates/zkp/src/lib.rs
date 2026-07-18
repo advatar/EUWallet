@@ -20,6 +20,12 @@
 
 use crypto_traits::Digest;
 
+/// A REAL zero-knowledge provider behind an experimental, non-production profile (feature
+/// `experimental-zk`). Present to prove the [`ProofProvider`] interface is genuinely pluggable; the
+/// production default remains [`SelectiveDisclosureFallback`] per the register guidance above.
+#[cfg(feature = "experimental-zk")]
+pub mod experimental;
+
 /// A statement the holder proves about a credential while revealing no more than necessary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Predicate {
