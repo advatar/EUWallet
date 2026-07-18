@@ -307,3 +307,103 @@ pub mod model {
         }
     }
 }
+
+/// OpenID4VP `transaction_data` (1.0 §5.4) — the standardized carrier for the TS12/PSD2 payment
+/// envelope. The RP puts an array of base64url(JSON) entries in the authorization request; the
+/// wallet parses the payment entry, shows the SCA confirmation, and binds the presentation/auth to
+/// the entry by including `SHA-256(entry)` (base64url) in the key-binding — so the payment the user
+/// authorises is exactly the one the RP requested (dynamic linking, at the transport layer).
+pub mod transaction_data {
+    use super::PaymentRequest;
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    use crypto_traits::Digest;
+
+    /// A parsed payment `transaction_data` entry.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct PaymentTransactionData {
+        /// The `type` (e.g. `payment_data`).
+        pub kind: String,
+        /// The DCQL credential query ids this transaction is bound to.
+        pub credential_ids: Vec<String>,
+        /// The payment fields (creditor + amount + currency + txn/nonce/response_uri).
+        pub request: PaymentRequest,
+        /// The exact base64url string the hash is computed over.
+        pub raw_b64: String,
+    }
+
+    /// Parse one base64url(JSON) `transaction_data` entry. The JSON carries `type`,
+    /// `credential_ids`, and the payment fields (top level, matching the payment request shape).
+    pub fn parse(entry_b64: &str) -> Option<PaymentTransactionData> {
+        let json = Base64UrlUnpadded::decode_vec(entry_b64).ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&json).ok()?;
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+        let credential_ids = v
+            .get("credential_ids")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        Some(PaymentTransactionData {
+            kind: s("type")?,
+            credential_ids,
+            request: PaymentRequest {
+                creditor_name: s("creditor_name")?,
+                creditor_account: s("creditor_account")?,
+                amount_minor: v.get("amount_minor").and_then(|x| x.as_u64())?,
+                currency: s("currency")?,
+                transaction_id: s("transaction_id").unwrap_or_default(),
+                nonce: v.get("nonce").and_then(|x| x.as_u64())?,
+                response_uri: s("response_uri").unwrap_or_default(),
+            },
+            raw_b64: entry_b64.to_string(),
+        })
+    }
+
+    /// The `transaction_data_hash` (OpenID4VP §5.4): base64url(SHA-256(entry_b64)). The wallet
+    /// echoes this in the KB-JWT, binding the presentation to this exact transaction_data entry.
+    pub fn transaction_data_hash(entry_b64: &str, digest: &dyn Digest) -> String {
+        Base64UrlUnpadded::encode_string(&digest.sha256(entry_b64.as_bytes()))
+    }
+}
+
+#[cfg(test)]
+mod transaction_data_tests {
+    use super::transaction_data::{parse, transaction_data_hash};
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    use crypto_backend::AwsLc;
+
+    fn entry() -> String {
+        let json = br#"{"type":"payment_data","credential_ids":["pid"],"creditor_name":"Acme Store","creditor_account":"DE89370400440532013000","amount_minor":1299,"currency":"EUR","transaction_id":"txn-1","nonce":7,"response_uri":"https://psp.example/authorize"}"#;
+        Base64UrlUnpadded::encode_string(json)
+    }
+
+    #[test]
+    fn parses_a_payment_transaction_data_entry() {
+        let e = entry();
+        let td = parse(&e).expect("valid transaction_data");
+        assert_eq!(td.kind, "payment_data");
+        assert_eq!(td.credential_ids, vec!["pid".to_string()]);
+        assert_eq!(td.request.creditor_name, "Acme Store");
+        assert_eq!(td.request.amount_minor, 1299);
+        assert_eq!(td.request.currency, "EUR");
+        assert_eq!(td.raw_b64, e);
+    }
+
+    #[test]
+    fn hash_is_over_the_base64url_string_and_binds_the_entry() {
+        let e = entry();
+        let h1 = transaction_data_hash(&e, &AwsLc);
+        let h2 = transaction_data_hash(&e, &AwsLc);
+        assert_eq!(h1, h2, "deterministic");
+        // A tampered entry (different amount) yields a different hash.
+        let tampered = Base64UrlUnpadded::encode_string(
+            br#"{"type":"payment_data","credential_ids":["pid"],"creditor_name":"Acme Store","creditor_account":"DE89370400440532013000","amount_minor":9999,"currency":"EUR","transaction_id":"txn-1","nonce":7,"response_uri":"https://psp.example/authorize"}"#,
+        );
+        assert_ne!(transaction_data_hash(&tampered, &AwsLc), h1);
+    }
+
+    #[test]
+    fn rejects_malformed_entries() {
+        assert!(parse("!!!not-base64!!!").is_none());
+        assert!(parse(&Base64UrlUnpadded::encode_string(b"not json")).is_none());
+    }
+}
