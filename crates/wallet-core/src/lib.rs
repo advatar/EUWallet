@@ -32,6 +32,9 @@ enum ActiveFlow {
 
 uniffi::setup_scaffolding!();
 
+mod demo;
+pub use demo::{DemoScenario, DemoWallet};
+
 fn parse_format(s: &str) -> Option<oid4vci::CredentialFormat> {
     match s {
         "mso_mdoc" => Some(oid4vci::CredentialFormat::MsoMdoc),
@@ -78,7 +81,14 @@ struct SessionInfo {
 /// Everything that can happen *to* the core. The shell produces these (deserialised from JSON at
 /// the FFI boundary).
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+// `rename_all` renames the variant TAGS; `rename_all_fields` renames the struct-variant FIELDS
+// (e.g. `rp_cert_chain` -> `rpCertChain`) so the JSON wire contract with the iOS shell is fully
+// camelCase. Without the latter, multi-word fields stay snake_case and the shell fails to parse.
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Event {
     /// Set the shell's wall-clock (Unix seconds); the core has no clock of its own.
     SetClock { epoch: i64 },
@@ -126,7 +136,13 @@ pub enum Event {
 
 /// Everything the core asks the shell to do (serialised to JSON at the FFI boundary).
 #[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+// See the note on `Event`: `rename_all_fields` makes struct-variant fields (`client_id` ->
+// `clientId`, `key_ref` -> `keyRef`) camelCase so the shell's `WalletEffect` decoder matches.
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Effect {
     /// Fetch RP metadata / trust status / JWKS, then send back `RpTrustResolved`.
     ResolveRpTrust { client_id: String },

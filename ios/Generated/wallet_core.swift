@@ -399,6 +399,38 @@ fileprivate class UniffiHandleMap<T> {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -459,6 +491,170 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
+ * Holds the demo's ephemeral keys and mints [`DemoScenario`]s. Also acts as the device signer for
+ * the simulator, where no Secure Enclave exists.
+ */
+public protocol DemoWalletProtocol : AnyObject {
+    
+    /**
+     * Build the full demo scenario (credential, trusted list, signed request, payment request).
+     */
+    func scenario()  -> DemoScenario
+    
+    /**
+     * Sign as the demo device key — the simulator stand-in for the Secure Enclave. The shell
+     * routes its `Sign` effect here; the resulting ES256 signature validates against
+     * [`DemoScenario::device_public_key`].
+     */
+    func signDevice(payload: Data)  -> Data
+    
+}
+
+/**
+ * Holds the demo's ephemeral keys and mints [`DemoScenario`]s. Also acts as the device signer for
+ * the simulator, where no Secure Enclave exists.
+ */
+open class DemoWallet:
+    DemoWalletProtocol {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_wallet_core_fn_clone_demowallet(self.pointer, $0) }
+    }
+    /**
+     * Generate a fresh set of demo keys. The RP key is the one matching the real `rp.der` cert.
+     */
+public convenience init() {
+    let pointer =
+        try! rustCall() {
+    uniffi_wallet_core_fn_constructor_demowallet_new($0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_wallet_core_fn_free_demowallet(pointer, $0) }
+    }
+
+    
+
+    
+    /**
+     * Build the full demo scenario (credential, trusted list, signed request, payment request).
+     */
+open func scenario() -> DemoScenario {
+    return try!  FfiConverterTypeDemoScenario.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_demowallet_scenario(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Sign as the demo device key — the simulator stand-in for the Secure Enclave. The shell
+     * routes its `Sign` effect here; the resulting ES256 signature validates against
+     * [`DemoScenario::device_public_key`].
+     */
+open func signDevice(payload: Data) -> Data {
+    return try!  FfiConverterData.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_demowallet_sign_device(self.uniffiClonePointer(),
+        FfiConverterData.lower(payload),$0
+    )
+})
+}
+    
+
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDemoWallet: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = DemoWallet
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> DemoWallet {
+        return DemoWallet(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: DemoWallet) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DemoWallet {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: DemoWallet, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDemoWallet_lift(_ pointer: UnsafeMutableRawPointer) throws -> DemoWallet {
+    return try FfiConverterTypeDemoWallet.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDemoWallet_lower(_ value: DemoWallet) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeDemoWallet.lower(value)
+}
+
+
+
+
+/**
  * The UniFFI-exposed handle the native shell (Swift now, Kotlin later) holds. It wraps [`Core`]
  * behind a mutex and speaks the FFI-friendly JSON API. The whole native surface is intentionally
  * tiny: construct, load a credential, and drive events.
@@ -474,12 +670,17 @@ public protocol WalletEngineProtocol : AnyObject {
     /**
      * Load a held credential: the issuer JWT plus a JSON object mapping claim name -> disclosure.
      */
-    func loadCredential(issuerJwt: String, disclosuresByClaimJson: String) 
+    func loadCredential(issuerJwt: String, disclosuresByClaimJson: String, statusIndex: UInt64?) 
     
     /**
      * Register the device public key the WUA attests (raw uncompressed point).
      */
     func loadDeviceKey(devicePublicKey: Data) 
+    
+    /**
+     * Verify + store a Token Status List (for revocation checks). Returns "" on success.
+     */
+    func loadStatusList(token: Data, providerPublicKey: Data)  -> String
     
     /**
      * Install/update the signed trusted list. Returns "" on success, else an error string.
@@ -575,10 +776,11 @@ open func handleEventJson(eventJson: String) -> String {
     /**
      * Load a held credential: the issuer JWT plus a JSON object mapping claim name -> disclosure.
      */
-open func loadCredential(issuerJwt: String, disclosuresByClaimJson: String) {try! rustCall() {
+open func loadCredential(issuerJwt: String, disclosuresByClaimJson: String, statusIndex: UInt64?) {try! rustCall() {
     uniffi_wallet_core_fn_method_walletengine_load_credential(self.uniffiClonePointer(),
         FfiConverterString.lower(issuerJwt),
-        FfiConverterString.lower(disclosuresByClaimJson),$0
+        FfiConverterString.lower(disclosuresByClaimJson),
+        FfiConverterOptionUInt64.lower(statusIndex),$0
     )
 }
 }
@@ -591,6 +793,18 @@ open func loadDeviceKey(devicePublicKey: Data) {try! rustCall() {
         FfiConverterData.lower(devicePublicKey),$0
     )
 }
+}
+    
+    /**
+     * Verify + store a Token Status List (for revocation checks). Returns "" on success.
+     */
+open func loadStatusList(token: Data, providerPublicKey: Data) -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_load_status_list(self.uniffiClonePointer(),
+        FfiConverterData.lower(token),
+        FfiConverterData.lower(providerPublicKey),$0
+    )
+})
 }
     
     /**
@@ -671,6 +885,273 @@ public func FfiConverterTypeWalletEngine_lower(_ value: WalletEngine) -> UnsafeM
     return FfiConverterTypeWalletEngine.lower(value)
 }
 
+
+/**
+ * Everything the shell must load/feed to drive the demo flows against the real core.
+ */
+public struct DemoScenario {
+    /**
+     * Wall-clock (Unix seconds) to give the core via `setClock`.
+     */
+    public var epoch: Int64
+    /**
+     * Issuer-signed SD-JWT VC (a PID with `family_name` + `age_over_18`).
+     */
+    public var issuerJwt: String
+    /**
+     * JSON object mapping claim name → base64url disclosure, for `loadCredential`.
+     */
+    public var disclosuresByClaimJson: String
+    /**
+     * Operator-signed trusted list anchoring the RP-access CA.
+     */
+    public var trustList: Data
+    /**
+     * Raw public key that signed `trust_list`.
+     */
+    public var operatorPublicKey: Data
+    /**
+     * Raw device public key to load into the core (`loadDeviceKey`).
+     */
+    public var devicePublicKey: Data
+    /**
+     * RP certificate chain (DER, leaf-first) the shell supplies on `resolveRpTrust`.
+     */
+    public var rpCertChain: [Data]
+    /**
+     * Redirect URIs registered for the RP (empty for the demo).
+     */
+    public var registeredRedirectUris: [String]
+    /**
+     * RP-signed authorization request (compact JWS) requesting only `age_over_18`.
+     */
+    public var presentationRequest: Data
+    /**
+     * A payment authorization request the shell feeds via `paymentAuthorizationRequestReceived`.
+     */
+    public var paymentRequest: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Wall-clock (Unix seconds) to give the core via `setClock`.
+         */epoch: Int64, 
+        /**
+         * Issuer-signed SD-JWT VC (a PID with `family_name` + `age_over_18`).
+         */issuerJwt: String, 
+        /**
+         * JSON object mapping claim name → base64url disclosure, for `loadCredential`.
+         */disclosuresByClaimJson: String, 
+        /**
+         * Operator-signed trusted list anchoring the RP-access CA.
+         */trustList: Data, 
+        /**
+         * Raw public key that signed `trust_list`.
+         */operatorPublicKey: Data, 
+        /**
+         * Raw device public key to load into the core (`loadDeviceKey`).
+         */devicePublicKey: Data, 
+        /**
+         * RP certificate chain (DER, leaf-first) the shell supplies on `resolveRpTrust`.
+         */rpCertChain: [Data], 
+        /**
+         * Redirect URIs registered for the RP (empty for the demo).
+         */registeredRedirectUris: [String], 
+        /**
+         * RP-signed authorization request (compact JWS) requesting only `age_over_18`.
+         */presentationRequest: Data, 
+        /**
+         * A payment authorization request the shell feeds via `paymentAuthorizationRequestReceived`.
+         */paymentRequest: Data) {
+        self.epoch = epoch
+        self.issuerJwt = issuerJwt
+        self.disclosuresByClaimJson = disclosuresByClaimJson
+        self.trustList = trustList
+        self.operatorPublicKey = operatorPublicKey
+        self.devicePublicKey = devicePublicKey
+        self.rpCertChain = rpCertChain
+        self.registeredRedirectUris = registeredRedirectUris
+        self.presentationRequest = presentationRequest
+        self.paymentRequest = paymentRequest
+    }
+}
+
+
+
+extension DemoScenario: Equatable, Hashable {
+    public static func ==(lhs: DemoScenario, rhs: DemoScenario) -> Bool {
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.issuerJwt != rhs.issuerJwt {
+            return false
+        }
+        if lhs.disclosuresByClaimJson != rhs.disclosuresByClaimJson {
+            return false
+        }
+        if lhs.trustList != rhs.trustList {
+            return false
+        }
+        if lhs.operatorPublicKey != rhs.operatorPublicKey {
+            return false
+        }
+        if lhs.devicePublicKey != rhs.devicePublicKey {
+            return false
+        }
+        if lhs.rpCertChain != rhs.rpCertChain {
+            return false
+        }
+        if lhs.registeredRedirectUris != rhs.registeredRedirectUris {
+            return false
+        }
+        if lhs.presentationRequest != rhs.presentationRequest {
+            return false
+        }
+        if lhs.paymentRequest != rhs.paymentRequest {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(epoch)
+        hasher.combine(issuerJwt)
+        hasher.combine(disclosuresByClaimJson)
+        hasher.combine(trustList)
+        hasher.combine(operatorPublicKey)
+        hasher.combine(devicePublicKey)
+        hasher.combine(rpCertChain)
+        hasher.combine(registeredRedirectUris)
+        hasher.combine(presentationRequest)
+        hasher.combine(paymentRequest)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDemoScenario: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DemoScenario {
+        return
+            try DemoScenario(
+                epoch: FfiConverterInt64.read(from: &buf), 
+                issuerJwt: FfiConverterString.read(from: &buf), 
+                disclosuresByClaimJson: FfiConverterString.read(from: &buf), 
+                trustList: FfiConverterData.read(from: &buf), 
+                operatorPublicKey: FfiConverterData.read(from: &buf), 
+                devicePublicKey: FfiConverterData.read(from: &buf), 
+                rpCertChain: FfiConverterSequenceData.read(from: &buf), 
+                registeredRedirectUris: FfiConverterSequenceString.read(from: &buf), 
+                presentationRequest: FfiConverterData.read(from: &buf), 
+                paymentRequest: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DemoScenario, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.epoch, into: &buf)
+        FfiConverterString.write(value.issuerJwt, into: &buf)
+        FfiConverterString.write(value.disclosuresByClaimJson, into: &buf)
+        FfiConverterData.write(value.trustList, into: &buf)
+        FfiConverterData.write(value.operatorPublicKey, into: &buf)
+        FfiConverterData.write(value.devicePublicKey, into: &buf)
+        FfiConverterSequenceData.write(value.rpCertChain, into: &buf)
+        FfiConverterSequenceString.write(value.registeredRedirectUris, into: &buf)
+        FfiConverterData.write(value.presentationRequest, into: &buf)
+        FfiConverterData.write(value.paymentRequest, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDemoScenario_lift(_ buf: RustBuffer) throws -> DemoScenario {
+    return try FfiConverterTypeDemoScenario.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDemoScenario_lower(_ value: DemoScenario) -> RustBuffer {
+    return FfiConverterTypeDemoScenario.lower(value)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
+    typealias SwiftType = [Data]
+
+    public static func write(_ value: [Data], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterData.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Data] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Data]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterData.read(from: &buf))
+        }
+        return seq
+    }
+}
+
 private enum InitializationResult {
     case ok
     case contractVersionMismatch
@@ -686,19 +1167,31 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_wallet_core_checksum_method_demowallet_scenario() != 15393) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_demowallet_sign_device() != 56295) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_wallet_core_checksum_method_walletengine_handle_event_json() != 35687) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_wallet_core_checksum_method_walletengine_load_credential() != 40264) {
+    if (uniffi_wallet_core_checksum_method_walletengine_load_credential() != 34961) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_load_device_key() != 64325) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_load_status_list() != 31401) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_load_trust_list() != 63474) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_load_wua() != 52241) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_constructor_demowallet_new() != 41997) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_constructor_walletengine_new() != 57779) {

@@ -1,0 +1,61 @@
+name: EUWalletDemo
+options:
+  bundleIdPrefix: eu.advatar.wallet
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # Swift 5 language mode: the shell predates Swift 6 strict-concurrency and the demo harness
+    # favours legibility over actor annotations. The core's safety lives in Rust, not here.
+    SWIFT_VERSION: "5.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  EUWalletDemo:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      # The thin native shell (renderer, effect executor, signer, transports, storage) and the
+      # UniFFI-generated bindings compile straight into the app module — one module, no imports.
+      - path: Sources/WalletShell
+      - path: Generated/wallet_core.swift
+    dependencies:
+      # The real Rust wallet core, cross-compiled for device + simulator by
+      # build-rust-xcframework.sh. Static libs → link, don't embed.
+      - framework: WalletCore.xcframework
+        embed: false
+        link: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.demo
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: EUDI Wallet
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        # The xcframework vends the `wallet_coreFFI` clang module via its bundled module.modulemap.
+        OTHER_LDFLAGS: "-lc++"
+
+  # Runs the REAL Rust core (aws-lc-rs, compiled for the simulator) end to end, on the simulator.
+  # Deterministic proof that the flows work on-device, independent of UI screenshotting.
+  EUWalletDemoTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/OnSim
+      - path: Sources/WalletShell
+      - path: Generated/wallet_core.swift
+      - path: App/DemoAdapters.swift
+    dependencies:
+      - framework: WalletCore.xcframework
+        embed: false
+        link: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.demo.tests
+        GENERATE_INFOPLIST_FILE: YES
+        OTHER_LDFLAGS: "-lc++"

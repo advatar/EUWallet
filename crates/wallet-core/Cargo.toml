@@ -34,7 +34,8 @@ presenter = { path = "../presenter" }
 payment = { path = "../payment" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Used by the `demo` module to build self-contained fixtures for the iOS simulator app.
+base64ct = { workspace = true }
 
 [dev-dependencies]
 miniz_oxide = "0.8"
-base64ct = { workspace = true }

@@ -251,6 +251,32 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureStr
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_CLONE_DEMOWALLET
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_CLONE_DEMOWALLET
+void*_Nonnull uniffi_wallet_core_fn_clone_demowallet(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_FREE_DEMOWALLET
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_FREE_DEMOWALLET
+void uniffi_wallet_core_fn_free_demowallet(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_CONSTRUCTOR_DEMOWALLET_NEW
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_CONSTRUCTOR_DEMOWALLET_NEW
+void*_Nonnull uniffi_wallet_core_fn_constructor_demowallet_new(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_DEMOWALLET_SCENARIO
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_DEMOWALLET_SCENARIO
+RustBuffer uniffi_wallet_core_fn_method_demowallet_scenario(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_DEMOWALLET_SIGN_DEVICE
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_DEMOWALLET_SIGN_DEVICE
+RustBuffer uniffi_wallet_core_fn_method_demowallet_sign_device(void*_Nonnull ptr, RustBuffer payload, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_CLONE_WALLETENGINE
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_CLONE_WALLETENGINE
 void*_Nonnull uniffi_wallet_core_fn_clone_walletengine(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
@@ -273,12 +299,17 @@ RustBuffer uniffi_wallet_core_fn_method_walletengine_handle_event_json(void*_Non
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_CREDENTIAL
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_CREDENTIAL
-void uniffi_wallet_core_fn_method_walletengine_load_credential(void*_Nonnull ptr, RustBuffer issuer_jwt, RustBuffer disclosures_by_claim_json, RustCallStatus *_Nonnull out_status
+void uniffi_wallet_core_fn_method_walletengine_load_credential(void*_Nonnull ptr, RustBuffer issuer_jwt, RustBuffer disclosures_by_claim_json, RustBuffer status_index, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_DEVICE_KEY
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_DEVICE_KEY
 void uniffi_wallet_core_fn_method_walletengine_load_device_key(void*_Nonnull ptr, RustBuffer device_public_key, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_STATUS_LIST
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_STATUS_LIST
+RustBuffer uniffi_wallet_core_fn_method_walletengine_load_status_list(void*_Nonnull ptr, RustBuffer token, RustBuffer provider_public_key, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_LOAD_TRUST_LIST
@@ -571,6 +602,18 @@ void ffi_wallet_core_rust_future_free_void(uint64_t handle
 void ffi_wallet_core_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_DEMOWALLET_SCENARIO
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_DEMOWALLET_SCENARIO
+uint16_t uniffi_wallet_core_checksum_method_demowallet_scenario(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_DEMOWALLET_SIGN_DEVICE
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_DEMOWALLET_SIGN_DEVICE
+uint16_t uniffi_wallet_core_checksum_method_demowallet_sign_device(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_HANDLE_EVENT_JSON
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_HANDLE_EVENT_JSON
 uint16_t uniffi_wallet_core_checksum_method_walletengine_handle_event_json(void
@@ -589,6 +632,12 @@ uint16_t uniffi_wallet_core_checksum_method_walletengine_load_device_key(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_STATUS_LIST
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_STATUS_LIST
+uint16_t uniffi_wallet_core_checksum_method_walletengine_load_status_list(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_TRUST_LIST
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_TRUST_LIST
 uint16_t uniffi_wallet_core_checksum_method_walletengine_load_trust_list(void
@@ -598,6 +647,12 @@ uint16_t uniffi_wallet_core_checksum_method_walletengine_load_trust_list(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_WUA
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_WUA
 uint16_t uniffi_wallet_core_checksum_method_walletengine_load_wua(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_CONSTRUCTOR_DEMOWALLET_NEW
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_CONSTRUCTOR_DEMOWALLET_NEW
+uint16_t uniffi_wallet_core_checksum_constructor_demowallet_new(void
     
 );
 #endif

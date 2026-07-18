@@ -15,9 +15,15 @@ cargo build -p wallet-core
 cargo run -p wallet-core --bin uniffi-bindgen -- generate \
   --library target/debug/libwallet_core.dylib --language swift --out-dir "$GEN"
 
-# 2) Build the static library for device + simulator (arm64) and macOS.
-cargo build -p wallet-core --release --target aarch64-apple-ios
-cargo build -p wallet-core --release --target aarch64-apple-ios-sim
+# 2) Build ONLY the static library for device + simulator (arm64). We use `cargo rustc
+#    --crate-type staticlib` (not `cargo build`) so cargo does not also try to LINK a cdylib for
+#    iOS — that link fails on `___chkstk_darwin` (a compiler-rt stack-probe builtin), and an iOS
+#    .dylib is useless to us anyway. Archiving a staticlib skips symbol resolution; the builtin
+#    resolves at final app-link against the iOS SDK. Pin the deployment target so the aws-lc
+#    objects (built for a modern iOS) and the archive agree (silences the version-mismatch warns).
+export IPHONEOS_DEPLOYMENT_TARGET=16.0
+cargo rustc -p wallet-core --lib --release --target aarch64-apple-ios --crate-type staticlib
+cargo rustc -p wallet-core --lib --release --target aarch64-apple-ios-sim --crate-type staticlib
 
 # 3) Assemble the modulemap headers directory expected by xcframework.
 HDR=target/uniffi-headers
