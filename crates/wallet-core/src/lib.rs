@@ -220,6 +220,8 @@ pub struct Core {
     // Payment details captured at the confirmation screen, recorded into the log on authorization.
     pay_summary: Option<txnlog::PaymentSummary>,
     pay_consent_hash: [u8; 32],
+    // Attestation catalogue: the credential types the wallet understands (TS11).
+    catalogue: catalogue::Catalogue,
 }
 
 impl Core {
@@ -249,7 +251,43 @@ impl Core {
             log: txnlog::TransactionLog::new(),
             pay_summary: None,
             pay_consent_hash: [0u8; 32],
+            catalogue: catalogue::default_catalogue(),
         }
+    }
+
+    /// The attestation catalogue as JSON (TS11): the credential types the wallet understands, each
+    /// with its claims (paths + which are mandatory), format, and trusted issuers. For the UI's
+    /// "available credentials" view and for planning which credential can satisfy a request.
+    pub fn attestation_catalogue_json(&self) -> String {
+        let types: Vec<String> = self
+            .catalogue
+            .list()
+            .iter()
+            .map(|t| {
+                let claims = t
+                    .claims
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            r#"{{"path":{:?},"displayName":{:?},"mandatory":{}}}"#,
+                            c.path, c.display_name, c.mandatory
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let issuers = t
+                    .trusted_issuers
+                    .iter()
+                    .map(|i| format!("{:?}", i))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    r#"{{"id":{:?},"displayName":{:?},"format":{:?},"claims":[{}],"trustedIssuers":[{}]}}"#,
+                    t.id, t.display_name, t.format, claims, issuers
+                )
+            })
+            .collect();
+        format!("[{}]", types.join(","))
     }
 
     /// The transaction (audit) log — completed presentations, payments, and issuances.
@@ -971,6 +1009,14 @@ impl WalletEngine {
     /// A portable, integrity-protected export of the holder's wallet data as JSON (TS10).
     pub fn export_json(&self) -> String {
         self.inner.lock().expect("poisoned").export_json()
+    }
+
+    /// The attestation catalogue as JSON (TS11): known credential types + their claims/issuers.
+    pub fn attestation_catalogue_json(&self) -> String {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .attestation_catalogue_json()
     }
 
     /// Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed

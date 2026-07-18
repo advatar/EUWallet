@@ -686,6 +686,11 @@ public func FfiConverterTypeDemoWallet_lower(_ value: DemoWallet) -> UnsafeMutab
 public protocol WalletEngineProtocol : AnyObject {
     
     /**
+     * The attestation catalogue as JSON (TS11): known credential types + their claims/issuers.
+     */
+    func attestationCatalogueJson()  -> String
+    
+    /**
      * A portable, integrity-protected export of the holder's wallet data as JSON (TS10).
      */
     func exportJson()  -> String
@@ -810,6 +815,16 @@ public convenience init(walletClientId: String, deviceKeyRef: String) {
 
     
 
+    
+    /**
+     * The attestation catalogue as JSON (TS11): known credential types + their claims/issuers.
+     */
+open func attestationCatalogueJson() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_attestation_catalogue_json(self.uniffiClonePointer(),$0
+    )
+})
+}
     
     /**
      * A portable, integrity-protected export of the holder's wallet data as JSON (TS10).
@@ -1285,6 +1300,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_demowallet_sign_device() != 56295) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_attestation_catalogue_json() != 15813) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_export_json() != 59242) {

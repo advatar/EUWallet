@@ -18,6 +18,7 @@ members = [
     "crates/wua",
     "crates/presenter",
     "crates/zkp",
+    "crates/catalogue",
     "crates/payment",
     "crates/qes",
     "crates/txnlog",

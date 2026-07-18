@@ -1,0 +1,13 @@
+[package]
+name = "catalogue"
+description = "Attestation catalogue (TS11): the credential types the wallet knows — claims, formats, trusted issuers — with matching logic. Sans-IO, pure."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

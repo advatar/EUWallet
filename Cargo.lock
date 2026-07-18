@@ -228,6 +228,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalogue"
+version = "0.0.1"
+
+[[package]]
 name = "cc"
 version = "1.2.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1265,6 +1269,7 @@ name = "wallet-core"
 version = "0.0.1"
 dependencies = [
  "base64ct",
+ "catalogue",
  "cose",
  "crypto-backend",
  "crypto-traits",
