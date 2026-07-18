@@ -13,8 +13,11 @@ publish.workspace = true
 [dependencies]
 wallet-core = { path = "../wallet-core" }
 presenter = { path = "../presenter" }
+# Parses the issuer's token/credential responses in the issuance effect handlers.
+serde_json = { workspace = true }
 
 [dev-dependencies]
+base64ct = { workspace = true }
 crypto-backend = { path = "../crypto-backend" }
 crypto-traits = { path = "../crypto-traits" }
 oid4vp = { path = "../oid4vp" }

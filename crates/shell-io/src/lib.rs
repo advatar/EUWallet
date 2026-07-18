@@ -35,6 +35,17 @@ pub trait TrustFetcher {
     fn fetch(&self, client_id: &str) -> (Vec<Vec<u8>>, Vec<String>);
 }
 
+/// The live issuer endpoints the shell POSTs to during OID4VCI issuance. The wire contract of the
+/// reference shell (a production shell speaks the full OAuth token endpoint over TLS):
+///  * `token_url` — POST, response `{"bound": bool, "cNonce": u64}`;
+///  * `credential_url` — POST body is the proof JWT, response
+///    `{"format": "dc+sd-jwt"|"mso_mdoc", "credential": "<compact credential>"}`.
+#[derive(Clone, Debug)]
+pub struct IssuerEndpoints {
+    pub token_url: String,
+    pub credential_url: String,
+}
+
 /// What happened while draining one event's effect cascade.
 #[derive(Clone, Debug, Default)]
 pub struct Outcome {
@@ -55,6 +66,7 @@ pub struct ShellRunner<S: DeviceSigner, T: TrustFetcher> {
     pub core: Core,
     signer: S,
     trust: T,
+    issuer: Option<IssuerEndpoints>,
     last_screen: Option<ScreenDescription>,
 }
 
@@ -64,8 +76,16 @@ impl<S: DeviceSigner, T: TrustFetcher> ShellRunner<S, T> {
             core,
             signer,
             trust,
+            issuer: None,
             last_screen: None,
         }
+    }
+
+    /// Configure live issuer endpoints so the issuance effects (`RequestToken`,
+    /// `RequestCredential`) perform real POSTs instead of being ignored.
+    pub fn with_issuer(mut self, issuer: IssuerEndpoints) -> Self {
+        self.issuer = Some(issuer);
+        self
     }
 
     /// The most recently rendered screen — what a UI would currently show.
@@ -133,13 +153,76 @@ impl<S: DeviceSigner, T: TrustFetcher> ShellRunner<S, T> {
                 outcome.closed = true;
                 None
             }
-            // Issuance browser/PAR/token effects need an authorization server; the reference shell
-            // records nothing for them here (the E2E issuance harness drives them explicitly).
-            Effect::PushPar
-            | Effect::OpenAuthBrowser
-            | Effect::PromptTxCode
-            | Effect::RequestToken
-            | Effect::RequestCredential { .. } => None,
+            Effect::RequestToken => {
+                let issuer = self.issuer.as_ref()?;
+                match http::post(&issuer.token_url, b"") {
+                    Ok((status, body)) if (200..300).contains(&status) => {
+                        outcome
+                            .http_posts
+                            .push((issuer.token_url.clone(), status, body.clone()));
+                        let v: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                outcome.errors.push(format!("token response not JSON: {e}"));
+                                return None;
+                            }
+                        };
+                        Some(Event::TokenReceived {
+                            bound: v["bound"].as_bool().unwrap_or(false),
+                            c_nonce: v["cNonce"].as_u64().unwrap_or(0),
+                        })
+                    }
+                    Ok((status, _)) => {
+                        outcome.errors.push(format!("token endpoint HTTP {status}"));
+                        None
+                    }
+                    Err(e) => {
+                        outcome.errors.push(format!("token POST failed: {e}"));
+                        None
+                    }
+                }
+            }
+            Effect::RequestCredential { proof_jwt } => {
+                let issuer = self.issuer.as_ref()?;
+                match http::post(&issuer.credential_url, &proof_jwt) {
+                    Ok((status, body)) if (200..300).contains(&status) => {
+                        outcome.http_posts.push((
+                            issuer.credential_url.clone(),
+                            status,
+                            body.clone(),
+                        ));
+                        let v: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                outcome
+                                    .errors
+                                    .push(format!("credential response not JSON: {e}"));
+                                return None;
+                            }
+                        };
+                        let format = v["format"].as_str().unwrap_or_default().to_string();
+                        let bytes = v["credential"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .as_bytes()
+                            .to_vec();
+                        Some(Event::CredentialReceived { format, bytes })
+                    }
+                    Ok((status, _)) => {
+                        outcome
+                            .errors
+                            .push(format!("credential endpoint HTTP {status}"));
+                        None
+                    }
+                    Err(e) => {
+                        outcome.errors.push(format!("credential POST failed: {e}"));
+                        None
+                    }
+                }
+            }
+            // Browser/PAR/tx-code prompts need a UI or an authorization server; the reference
+            // shell leaves them to the platform (the pre-authorized flow doesn't emit them).
+            Effect::PushPar | Effect::OpenAuthBrowser | Effect::PromptTxCode => None,
         }
     }
 }

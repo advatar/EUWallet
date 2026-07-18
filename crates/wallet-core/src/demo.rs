@@ -78,6 +78,7 @@ pub struct DemoWallet {
     issuer: SoftwareSigner,
     operator: SoftwareSigner,
     rp: SoftwareSigner,
+    wallet_provider: SoftwareSigner,
 }
 
 #[uniffi::export]
@@ -90,6 +91,7 @@ impl DemoWallet {
             issuer: SoftwareSigner::generate_p256().expect("issuer keygen"),
             operator: SoftwareSigner::generate_p256().expect("operator keygen"),
             rp: SoftwareSigner::from_pkcs8_der(RP_PKCS8).expect("rp key"),
+            wallet_provider: SoftwareSigner::generate_p256().expect("wp keygen"),
         })
     }
 
@@ -144,6 +146,55 @@ impl DemoWallet {
     /// The nonce the demo presentation request is bound to (the RP checks it in the KB-JWT).
     pub fn demo_nonce(&self) -> u64 {
         DEMO_NONCE
+    }
+
+    /// A signed trusted list anchoring the demo CA for BOTH RP access and PID issuance, so one
+    /// core can run the full lifecycle (issuance needs a `pid` anchor; presentation needs
+    /// `rp-access-ca`). Plain Rust only (not FFI-exported).
+    pub fn signed_trust_list_with_pid_anchor(&self) -> Vec<u8> {
+        let header = b64(br#"{"alg":"ES256"}"#);
+        let payload = b64(json!({
+            "seq": 1,
+            "valid_from": 0,
+            "valid_until": 4_000_000_000i64,
+            "anchors": [
+                { "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" },
+                { "cert": b64(CA_DER), "service": "pid", "status": "granted" },
+            ],
+        })
+        .to_string()
+        .as_bytes());
+        let signing_input = format!("{header}.{payload}");
+        let sig = self
+            .operator
+            .sign(&KeyRef("op".into()), Alg::Es256, signing_input.as_bytes())
+            .expect("operator sign");
+        format!("{signing_input}.{}", b64(&sig)).into_bytes()
+    }
+
+    /// A Wallet Unit Attestation binding the demo device key at High assurance, signed by the demo
+    /// wallet provider. The core verifies it in-core before proving possession during issuance.
+    pub fn wua_jwt(&self) -> Vec<u8> {
+        let header = b64(br#"{"alg":"ES256","typ":"wallet-unit-attestation+jwt"}"#);
+        let payload = b64(json!({
+            "iss": "https://wp.example",
+            "exp": 4_000_000_000i64,
+            "aal": "high",
+            "cnf": { "jwk_raw": b64(self.device.public_key_raw()) },
+        })
+        .to_string()
+        .as_bytes());
+        let signing_input = format!("{header}.{payload}");
+        let sig = self
+            .wallet_provider
+            .sign(&KeyRef("wp".into()), Alg::Es256, signing_input.as_bytes())
+            .expect("wp sign");
+        format!("{signing_input}.{}", b64(&sig)).into_bytes()
+    }
+
+    /// The demo wallet provider's raw public key (verifies [`DemoWallet::wua_jwt`]).
+    pub fn wallet_provider_public_key(&self) -> Vec<u8> {
+        self.wallet_provider.public_key_raw().to_vec()
     }
 
     /// An RP-signed OpenID4VP authorization request carrying a DCQL query for `age_over_18`,

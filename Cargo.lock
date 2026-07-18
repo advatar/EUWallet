@@ -947,6 +947,7 @@ dependencies = [
 name = "shell-io"
 version = "0.0.1"
 dependencies = [
+ "base64ct",
  "crypto-backend",
  "crypto-traits",
  "oid4vp",
