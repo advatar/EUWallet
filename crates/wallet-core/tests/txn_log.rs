@@ -17,7 +17,8 @@ fn presentation_and_payment_are_logged_without_values() {
     });
     core.load_device_key(s.device_public_key.clone());
     core.handle_event(Event::SetClock { epoch: s.epoch });
-    core.load_trust_list(&s.trust_list, &s.operator_public_key).unwrap();
+    core.load_trust_list(&s.trust_list, &s.operator_public_key)
+        .unwrap();
 
     // --- Presentation ---
     core.handle_event(Event::AuthorizationRequestReceived {
@@ -65,7 +66,10 @@ fn presentation_and_payment_are_logged_without_values() {
     assert_eq!(presentation.kind, txnlog::Kind::Presentation);
     assert_eq!(presentation.counterparty, "rp.example");
     assert_eq!(presentation.claim_paths, vec!["age_over_18".to_string()]); // path only
-    assert_ne!(presentation.consent_hash, [0u8; 32], "consent hash committed");
+    assert_ne!(
+        presentation.consent_hash, [0u8; 32],
+        "consent hash committed"
+    );
 
     let payment = &log.entries()[1];
     assert_eq!(payment.kind, txnlog::Kind::Payment);
@@ -94,14 +98,21 @@ fn presentation_and_payment_are_logged_without_values() {
     // --- Deletion (TS07): erase the presentation; the chain stays intact. ---
     assert!(core.redact_transaction(0));
     assert!(
-        core.transaction_log().verify_integrity(&crypto_backend::AwsLc),
+        core.transaction_log()
+            .verify_integrity(&crypto_backend::AwsLc),
         "chain remains intact after erasure"
     );
     let after = core.transaction_log_json();
-    assert!(!after.contains("age_over_18"), "erased entry's paths are gone: {after}");
+    assert!(
+        !after.contains("age_over_18"),
+        "erased entry's paths are gone: {after}"
+    );
     let report2 = core.transaction_report_json();
     assert!(report2.contains(r#""redacted":1"#));
-    assert!(report2.contains(r#""presentations":0"#), "the erased presentation no longer counts");
+    assert!(
+        report2.contains(r#""presentations":0"#),
+        "the erased presentation no longer counts"
+    );
 
     // Full wipe clears everything.
     core.wipe_transaction_log();

@@ -16,7 +16,8 @@ fn export_round_trips_and_detects_tampering() {
     });
     core.load_device_key(s.device_public_key.clone());
     core.handle_event(Event::SetClock { epoch: s.epoch });
-    core.load_trust_list(&s.trust_list, &s.operator_public_key).unwrap();
+    core.load_trust_list(&s.trust_list, &s.operator_public_key)
+        .unwrap();
 
     // Complete a presentation so the export carries both a credential and a log entry.
     core.handle_event(Event::AuthorizationRequestReceived {
@@ -42,7 +43,10 @@ fn export_round_trips_and_detects_tampering() {
     let export = core.export_json();
 
     // The bundle carries the holder's credential and the log entry.
-    assert!(export.contains(&s.issuer_jwt), "credential material is exported");
+    assert!(
+        export.contains(&s.issuer_jwt),
+        "credential material is exported"
+    );
     assert!(export.contains("\"transactionLog\""));
     assert!(export.contains("rp.example"));
     assert!(export.contains("\"integrityHash\""));
@@ -52,7 +56,10 @@ fn export_round_trips_and_detects_tampering() {
         wallet_core::export::verify_export(&AwsLc, &export),
         "untampered export verifies"
     );
-    assert!(wallet_core::verify_wallet_export(export.clone()), "same, via the FFI free fn");
+    assert!(
+        wallet_core::verify_wallet_export(export.clone()),
+        "same, via the FFI free fn"
+    );
 
     // Tamper with a value in the saved bundle → integrity check fails.
     let tampered = export.replace("rp.example", "evil.example");

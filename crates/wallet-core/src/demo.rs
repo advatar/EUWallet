@@ -125,6 +125,56 @@ impl DemoWallet {
 }
 
 impl DemoWallet {
+    /// Like [`DemoWallet::scenario`], but the presentation request targets `response_uri` and
+    /// carries a real DCQL query (OpenID4VP 1.0 §6) instead of the legacy `claims` array. Used by
+    /// the live-I/O reference shell tests to point the wallet at a real local RP endpoint. Plain
+    /// Rust only (not FFI-exported), so the generated bindings are unaffected.
+    pub fn scenario_with_response_uri(&self, response_uri: &str) -> DemoScenario {
+        let mut s = self.scenario();
+        s.presentation_request = self.sign_request_dcql(DEMO_NONCE, response_uri);
+        s
+    }
+
+    /// The demo issuer's raw public key — what an RP uses to verify the issuer signature of a
+    /// presented SD-JWT VC. Plain Rust only (not FFI-exported).
+    pub fn issuer_public_key(&self) -> Vec<u8> {
+        self.issuer.public_key_raw().to_vec()
+    }
+
+    /// The nonce the demo presentation request is bound to (the RP checks it in the KB-JWT).
+    pub fn demo_nonce(&self) -> u64 {
+        DEMO_NONCE
+    }
+
+    /// An RP-signed OpenID4VP authorization request carrying a DCQL query for `age_over_18`,
+    /// bound to `nonce`, answering to `response_uri`.
+    fn sign_request_dcql(&self, nonce: u64, response_uri: &str) -> Vec<u8> {
+        let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
+        let payload = b64(serde_json::to_string(&json!({
+            "client_id": "rp.example",
+            "nonce": nonce,
+            "aud": "wallet.example",
+            "response_uri": response_uri,
+            "purpose": "Prove you are over 18",
+            "dcql_query": {
+                "credentials": [{
+                    "id": "pid",
+                    "format": "dc+sd-jwt",
+                    "meta": { "vct_values": ["urn:eudi:pid:1"] },
+                    "claims": [{ "path": ["age_over_18"] }]
+                }]
+            },
+        }))
+        .expect("serialize request")
+        .as_bytes());
+        let signing_input = format!("{header}.{payload}");
+        let sig = self
+            .rp
+            .sign(&KeyRef("r".into()), Alg::Es256, signing_input.as_bytes())
+            .expect("rp sign");
+        format!("{signing_input}.{}", b64(&sig)).into_bytes()
+    }
+
     /// Issue an SD-JWT VC; return (issuer_jwt, disclosures_by_claim). Mirrors the issuance the
     /// wallet-core e2e tests perform, so the credential is byte-compatible with the core.
     fn issue(&self, claims: &[(&str, serde_json::Value)]) -> (String, BTreeMap<String, String>) {

@@ -1,0 +1,25 @@
+[package]
+name = "shell-io"
+description = "Reference shell with REAL I/O: executes wallet-core effects (HTTP POST over TCP, device signing, trust fetch) and feeds results back — the Rust analogue of the iOS EffectExecutor."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Deliberately std-only: the HTTP client is a minimal blocking HTTP/1.1 POST over
+# std::net::TcpStream. TLS is the PLATFORM shell's job (URLSession / OkHttp terminate TLS with the
+# OS trust store); this crate is the reference/E2E harness proving the core drives real sockets.
+[dependencies]
+wallet-core = { path = "../wallet-core" }
+presenter = { path = "../presenter" }
+
+[dev-dependencies]
+crypto-backend = { path = "../crypto-backend" }
+crypto-traits = { path = "../crypto-traits" }
+oid4vp = { path = "../oid4vp" }
+sdjwt = { path = "../sdjwt" }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -9,6 +9,7 @@ members = [
     "crates/cose",
     "crates/mdoc",
     "crates/sdjwt",
+    "crates/shell-io",
     "crates/x509",
     "crates/oid4vp",
     "crates/oid4vci",

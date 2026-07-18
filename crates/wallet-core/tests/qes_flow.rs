@@ -7,7 +7,9 @@ use wallet_core::{Core, Effect, Event};
 #[test]
 fn qes_flow_renders_confirmation_then_signs_and_delivers() {
     let mut core = Core::new("wallet.example", "device-key");
-    core.handle_event(Event::SetClock { epoch: 1_790_000_000 });
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
 
     // A document-signing request → the sign-confirmation screen (WYSIWYS).
     let request =
@@ -18,7 +20,10 @@ fn qes_flow_renders_confirmation_then_signs_and_delivers() {
         matches!(e, Effect::Render { screen }
             if matches!(screen, presenter::ScreenDescription::SignConfirmation(_)))
     });
-    assert!(is_sign_screen, "expected a QES sign-confirmation screen, got {fx:?}");
+    assert!(
+        is_sign_screen,
+        "expected a QES sign-confirmation screen, got {fx:?}"
+    );
 
     // Authorize → the core asks the device to sign the DTBS/R.
     let fx = core.handle_event(Event::QesAuthorized);
