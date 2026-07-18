@@ -29,6 +29,8 @@ pub enum ScreenDescription {
     /// screens. Shows exactly what the user is authorising (amount + payee) — what-you-see-is-
     /// what-you-authorise, dynamically linked by the payment machine.
     PaymentConfirmation(PaymentScreen),
+    /// QES qualified-signature confirmation (what-you-see-is-what-you-sign).
+    SignConfirmation(SignScreen),
     CredentialList,
     CredentialDetail,
     IssuanceOffer,
@@ -48,6 +50,17 @@ pub struct PaymentScreen {
     /// Amount in minor units (e.g. cents) to avoid floating-point ambiguity.
     pub amount_minor: u64,
     pub currency: String,
+}
+
+/// A fully-resolved QES sign-confirmation screen (what-you-see-is-what-you-sign): the document and
+/// (Q)TSP the holder is authorising a qualified signature over.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignScreen {
+    pub document_name: String,
+    pub qtsp_id: String,
+    /// Hex of the document hash (DTBS) being signed.
+    pub document_hash_hex: String,
 }
 
 /// A fully-resolved consent screen. RP-supplied strings enter ONLY as validated data here.
@@ -134,6 +147,12 @@ fn to_value(screen: &ScreenDescription) -> Value {
             Value::Text(p.creditor_account.clone()),
             Value::Uint(p.amount_minor),
             Value::Text(p.currency.clone()),
+        ]),
+        ScreenDescription::SignConfirmation(s) => Value::Array(vec![
+            tag("signConfirmation"),
+            Value::Text(s.document_name.clone()),
+            Value::Text(s.qtsp_id.clone()),
+            Value::Text(s.document_hash_hex.clone()),
         ]),
         ScreenDescription::CredentialList => Value::Array(vec![tag("credentialList")]),
         ScreenDescription::CredentialDetail => Value::Array(vec![tag("credentialDetail")]),

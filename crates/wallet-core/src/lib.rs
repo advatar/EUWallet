@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use crypto_backend::AwsLc;
 use crypto_traits::Alg;
 use oid4vp::{Env, Input, ResolvedTrust, SelectedCredential, State};
-use presenter::{minimum_claim_set, ConsentScreen, PaymentScreen, ScreenDescription};
+use presenter::{minimum_claim_set, ConsentScreen, PaymentScreen, ScreenDescription, SignScreen};
 use serde::{Deserialize, Serialize};
 use trust::{ServiceType, TrustStore};
 
@@ -28,6 +28,7 @@ enum ActiveFlow {
     Presentation,
     Payment,
     Issuance,
+    Qes,
 }
 
 uniffi::setup_scaffolding!();
@@ -53,7 +54,12 @@ fn parse_format(s: &str) -> Option<oid4vci::CredentialFormat> {
 
 /// Lowercase hex of a 32-byte hash (for the transaction-log JSON).
 fn hex32(bytes: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
+    hex_bytes(bytes)
+}
+
+/// Lowercase hex of an arbitrary byte slice.
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         s.push_str(&format!("{:02x}", b));
     }
@@ -136,6 +142,12 @@ pub enum Event {
     PaymentApproved,
     /// The user declined the payment.
     PaymentDeclined,
+    /// A document-signing (QES) request arrived (JSON, see `qes::parse_request`).
+    QesSignRequestReceived { request: Vec<u8> },
+    /// The user authorized the QES sign-confirmation screen.
+    QesAuthorized,
+    /// The user declined to sign.
+    QesDeclined,
     /// A credential offer (OID4VCI) arrived, with the issuer's cert chain (issuer trust is decided
     /// in-core against the trusted list — not a shell boolean).
     CredentialOfferReceived {
@@ -222,6 +234,10 @@ pub struct Core {
     pay_consent_hash: [u8; 32],
     // Attestation catalogue: the credential types the wallet understands (TS11).
     catalogue: catalogue::Catalogue,
+    // QES (qualified e-signature) flow.
+    qes: qes::QesState,
+    qes_seen_nonces: Vec<u64>,
+    qes_consent_hash: [u8; 32],
 }
 
 impl Core {
@@ -252,6 +268,9 @@ impl Core {
             pay_summary: None,
             pay_consent_hash: [0u8; 32],
             catalogue: catalogue::default_catalogue(),
+            qes: qes::QesState::Idle,
+            qes_seen_nonces: Vec::new(),
+            qes_consent_hash: [0u8; 32],
         }
     }
 
@@ -508,6 +527,9 @@ impl Core {
                 ActiveFlow::Issuance => {
                     self.drive_issuance(oid4vci::Input::ProofSignatureProduced(signature))
                 }
+                ActiveFlow::Qes => {
+                    self.drive_qes(qes::Input::AuthorizationSignatureProduced(signature))
+                }
                 _ => self.drive(Input::DeviceSignatureProduced(signature)),
             },
             Event::PresentationDelivered => self.drive(Input::PresentationDelivered),
@@ -517,6 +539,12 @@ impl Core {
             }
             Event::PaymentApproved => self.drive_payment(payment::Input::UserApproved),
             Event::PaymentDeclined => self.drive_payment(payment::Input::UserDeclined),
+            Event::QesSignRequestReceived { request } => {
+                self.active = ActiveFlow::Qes;
+                self.drive_qes(qes::Input::SignatureRequest(request))
+            }
+            Event::QesAuthorized => self.drive_qes(qes::Input::UserAuthorized),
+            Event::QesDeclined => self.drive_qes(qes::Input::UserDeclined),
             Event::CredentialOfferReceived {
                 offer,
                 issuer_cert_chain,
@@ -766,6 +794,63 @@ impl Core {
     }
 
     /// The disclosures to reveal = the requested-and-held claims (data minimisation).
+    /// Drive the QES machine. The `consent_hash` in the env is the hash of the sign-confirmation
+    /// screen captured on render, so the DTBS/R the device signs binds what the user saw.
+    fn drive_qes(&mut self, input: qes::Input) -> Vec<Effect> {
+        let (next, outputs) = {
+            let env = qes::Env {
+                seen_nonces: &self.qes_seen_nonces,
+                device_key_ref: &self.config.device_key_ref,
+                consent_hash: self.qes_consent_hash,
+            };
+            qes::step(&self.qes, &input, &env)
+        };
+        self.qes = next;
+        // Record the request nonce once the confirmation is reached (replay protection).
+        if let qes::QesState::AwaitingAuthorization(req) = &self.qes {
+            if !self.qes_seen_nonces.contains(&req.nonce) {
+                self.qes_seen_nonces.push(req.nonce);
+            }
+        }
+        outputs
+            .into_iter()
+            .flat_map(|o| self.translate_qes(o))
+            .collect()
+    }
+
+    fn translate_qes(&mut self, output: qes::Output) -> Vec<Effect> {
+        use qes::Output as QO;
+        match output {
+            QO::RenderSignConfirmation {
+                document_name,
+                qtsp_id,
+                document_hash,
+            } => {
+                let screen = ScreenDescription::SignConfirmation(SignScreen {
+                    document_name,
+                    qtsp_id,
+                    document_hash_hex: hex_bytes(&document_hash),
+                });
+                // WYSIWYS anchor: bind the qualified signature to exactly this confirmation.
+                self.qes_consent_hash = presenter::consent_hash(&AwsLc, &screen);
+                vec![Effect::Render { screen }]
+            }
+            QO::SignAuthorization {
+                key_ref,
+                signing_input,
+            } => vec![Effect::Sign {
+                key_ref,
+                payload: signing_input,
+            }],
+            // The QTSP endpoint (CSC API) is resolved by the shell; the body is the authorization.
+            QO::SendToQtsp(body) => vec![Effect::Http {
+                url: String::new(),
+                body,
+            }],
+            QO::Close => vec![Effect::Close],
+        }
+    }
+
     fn select_credential_for(&self, input: &Input) -> Option<SelectedCredential> {
         if !matches!(input, Input::ConsentGranted) {
             return None;

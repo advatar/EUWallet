@@ -1294,6 +1294,7 @@ dependencies = [
  "oid4vp",
  "payment",
  "presenter",
+ "qes",
  "sdjwt",
  "serde",
  "serde_json",
