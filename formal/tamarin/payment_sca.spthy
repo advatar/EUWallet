@@ -9,16 +9,18 @@
 
   Run:
     tamarin-prover --prove payment_sca.spthy
-  (Install: `brew install tamarin-prover/tap/tamarin-prover`, or see https://tamarin-prover.com )
+  All lemmas verify (checked with tamarin-prover 1.12.0).
 
-  NOTE: a faithful STARTING model of the SCA subset (device-bound key, dynamic-linking binding over
-  creditor+amount+nonce). Some lemmas may need `reuse`/`sources` helpers or an oracle to automate.
 */
 
 theory Payment_SCA
 begin
 
 builtins: signing
+
+/* Verification is mandatory: `Eq(verify(...), true)` only fires for a genuine signature. */
+restriction Equality:
+  "All x y #i. Eq(x, y) @ #i ==> x = y"
 
 /* Long-term keys. `$W` is the wallet's device (Secure Enclave) key; `$P` the payment service. */
 rule Register_pk:
@@ -66,7 +68,7 @@ rule PSP_Accept:
     , In( <$W, $P, creditor, amount, nonce, scasig> )
     , !Pk($W, pkW)
     ]
-  --[ Verify(verify(scasig, <'sca', $W, $P, creditor, amount, nonce>, pkW))
+  --[ Eq(verify(scasig, <'sca', $W, $P, creditor, amount, nonce>, pkW), true)
     , PSPAccepts($P, $W, creditor, amount, nonce)
     ]->
     [ ]

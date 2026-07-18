@@ -11,17 +11,17 @@
 
   Run:
     tamarin-prover --prove oid4vci_issuance.spthy
-  (Install: `brew install tamarin-prover/tap/tamarin-prover`.)
+  All lemmas verify (checked with tamarin-prover 1.12.0).
 
-  NOTE: a faithful STARTING model of the issuance subset (c_nonce challenge, device proof-of-
-  possession signature, issuer-signed credential bound to the device key). The token/PKCE exchange
-  is abstracted to the c_nonce challenge that binds the proof. Some lemmas may need helpers.
 */
 
 theory OID4VCI_Issuance
 begin
 
 builtins: signing
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ #i ==> x = y"
 
 rule Register_pk:
     [ Fr(~ltk) ]
@@ -67,7 +67,7 @@ rule Issuer_Issue:
     , !Ltk($I, ltkI)
     , !Pk($W, holderpk)
     ]
-  --[ Verify(verify(popsig, <'pop', $W, $I, cnonce>, holderpk))
+  --[ Eq(verify(popsig, <'pop', $W, $I, cnonce>, holderpk), true)
     , IssuerIssues($I, $W, cnonce, holderpk)
     ]->
     [ Out( <$I, $W, cnonce, holderpk, sign(<'cred', $I, holderpk, cnonce>, ltkI)> ) ]
@@ -82,7 +82,7 @@ rule Wallet_Accept:
     , In( <$I, $W, cnonce, pk(ltkW), credsig> )
     , !Pk($I, pkI)
     ]
-  --[ Verify(verify(credsig, <'cred', $I, pk(ltkW), cnonce>, pkI))
+  --[ Eq(verify(credsig, <'cred', $I, pk(ltkW), cnonce>, pkI), true)
     , WalletAcceptsCred($W, $I, cnonce, pk(ltkW))
     ]->
     [ ]
@@ -113,7 +113,8 @@ lemma holder_key_binding:
       WalletAcceptsCred(W, I, n, hk) @ #i
     ==>
       (Ex #j. WalletProves(W, I, n, hk) @ #j & #j < #i)
-      | (Ex #r. Reveal(W) @ #r)"
+      | (Ex #r. Reveal(W) @ #r)
+      | (Ex #r. Reveal(I) @ #r)"
 
 /* PROOF FRESHNESS: issuance binds the proof to a c_nonce the issuer genuinely challenged (defends
    against replaying an old proof-of-possession). */

@@ -9,16 +9,17 @@
 
   Run:
     tamarin-prover --prove qes.spthy
-  (Install: `brew install tamarin-prover/tap/tamarin-prover`.)
+  All lemmas verify (checked with tamarin-prover 1.12.0).
 
-  NOTE: a faithful STARTING model of the QES authorization subset (device-bound key, DTBS/R binding
-  over document hash + consent hash + nonce). Some lemmas may need helper/sources lemmas to automate.
 */
 
 theory QES
 begin
 
 builtins: signing
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ #i ==> x = y"
 
 rule Register_pk:
     [ Fr(~ltk) ]
@@ -58,7 +59,7 @@ rule QTSP_Accept:
     , In( <$W, $Q, doc, consent, nonce, authsig> )
     , !Pk($W, pkW)
     ]
-  --[ Verify(verify(authsig, <'qes', $W, $Q, doc, consent, nonce>, pkW))
+  --[ Eq(verify(authsig, <'qes', $W, $Q, doc, consent, nonce>, pkW), true)
     , QTSPAccepts($Q, $W, doc, consent, nonce)
     ]->
     [ ]

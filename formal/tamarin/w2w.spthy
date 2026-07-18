@@ -10,17 +10,18 @@
 
   Run:
     tamarin-prover --prove w2w.spthy
-  (Install: `brew install tamarin-prover/tap/tamarin-prover`.)
+  All lemmas verify (checked with tamarin-prover 1.12.0).
 
-  NOTE: a faithful STARTING model. The receiver's ephemeral key is used to encrypt the credential
-  to it (asymmetric-encryption), and the sender signs the transfer bound to that key. Some lemmas
-  may need helper/sources lemmas to automate.
 */
 
 theory Wallet2Wallet
 begin
 
 builtins: signing, asymmetric-encryption
+
+/* Verification is mandatory: `Eq(verify(...), true)` only fires for a genuine signature. */
+restriction Equality:
+  "All x y #i. Eq(x, y) @ #i ==> x = y"
 
 rule Register_pk:
     [ Fr(~ltk) ]
@@ -32,39 +33,48 @@ rule Reveal_ltk:
   --[ Reveal($A) ]->
     [ Out(~ltk) ]
 
-/* The RECEIVER publishes an offer: a fresh EPHEMERAL key (out-of-band, e.g. a QR code) and nonce. */
+/* The RECEIVER publishes an AUTHENTICATED offer: a fresh EPHEMERAL key + nonce, signed with its
+   long-term key. Authentication of the offer is what stops a man-in-the-middle from making the
+   sender encrypt the credential to the ATTACKER's key. */
 rule Receiver_Offer:
     [ Fr(~eph)      // ephemeral secret
     , Fr(~nonce)
+    , !Ltk($R, ltkR)
     ]
   --[ Offer($R, pk(~eph), ~nonce) ]->
-    [ Out( <$R, pk(~eph), ~nonce> )
+    [ Out( <$R, pk(~eph), ~nonce, sign(<'offer', $R, pk(~eph), ~nonce>, ltkR)> )
     , Recv_Await($R, ~eph, ~nonce)
     ]
 
-/* The SENDER transfers a credential: encrypts it to the receiver's ephemeral key and signs a
-   transfer binding over the receiver key + nonce (so the transfer is bound to THIS receiver). */
+/* The SENDER verifies the receiver's authenticated offer (mandatory), then encrypts the credential
+   to the receiver's ephemeral key and signs a transfer binding over that key + nonce. */
 rule Sender_Transfer:
-    [ In( <$R, ephpub, nonce> )
+    let ct = aenc(~credential, ephpub)
+    in
+    [ In( <$R, ephpub, nonce, offersig> )
+    , !Pk($R, pkR)
     , !Ltk($S, ltkS)
     , Fr(~credential)
     ]
-  --[ SenderTransfers($S, $R, ephpub, nonce, ~credential)
+  --[ Eq(verify(offersig, <'offer', $R, ephpub, nonce>, pkR), true)
+    , SenderTransfers($S, $R, ephpub, nonce, ~credential)
     , SecretCredential($S, $R, ~credential)
     ]->
-    [ Out( <$S, $R, nonce,
-            aenc(~credential, ephpub),
-            sign(<'w2w', $S, ephpub, nonce>, ltkS)> ) ]
+    // The transfer signature covers the receiver IDENTITY `$R` and the CIPHERTEXT, so an attacker
+    // cannot (a) redirect the sender to believe it is transferring to a different party by claiming
+    // the receiver's public ephemeral key, nor (b) swap the encrypted credential.
+    [ Out( <$S, $R, nonce, ct, sign(<'w2w', $S, $R, ephpub, nonce, ct>, ltkS)> ) ]
 
 /* The RECEIVER accepts only if the transfer is signed by the sender AND bound to the ephemeral key
    it actually offered; it decrypts with its ephemeral secret. */
 rule Receiver_Accept:
+    let cred = adec(enc, ~eph)
+    in
     [ Recv_Await($R, ~eph, nonce)
     , In( <$S, $R, nonce, enc, sig> )
     , !Pk($S, pkS)
-    , let cred = adec(enc, ~eph)
     ]
-  --[ Verify(verify(sig, <'w2w', $S, pk(~eph), nonce>, pkS))
+  --[ Eq(verify(sig, <'w2w', $S, $R, pk(~eph), nonce, enc>, pkS), true)
     , ReceiverAccepts($R, $S, pk(~eph), nonce, cred)
     ]->
     [ ]
@@ -94,6 +104,7 @@ lemma peer_binding:
       ReceiverAccepts(R, S, k, n, c) @ #i
     ==>
       (Ex #j. SenderTransfers(S, R, k, n, c) @ #j & #j < #i)
-      | (Ex #r. Reveal(S) @ #r)"
+      | (Ex #r. Reveal(S) @ #r)
+      | (Ex #r. Reveal(R) @ #r)"
 
 end

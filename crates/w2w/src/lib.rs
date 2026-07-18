@@ -98,18 +98,26 @@ pub fn step(state: &State, input: &Input) -> (State, Vec<Output>) {
 }
 
 /// The sender's transfer-authorization binding (DTBS): canonical CBOR over a domain tag, the
-/// credential id, the receiver's key, the consent hash of what the sender saw, and a nonce. The
-/// sender's device signs this; the receiver checks the transfer is bound to ITS key (`peer_bound`).
+/// receiver IDENTITY, the receiver's key, the transferred CREDENTIAL, the consent hash of what the
+/// sender saw, and a nonce.
+///
+/// Binding the receiver identity AND the credential is not incidental: the Tier-3 Tamarin analysis
+/// (`formal/tamarin/w2w.spthy`) showed that binding only the (public) ephemeral key lets an
+/// attacker (a) redirect the sender to believe it is transferring to a different party, and (b)
+/// swap the encrypted credential while keeping a valid signature. Both are closed by including
+/// `receiver_id` and `credential` here.
 pub fn transfer_authorization_binding(
-    credential_id: &str,
+    receiver_id: &str,
     receiver_key: &[u8],
+    credential: &[u8],
     consent_hash: &[u8; 32],
     nonce: u64,
 ) -> Vec<u8> {
     Value::Array(vec![
         Value::Text("eudi-w2w-transfer-v1".into()),
-        Value::Text(credential_id.into()),
+        Value::Text(receiver_id.into()),
         Value::Bytes(receiver_key.to_vec()),
+        Value::Bytes(credential.to_vec()),
         Value::Bytes(consent_hash.to_vec()),
         Value::Uint(nonce),
     ])
@@ -180,14 +188,17 @@ mod tests {
     }
 
     #[test]
-    fn binding_is_specific_to_credential_and_peer() {
+    fn binding_is_specific_to_receiver_and_credential() {
         let ch = [9u8; 32];
-        let a = transfer_authorization_binding("pid:1", b"peerA", &ch, 1);
-        let same = transfer_authorization_binding("pid:1", b"peerA", &ch, 1);
-        let other_peer = transfer_authorization_binding("pid:1", b"peerB", &ch, 1);
-        let other_cred = transfer_authorization_binding("pid:2", b"peerA", &ch, 1);
+        let a = transfer_authorization_binding("wallet-B", b"ephA", b"cred-bytes", &ch, 1);
+        let same = transfer_authorization_binding("wallet-B", b"ephA", b"cred-bytes", &ch, 1);
+        let other_id = transfer_authorization_binding("wallet-C", b"ephA", b"cred-bytes", &ch, 1);
+        let other_key = transfer_authorization_binding("wallet-B", b"ephX", b"cred-bytes", &ch, 1);
+        let other_cred = transfer_authorization_binding("wallet-B", b"ephA", b"other-cred", &ch, 1);
         assert_eq!(a, same);
-        assert_ne!(a, other_peer, "binding must differ per receiver key");
+        // Each field the Tamarin analysis proved must be bound changes the DTBS.
+        assert_ne!(a, other_id, "binding must differ per receiver identity");
+        assert_ne!(a, other_key, "binding must differ per receiver key");
         assert_ne!(a, other_cred, "binding must differ per credential");
     }
 }
