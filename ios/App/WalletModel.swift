@@ -246,6 +246,7 @@ struct ActivityReport: Decodable {
     let presentations: Int
     let issuances: Int
     let payments: Int
+    let transfers: Int
     let redacted: Int
     let counterparties: [String]
 }

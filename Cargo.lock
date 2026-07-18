@@ -1316,6 +1316,7 @@ dependencies = [
  "trust",
  "txnlog",
  "uniffi",
+ "w2w",
  "wua",
  "x509",
 ]

@@ -57,6 +57,8 @@ pub struct Outcome {
     pub persisted_nonces: Vec<u64>,
     /// Whether the core closed the flow.
     pub closed: bool,
+    /// The wallet-to-wallet offer key the core asked to publish, if any (TS09).
+    pub published_offer_key: Option<Vec<u8>>,
     /// Errors from I/O effects (an HTTP failure aborts the cascade for that branch).
     pub errors: Vec<String>,
 }
@@ -219,6 +221,10 @@ impl<S: DeviceSigner, T: TrustFetcher> ShellRunner<S, T> {
                         None
                     }
                 }
+            }
+            Effect::PublishTransferOffer { offered_key } => {
+                outcome.published_offer_key = Some(offered_key);
+                None
             }
             // Browser/PAR/tx-code prompts need a UI or an authorization server; the reference
             // shell leaves them to the platform (the pre-authorized flow doesn't emit them).

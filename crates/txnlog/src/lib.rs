@@ -28,6 +28,8 @@ pub enum Kind {
     Issuance,
     /// A payment authorisation (PSD2/TS12 SCA).
     Payment,
+    /// A wallet-to-wallet credential received from a peer (TS09).
+    Transfer,
 }
 
 impl Kind {
@@ -36,6 +38,7 @@ impl Kind {
             Kind::Presentation => 1,
             Kind::Issuance => 2,
             Kind::Payment => 3,
+            Kind::Transfer => 4,
         }
     }
     /// Stable string form (matches the JSON the FFI/UI reads).
@@ -44,6 +47,7 @@ impl Kind {
             Kind::Presentation => "presentation",
             Kind::Issuance => "issuance",
             Kind::Payment => "payment",
+            Kind::Transfer => "transfer",
         }
     }
 }
@@ -127,7 +131,9 @@ pub struct TransactionLog {
 
 impl TransactionLog {
     pub fn new() -> Self {
-        TransactionLog { entries: Vec::new() }
+        TransactionLog {
+            entries: Vec::new(),
+        }
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -146,7 +152,10 @@ impl TransactionLog {
     /// entire history — persist it (e.g. in the Secure Enclave / a signed anchor) to detect
     /// off-device tampering with the stored log.
     pub fn head(&self) -> [u8; 32] {
-        self.entries.last().map(|e| e.entry_hash).unwrap_or([0u8; 32])
+        self.entries
+            .last()
+            .map(|e| e.entry_hash)
+            .unwrap_or([0u8; 32])
     }
 
     /// Append an interaction, extending the hash chain. Returns the committed entry.
@@ -198,7 +207,8 @@ impl TransactionLog {
     /// counts by kind, how many entries were redacted, and the distinct (non-redacted)
     /// counterparties. Contains no claim values.
     pub fn report(&self) -> Report {
-        let (mut presentations, mut issuances, mut payments, mut redacted) = (0, 0, 0, 0);
+        let (mut presentations, mut issuances, mut payments, mut transfers, mut redacted) =
+            (0, 0, 0, 0, 0);
         let mut counterparties: Vec<String> = Vec::new();
         for e in &self.entries {
             if e.redacted {
@@ -209,6 +219,7 @@ impl TransactionLog {
                 Kind::Presentation => presentations += 1,
                 Kind::Issuance => issuances += 1,
                 Kind::Payment => payments += 1,
+                Kind::Transfer => transfers += 1,
             }
             if !counterparties.contains(&e.counterparty) {
                 counterparties.push(e.counterparty.clone());
@@ -220,6 +231,7 @@ impl TransactionLog {
             presentations,
             issuances,
             payments,
+            transfers,
             redacted,
             counterparties,
         }
@@ -263,6 +275,7 @@ pub struct Report {
     pub presentations: usize,
     pub issuances: usize,
     pub payments: usize,
+    pub transfers: usize,
     pub redacted: usize,
     pub counterparties: Vec<String>,
 }
@@ -442,7 +455,10 @@ mod tests {
         assert_eq!(r.payments, 1);
         assert_eq!(r.issuances, 0);
         // Distinct non-redacted counterparties, sorted; the redacted one is excluded.
-        assert_eq!(r.counterparties, vec!["Acme Store".to_string(), "rp.example".to_string()]);
+        assert_eq!(
+            r.counterparties,
+            vec!["Acme Store".to_string(), "rp.example".to_string()]
+        );
     }
 
     #[test]

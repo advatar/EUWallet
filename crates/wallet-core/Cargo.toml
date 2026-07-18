@@ -34,6 +34,7 @@ presenter = { path = "../presenter" }
 payment = { path = "../payment" }
 txnlog = { path = "../txnlog" }
 catalogue = { path = "../catalogue" }
+w2w = { path = "../w2w" }
 qes = { path = "../qes" }
 serde = { workspace = true }
 serde_json = { workspace = true }

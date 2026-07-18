@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use crypto_backend::AwsLc;
-use crypto_traits::Alg;
+use crypto_traits::{Alg, Digest};
 use oid4vp::{Env, Input, ResolvedTrust, SelectedCredential, State};
 use presenter::{minimum_claim_set, ConsentScreen, PaymentScreen, ScreenDescription, SignScreen};
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,7 @@ enum ActiveFlow {
     Payment,
     Issuance,
     Qes,
+    WalletTransfer,
 }
 
 uniffi::setup_scaffolding!();
@@ -165,6 +166,27 @@ pub enum Event {
     TokenReceived { bound: bool, c_nonce: u64 },
     /// The credential endpoint returned a credential.
     CredentialReceived { format: String, bytes: Vec<u8> },
+    /// The holder wants to RECEIVE a credential from a peer wallet (TS09): publish an offer
+    /// carrying this wallet's key + a fresh nonce over the peer transport (BLE/QR).
+    WalletTransferOfferCreated,
+    /// A peer sent a credential transfer. The core decides IN-CORE whether to accept: the issuer
+    /// signature must validate against the trusted list (`issuer_valid`), and the sender's transfer
+    /// authorization must be bound to THIS wallet's key + this credential (`peer_bound`). None of
+    /// that is a shell boolean.
+    WalletTransferReceived {
+        /// The transferred credential (compact SD-JWT VC).
+        credential: Vec<u8>,
+        /// The credential issuer's certificate chain (DER, leaf-first).
+        issuer_cert_chain: Vec<Vec<u8>>,
+        /// The sending wallet's public key (raw), which signed the transfer authorization.
+        sender_public_key: Vec<u8>,
+        /// The sender's signature over `w2w::transfer_authorization_binding(...)`.
+        sender_signature: Vec<u8>,
+        /// The consent hash the sender bound (its WYSIWYS anchor; carried in the transfer).
+        sender_consent_hash: Vec<u8>,
+        /// The transfer nonce.
+        nonce: u64,
+    },
 }
 
 /// Everything the core asks the shell to do (serialised to JSON at the FFI boundary).
@@ -198,6 +220,9 @@ pub enum Effect {
     RequestToken,
     /// Request the credential with the assembled proof, then send back `CredentialReceived`.
     RequestCredential { proof_jwt: Vec<u8> },
+    /// Publish a wallet-to-wallet receive offer over the peer transport: this wallet's key (the
+    /// binding the sender must target). The shell adds a fresh nonce + BLE/QR transport (TS09).
+    PublishTransferOffer { offered_key: Vec<u8> },
     /// Tear down the exchange.
     Close,
 }
@@ -238,6 +263,9 @@ pub struct Core {
     qes: qes::QesState,
     qes_seen_nonces: Vec<u64>,
     qes_consent_hash: [u8; 32],
+    // Wallet-to-wallet receive (TS09): the receiver machine + the credential it accepted.
+    w2w: w2w::State,
+    w2w_credential: Option<Vec<u8>>,
 }
 
 impl Core {
@@ -271,7 +299,14 @@ impl Core {
             qes: qes::QesState::Idle,
             qes_seen_nonces: Vec::new(),
             qes_consent_hash: [0u8; 32],
+            w2w: w2w::State::Idle,
+            w2w_credential: None,
         }
+    }
+
+    /// The credential accepted via a wallet-to-wallet transfer, if one completed (TS09).
+    pub fn received_transfer_credential(&self) -> Option<Vec<u8>> {
+        self.w2w_credential.clone()
     }
 
     /// The attestation catalogue as JSON (TS11): the credential types the wallet understands, each
@@ -383,8 +418,8 @@ impl Core {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            r#"{{"total":{},"presentations":{},"issuances":{},"payments":{},"redacted":{},"counterparties":[{}]}}"#,
-            r.total, r.presentations, r.issuances, r.payments, r.redacted, parties
+            r#"{{"total":{},"presentations":{},"issuances":{},"payments":{},"transfers":{},"redacted":{},"counterparties":[{}]}}"#,
+            r.total, r.presentations, r.issuances, r.payments, r.transfers, r.redacted, parties
         )
     }
 
@@ -546,6 +581,38 @@ impl Core {
             }
             Event::QesAuthorized => self.drive_qes(qes::Input::UserAuthorized),
             Event::QesDeclined => self.drive_qes(qes::Input::UserDeclined),
+            Event::WalletTransferOfferCreated => {
+                self.active = ActiveFlow::WalletTransfer;
+                self.drive_w2w(w2w::Input::CreateOffer)
+            }
+            Event::WalletTransferReceived {
+                credential,
+                issuer_cert_chain,
+                sender_public_key,
+                sender_signature,
+                sender_consent_hash,
+                nonce,
+            } => {
+                // Decide acceptance IN-CORE (never shell booleans):
+                //  * issuer_valid — the issuer chain is trusted AND signs this credential;
+                //  * peer_bound   — the sender's authorization is bound to THIS wallet's key and
+                //    this exact credential (defeats forged/misdirected transfers).
+                let issuer_valid =
+                    self.received_credential_issuer_valid(&credential, &issuer_cert_chain);
+                let peer_bound = self.transfer_is_peer_bound(
+                    &credential,
+                    &sender_public_key,
+                    &sender_signature,
+                    &sender_consent_hash,
+                    nonce,
+                );
+                self.active = ActiveFlow::WalletTransfer;
+                self.drive_w2w(w2w::Input::TransferReceived {
+                    issuer_valid,
+                    peer_bound,
+                    credential,
+                })
+            }
             Event::CredentialOfferReceived {
                 offer,
                 issuer_cert_chain,
@@ -916,6 +983,99 @@ impl Core {
             payment: None,
         };
         self.log.append(&AwsLc, entry);
+    }
+
+    // --- Wallet-to-wallet receive (TS09) ---
+
+    fn drive_w2w(&mut self, input: w2w::Input) -> Vec<Effect> {
+        let (next, outputs) = w2w::step(&self.w2w, &input);
+        self.w2w = next;
+        outputs
+            .into_iter()
+            .flat_map(|o| self.translate_w2w(o))
+            .collect()
+    }
+
+    fn translate_w2w(&mut self, output: w2w::Output) -> Vec<Effect> {
+        use w2w::Output as WO;
+        match output {
+            // Offer this wallet's key as the binding target; the shell adds the nonce + transport.
+            WO::PublishOffer => vec![Effect::PublishTransferOffer {
+                offered_key: self.device_public_key.clone(),
+            }],
+            WO::StoreCredential(credential) => {
+                // Record the accepted transfer (privacy-preserving: no claim values) and hold the
+                // credential for the shell to persist.
+                let entry = txnlog::NewEntry {
+                    epoch: self.now_epoch,
+                    kind: txnlog::Kind::Transfer,
+                    counterparty: "peer-wallet".into(),
+                    consent_hash: AwsLc.sha256(&credential),
+                    claim_paths: Vec::new(),
+                    outcome: txnlog::Outcome::Completed,
+                    payment: None,
+                };
+                self.log.append(&AwsLc, entry);
+                self.w2w_credential = Some(credential);
+                vec![]
+            }
+            WO::Close => vec![Effect::Close],
+        }
+    }
+
+    /// In-core issuer validity for a received transfer: the issuer chain must be trusted (a PID /
+    /// attestation anchor) AND must sign the transferred SD-JWT VC.
+    fn received_credential_issuer_valid(
+        &self,
+        credential: &[u8],
+        issuer_chain: &[Vec<u8>],
+    ) -> bool {
+        if !self.resolve_issuer(issuer_chain) {
+            return false;
+        }
+        let Some(issuer_key) = issuer_chain
+            .first()
+            .and_then(|der| x509::parse_cert(der).ok())
+            .map(|c| c.public_key_raw)
+        else {
+            return false;
+        };
+        core::str::from_utf8(credential)
+            .ok()
+            .and_then(|s| sdjwt::SdJwtVc::parse(s).ok())
+            .map(|vc| {
+                vc.verify_and_disclose(&AwsLc, &AwsLc, &issuer_key, Alg::Es256)
+                    .is_ok()
+            })
+            .unwrap_or(false)
+    }
+
+    /// In-core peer binding: the sender's authorization must be signed over the transfer binding
+    /// for THIS wallet's identity + key + this exact credential (and the sender's carried consent
+    /// hash + nonce), by the sender's key. This is what makes a transfer non-misdirectable.
+    fn transfer_is_peer_bound(
+        &self,
+        credential: &[u8],
+        sender_public_key: &[u8],
+        sender_signature: &[u8],
+        sender_consent_hash: &[u8],
+        nonce: u64,
+    ) -> bool {
+        use crypto_traits::Verifier;
+        let consent_hash: [u8; 32] = match sender_consent_hash.try_into() {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+        let binding = w2w::transfer_authorization_binding(
+            &self.config.wallet_client_id,
+            &self.device_public_key,
+            credential,
+            &consent_hash,
+            nonce,
+        );
+        AwsLc
+            .verify(Alg::Es256, sender_public_key, &binding, sender_signature)
+            .is_ok()
     }
 
     fn consent_screen(&self) -> ScreenDescription {
