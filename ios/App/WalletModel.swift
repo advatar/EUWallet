@@ -27,10 +27,60 @@ final class WalletModel: ObservableObject {
     @Published private(set) var report: ActivityReport?
     /// The export sheet's content when presented (TS10).
     @Published var exportPreview: ExportPreview?
+    /// The credentials shown on the wallet home, decoded from the held credential's disclosures
+    /// with display names from the attestation catalogue (TS11).
+    @Published private(set) var credentials: [WalletCredential] = []
 
     private var executor: EffectExecutor?
     /// The engine whose log/report/export the P1 screens operate on (the most recent flows).
     private var engine: WalletEngine?
+
+    init() {
+        loadWallet()
+    }
+
+    /// Populate the wallet's held credentials from the demo scenario, decoding each disclosure
+    /// (`[salt, name, value]`) to a display value and labelling it via the attestation catalogue.
+    private func loadWallet() {
+        let scenario = DemoWallet().scenario()
+        let pidType = catalogueItems().first { $0.id == "urn:eudi:pid:1" }
+
+        // claim path -> display name, from the catalogue.
+        var display: [String: String] = [:]
+        for c in pidType?.claims ?? [] { display[c.path] = c.displayName }
+
+        // Decode disclosures: { "<claim>": "<base64url([salt,name,value])>" }.
+        var claims: [(String, String)] = []
+        if let data = scenario.disclosuresByClaimJson.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+            for (claim, disclosureB64) in obj.sorted(by: { $0.key < $1.key }) {
+                guard let raw = Self.base64urlDecode(disclosureB64),
+                      let arr = try? JSONSerialization.jsonObject(with: raw) as? [Any],
+                      arr.count == 3
+                else { continue }
+                let value = String(describing: arr[2])
+                claims.append((display[claim] ?? claim, value))
+            }
+        }
+        let holder = claims.first { $0.0 == "Family name" }.map { "A. \($0.1)" } ?? "EU Citizen"
+        credentials = [
+            WalletCredential(
+                id: "urn:eudi:pid:1",
+                typeName: pidType?.displayName ?? "Person Identification Data",
+                issuer: "issuer.example",
+                holder: holder,
+                claims: claims,
+                gradientHex: (0x2A5BD7, 0x6E48D9))
+        ]
+    }
+
+    /// Base64url (no padding) → bytes.
+    private static func base64urlDecode(_ s: String) -> Data? {
+        var b = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while b.count % 4 != 0 { b.append("=") }
+        return Data(base64Encoded: b)
+    }
+
 
     /// Build a fresh engine loaded with the demo credential, device key, and trusted list.
     private func makeEngine() -> (WalletEngine, DemoWallet, DemoScenario) {
@@ -257,6 +307,18 @@ struct ExportPreview: Identifiable {
     let json: String
     let verifies: Bool
     let tamperDetected: Bool
+}
+
+/// A credential shown on the wallet home — decoded from the held credential, labelled via the
+/// catalogue. `claims` are (display name, value) pairs; the card never shows raw disclosure blobs.
+struct WalletCredential: Identifiable {
+    let id: String
+    let typeName: String
+    let issuer: String
+    let holder: String
+    let claims: [(String, String)]
+    /// Two hex colors for the card gradient.
+    let gradientHex: (UInt32, UInt32)
 }
 
 /// One attestation-catalogue entry (TS11).

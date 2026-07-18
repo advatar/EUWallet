@@ -41,13 +41,13 @@ struct ContentView: View {
         case .onboarding:
             OnboardingView { nav.send(.finishedOnboarding) }
         case .home:
-            HomeView(
-                startPresentation: { nav.send(.startPresentation); model.startPresentation() },
-                startPayment: { nav.send(.startPresentation); model.startPayment() },
-                openHistory: { model.reloadHistory(); nav.send(.openHistory) },
-                openCatalogue: { nav.send(.openCatalogue) },
-                openSettings: { nav.send(.openSettings) },
-                historyCount: model.history.count)
+            WalletHomeView(
+                model: model,
+                onPresent: { nav.send(.startPresentation); model.startPresentation() },
+                onPay: { nav.send(.startPresentation); model.startPayment() },
+                onOpenHistory: { model.reloadHistory(); nav.send(.openHistory) },
+                onOpenCatalogue: { nav.send(.openCatalogue) },
+                onOpenSettings: { nav.send(.openSettings) })
         case .presenting:
             PresentingContainer(model: model) {
                 model.reset()
@@ -69,6 +69,7 @@ struct ContentView: View {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-autostart"), i + 1 < args.count else { return }
         switch args[i + 1] {
+        case "home": nav.send(.finishedOnboarding)
         case "presentation": nav.send(.startPresentation); model.startPresentation()
         case "payment": nav.send(.startPresentation); model.startPayment()
         case "history":
@@ -112,70 +113,6 @@ struct OnboardingView: View {
 }
 
 /// Flow picker. Each row drives one real core flow or opens a P1 wallet screen.
-struct HomeView: View {
-    let startPresentation: () -> Void
-    let startPayment: () -> Void
-    let openHistory: () -> Void
-    let openCatalogue: () -> Void
-    let openSettings: () -> Void
-    let historyCount: Int
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Running the real Rust core on-device.")
-                .font(.subheadline).foregroundStyle(.secondary)
-
-            Button(action: startPresentation) {
-                Label {
-                    VStack(alignment: .leading) {
-                        Text("Identity presentation").font(.headline)
-                        Text("OpenID4VP · data-minimised consent").font(.caption)
-                    }
-                } icon: { Image(systemName: "person.text.rectangle") }
-            }
-            .buttonStyle(.bordered)
-
-            Button(action: startPayment) {
-                Label {
-                    VStack(alignment: .leading) {
-                        Text("Payment authorisation").font(.headline)
-                        Text("PSD2/TS12 · strong customer authentication").font(.caption)
-                    }
-                } icon: { Image(systemName: "creditcard") }
-            }
-            .buttonStyle(.bordered)
-
-            Button(action: openHistory) {
-                Label {
-                    VStack(alignment: .leading) {
-                        Text("Transaction history").font(.headline)
-                        Text("\(historyCount) recorded · erase & report · paths, never values")
-                            .font(.caption)
-                    }
-                } icon: { Image(systemName: "list.bullet.rectangle") }
-            }
-            .buttonStyle(.bordered)
-
-            Button(action: openCatalogue) {
-                Label {
-                    VStack(alignment: .leading) {
-                        Text("Credential catalogue").font(.headline)
-                        Text("TS11 · attestation types this wallet understands").font(.caption)
-                    }
-                } icon: { Image(systemName: "books.vertical") }
-            }
-            .buttonStyle(.bordered)
-
-            Spacer()
-            Button(action: openSettings) {
-                Label("Settings", systemImage: "gear")
-            }
-            .font(.subheadline)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
 /// The container the navigation machine presents for an in-flight flow.
 struct PresentingContainer: View {
     @ObservedObject var model: WalletModel
