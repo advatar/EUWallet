@@ -111,8 +111,12 @@ pub struct Entry {
     pub payment: Option<PaymentSummary>,
     /// Hash of the previous entry ( `[0u8; 32]` for the first entry).
     pub prev_hash: [u8; 32],
-    /// `H(canonical(this entry, including prev_hash))`.
+    /// `H(canonical(this entry, including prev_hash))`. For a redacted entry this is the ORIGINAL
+    /// hash, retained so the chain still links even though the content is gone.
     pub entry_hash: [u8; 32],
+    /// True once the content has been erased (TS07). A redacted entry is a tombstone: its position
+    /// and hash remain (so deletion is evident and the chain intact), but its PII fields are blank.
+    pub redacted: bool,
 }
 
 /// The append-only, hash-chained transaction log.
@@ -161,8 +165,64 @@ impl TransactionLog {
             payment: e.payment,
             prev_hash,
             entry_hash,
+            redacted: false,
         });
         self.entries.last().expect("just pushed")
+    }
+
+    /// Erase the content of the entry at `seq` — the data-subject right to erasure (TS07). Leaves a
+    /// TOMBSTONE: the position, `prev_hash`, and `entry_hash` remain (so the chain still links and
+    /// the fact that an entry existed-and-was-deleted stays evident), but the counterparty, claim
+    /// paths, consent hash, and payment detail are blanked. One-way; returns whether `seq` existed.
+    pub fn redact(&mut self, seq: u64) -> bool {
+        match self.entries.get_mut(seq as usize) {
+            Some(e) => {
+                e.redacted = true;
+                e.counterparty = String::new();
+                e.claim_paths = Vec::new();
+                e.consent_hash = [0u8; 32];
+                e.payment = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Erase the ENTIRE log (full right-to-erasure / device reset). After this the chain restarts
+    /// from empty; there is nothing left to link to.
+    pub fn wipe(&mut self) {
+        self.entries.clear();
+    }
+
+    /// A privacy-preserving activity summary for data-subject access / oversight reporting (TS08):
+    /// counts by kind, how many entries were redacted, and the distinct (non-redacted)
+    /// counterparties. Contains no claim values.
+    pub fn report(&self) -> Report {
+        let (mut presentations, mut issuances, mut payments, mut redacted) = (0, 0, 0, 0);
+        let mut counterparties: Vec<String> = Vec::new();
+        for e in &self.entries {
+            if e.redacted {
+                redacted += 1;
+                continue;
+            }
+            match e.kind {
+                Kind::Presentation => presentations += 1,
+                Kind::Issuance => issuances += 1,
+                Kind::Payment => payments += 1,
+            }
+            if !counterparties.contains(&e.counterparty) {
+                counterparties.push(e.counterparty.clone());
+            }
+        }
+        counterparties.sort();
+        Report {
+            total: self.entries.len(),
+            presentations,
+            issuances,
+            payments,
+            redacted,
+            counterparties,
+        }
     }
 
     /// Recompute the whole chain and check it is intact: gapless monotonic `seq`, correct `prev`
@@ -173,22 +233,38 @@ impl TransactionLog {
             if e.seq != i as u64 || e.prev_hash != prev {
                 return false;
             }
-            let ne = NewEntry {
-                epoch: e.epoch,
-                kind: e.kind,
-                counterparty: e.counterparty.clone(),
-                consent_hash: e.consent_hash,
-                claim_paths: e.claim_paths.clone(),
-                outcome: e.outcome,
-                payment: e.payment.clone(),
-            };
-            if hash_entry(digest, e.seq, e.prev_hash, &ne) != e.entry_hash {
-                return false;
+            // A redacted entry's content is gone, so its hash cannot be recomputed; the retained
+            // `entry_hash` is trusted here but stays pinned by the NEXT entry's `prev_hash`, so it
+            // cannot be altered without breaking the chain. Non-redacted entries are recomputed.
+            if !e.redacted {
+                let ne = NewEntry {
+                    epoch: e.epoch,
+                    kind: e.kind,
+                    counterparty: e.counterparty.clone(),
+                    consent_hash: e.consent_hash,
+                    claim_paths: e.claim_paths.clone(),
+                    outcome: e.outcome,
+                    payment: e.payment.clone(),
+                };
+                if hash_entry(digest, e.seq, e.prev_hash, &ne) != e.entry_hash {
+                    return false;
+                }
             }
             prev = e.entry_hash;
         }
         true
     }
+}
+
+/// A privacy-preserving activity summary (TS08). Counts and distinct counterparties only.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Report {
+    pub total: usize,
+    pub presentations: usize,
+    pub issuances: usize,
+    pub payments: usize,
+    pub redacted: usize,
+    pub counterparties: Vec<String>,
 }
 
 /// Deterministic, length-prefixed serialisation of an entry, then SHA-256. Length prefixes make
@@ -291,6 +367,82 @@ mod tests {
         // Remove the middle entry: seq gap + broken linkage.
         log.entries.remove(1);
         assert!(!log.verify_integrity(&AwsLc));
+    }
+
+    #[test]
+    fn redaction_erases_content_but_preserves_the_chain() {
+        let mut log = TransactionLog::new();
+        log.append(&AwsLc, presentation(1000, "rp.example", &["age_over_18"]));
+        log.append(&AwsLc, presentation(1001, "shop.example", &["family_name"]));
+        log.append(&AwsLc, presentation(1002, "third.example", &["birthdate"]));
+        let head_before = log.head();
+
+        // Erase the middle entry (data-subject right to erasure).
+        assert!(log.redact(1));
+        let e = &log.entries()[1];
+        assert!(e.redacted);
+        assert_eq!(e.counterparty, ""); // content gone
+        assert!(e.claim_paths.is_empty());
+        assert_eq!(e.consent_hash, [0u8; 32]);
+
+        // The chain still verifies and the head is unchanged (linkage intact, deletion evident).
+        assert!(log.verify_integrity(&AwsLc), "chain intact after redaction");
+        assert_eq!(log.head(), head_before, "head unchanged: hashes retained");
+        // The un-redacted neighbours are untouched.
+        assert_eq!(log.entries()[0].counterparty, "rp.example");
+        assert_eq!(log.entries()[2].counterparty, "third.example");
+    }
+
+    #[test]
+    fn redacting_a_missing_entry_is_a_noop() {
+        let mut log = TransactionLog::new();
+        log.append(&AwsLc, presentation(1000, "rp.example", &["x"]));
+        assert!(!log.redact(5));
+        assert!(log.verify_integrity(&AwsLc));
+    }
+
+    #[test]
+    fn wipe_erases_everything() {
+        let mut log = TransactionLog::new();
+        log.append(&AwsLc, presentation(1000, "a", &["x"]));
+        log.append(&AwsLc, presentation(1001, "b", &["y"]));
+        log.wipe();
+        assert!(log.is_empty());
+        assert_eq!(log.head(), [0u8; 32]);
+        assert!(log.verify_integrity(&AwsLc));
+    }
+
+    #[test]
+    fn report_summarises_without_values() {
+        let mut log = TransactionLog::new();
+        log.append(&AwsLc, presentation(1000, "rp.example", &["age_over_18"]));
+        log.append(&AwsLc, presentation(1001, "rp.example", &["family_name"])); // same RP again
+        log.append(
+            &AwsLc,
+            NewEntry {
+                epoch: 1002,
+                kind: Kind::Payment,
+                counterparty: "Acme Store".into(),
+                consent_hash: [1u8; 32],
+                claim_paths: vec![],
+                outcome: Outcome::Completed,
+                payment: Some(PaymentSummary {
+                    payee: "Acme Store".into(),
+                    amount_minor: 500,
+                    currency: "EUR".into(),
+                }),
+            },
+        );
+        log.redact(0); // erase one presentation
+
+        let r = log.report();
+        assert_eq!(r.total, 3);
+        assert_eq!(r.redacted, 1);
+        assert_eq!(r.presentations, 1); // one remains un-redacted
+        assert_eq!(r.payments, 1);
+        assert_eq!(r.issuances, 0);
+        // Distinct non-redacted counterparties, sorted; the redacted one is excluded.
+        assert_eq!(r.counterparties, vec!["Acme Store".to_string(), "rp.example".to_string()]);
     }
 
     #[test]

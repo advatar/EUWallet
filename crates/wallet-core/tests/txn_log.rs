@@ -83,4 +83,27 @@ fn presentation_and_payment_are_logged_without_values() {
         !json.contains("Andersson"),
         "the family_name VALUE must never appear in the audit log: {json}"
     );
+
+    // --- Reporting (TS08): a privacy-preserving activity summary. ---
+    let report = core.transaction_report_json();
+    assert!(report.contains(r#""total":2"#));
+    assert!(report.contains(r#""presentations":1"#));
+    assert!(report.contains(r#""payments":1"#));
+    assert!(report.contains("rp.example") && report.contains("Acme Store"));
+
+    // --- Deletion (TS07): erase the presentation; the chain stays intact. ---
+    assert!(core.redact_transaction(0));
+    assert!(
+        core.transaction_log().verify_integrity(&crypto_backend::AwsLc),
+        "chain remains intact after erasure"
+    );
+    let after = core.transaction_log_json();
+    assert!(!after.contains("age_over_18"), "erased entry's paths are gone: {after}");
+    let report2 = core.transaction_report_json();
+    assert!(report2.contains(r#""redacted":1"#));
+    assert!(report2.contains(r#""presentations":0"#), "the erased presentation no longer counts");
+
+    // Full wipe clears everything.
+    core.wipe_transaction_log();
+    assert_eq!(core.transaction_log().len(), 0);
 }

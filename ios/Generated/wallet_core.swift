@@ -431,6 +431,30 @@ fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -693,10 +717,25 @@ public protocol WalletEngineProtocol : AnyObject {
     func loadWua(wuaJwt: Data, providerPublicKey: Data)  -> String
     
     /**
+     * Erase one transaction-log entry (right to erasure, TS07). Chain-preserving tombstone.
+     */
+    func redactTransaction(seq: UInt64)  -> Bool
+    
+    /**
      * The transaction (audit) log as JSON — completed presentations, payments, issuances. Records
      * claim paths + a committing consent hash, never raw claim values (TS06). For the history UI.
      */
     func transactionLogJson()  -> String
+    
+    /**
+     * A privacy-preserving activity report as JSON (TS08).
+     */
+    func transactionReportJson()  -> String
+    
+    /**
+     * Erase the entire transaction log (TS07).
+     */
+    func wipeTransactionLog() 
     
 }
 
@@ -838,6 +877,17 @@ open func loadWua(wuaJwt: Data, providerPublicKey: Data) -> String {
 }
     
     /**
+     * Erase one transaction-log entry (right to erasure, TS07). Chain-preserving tombstone.
+     */
+open func redactTransaction(seq: UInt64) -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_redact_transaction(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(seq),$0
+    )
+})
+}
+    
+    /**
      * The transaction (audit) log as JSON — completed presentations, payments, issuances. Records
      * claim paths + a committing consent hash, never raw claim values (TS06). For the history UI.
      */
@@ -846,6 +896,25 @@ open func transactionLogJson() -> String {
     uniffi_wallet_core_fn_method_walletengine_transaction_log_json(self.uniffiClonePointer(),$0
     )
 })
+}
+    
+    /**
+     * A privacy-preserving activity report as JSON (TS08).
+     */
+open func transactionReportJson() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_transaction_report_json(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Erase the entire transaction log (TS07).
+     */
+open func wipeTransactionLog() {try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_wipe_transaction_log(self.uniffiClonePointer(),$0
+    )
+}
 }
     
 
@@ -1208,7 +1277,16 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallet_core_checksum_method_walletengine_load_wua() != 52241) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_wallet_core_checksum_method_walletengine_redact_transaction() != 36608) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_wallet_core_checksum_method_walletengine_transaction_log_json() != 50296) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_transaction_report_json() != 312) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_wipe_transaction_log() != 37351) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_constructor_demowallet_new() != 41997) {

@@ -286,6 +286,35 @@ impl Core {
         format!("[{}]", entries.join(","))
     }
 
+    /// Erase one transaction-log entry's content (data-subject right to erasure, TS07). Leaves a
+    /// tamper-evident tombstone: the chain stays intact and the deletion is auditable, but the
+    /// counterparty / claim paths / consent hash / payment detail are gone. Returns whether `seq`
+    /// existed.
+    pub fn redact_transaction(&mut self, seq: u64) -> bool {
+        self.log.redact(seq)
+    }
+
+    /// Erase the entire transaction log (full erasure / reset).
+    pub fn wipe_transaction_log(&mut self) {
+        self.log.wipe();
+    }
+
+    /// A privacy-preserving activity report as JSON (TS08): counts by kind, redaction count, and
+    /// distinct counterparties. No claim values.
+    pub fn transaction_report_json(&self) -> String {
+        let r = self.log.report();
+        let parties = r
+            .counterparties
+            .iter()
+            .map(|c| format!("{:?}", c))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"total":{},"presentations":{},"issuances":{},"payments":{},"redacted":{},"counterparties":[{}]}}"#,
+            r.total, r.presentations, r.issuances, r.payments, r.redacted, parties
+        )
+    }
+
     /// Verify + store a Token Status List used to check credential revocation before presenting.
     pub fn load_status_list(
         &mut self,
@@ -904,6 +933,24 @@ impl WalletEngine {
     /// claim paths + a committing consent hash, never raw claim values (TS06). For the history UI.
     pub fn transaction_log_json(&self) -> String {
         self.inner.lock().expect("poisoned").transaction_log_json()
+    }
+
+    /// Erase one transaction-log entry (right to erasure, TS07). Chain-preserving tombstone.
+    pub fn redact_transaction(&self, seq: u64) -> bool {
+        self.inner.lock().expect("poisoned").redact_transaction(seq)
+    }
+
+    /// Erase the entire transaction log (TS07).
+    pub fn wipe_transaction_log(&self) {
+        self.inner.lock().expect("poisoned").wipe_transaction_log();
+    }
+
+    /// A privacy-preserving activity report as JSON (TS08).
+    pub fn transaction_report_json(&self) -> String {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .transaction_report_json()
     }
 
     /// Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
