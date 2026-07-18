@@ -14,6 +14,8 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use crypto_traits::{Alg, Digest, Verifier};
 use serde_json::Value as Json;
 
+pub mod dcql;
+
 /// States of the remote-presentation flow.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
@@ -392,15 +394,21 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         .and_then(|v| v.as_str())
         .map(String::from);
     let purpose = p.get("purpose").and_then(|v| v.as_str()).map(String::from);
-    let requested_claims = p
-        .get("claims")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    // Prefer the real DCQL query (OpenID4VP 1.0 §6); fall back to the legacy flat `claims` array.
+    let requested_claims = match p.get("dcql_query") {
+        Some(q) => dcql::DcqlQuery::from_value(q)
+            .map(|dq| dq.requested_claim_paths())
+            .unwrap_or_default(),
+        None => p
+            .get("claims")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
 
     let signed_payload = format!("{}.{}", parts[0], parts[1]).into_bytes();
     let signature = Base64UrlUnpadded::decode_vec(parts[2]).map_err(|_| ())?;
