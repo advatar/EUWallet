@@ -686,6 +686,11 @@ public func FfiConverterTypeDemoWallet_lower(_ value: DemoWallet) -> UnsafeMutab
 public protocol WalletEngineProtocol : AnyObject {
     
     /**
+     * A portable, integrity-protected export of the holder's wallet data as JSON (TS10).
+     */
+    func exportJson()  -> String
+    
+    /**
      * Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
      * event, returns a `{"error": "..."}` object instead of an array.
      */
@@ -805,6 +810,16 @@ public convenience init(walletClientId: String, deviceKeyRef: String) {
 
     
 
+    
+    /**
+     * A portable, integrity-protected export of the holder's wallet data as JSON (TS10).
+     */
+open func exportJson() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_export_json(self.uniffiClonePointer(),$0
+    )
+})
+}
     
     /**
      * Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
@@ -1237,6 +1252,16 @@ fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
         return seq
     }
 }
+/**
+ * Verify a wallet export bundle's integrity hash (TS10). Callable from the shell before re-import.
+ */
+public func verifyWalletExport(json: String) -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_wallet_core_fn_func_verify_wallet_export(
+        FfiConverterString.lower(json),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -1253,10 +1278,16 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_wallet_core_checksum_func_verify_wallet_export() != 147) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_wallet_core_checksum_method_demowallet_scenario() != 15393) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_demowallet_sign_device() != 56295) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_export_json() != 59242) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_handle_event_json() != 35687) {

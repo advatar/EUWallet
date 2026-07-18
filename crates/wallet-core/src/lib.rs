@@ -35,6 +35,14 @@ uniffi::setup_scaffolding!();
 mod demo;
 pub use demo::{DemoScenario, DemoWallet};
 
+pub mod export;
+
+/// Verify a wallet export bundle's integrity hash (TS10). Callable from the shell before re-import.
+#[uniffi::export]
+pub fn verify_wallet_export(json: String) -> bool {
+    export::verify_export(&AwsLc, &json)
+}
+
 fn parse_format(s: &str) -> Option<oid4vci::CredentialFormat> {
     match s {
         "mso_mdoc" => Some(oid4vci::CredentialFormat::MsoMdoc),
@@ -297,6 +305,13 @@ impl Core {
     /// Erase the entire transaction log (full erasure / reset).
     pub fn wipe_transaction_log(&mut self) {
         self.log.wipe();
+    }
+
+    /// A portable, integrity-protected export of the holder's own wallet data (TS10): the held
+    /// credential + the transaction log, under a SHA-256 hash over canonical bytes. The holder's
+    /// explicit action; the shell adds at-rest encryption before it leaves the device.
+    pub fn export_json(&self) -> String {
+        export::export_json(&AwsLc, self.now_epoch, self.credential.as_ref(), &self.log)
     }
 
     /// A privacy-preserving activity report as JSON (TS08): counts by kind, redaction count, and
@@ -951,6 +966,11 @@ impl WalletEngine {
             .lock()
             .expect("poisoned")
             .transaction_report_json()
+    }
+
+    /// A portable, integrity-protected export of the holder's wallet data as JSON (TS10).
+    pub fn export_json(&self) -> String {
+        self.inner.lock().expect("poisoned").export_json()
     }
 
     /// Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed

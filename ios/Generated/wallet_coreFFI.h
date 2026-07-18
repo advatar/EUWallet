@@ -292,6 +292,11 @@ void uniffi_wallet_core_fn_free_walletengine(void*_Nonnull ptr, RustCallStatus *
 void*_Nonnull uniffi_wallet_core_fn_constructor_walletengine_new(RustBuffer wallet_client_id, RustBuffer device_key_ref, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_EXPORT_JSON
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_EXPORT_JSON
+RustBuffer uniffi_wallet_core_fn_method_walletengine_export_json(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_HANDLE_EVENT_JSON
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_HANDLE_EVENT_JSON
 RustBuffer uniffi_wallet_core_fn_method_walletengine_handle_event_json(void*_Nonnull ptr, RustBuffer event_json, RustCallStatus *_Nonnull out_status
@@ -340,6 +345,11 @@ RustBuffer uniffi_wallet_core_fn_method_walletengine_transaction_report_json(voi
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_WIPE_TRANSACTION_LOG
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_WIPE_TRANSACTION_LOG
 void uniffi_wallet_core_fn_method_walletengine_wipe_transaction_log(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_FUNC_VERIFY_WALLET_EXPORT
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_FUNC_VERIFY_WALLET_EXPORT
+int8_t uniffi_wallet_core_fn_func_verify_wallet_export(RustBuffer json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_WALLET_CORE_RUSTBUFFER_ALLOC
@@ -622,6 +632,12 @@ void ffi_wallet_core_rust_future_free_void(uint64_t handle
 void ffi_wallet_core_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_FUNC_VERIFY_WALLET_EXPORT
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_FUNC_VERIFY_WALLET_EXPORT
+uint16_t uniffi_wallet_core_checksum_func_verify_wallet_export(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_DEMOWALLET_SCENARIO
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_DEMOWALLET_SCENARIO
 uint16_t uniffi_wallet_core_checksum_method_demowallet_scenario(void
@@ -631,6 +647,12 @@ uint16_t uniffi_wallet_core_checksum_method_demowallet_scenario(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_DEMOWALLET_SIGN_DEVICE
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_DEMOWALLET_SIGN_DEVICE
 uint16_t uniffi_wallet_core_checksum_method_demowallet_sign_device(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_EXPORT_JSON
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_EXPORT_JSON
+uint16_t uniffi_wallet_core_checksum_method_walletengine_export_json(void
     
 );
 #endif
