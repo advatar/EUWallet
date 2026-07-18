@@ -43,6 +43,14 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(nav.state, .home)
     }
 
+    func testOpenCatalogueAndBack() {
+        let nav = NavigationMachine(state: .home)
+        nav.send(.openCatalogue)
+        XCTAssertEqual(nav.state, .catalogue)
+        nav.send(.cancelled)
+        XCTAssertEqual(nav.state, .home)
+    }
+
     func testCancelReturnsHome() {
         let nav = NavigationMachine(state: .presenting)
         nav.send(.cancelled)

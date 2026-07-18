@@ -336,13 +336,14 @@ impl Core {
                     None => String::new(),
                 };
                 format!(
-                    r#"{{"seq":{},"epoch":{},"kind":"{}","counterparty":{:?},"outcome":"{}","consentHash":"{}","claimPaths":[{}]{}}}"#,
+                    r#"{{"seq":{},"epoch":{},"kind":"{}","counterparty":{:?},"outcome":"{}","consentHash":"{}","redacted":{},"claimPaths":[{}]{}}}"#,
                     e.seq,
                     e.epoch,
                     e.kind.name(),
                     e.counterparty,
                     e.outcome.name(),
                     hex32(&e.consent_hash),
+                    e.redacted,
                     claims,
                     payment,
                 )

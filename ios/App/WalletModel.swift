@@ -3,10 +3,11 @@ import Foundation
 // WalletShell sources, the generated UniFFI bindings, and these App sources are compiled into one
 // app module (see ios/project.yml), so no cross-module import is needed.
 
-/// Orchestrates the real Rust core for the demo app. Each flow gets a FRESH engine (the core is a
-/// one-shot state machine that ends in `Done`), wired to the shell's `EffectExecutor`. The device
-/// signer and RP trust come from `DemoWallet` (real aws-lc-rs keys) so the on-simulator run is a
-/// genuine end-to-end flow — not a scripted mock — even without the Secure Enclave or a live RP.
+/// Orchestrates the real Rust core for the demo app. Flows run through a WALLET ENGINE that is
+/// kept alive afterwards, so the P1 screens (history, deletion, report, export) operate on the
+/// engine's real in-core state over the FFI — redaction, wiping, reporting, and export are the
+/// Rust core's own functions, not Swift re-implementations. The device signer and RP trust come
+/// from `DemoWallet` (real aws-lc-rs keys), so every run is a genuine end-to-end flow.
 @MainActor
 final class WalletModel: ObservableObject {
     enum Phase: Equatable {
@@ -19,15 +20,19 @@ final class WalletModel: ObservableObject {
 
     @Published private(set) var phase: Phase = .home
     @Published private(set) var log: [String] = []
-    /// Accumulated audit-log entries across flows. Each one-shot flow engine records one entry;
-    /// we absorb it here so the History screen shows the running privacy-preserving log (TS06).
+    /// The wallet engine's transaction log (TS06), decoded straight from the core's JSON. Redacted
+    /// entries appear as tombstones. Reloaded after every operation that can change it.
     @Published private(set) var history: [HistoryItem] = []
+    /// The privacy-preserving activity report (TS08), from the core.
+    @Published private(set) var report: ActivityReport?
+    /// The export sheet's content when presented (TS10).
+    @Published var exportPreview: ExportPreview?
 
     private var executor: EffectExecutor?
+    /// The engine whose log/report/export the P1 screens operate on (the most recent flows).
     private var engine: WalletEngine?
 
-    /// Build a fresh engine loaded with the demo credential, device key, and trusted list. The
-    /// core is a one-shot state machine, so each flow gets its own engine.
+    /// Build a fresh engine loaded with the demo credential, device key, and trusted list.
     private func makeEngine() -> (WalletEngine, DemoWallet, DemoScenario) {
         let engine = WalletEngine(walletClientId: "wallet.example", deviceKeyRef: "device-key")
         let demo = DemoWallet()
@@ -112,12 +117,12 @@ final class WalletModel: ObservableObject {
             if wasPayment {
                 await executor?.send(eventJson: WalletEventJSON.paymentApproved())
                 note("Device signed the dynamic-linking binding; auth code posted to the PSP.")
-                absorbLog()
+                reloadHistory()
                 phase = .done("Payment authorised — SCA auth code delivered.")
             } else {
                 await executor?.send(eventJson: WalletEventJSON.userConsented())
                 note("Device signed the key-binding JWT; vp_token posted to the RP.")
-                absorbLog()
+                reloadHistory()
                 phase = .done("Presentation delivered — only the requested claim was shared.")
             }
         }
@@ -138,47 +143,93 @@ final class WalletModel: ObservableObject {
     }
 
     /// Demo/screenshot affordance: drive a full presentation AND a full payment to completion
-    /// SILENTLY (no-op render, so `phase`/navigation are untouched), populating the history.
-    func seedHistoryForDemo() {
+    /// SILENTLY (no-op render) through ONE engine — exactly like the core's own txn_log test — so
+    /// the wallet log holds both entries and the P1 screens operate on real accumulated state.
+    /// `redactFirst` then erases entry #0 (the TS07 tombstone path); `thenExport` opens the TS10
+    /// export sheet.
+    func seedHistoryForDemo(redactFirst: Bool = false, thenExport: Bool = false) {
         Task {
-            let (pe, pd, ps) = makeEngine()
-            let pex = makeExecutor(pe, pd, ps, render: { _ in })
-            await pex.send(
-                eventJson: WalletEventJSON.authorizationRequestReceived(ps.presentationRequest))
-            await pex.send(eventJson: WalletEventJSON.userConsented())
-            absorb(pe)
-
-            let (ye, yd, ys) = makeEngine()
-            let yex = makeExecutor(ye, yd, ys, render: { _ in })
-            await yex.send(
-                eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(ys.paymentRequest))
-            await yex.send(eventJson: WalletEventJSON.paymentApproved())
-            absorb(ye)
+            let (e, d, s) = makeEngine()
+            self.engine = e
+            let ex = makeExecutor(e, d, s, render: { _ in })
+            await ex.send(
+                eventJson: WalletEventJSON.authorizationRequestReceived(s.presentationRequest))
+            await ex.send(eventJson: WalletEventJSON.userConsented())
+            await ex.send(
+                eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(s.paymentRequest))
+            await ex.send(eventJson: WalletEventJSON.paymentApproved())
+            if redactFirst {
+                _ = e.redactTransaction(seq: 0)
+            }
+            reloadHistory()
+            if thenExport {
+                exportPreview = makeExport()
+            }
         }
     }
 
-    /// Read the live flow engine's audit log and append its entries to the running history.
-    private func absorbLog() {
-        if let engine { absorb(engine) }
+    // MARK: - P1 operations (all real core functions over the FFI)
+
+    /// Refresh the history list + activity report from the engine's in-core log.
+    func reloadHistory() {
+        guard let engine else {
+            history = []
+            report = nil
+            return
+        }
+        if let data = engine.transactionLogJson().data(using: .utf8),
+           let items = try? JSONDecoder().decode([HistoryItem].self, from: data) {
+            history = items
+        }
+        if let data = engine.transactionReportJson().data(using: .utf8),
+           let r = try? JSONDecoder().decode(ActivityReport.self, from: data) {
+            report = r
+        }
     }
 
-    /// Append `engine`'s audit-log entries to the running history. Each one-shot engine holds only
-    /// its own flow's entries, so this accumulates across flows.
-    private func absorb(_ engine: WalletEngine) {
-        guard let data = engine.transactionLogJson().data(using: .utf8),
-              let items = try? JSONDecoder().decode([HistoryItem].self, from: data)
-        else { return }
-        history.append(contentsOf: items)
+    /// Erase one entry's content (TS07). The core leaves a chain-preserving tombstone.
+    func redact(seq: UInt64) {
+        _ = engine?.redactTransaction(seq: seq)
+        reloadHistory()
+    }
+
+    /// Erase the entire log (TS07).
+    func wipeLog() {
+        engine?.wipeTransactionLog()
+        reloadHistory()
+    }
+
+    /// The integrity-protected export bundle (TS10) plus whether it verifies, and a proof that a
+    /// TAMPERED copy fails — both checks performed by the core's own verifier.
+    func makeExport() -> ExportPreview? {
+        guard let engine else { return nil }
+        let json = engine.exportJson()
+        let verifies = verifyWalletExport(json: json)
+        let tampered = json.replacingOccurrences(of: "rp.example", with: "evil.example")
+        let tamperDetected = tampered != json && !verifyWalletExport(json: tampered)
+        return ExportPreview(json: json, verifies: verifies, tamperDetected: tamperDetected)
+    }
+
+    /// The attestation catalogue (TS11): the credential types this wallet understands.
+    func catalogueItems() -> [CatalogueItem] {
+        let e = engine ?? makeEngine().0
+        guard let data = e.attestationCatalogueJson().data(using: .utf8),
+              let items = try? JSONDecoder().decode([CatalogueItem].self, from: data)
+        else { return [] }
+        return items
     }
 }
 
 /// One transaction-log entry as decoded from `WalletEngine.transactionLogJson()`. Mirrors the
 /// core's privacy-preserving record: claim PATHS + a committing consent hash, never values.
+/// `redacted == true` marks a chain-preserving tombstone (content erased, position retained).
 struct HistoryItem: Decodable {
+    let seq: UInt64
     let kind: String
     let counterparty: String
     let outcome: String
     let consentHash: String
+    let redacted: Bool
     let claimPaths: [String]
     let payment: PaymentInfo?
 
@@ -186,5 +237,38 @@ struct HistoryItem: Decodable {
         let payee: String
         let amountMinor: UInt64
         let currency: String
+    }
+}
+
+/// The core's activity report (TS08): counts only, no claim values.
+struct ActivityReport: Decodable {
+    let total: Int
+    let presentations: Int
+    let issuances: Int
+    let payments: Int
+    let redacted: Int
+    let counterparties: [String]
+}
+
+/// The export bundle (TS10) with the core-verified integrity results for display.
+struct ExportPreview: Identifiable {
+    let id = UUID()
+    let json: String
+    let verifies: Bool
+    let tamperDetected: Bool
+}
+
+/// One attestation-catalogue entry (TS11).
+struct CatalogueItem: Decodable {
+    let id: String
+    let displayName: String
+    let format: String
+    let claims: [Claim]
+    let trustedIssuers: [String]
+
+    struct Claim: Decodable {
+        let path: String
+        let displayName: String
+        let mandatory: Bool
     }
 }

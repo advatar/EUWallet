@@ -3,9 +3,9 @@ import SwiftUI
 /// A minimal SwiftUI harness that runs the real Rust wallet core on the iOS Simulator.
 ///
 /// Two orthogonal state owners (plan §8.10):
-///  - `WalletModel` surfaces the core's screen *content* (`ScreenDescription` over the FFI).
-///  - `NavigationMachine` owns app-shell *containment/routing* (onboarding / home / presenting /
-///    settings). It holds no security state; the shell derives its milestone events from renders.
+///  - `WalletModel` surfaces the core's screen *content* (`ScreenDescription` over the FFI) and
+///    the P1 wallet functions (history/deletion/report/export/catalogue — all core FFI calls).
+///  - `NavigationMachine` owns app-shell *containment/routing*. It holds no security state.
 @main
 struct EUWalletDemoApp: App {
     var body: some Scene {
@@ -27,16 +27,15 @@ struct ContentView: View {
         // protocol logic (the machine never sees credential data).
         .onChange(of: model.phase) { phase in
             switch phase {
-            case .screen: nav.send(.startPresentation)   // the core produced a flow screen
-            case .done, .failed: nav.send(.presentationCompleted)  // the flow ended
+            case .screen: nav.send(.startPresentation)
+            case .done, .failed: nav.send(.presentationCompleted)
             default: break
             }
         }
         .onAppear(perform: handleLaunchArguments)
     }
 
-    /// The app-shell container the navigation machine currently presents. The core's screens are
-    /// rendered INSIDE the `.presenting` container — content and containment stay orthogonal.
+    /// The app-shell container the navigation machine currently presents.
     @ViewBuilder private var container: some View {
         switch nav.state {
         case .onboarding:
@@ -45,7 +44,8 @@ struct ContentView: View {
             HomeView(
                 startPresentation: { nav.send(.startPresentation); model.startPresentation() },
                 startPayment: { nav.send(.startPresentation); model.startPayment() },
-                openHistory: { nav.send(.openHistory) },
+                openHistory: { model.reloadHistory(); nav.send(.openHistory) },
+                openCatalogue: { nav.send(.openCatalogue) },
                 openSettings: { nav.send(.openSettings) },
                 historyCount: model.history.count)
         case .presenting:
@@ -56,15 +56,15 @@ struct ContentView: View {
         case .settings:
             SettingsView { nav.send(.cancelled) }
         case .history:
-            HistoryView(items: model.history) { nav.send(.cancelled) }
+            HistoryView(model: model) { nav.send(.cancelled) }
+        case .catalogue:
+            CatalogueView(items: model.catalogueItems()) { nav.send(.cancelled) }
         case .issuing, .scanning:
-            // Not wired to UI in this demo; the machine supports them for completeness.
             ProgressView()
         }
     }
 
-    /// UI-test / screenshot affordance: `-autostart presentation|payment` skips onboarding and
-    /// drives a flow on launch so a screenshot captures the core-rendered screen.
+    /// UI-test / screenshot affordance: `-autostart presentation|payment|history|catalogue`.
     private func handleLaunchArguments() {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-autostart"), i + 1 < args.count else { return }
@@ -73,9 +73,19 @@ struct ContentView: View {
         case "payment": nav.send(.startPresentation); model.startPayment()
         case "history":
             model.seedHistoryForDemo()
-            nav.send(.finishedOnboarding) // onboarding → home
-            nav.send(.openHistory) // home → history
-
+            nav.send(.finishedOnboarding)
+            nav.send(.openHistory)
+        case "history-redacted":
+            model.seedHistoryForDemo(redactFirst: true)
+            nav.send(.finishedOnboarding)
+            nav.send(.openHistory)
+        case "export":
+            model.seedHistoryForDemo(thenExport: true)
+            nav.send(.finishedOnboarding)
+            nav.send(.openHistory)
+        case "catalogue":
+            nav.send(.finishedOnboarding)
+            nav.send(.openCatalogue)
         default: break
         }
     }
@@ -101,16 +111,17 @@ struct OnboardingView: View {
     }
 }
 
-/// Flow picker. Each row drives one real core flow.
+/// Flow picker. Each row drives one real core flow or opens a P1 wallet screen.
 struct HomeView: View {
     let startPresentation: () -> Void
     let startPayment: () -> Void
     let openHistory: () -> Void
+    let openCatalogue: () -> Void
     let openSettings: () -> Void
     let historyCount: Int
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 18) {
             Text("Running the real Rust core on-device.")
                 .font(.subheadline).foregroundStyle(.secondary)
 
@@ -138,10 +149,20 @@ struct HomeView: View {
                 Label {
                     VStack(alignment: .leading) {
                         Text("Transaction history").font(.headline)
-                        Text("\(historyCount) recorded · paths + consent hash, never values")
+                        Text("\(historyCount) recorded · erase & report · paths, never values")
                             .font(.caption)
                     }
                 } icon: { Image(systemName: "list.bullet.rectangle") }
+            }
+            .buttonStyle(.bordered)
+
+            Button(action: openCatalogue) {
+                Label {
+                    VStack(alignment: .leading) {
+                        Text("Credential catalogue").font(.headline)
+                        Text("TS11 · attestation types this wallet understands").font(.caption)
+                    }
+                } icon: { Image(systemName: "books.vertical") }
             }
             .buttonStyle(.bordered)
 
@@ -155,69 +176,7 @@ struct HomeView: View {
     }
 }
 
-/// The transaction-history screen (TS06). Renders the wallet's privacy-preserving audit log:
-/// counterparty, what was shared (claim PATHS or payment summary), outcome, and the consent hash
-/// that commits to it — never the underlying claim values.
-struct HistoryView: View {
-    let items: [HistoryItem]
-    let onBack: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if items.isEmpty {
-                Text("No transactions yet. Run a presentation or payment first.")
-                    .font(.callout).foregroundStyle(.secondary)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                            HistoryRow(item: item)
-                        }
-                    }
-                }
-            }
-            Spacer()
-            Button("Back", action: onBack).buttonStyle(.borderedProminent)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-struct HistoryRow: View {
-    let item: HistoryItem
-
-    private var icon: String {
-        switch item.kind {
-        case "payment": return "creditcard"
-        case "issuance": return "plus.rectangle.on.folder"
-        default: return "person.text.rectangle"
-        }
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon).font(.title3).foregroundStyle(.tint).frame(width: 28)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(item.counterparty).font(.headline)
-                if let p = item.payment {
-                    Text(String(format: "%.2f %@", Double(p.amountMinor) / 100.0, p.currency))
-                        .font(.subheadline)
-                } else if !item.claimPaths.isEmpty {
-                    Text("Shared: \(item.claimPaths.joined(separator: ", "))")
-                        .font(.subheadline)
-                }
-                Text("\(item.kind.capitalized) · \(item.outcome)")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("consent \(item.consentHash.prefix(12))…")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            }
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-/// The container the navigation machine presents for an in-flight flow. It renders the CORE's
-/// screens (`ScreenRenderer`) and its terminal result — nothing protocol-specific lives here.
+/// The container the navigation machine presents for an in-flight flow.
 struct PresentingContainer: View {
     @ObservedObject var model: WalletModel
     let onFinish: () -> Void
@@ -235,6 +194,186 @@ struct PresentingContainer: View {
             ResultView(symbol: "xmark.octagon.fill", tint: .red, message: message,
                        log: model.log, onDone: onFinish)
         }
+    }
+}
+
+/// The transaction-history screen (TS06/07/08/10). Every action here is a REAL core function over
+/// the FFI: swipe-to-erase → chain-preserving redaction; Report → in-core activity summary;
+/// Export → integrity-hashed bundle verified (and tamper-checked) by the core; Wipe → full erasure.
+struct HistoryView: View {
+    @ObservedObject var model: WalletModel
+    let onBack: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let r = model.report {
+                Text("\(r.total) recorded · \(r.presentations) presentations · \(r.payments) payments · \(r.redacted) erased")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel("Activity report")
+            }
+            if model.history.isEmpty {
+                Spacer()
+                Text("No transactions yet. Run a presentation or payment first.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Spacer()
+            } else {
+                List {
+                    ForEach(model.history, id: \.seq) { item in
+                        HistoryRow(item: item)
+                            .listRowInsets(EdgeInsets(top: 8, leading: 4, bottom: 8, trailing: 4))
+                            .swipeActions(edge: .trailing) {
+                                if !item.redacted {
+                                    Button(role: .destructive) {
+                                        model.redact(seq: item.seq)
+                                    } label: {
+                                        Label("Erase", systemImage: "trash")
+                                    }
+                                }
+                            }
+                    }
+                }
+                .listStyle(.plain)
+            }
+            HStack(spacing: 12) {
+                Button("Back", action: onBack).buttonStyle(.borderedProminent)
+                Spacer()
+                Button {
+                    model.exportPreview = model.makeExport()
+                } label: {
+                    Label("Export", systemImage: "square.and.arrow.up")
+                }
+                Button(role: .destructive) {
+                    model.wipeLog()
+                } label: {
+                    Label("Wipe", systemImage: "trash.slash")
+                }
+            }
+            .font(.subheadline)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(item: $model.exportPreview) { preview in
+            ExportSheet(preview: preview)
+        }
+    }
+}
+
+struct HistoryRow: View {
+    let item: HistoryItem
+
+    private var icon: String {
+        if item.redacted { return "trash.slash" }
+        switch item.kind {
+        case "payment": return "creditcard"
+        case "issuance": return "plus.rectangle.on.folder"
+        default: return "person.text.rectangle"
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon).font(.title3)
+                .foregroundStyle(item.redacted ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.tint))
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                if item.redacted {
+                    Text("Erased entry").font(.headline).foregroundStyle(.secondary)
+                    Text("Content removed · position #\(item.seq) retained, chain intact")
+                        .font(.caption).foregroundStyle(.tertiary)
+                } else {
+                    Text(item.counterparty).font(.headline)
+                    if let p = item.payment {
+                        Text(String(format: "%.2f %@", Double(p.amountMinor) / 100.0, p.currency))
+                            .font(.subheadline)
+                    } else if !item.claimPaths.isEmpty {
+                        Text("Shared: \(item.claimPaths.joined(separator: ", "))")
+                            .font(.subheadline)
+                    }
+                    Text("\(item.kind.capitalized) · \(item.outcome)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("consent \(item.consentHash.prefix(12))…")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The export bundle (TS10): shown with the CORE's own verification verdicts — the untampered
+/// bundle verifies, a tampered copy is detected.
+struct ExportSheet: View {
+    let preview: ExportPreview
+
+    private var integrityHash: String {
+        guard let data = preview.json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let h = obj["integrityHash"] as? String
+        else { return "—" }
+        return h
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Wallet export").font(.title2.bold())
+            Label(
+                preview.verifies ? "Integrity verified by the core" : "Integrity check FAILED",
+                systemImage: preview.verifies ? "checkmark.seal.fill" : "xmark.octagon.fill")
+                .foregroundStyle(preview.verifies ? .green : .red)
+            Label(
+                preview.tamperDetected
+                    ? "Tampered copy detected and rejected" : "Tamper check inconclusive",
+                systemImage: preview.tamperDetected ? "shield.checkered" : "questionmark.diamond")
+                .foregroundStyle(preview.tamperDetected ? .green : .orange)
+            Text("SHA-256 \(integrityHash.prefix(24))…")
+                .font(.caption.monospaced()).foregroundStyle(.secondary)
+            Divider()
+            ScrollView {
+                Text(preview.json)
+                    .font(.caption2.monospaced())
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding()
+    }
+}
+
+/// The attestation catalogue (TS11): the credential types this wallet understands, straight from
+/// the core (`attestationCatalogueJson`).
+struct CatalogueView: View {
+    let items: [CatalogueItem]
+    let onBack: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if items.isEmpty {
+                Text("No attestation types registered.").foregroundStyle(.secondary)
+            } else {
+                List {
+                    ForEach(items, id: \.id) { item in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(item.displayName).font(.headline)
+                            Text("\(item.id) · \(item.format)")
+                                .font(.caption.monospaced()).foregroundStyle(.secondary)
+                            ForEach(item.claims, id: \.path) { claim in
+                                HStack(spacing: 6) {
+                                    Image(systemName: claim.mandatory ? "asterisk.circle.fill" : "circle")
+                                        .font(.caption2)
+                                        .foregroundStyle(claim.mandatory ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                                    Text(claim.displayName).font(.subheadline)
+                                    Text(claim.path).font(.caption.monospaced()).foregroundStyle(.tertiary)
+                                }
+                            }
+                            Text("Issuers: \(item.trustedIssuers.joined(separator: ", "))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        .listRowInsets(EdgeInsets(top: 10, leading: 4, bottom: 10, trailing: 4))
+                    }
+                }
+                .listStyle(.plain)
+            }
+            Button("Back", action: onBack).buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
