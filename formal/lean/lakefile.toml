@@ -22,6 +22,9 @@ name = "IssuanceModel"
 [[lean_lib]]
 name = "QesModel"
 
+[[lean_lib]]
+name = "W2wModel"
+
 [[lean_exe]]
 name = "traces"
 root = "Traces"
@@ -43,3 +46,7 @@ root = "IssuanceTraces"
 [[lean_exe]]
 name = "qes_traces"
 root = "QesTraces"
+
+[[lean_exe]]
+name = "w2w_traces"
+root = "W2wTraces"

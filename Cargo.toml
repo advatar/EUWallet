@@ -22,6 +22,7 @@ members = [
     "crates/payment",
     "crates/qes",
     "crates/txnlog",
+    "crates/w2w",
     "crates/wallet-core",
 ]
 

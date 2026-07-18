@@ -1,0 +1,99 @@
+/*
+  Tier-3 symbolic analysis of wallet-to-wallet credential transfer.
+  See docs/IMPLEMENTATION_PLAN.md Section 11. Companion to the Tier-2 `W2wModel.lean`.
+
+  Models the PROTOCOL DESIGN against a Dolev-Yao attacker. The properties that testing and the
+  receiver state machine cannot establish and that are distinctive to a device-to-device transfer:
+   - CONFIDENTIALITY: the transferred credential is never learned by the network attacker;
+   - PEER AUTHENTICATION / BINDING: the receiver accepts a credential only if it was bound to the
+     ephemeral key IT offered (no misdirection / relay of a transfer meant for another wallet).
+
+  Run:
+    tamarin-prover --prove w2w.spthy
+  (Install: `brew install tamarin-prover/tap/tamarin-prover`.)
+
+  NOTE: a faithful STARTING model. The receiver's ephemeral key is used to encrypt the credential
+  to it (asymmetric-encryption), and the sender signs the transfer bound to that key. Some lemmas
+  may need helper/sources lemmas to automate.
+*/
+
+theory Wallet2Wallet
+begin
+
+builtins: signing, asymmetric-encryption
+
+rule Register_pk:
+    [ Fr(~ltk) ]
+  -->
+    [ !Ltk($A, ~ltk), !Pk($A, pk(~ltk)), Out(pk(~ltk)) ]
+
+rule Reveal_ltk:
+    [ !Ltk($A, ~ltk) ]
+  --[ Reveal($A) ]->
+    [ Out(~ltk) ]
+
+/* The RECEIVER publishes an offer: a fresh EPHEMERAL key (out-of-band, e.g. a QR code) and nonce. */
+rule Receiver_Offer:
+    [ Fr(~eph)      // ephemeral secret
+    , Fr(~nonce)
+    ]
+  --[ Offer($R, pk(~eph), ~nonce) ]->
+    [ Out( <$R, pk(~eph), ~nonce> )
+    , Recv_Await($R, ~eph, ~nonce)
+    ]
+
+/* The SENDER transfers a credential: encrypts it to the receiver's ephemeral key and signs a
+   transfer binding over the receiver key + nonce (so the transfer is bound to THIS receiver). */
+rule Sender_Transfer:
+    [ In( <$R, ephpub, nonce> )
+    , !Ltk($S, ltkS)
+    , Fr(~credential)
+    ]
+  --[ SenderTransfers($S, $R, ephpub, nonce, ~credential)
+    , SecretCredential($S, $R, ~credential)
+    ]->
+    [ Out( <$S, $R, nonce,
+            aenc(~credential, ephpub),
+            sign(<'w2w', $S, ephpub, nonce>, ltkS)> ) ]
+
+/* The RECEIVER accepts only if the transfer is signed by the sender AND bound to the ephemeral key
+   it actually offered; it decrypts with its ephemeral secret. */
+rule Receiver_Accept:
+    [ Recv_Await($R, ~eph, nonce)
+    , In( <$S, $R, nonce, enc, sig> )
+    , !Pk($S, pkS)
+    , let cred = adec(enc, ~eph)
+    ]
+  --[ Verify(verify(sig, <'w2w', $S, pk(~eph), nonce>, pkS))
+    , ReceiverAccepts($R, $S, pk(~eph), nonce, cred)
+    ]->
+    [ ]
+
+/* ================================================================== */
+/* LEMMAS                                                             */
+/* ================================================================== */
+
+/* Sanity: an honest transfer can complete. */
+lemma executable:
+  exists-trace
+  "Ex R S k n c #i. ReceiverAccepts(R, S, k, n, c) @ #i"
+
+/* CONFIDENTIALITY: the transferred credential is never learned by the network attacker, for an
+   honest sender and receiver. */
+lemma credential_secrecy:
+  "All S R c #i.
+      SecretCredential(S, R, c) @ #i & not (Ex #r. Reveal(S) @ #r) & not (Ex #r. Reveal(R) @ #r)
+    ==>
+      not (Ex #k. K(c) @ #k)"
+
+/* PEER BINDING / NO MISDIRECTION: whenever a receiver accepts a transfer bound to the ephemeral key
+   k on nonce n, some sender genuinely transferred bound to that SAME k and n — a transfer meant for
+   another wallet's key cannot be accepted here, unless a long-term key was revealed. */
+lemma peer_binding:
+  "All R S k n c #i.
+      ReceiverAccepts(R, S, k, n, c) @ #i
+    ==>
+      (Ex #j. SenderTransfers(S, R, k, n, c) @ #j & #j < #i)
+      | (Ex #r. Reveal(S) @ #r)"
+
+end

@@ -1,0 +1,7 @@
+[
+  {"events":[{"kind":"createOffer"},{"kind":"transferReceived","issuerValid":true,"peerBound":true}],"expect":{"state":"accepted","issuerValid":true,"peerBound":true}},
+  {"events":[{"kind":"createOffer"},{"kind":"transferReceived","issuerValid":false,"peerBound":true}],"expect":{"state":"rejected","issuerValid":false,"peerBound":false}},
+  {"events":[{"kind":"createOffer"},{"kind":"transferReceived","issuerValid":true,"peerBound":false}],"expect":{"state":"rejected","issuerValid":false,"peerBound":false}},
+  {"events":[{"kind":"transferReceived","issuerValid":true,"peerBound":true}],"expect":{"state":"rejected","issuerValid":false,"peerBound":false}},
+  {"events":[{"kind":"createOffer"}],"expect":{"state":"awaitingTransfer","issuerValid":false,"peerBound":false}}
+]

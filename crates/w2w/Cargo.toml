@@ -1,0 +1,20 @@
+[package]
+name = "w2w"
+description = "Wallet-to-wallet credential transfer (TS09): receiver accept-after-validate machine + sender consent-bound transfer binding. Sans-IO."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }
+cose = { path = "../cose" }          # canonical CBOR for the transfer-authorization binding
+
+[dev-dependencies]
+crypto-backend = { path = "../crypto-backend" }
+# Used by tests/conformance.rs to replay the Lean oracle traces.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
