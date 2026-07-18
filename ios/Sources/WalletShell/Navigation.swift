@@ -16,7 +16,7 @@ import SwiftUI
 @MainActor
 public final class NavigationMachine: ObservableObject {
     public enum State: Equatable {
-        case onboarding, home, presenting, issuing, scanning, settings
+        case onboarding, home, presenting, issuing, scanning, settings, history
     }
 
     public enum Event {
@@ -25,6 +25,7 @@ public final class NavigationMachine: ObservableObject {
         case startIssuance
         case openScanner
         case openSettings
+        case openHistory
         case presentationCompleted
         case cancelled
         case deepLinkArrived
@@ -52,6 +53,8 @@ public final class NavigationMachine: ObservableObject {
             state = .scanning
         case (.home, .openSettings):
             state = .settings
+        case (.home, .openHistory):
+            state = .history
         // A flow always returns to home when it finishes or is cancelled, wherever we were.
         case (_, .presentationCompleted), (_, .cancelled):
             state = .home

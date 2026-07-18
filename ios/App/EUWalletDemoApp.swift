@@ -45,7 +45,9 @@ struct ContentView: View {
             HomeView(
                 startPresentation: { nav.send(.startPresentation); model.startPresentation() },
                 startPayment: { nav.send(.startPresentation); model.startPayment() },
-                openSettings: { nav.send(.openSettings) })
+                openHistory: { nav.send(.openHistory) },
+                openSettings: { nav.send(.openSettings) },
+                historyCount: model.history.count)
         case .presenting:
             PresentingContainer(model: model) {
                 model.reset()
@@ -53,6 +55,8 @@ struct ContentView: View {
             }
         case .settings:
             SettingsView { nav.send(.cancelled) }
+        case .history:
+            HistoryView(items: model.history) { nav.send(.cancelled) }
         case .issuing, .scanning:
             // Not wired to UI in this demo; the machine supports them for completeness.
             ProgressView()
@@ -67,6 +71,11 @@ struct ContentView: View {
         switch args[i + 1] {
         case "presentation": nav.send(.startPresentation); model.startPresentation()
         case "payment": nav.send(.startPresentation); model.startPayment()
+        case "history":
+            model.seedHistoryForDemo()
+            nav.send(.finishedOnboarding) // onboarding → home
+            nav.send(.openHistory) // home → history
+
         default: break
         }
     }
@@ -96,7 +105,9 @@ struct OnboardingView: View {
 struct HomeView: View {
     let startPresentation: () -> Void
     let startPayment: () -> Void
+    let openHistory: () -> Void
     let openSettings: () -> Void
+    let historyCount: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -123,15 +134,85 @@ struct HomeView: View {
             }
             .buttonStyle(.bordered)
 
+            Button(action: openHistory) {
+                Label {
+                    VStack(alignment: .leading) {
+                        Text("Transaction history").font(.headline)
+                        Text("\(historyCount) recorded · paths + consent hash, never values")
+                            .font(.caption)
+                    }
+                } icon: { Image(systemName: "list.bullet.rectangle") }
+            }
+            .buttonStyle(.bordered)
+
             Spacer()
-            Button {
-                openSettings()
-            } label: {
+            Button(action: openSettings) {
                 Label("Settings", systemImage: "gear")
             }
             .font(.subheadline)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The transaction-history screen (TS06). Renders the wallet's privacy-preserving audit log:
+/// counterparty, what was shared (claim PATHS or payment summary), outcome, and the consent hash
+/// that commits to it — never the underlying claim values.
+struct HistoryView: View {
+    let items: [HistoryItem]
+    let onBack: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if items.isEmpty {
+                Text("No transactions yet. Run a presentation or payment first.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                            HistoryRow(item: item)
+                        }
+                    }
+                }
+            }
+            Spacer()
+            Button("Back", action: onBack).buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct HistoryRow: View {
+    let item: HistoryItem
+
+    private var icon: String {
+        switch item.kind {
+        case "payment": return "creditcard"
+        case "issuance": return "plus.rectangle.on.folder"
+        default: return "person.text.rectangle"
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon).font(.title3).foregroundStyle(.tint).frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.counterparty).font(.headline)
+                if let p = item.payment {
+                    Text(String(format: "%.2f %@", Double(p.amountMinor) / 100.0, p.currency))
+                        .font(.subheadline)
+                } else if !item.claimPaths.isEmpty {
+                    Text("Shared: \(item.claimPaths.joined(separator: ", "))")
+                        .font(.subheadline)
+                }
+                Text("\(item.kind.capitalized) · \(item.outcome)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("consent \(item.consentHash.prefix(12))…")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

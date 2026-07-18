@@ -19,17 +19,20 @@ final class WalletModel: ObservableObject {
 
     @Published private(set) var phase: Phase = .home
     @Published private(set) var log: [String] = []
+    /// Accumulated audit-log entries across flows. Each one-shot flow engine records one entry;
+    /// we absorb it here so the History screen shows the running privacy-preserving log (TS06).
+    @Published private(set) var history: [HistoryItem] = []
 
     private var executor: EffectExecutor?
+    private var engine: WalletEngine?
 
-    /// Build a fresh engine + executor for one flow. Returns the demo scenario to drive it.
-    private func freshFlow() -> DemoScenario {
+    /// Build a fresh engine loaded with the demo credential, device key, and trusted list. The
+    /// core is a one-shot state machine, so each flow gets its own engine.
+    private func makeEngine() -> (WalletEngine, DemoWallet, DemoScenario) {
         let engine = WalletEngine(walletClientId: "wallet.example", deviceKeyRef: "device-key")
         let demo = DemoWallet()
         let scenario = demo.scenario()
-
-        // Load the held credential, device key, and trusted list directly (these are FFI calls,
-        // not events). RP registration, data minimisation, and key binding are decided in-core.
+        // These are FFI calls, not events. RP registration, minimisation, key binding: all in-core.
         engine.loadCredential(
             issuerJwt: scenario.issuerJwt,
             disclosuresByClaimJson: scenario.disclosuresByClaimJson,
@@ -41,8 +44,16 @@ final class WalletModel: ObservableObject {
         _ = engine.loadTrustList(
             signedList: scenario.trustList,
             operatorPublicKey: scenario.operatorPublicKey)
+        return (engine, demo, scenario)
+    }
 
-        self.executor = EffectExecutor(
+    /// Build an executor for `engine`; `render` maps the core's screens somewhere (the live UI, or
+    /// a no-op for silent seeding).
+    private func makeExecutor(
+        _ engine: WalletEngine, _ demo: DemoWallet, _ scenario: DemoScenario,
+        render: @escaping (ScreenDescription) -> Void
+    ) -> EffectExecutor {
+        EffectExecutor(
             engine: engine,
             signer: DemoSigner(demo: demo),
             http: StubHttpClient(),
@@ -50,9 +61,16 @@ final class WalletModel: ObservableObject {
             trust: DemoTrustResolver(
                 certChain: scenario.rpCertChain,
                 redirectUris: scenario.registeredRedirectUris),
-            render: { [weak self] screen in
-                Task { @MainActor in self?.phase = .screen(screen) }
-            })
+            render: render)
+    }
+
+    /// Build the live flow: renders drive the visible UI via `phase`.
+    private func freshFlow() -> DemoScenario {
+        let (engine, demo, scenario) = makeEngine()
+        self.engine = engine
+        self.executor = makeExecutor(engine, demo, scenario) { [weak self] screen in
+            Task { @MainActor in self?.phase = .screen(screen) }
+        }
         return scenario
     }
 
@@ -94,10 +112,12 @@ final class WalletModel: ObservableObject {
             if wasPayment {
                 await executor?.send(eventJson: WalletEventJSON.paymentApproved())
                 note("Device signed the dynamic-linking binding; auth code posted to the PSP.")
+                absorbLog()
                 phase = .done("Payment authorised — SCA auth code delivered.")
             } else {
                 await executor?.send(eventJson: WalletEventJSON.userConsented())
                 note("Device signed the key-binding JWT; vp_token posted to the RP.")
+                absorbLog()
                 phase = .done("Presentation delivered — only the requested claim was shared.")
             }
         }
@@ -115,5 +135,56 @@ final class WalletModel: ObservableObject {
         executor = nil
         phase = .home
         log = []
+    }
+
+    /// Demo/screenshot affordance: drive a full presentation AND a full payment to completion
+    /// SILENTLY (no-op render, so `phase`/navigation are untouched), populating the history.
+    func seedHistoryForDemo() {
+        Task {
+            let (pe, pd, ps) = makeEngine()
+            let pex = makeExecutor(pe, pd, ps, render: { _ in })
+            await pex.send(
+                eventJson: WalletEventJSON.authorizationRequestReceived(ps.presentationRequest))
+            await pex.send(eventJson: WalletEventJSON.userConsented())
+            absorb(pe)
+
+            let (ye, yd, ys) = makeEngine()
+            let yex = makeExecutor(ye, yd, ys, render: { _ in })
+            await yex.send(
+                eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(ys.paymentRequest))
+            await yex.send(eventJson: WalletEventJSON.paymentApproved())
+            absorb(ye)
+        }
+    }
+
+    /// Read the live flow engine's audit log and append its entries to the running history.
+    private func absorbLog() {
+        if let engine { absorb(engine) }
+    }
+
+    /// Append `engine`'s audit-log entries to the running history. Each one-shot engine holds only
+    /// its own flow's entries, so this accumulates across flows.
+    private func absorb(_ engine: WalletEngine) {
+        guard let data = engine.transactionLogJson().data(using: .utf8),
+              let items = try? JSONDecoder().decode([HistoryItem].self, from: data)
+        else { return }
+        history.append(contentsOf: items)
+    }
+}
+
+/// One transaction-log entry as decoded from `WalletEngine.transactionLogJson()`. Mirrors the
+/// core's privacy-preserving record: claim PATHS + a committing consent hash, never values.
+struct HistoryItem: Decodable {
+    let kind: String
+    let counterparty: String
+    let outcome: String
+    let consentHash: String
+    let claimPaths: [String]
+    let payment: PaymentInfo?
+
+    struct PaymentInfo: Decodable {
+        let payee: String
+        let amountMinor: UInt64
+        let currency: String
     }
 }
