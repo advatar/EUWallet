@@ -1074,6 +1074,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "txnlog"
+version = "0.0.1"
+dependencies = [
+ "crypto-backend",
+ "crypto-traits",
+]
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1262,6 +1270,7 @@ dependencies = [
  "serde_json",
  "status",
  "trust",
+ "txnlog",
  "uniffi",
  "wua",
  "x509",

@@ -43,6 +43,15 @@ fn parse_format(s: &str) -> Option<oid4vci::CredentialFormat> {
     }
 }
 
+/// Lowercase hex of a 32-byte hash (for the transaction-log JSON).
+fn hex32(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
 fn format_name(f: oid4vci::CredentialFormat) -> &'static str {
     match f {
         oid4vci::CredentialFormat::MsoMdoc => "mso_mdoc",
@@ -76,6 +85,10 @@ struct SessionInfo {
     purpose: String,
     requested_claims: Vec<String>,
     response_uri: String,
+    /// The consent hash + the exact claim paths shown on the consent screen, captured when it is
+    /// rendered, so the transaction log can record what was shared without storing values.
+    consent_hash: [u8; 32],
+    shared_claims: Vec<String>,
 }
 
 /// Everything that can happen *to* the core. The shell produces these (deserialised from JSON at
@@ -194,6 +207,11 @@ pub struct Core {
     issuer_id_current: String,
     // Revocation: the current verified Token Status List, checked before presenting.
     status_list: Option<status::StatusList>,
+    // Transaction (audit) log: privacy-preserving, tamper-evident record of completed flows (TS06).
+    log: txnlog::TransactionLog,
+    // Payment details captured at the confirmation screen, recorded into the log on authorization.
+    pay_summary: Option<txnlog::PaymentSummary>,
+    pay_consent_hash: [u8; 32],
 }
 
 impl Core {
@@ -220,7 +238,52 @@ impl Core {
             issuer_trusted_current: false,
             issuer_id_current: String::new(),
             status_list: None,
+            log: txnlog::TransactionLog::new(),
+            pay_summary: None,
+            pay_consent_hash: [0u8; 32],
         }
+    }
+
+    /// The transaction (audit) log — completed presentations, payments, and issuances.
+    pub fn transaction_log(&self) -> &txnlog::TransactionLog {
+        &self.log
+    }
+
+    /// The transaction log as a JSON array (what the iOS history screen renders). Records claim
+    /// PATHS + a committing consent hash, never raw claim values.
+    pub fn transaction_log_json(&self) -> String {
+        let entries: Vec<String> = self
+            .log
+            .entries()
+            .iter()
+            .map(|e| {
+                let claims = e
+                    .claim_paths
+                    .iter()
+                    .map(|c| format!("{:?}", c))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let payment = match &e.payment {
+                    Some(p) => format!(
+                        r#","payment":{{"payee":{:?},"amountMinor":{},"currency":{:?}}}"#,
+                        p.payee, p.amount_minor, p.currency
+                    ),
+                    None => String::new(),
+                };
+                format!(
+                    r#"{{"seq":{},"epoch":{},"kind":"{}","counterparty":{:?},"outcome":"{}","consentHash":"{}","claimPaths":[{}]{}}}"#,
+                    e.seq,
+                    e.epoch,
+                    e.kind.name(),
+                    e.counterparty,
+                    e.outcome.name(),
+                    hex32(&e.consent_hash),
+                    claims,
+                    payment,
+                )
+            })
+            .collect();
+        format!("[{}]", entries.join(","))
     }
 
     /// Verify + store a Token Status List used to check credential revocation before presenting.
@@ -436,6 +499,7 @@ impl Core {
             };
             oid4vp::step(&self.vp, &input, &env)
         };
+        let was_done = matches!(self.vp, State::Done);
         self.vp = next;
 
         // Capture session details the moment the request is validated (needed later for the
@@ -446,13 +510,21 @@ impl Core {
                 purpose: req.purpose.clone().unwrap_or_default(),
                 requested_claims: req.requested_claims.clone(),
                 response_uri: req.response_uri.clone(),
+                consent_hash: [0u8; 32],
+                shared_claims: Vec::new(),
             });
         }
 
-        outputs
+        let effects: Vec<Effect> = outputs
             .into_iter()
             .flat_map(|o| self.translate(o))
-            .collect()
+            .collect();
+
+        // Record a completed presentation the moment the machine reaches Done (once).
+        if !was_done && matches!(self.vp, State::Done) {
+            self.record_presentation();
+        }
+        effects
     }
 
     /// Is the issuer chain trusted? Validated in-core against the PID/attestation CAs in the list.
@@ -485,12 +557,22 @@ impl Core {
             };
             oid4vci::step(&self.issuance, &input, &env)
         };
+        let was_issued = matches!(self.issuance, oid4vci::State::CredentialIssued { .. });
         self.issuance = next;
 
-        outputs
+        let effects: Vec<Effect> = outputs
             .into_iter()
             .map(|o| self.translate_issuance(o))
-            .collect()
+            .collect();
+
+        // Record a completed issuance the moment the credential is issued (once).
+        if !was_issued {
+            if let oid4vci::State::CredentialIssued { format, .. } = &self.issuance {
+                let fmt = format_name(*format).to_string();
+                self.record_issuance(fmt);
+            }
+        }
+        effects
     }
 
     fn translate_issuance(&self, output: oid4vci::Output) -> Effect {
@@ -530,6 +612,7 @@ impl Core {
             };
             payment::step(&self.payment, &input, &env)
         };
+        let was_authorized = matches!(self.payment, payment::State::Authorized { .. });
         self.payment = next;
 
         // Capture the response endpoint + nonce when the confirmation screen is reached.
@@ -545,10 +628,16 @@ impl Core {
             }
         }
 
-        outputs
+        let effects: Vec<Effect> = outputs
             .into_iter()
             .flat_map(|o| self.translate_payment(o))
-            .collect()
+            .collect();
+
+        // Record a completed payment the moment the machine reaches Authorized (once).
+        if !was_authorized && matches!(self.payment, payment::State::Authorized { .. }) {
+            self.record_payment();
+        }
+        effects
     }
 
     fn translate_payment(&mut self, output: payment::Output) -> Vec<Effect> {
@@ -559,14 +648,22 @@ impl Core {
                 creditor_account,
                 amount_minor,
                 currency,
-            } => vec![Effect::Render {
-                screen: ScreenDescription::PaymentConfirmation(PaymentScreen {
-                    creditor_name,
+            } => {
+                let screen = ScreenDescription::PaymentConfirmation(PaymentScreen {
+                    creditor_name: creditor_name.clone(),
                     creditor_account,
                     amount_minor,
+                    currency: currency.clone(),
+                });
+                // Capture the payer-visible essence + the committing hash for the audit log.
+                self.pay_consent_hash = presenter::consent_hash(&AwsLc, &screen);
+                self.pay_summary = Some(txnlog::PaymentSummary {
+                    payee: creditor_name,
+                    amount_minor,
                     currency,
-                }),
-            }],
+                });
+                vec![Effect::Render { screen }]
+            }
             PO::SignAuthCode {
                 key_ref,
                 signing_input,
@@ -604,6 +701,55 @@ impl Core {
         })
     }
 
+    /// Append a completed presentation to the audit log (paths + consent hash, never values).
+    fn record_presentation(&mut self) {
+        let entry = match &self.session {
+            Some(sess) => txnlog::NewEntry {
+                epoch: self.now_epoch,
+                kind: txnlog::Kind::Presentation,
+                counterparty: sess.rp_client_id.clone(),
+                consent_hash: sess.consent_hash,
+                claim_paths: sess.shared_claims.clone(),
+                outcome: txnlog::Outcome::Completed,
+                payment: None,
+            },
+            None => return,
+        };
+        self.log.append(&AwsLc, entry);
+    }
+
+    /// Append an authorised payment to the audit log (payer-visible summary + consent hash).
+    fn record_payment(&mut self) {
+        let summary = match &self.pay_summary {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        let entry = txnlog::NewEntry {
+            epoch: self.now_epoch,
+            kind: txnlog::Kind::Payment,
+            counterparty: summary.payee.clone(),
+            consent_hash: self.pay_consent_hash,
+            claim_paths: Vec::new(),
+            outcome: txnlog::Outcome::Completed,
+            payment: Some(summary),
+        };
+        self.log.append(&AwsLc, entry);
+    }
+
+    /// Append a completed issuance to the audit log (issuer identity + credential format).
+    fn record_issuance(&mut self, format: String) {
+        let entry = txnlog::NewEntry {
+            epoch: self.now_epoch,
+            kind: txnlog::Kind::Issuance,
+            counterparty: self.issuer_id_current.clone(),
+            consent_hash: [0u8; 32],
+            claim_paths: vec![format],
+            outcome: txnlog::Outcome::Completed,
+            payment: None,
+        };
+        self.log.append(&AwsLc, entry);
+    }
+
     fn consent_screen(&self) -> ScreenDescription {
         let (rp, purpose, requested) = match &self.session {
             Some(s) => (
@@ -633,9 +779,18 @@ impl Core {
                 self.seen_nonces.push(nonce);
                 vec![Effect::PersistNonce { nonce }]
             }
-            O::RenderConsent { .. } => vec![Effect::Render {
-                screen: self.consent_screen(),
-            }],
+            O::RenderConsent { .. } => {
+                let screen = self.consent_screen();
+                // Capture what the user is about to see: the consent hash commits to it, and the
+                // exact claim paths shown are what we record when the presentation completes.
+                if let (Some(sess), ScreenDescription::Consent(c)) =
+                    (self.session.as_mut(), &screen)
+                {
+                    sess.consent_hash = presenter::consent_hash(&AwsLc, &screen);
+                    sess.shared_claims = c.requested_claims.clone();
+                }
+                vec![Effect::Render { screen }]
+            }
             O::SignKeyBinding {
                 key_ref,
                 signing_input,
@@ -743,6 +898,12 @@ impl WalletEngine {
                 disclosures_by_claim,
                 status_index,
             });
+    }
+
+    /// The transaction (audit) log as JSON — completed presentations, payments, issuances. Records
+    /// claim paths + a committing consent hash, never raw claim values (TS06). For the history UI.
+    pub fn transaction_log_json(&self) -> String {
+        self.inner.lock().expect("poisoned").transaction_log_json()
     }
 
     /// Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed

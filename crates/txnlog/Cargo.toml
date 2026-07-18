@@ -1,0 +1,17 @@
+[package]
+name = "txnlog"
+description = "Privacy-preserving, tamper-evident transaction (audit) log for the wallet (TS06). Sans-IO."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }
+
+[dev-dependencies]
+crypto-backend = { path = "../crypto-backend" }
+
+[lints]
+workspace = true

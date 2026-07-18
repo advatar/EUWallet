@@ -692,6 +692,12 @@ public protocol WalletEngineProtocol : AnyObject {
      */
     func loadWua(wuaJwt: Data, providerPublicKey: Data)  -> String
     
+    /**
+     * The transaction (audit) log as JSON — completed presentations, payments, issuances. Records
+     * claim paths + a committing consent hash, never raw claim values (TS06). For the history UI.
+     */
+    func transactionLogJson()  -> String
+    
 }
 
 /**
@@ -827,6 +833,17 @@ open func loadWua(wuaJwt: Data, providerPublicKey: Data) -> String {
     uniffi_wallet_core_fn_method_walletengine_load_wua(self.uniffiClonePointer(),
         FfiConverterData.lower(wuaJwt),
         FfiConverterData.lower(providerPublicKey),$0
+    )
+})
+}
+    
+    /**
+     * The transaction (audit) log as JSON — completed presentations, payments, issuances. Records
+     * claim paths + a committing consent hash, never raw claim values (TS06). For the history UI.
+     */
+open func transactionLogJson() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_transaction_log_json(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -1189,6 +1206,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_load_wua() != 52241) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_transaction_log_json() != 50296) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_constructor_demowallet_new() != 41997) {

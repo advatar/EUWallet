@@ -19,6 +19,7 @@ members = [
     "crates/presenter",
     "crates/zkp",
     "crates/payment",
+    "crates/txnlog",
     "crates/wallet-core",
 ]
 

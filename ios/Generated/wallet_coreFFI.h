@@ -322,6 +322,11 @@ RustBuffer uniffi_wallet_core_fn_method_walletengine_load_trust_list(void*_Nonnu
 RustBuffer uniffi_wallet_core_fn_method_walletengine_load_wua(void*_Nonnull ptr, RustBuffer wua_jwt, RustBuffer provider_public_key, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_TRANSACTION_LOG_JSON
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_FN_METHOD_WALLETENGINE_TRANSACTION_LOG_JSON
+RustBuffer uniffi_wallet_core_fn_method_walletengine_transaction_log_json(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_WALLET_CORE_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_WALLET_CORE_RUSTBUFFER_ALLOC
 RustBuffer ffi_wallet_core_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -647,6 +652,12 @@ uint16_t uniffi_wallet_core_checksum_method_walletengine_load_trust_list(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_WUA
 #define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_LOAD_WUA
 uint16_t uniffi_wallet_core_checksum_method_walletengine_load_wua(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_TRANSACTION_LOG_JSON
+#define UNIFFI_FFIDEF_UNIFFI_WALLET_CORE_CHECKSUM_METHOD_WALLETENGINE_TRANSACTION_LOG_JSON
+uint16_t uniffi_wallet_core_checksum_method_walletengine_transaction_log_json(void
     
 );
 #endif
