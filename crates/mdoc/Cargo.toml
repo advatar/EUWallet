@@ -13,3 +13,4 @@ cose = { path = "../cose" }
 
 [dev-dependencies]
 proptest = { workspace = true }
+crypto-backend = { path = "../crypto-backend" }

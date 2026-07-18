@@ -414,7 +414,84 @@ pub fn verify_issuer_signed(
     Ok(mso)
 }
 
-/// Device-signed portion (holder binding). Structure placeholder — the `SessionTranscript`
-/// binding is supplied by the `iso18013-5` machine (plan Section 5.3).
-#[derive(Clone, Debug, Default)]
-pub struct DeviceSigned;
+// ---------------------------------------------------------------------------
+// DeviceResponse assembly (ISO 18013-5 §8.3.2.1.2.2)
+// ---------------------------------------------------------------------------
+
+impl IssuerSigned {
+    /// Encode as the `IssuerSigned` CBOR map: `{ "nameSpaces": {ns => [IssuerSignedItemBytes]},
+    /// "issuerAuth": COSE_Sign1 }`. Each item is a tag-24 `IssuerSignedItemBytes`.
+    pub fn to_value(&self) -> Value {
+        let ns_pairs: Vec<(Value, Value)> = self
+            .name_spaces
+            .iter()
+            .map(|(ns, items)| {
+                let arr = Value::Array(
+                    items
+                        .iter()
+                        .map(|it| Value::Tag(24, Box::new(Value::Bytes(it.to_value().to_canonical()))))
+                        .collect(),
+                );
+                (Value::Text(ns.clone()), arr)
+            })
+            .collect();
+        Value::Map(vec![
+            (Value::Text("nameSpaces".into()), Value::Map(ns_pairs)),
+            (Value::Text("issuerAuth".into()), self.issuer_auth.to_value()),
+        ])
+    }
+}
+
+/// The `DeviceAuthenticationBytes` the device key signs (ISO 18013-5 §9.1.3.4):
+/// `#6.24(bstr .cbor [ "DeviceAuthentication", SessionTranscript, DocType, DeviceNameSpacesBytes ])`.
+/// `session_transcript` is the canonical CBOR of the SessionTranscript array; it is embedded as a
+/// value (not a byte string) so the structure matches the standard exactly.
+pub fn device_authentication_bytes(
+    session_transcript: &[u8],
+    doc_type: &str,
+    device_namespaces_bytes: &[u8],
+) -> Result<Vec<u8>, MdocError> {
+    let transcript = cbor::from_canonical_slice(session_transcript)?;
+    let device_auth = Value::Array(vec![
+        Value::Text("DeviceAuthentication".into()),
+        transcript,
+        Value::Text(doc_type.into()),
+        Value::Tag(24, Box::new(Value::Bytes(device_namespaces_bytes.to_vec()))),
+    ]);
+    Ok(tag24(device_auth.to_canonical()))
+}
+
+/// Assemble a real ISO 18013-5 `DeviceResponse` (one document):
+/// `{ "version": "1.0", "documents": [ { docType, issuerSigned, deviceSigned } ], "status": 0 }`,
+/// where `deviceSigned = { nameSpaces: #6.24(bstr), deviceAuth: { deviceSignature: COSE_Sign1 } }`.
+pub fn device_response(
+    doc_type: &str,
+    issuer_signed: &IssuerSigned,
+    device_namespaces_bytes: &[u8],
+    device_signature: &CoseSign1,
+) -> Vec<u8> {
+    let device_signed = Value::Map(vec![
+        (
+            Value::Text("nameSpaces".into()),
+            Value::Tag(24, Box::new(Value::Bytes(device_namespaces_bytes.to_vec()))),
+        ),
+        (
+            Value::Text("deviceAuth".into()),
+            Value::Map(vec![(
+                Value::Text("deviceSignature".into()),
+                device_signature.to_value(),
+            )]),
+        ),
+    ]);
+    let document = Value::Map(vec![
+        (Value::Text("docType".into()), Value::Text(doc_type.into())),
+        (Value::Text("issuerSigned".into()), issuer_signed.to_value()),
+        (Value::Text("deviceSigned".into()), device_signed),
+    ]);
+    Value::Map(vec![
+        (Value::Text("version".into()), Value::Text("1.0".into())),
+        (Value::Text("documents".into()), Value::Array(vec![document])),
+        (Value::Text("status".into()), Value::Uint(0)),
+    ])
+    .to_canonical()
+}

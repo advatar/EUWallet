@@ -187,6 +187,26 @@ impl CoseSign1 {
         verifier.verify(expected_alg, public_key, &tbs, &self.signature)?; // <-- crypto boundary
         Ok(())
     }
+
+    /// Encode as the COSE_Sign1 wire structure (RFC 9052 §4.2):
+    /// `[ protected: bstr, unprotected: map, payload: bstr / nil, signature: bstr ]`.
+    /// A detached payload (`None`) is encoded as CBOR `null`.
+    pub fn to_value(&self) -> Value {
+        let unprotected = match &self.unprotected.kid {
+            Some(kid) => Value::Map(vec![(Value::Uint(label::KID), Value::Bytes(kid.clone()))]),
+            None => Value::Map(vec![]),
+        };
+        let payload = match &self.payload {
+            Some(p) => Value::Bytes(p.clone()),
+            None => Value::Null,
+        };
+        Value::Array(vec![
+            Value::Bytes(self.protected.clone()),
+            unprotected,
+            payload,
+            Value::Bytes(self.signature.clone()),
+        ])
+    }
 }
 
 /// Helper for building a `crit` protected header in tests (and for callers that legitimately
