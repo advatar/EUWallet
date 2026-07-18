@@ -1,0 +1,7 @@
+[
+  {"events":[{"kind":"request","docId":42,"nonce":3},{"kind":"authorize"},{"kind":"sign"}],"expect":{"state":"signed","authorized":true,"bound":true}},
+  {"events":[{"kind":"request","docId":42,"nonce":3},{"kind":"decline"}],"expect":{"state":"aborted","authorized":false,"bound":false}},
+  {"events":[{"kind":"request","docId":42,"nonce":3},{"kind":"sign"}],"expect":{"state":"awaitingAuthorization","authorized":false,"bound":false}},
+  {"events":[{"kind":"request","docId":0,"nonce":4}],"expect":{"state":"aborted","authorized":false,"bound":false}},
+  {"events":[{"kind":"request","docId":42,"nonce":3}],"expect":{"state":"awaitingAuthorization","authorized":false,"bound":false}}
+]

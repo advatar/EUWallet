@@ -19,6 +19,9 @@ name = "ProximityModel"
 [[lean_lib]]
 name = "IssuanceModel"
 
+[[lean_lib]]
+name = "QesModel"
+
 [[lean_exe]]
 name = "traces"
 root = "Traces"
@@ -36,3 +39,7 @@ root = "ProximityTraces"
 [[lean_exe]]
 name = "issuance_traces"
 root = "IssuanceTraces"
+
+[[lean_exe]]
+name = "qes_traces"
+root = "QesTraces"

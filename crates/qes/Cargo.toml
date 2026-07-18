@@ -1,0 +1,19 @@
+[package]
+name = "qes"
+description = "Qualified/advanced e-signature (QES) authorization flow — sans-IO. Binds the signature to what the user saw (consent hash) and the document (DTBS/R). Remote QTSP/QSCD I/O is the shell's."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }
+cose = { path = "../cose" }          # canonical CBOR for the DTBS/R authorization binding
+serde_json = { workspace = true }
+
+[dev-dependencies]
+crypto-backend = { path = "../crypto-backend" }
+
+[lints]
+workspace = true

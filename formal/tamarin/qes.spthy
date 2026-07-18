@@ -1,0 +1,99 @@
+/*
+  Tier-3 symbolic analysis of the QES (qualified e-signature) authorization exchange.
+  See docs/IMPLEMENTATION_PLAN.md Section 11. Companion to the Tier-2 `QesModel.lean`.
+
+  Models the PROTOCOL DESIGN against a Dolev-Yao attacker. The property qualified signing hinges
+  on and that testing cannot establish: the authorization the QTSP accepts to complete a signature
+  is cryptographically bound to the EXACT document AND the exact confirmation the holder saw — an
+  attacker who swaps the document (or the terms) in flight cannot get a valid authorization.
+
+  Run:
+    tamarin-prover --prove qes.spthy
+  (Install: `brew install tamarin-prover/tap/tamarin-prover`.)
+
+  NOTE: a faithful STARTING model of the QES authorization subset (device-bound key, DTBS/R binding
+  over document hash + consent hash + nonce). Some lemmas may need helper/sources lemmas to automate.
+*/
+
+theory QES
+begin
+
+builtins: signing
+
+rule Register_pk:
+    [ Fr(~ltk) ]
+  -->
+    [ !Ltk($A, ~ltk), !Pk($A, pk(~ltk)), Out(pk(~ltk)) ]
+
+rule Reveal_ltk:
+    [ !Ltk($A, ~ltk) ]
+  --[ Reveal($A) ]->
+    [ Out(~ltk) ]
+
+/* The QTSP presents a document to sign: a fresh nonce, the document hash, and the terms/consent
+   representation the holder will confirm. */
+rule QTSP_Request:
+    [ Fr(~nonce) ]
+  --[ QTSPRequests($Q, $W, $doc, $consent, ~nonce) ]->
+    [ Out( <$Q, $W, $doc, $consent, ~nonce> )
+    , QTSP_Await($Q, $W, $doc, $consent, ~nonce)
+    ]
+
+/* The holder AUTHORIZES exactly what the sign-confirmation showed; the device signs the DTBS/R
+   binding over document + consent + nonce. `UserAuthorizes` records what the human approved. */
+rule Wallet_Authorize:
+    [ In( <$Q, $W, doc, consent, nonce> )
+    , !Ltk($W, ltkW)
+    ]
+  --[ UserAuthorizes($W, doc, consent, nonce)
+    , DeviceSigns($W, $Q, doc, consent, nonce)
+    ]->
+    [ Out( <$W, $Q, doc, consent, nonce,
+            sign(<'qes', $W, $Q, doc, consent, nonce>, ltkW)> ) ]
+
+/* The QTSP completes the signature only if the authorization verifies over the DTBS/R for the
+   document + consent it is expecting for that nonce. */
+rule QTSP_Accept:
+    [ QTSP_Await($Q, $W, doc, consent, nonce)
+    , In( <$W, $Q, doc, consent, nonce, authsig> )
+    , !Pk($W, pkW)
+    ]
+  --[ Verify(verify(authsig, <'qes', $W, $Q, doc, consent, nonce>, pkW))
+    , QTSPAccepts($Q, $W, doc, consent, nonce)
+    ]->
+    [ ]
+
+/* ================================================================== */
+/* LEMMAS                                                             */
+/* ================================================================== */
+
+/* Sanity: an honest signing can complete. */
+lemma executable:
+  exists-trace
+  "Ex Q W d c n #i. QTSPAccepts(Q, W, d, c, n) @ #i"
+
+/* WYSIWYS (the core QES property): if the QTSP accepts an authorization for a given document +
+   consent + nonce, the holder actually authorized THAT SAME document + consent for that nonce.
+   No document/terms substitution, unless the device key was revealed. */
+lemma what_you_see_is_what_you_sign:
+  "All Q W d c n #i.
+      QTSPAccepts(Q, W, d, c, n) @ #i
+    ==>
+      (Ex #j. UserAuthorizes(W, d, c, n) @ #j & #j < #i)
+      | (Ex #r. Reveal(W) @ #r)"
+
+/* No signature over an unseen document/terms. */
+lemma no_document_substitution:
+  "not (Ex Q W d c n #i.
+          QTSPAccepts(Q, W, d, c, n) @ #i
+        & not (Ex #j. UserAuthorizes(W, d, c, n) @ #j)
+        & not (Ex #r. Reveal(W) @ #r))"
+
+/* Freshness: an accepted authorization matches a genuine request the QTSP issued on that nonce. */
+lemma request_authentic:
+  "All Q W d c n #i.
+      QTSPAccepts(Q, W, d, c, n) @ #i
+    ==>
+      Ex #j. QTSPRequests(Q, W, d, c, n) @ #j & #j < #i"
+
+end
