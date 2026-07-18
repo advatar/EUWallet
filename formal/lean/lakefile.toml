@@ -8,6 +8,17 @@ defaultTargets = ["WalletModel"]
 [[lean_lib]]
 name = "WalletModel"
 
+# Additional Tier-2 models for the other core state machines (plan Section 10):
+# payment SCA (dynamic linking), ISO 18013-5 proximity, and OID4VCI issuance.
+[[lean_lib]]
+name = "PaymentModel"
+
+[[lean_lib]]
+name = "ProximityModel"
+
+[[lean_lib]]
+name = "IssuanceModel"
+
 [[lean_exe]]
 name = "traces"
 root = "Traces"

@@ -1,0 +1,126 @@
+/*
+  Tier-3 symbolic analysis of the OID4VCI issuance exchange (HAIP profile).
+  See docs/IMPLEMENTATION_PLAN.md Section 11. Companion to the Tier-2 `IssuanceModel.lean`.
+
+  Models the PROTOCOL DESIGN against a Dolev-Yao attacker. The properties issuance hinges on:
+   - issuer authentication: the wallet only accepts a credential from the authenticated issuer;
+   - proof-of-possession / key binding: the issued credential is bound to the wallet's device key,
+     so a credential issued to one wallet cannot be replayed into another (stolen-credential /
+     wallet-substitution defence). This is the protocol-level companion of the WUA key-attestation
+     guard proved in `IssuanceModel.lean`.
+
+  Run:
+    tamarin-prover --prove oid4vci_issuance.spthy
+  (Install: `brew install tamarin-prover/tap/tamarin-prover`.)
+
+  NOTE: a faithful STARTING model of the issuance subset (c_nonce challenge, device proof-of-
+  possession signature, issuer-signed credential bound to the device key). The token/PKCE exchange
+  is abstracted to the c_nonce challenge that binds the proof. Some lemmas may need helpers.
+*/
+
+theory OID4VCI_Issuance
+begin
+
+builtins: signing
+
+rule Register_pk:
+    [ Fr(~ltk) ]
+  -->
+    [ !Ltk($A, ~ltk), !Pk($A, pk(~ltk)), Out(pk(~ltk)) ]
+
+rule Reveal_ltk:
+    [ !Ltk($A, ~ltk) ]
+  --[ Reveal($A) ]->
+    [ Out(~ltk) ]
+
+/* ------------------------------------------------------------------ */
+/* The issuer challenges the wallet with a fresh c_nonce (bound to the  */
+/* token exchange, abstracted here).                                    */
+/* ------------------------------------------------------------------ */
+rule Issuer_Challenge:
+    [ Fr(~cnonce) ]
+  --[ IssuerChallenges($I, $W, ~cnonce) ]->
+    [ Out( <$I, $W, ~cnonce> )
+    , Iss_Await($I, $W, ~cnonce)
+    ]
+
+/* ------------------------------------------------------------------ */
+/* The wallet proves possession of its DEVICE key by signing the        */
+/* c_nonce (this is the proof whose key the WUA attests in-core).       */
+/* ------------------------------------------------------------------ */
+rule Wallet_Proof:
+    [ In( <$I, $W, cnonce> )
+    , !Ltk($W, ltkW)
+    ]
+  --[ WalletProves($W, $I, cnonce, pk(ltkW)) ]->
+    [ Out( <$W, $I, cnonce, pk(ltkW), sign(<'pop', $W, $I, cnonce>, ltkW)> )
+    , Wallet_AwaitCred($W, $I, cnonce)
+    ]
+
+/* ------------------------------------------------------------------ */
+/* The issuer verifies the proof-of-possession, then issues a           */
+/* credential BOUND to the wallet's device key (cnf/holder binding).    */
+/* ------------------------------------------------------------------ */
+rule Issuer_Issue:
+    [ Iss_Await($I, $W, cnonce)
+    , In( <$W, $I, cnonce, holderpk, popsig> )
+    , !Ltk($I, ltkI)
+    , !Pk($W, holderpk)
+    ]
+  --[ Verify(verify(popsig, <'pop', $W, $I, cnonce>, holderpk))
+    , IssuerIssues($I, $W, cnonce, holderpk)
+    ]->
+    [ Out( <$I, $W, cnonce, holderpk, sign(<'cred', $I, holderpk, cnonce>, ltkI)> ) ]
+
+/* ------------------------------------------------------------------ */
+/* The wallet accepts a credential only if it is signed by the           */
+/* authenticated issuer AND bound to its OWN device key.                 */
+/* ------------------------------------------------------------------ */
+rule Wallet_Accept:
+    [ Wallet_AwaitCred($W, $I, cnonce)
+    , !Ltk($W, ltkW)
+    , In( <$I, $W, cnonce, pk(ltkW), credsig> )
+    , !Pk($I, pkI)
+    ]
+  --[ Verify(verify(credsig, <'cred', $I, pk(ltkW), cnonce>, pkI))
+    , WalletAcceptsCred($W, $I, cnonce, pk(ltkW))
+    ]->
+    [ ]
+
+/* ================================================================== */
+/* LEMMAS                                                             */
+/* ================================================================== */
+
+/* Sanity: an honest issuance can complete. */
+lemma executable:
+  exists-trace
+  "Ex I W n hk #i. WalletAcceptsCred(I, W, n, hk) @ #i"
+
+/* ISSUER AUTHENTICATION: a wallet accepts a credential only if the named issuer genuinely issued
+   it (against this wallet + c_nonce), unless the issuer key was revealed. */
+lemma issuer_authentication:
+  "All W I n hk #i.
+      WalletAcceptsCred(W, I, n, hk) @ #i
+    ==>
+      (Ex #j. IssuerIssues(I, W, n, hk) @ #j & #j < #i)
+      | (Ex #r. Reveal(I) @ #r)"
+
+/* KEY BINDING / NO WALLET SUBSTITUTION: the credential a wallet accepts is bound to the key of
+   the wallet that actually proved possession — a credential issued for one holder key cannot be
+   accepted by a wallet holding a different key. */
+lemma holder_key_binding:
+  "All W I n hk #i.
+      WalletAcceptsCred(W, I, n, hk) @ #i
+    ==>
+      (Ex #j. WalletProves(W, I, n, hk) @ #j & #j < #i)
+      | (Ex #r. Reveal(W) @ #r)"
+
+/* PROOF FRESHNESS: issuance binds the proof to a c_nonce the issuer genuinely challenged (defends
+   against replaying an old proof-of-possession). */
+lemma cnonce_authentic:
+  "All I W n hk #i.
+      IssuerIssues(I, W, n, hk) @ #i
+    ==>
+      Ex #j. IssuerChallenges(I, W, n) @ #j & #j < #i"
+
+end

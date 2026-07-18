@@ -1,0 +1,122 @@
+/*
+  Tier-3 symbolic analysis of the ISO 18013-5 proximity (mdoc) presentation.
+  See docs/IMPLEMENTATION_PLAN.md Section 11. Companion to the Tier-2 `ProximityModel.lean`.
+
+  Models the PROTOCOL DESIGN against a Dolev-Yao attacker. The property proximity presentation
+  hinges on and that testing cannot establish: the device response is bound to the SESSION
+  TRANSCRIPT (the ephemeral-key handshake between this device and this reader), so a response
+  cannot be relayed into a different session (the classic mdoc relay / mafia-fraud attack).
+
+  Run:
+    tamarin-prover --prove iso18013_5_proximity.spthy
+  (Install: `brew install tamarin-prover/tap/tamarin-prover`.)
+
+  NOTE: a faithful STARTING model of the 18013-5 session binding (device/reader ephemeral keys →
+  session transcript → signed DeviceResponse). Diffie-Hellman is abstracted as a shared transcript
+  derived from both ephemeral public keys; some lemmas may need helper/sources lemmas to automate.
+*/
+
+theory ISO18013_5_Proximity
+begin
+
+builtins: signing, hashing
+
+rule Register_pk:
+    [ Fr(~ltk) ]
+  -->
+    [ !Ltk($A, ~ltk), !Pk($A, pk(~ltk)), Out(pk(~ltk)) ]
+
+rule Reveal_ltk:
+    [ !Ltk($A, ~ltk) ]
+  --[ Reveal($A) ]->
+    [ Out(~ltk) ]
+
+/* ------------------------------------------------------------------ */
+/* Device engagement: the holder's device broadcasts an ephemeral      */
+/* public key (QR / NFC / BLE). `~edev` is the ephemeral secret.        */
+/* ------------------------------------------------------------------ */
+rule Device_Engage:
+    [ Fr(~edev) ]
+  --[ Engage($W, pk(~edev)) ]->
+    [ Out( <$W, pk(~edev)> )
+    , Dev_Engaged($W, ~edev)
+    ]
+
+/* ------------------------------------------------------------------ */
+/* Reader establishment: the reader picks its ephemeral key and forms  */
+/* the SESSION TRANSCRIPT from both ephemeral public keys. It sends its */
+/* ephemeral key to the device.                                        */
+/* ------------------------------------------------------------------ */
+rule Reader_Establish:
+    [ In( <$W, edevpub> )
+    , Fr(~erdr)
+    ]
+  --[ ReaderEstablish($R, $W, h(<edevpub, pk(~erdr)>)) ]->
+    [ Out( <$R, pk(~erdr)> )
+    , Rdr_Session($R, $W, h(<edevpub, pk(~erdr)>))
+    ]
+
+/* ------------------------------------------------------------------ */
+/* The device computes the SAME transcript from its own ephemeral      */
+/* secret and the reader's ephemeral key, and — after holder consent — */
+/* signs the DeviceResponse (the disclosed claim) OVER THE TRANSCRIPT.  */
+/* ------------------------------------------------------------------ */
+rule Device_Respond:
+    [ Dev_Engaged($W, ~edev)
+    , In( <$R, erdrpub> )
+    , !Ltk($W, ltkW)
+    , Fr(~claim)
+    ]
+  --[ Consent($W, $R)
+    , DeviceResponds($W, $R, h(<pk(~edev), erdrpub>), ~claim)
+    , SecretClaim($W, $R, ~claim)
+    ]->
+    [ Out( <$W, $R, h(<pk(~edev), erdrpub>), ~claim,
+            sign(<'devresp', $W, h(<pk(~edev), erdrpub>), ~claim>, ltkW)> ) ]
+
+/* ------------------------------------------------------------------ */
+/* The reader accepts a response only if it is signed by the device    */
+/* AND bound to the transcript of THIS session.                        */
+/* ------------------------------------------------------------------ */
+rule Reader_Accept:
+    [ Rdr_Session($R, $W, transcript)
+    , In( <$W, $R, transcript, claim, sig> )
+    , !Pk($W, pkW)
+    ]
+  --[ Verify(verify(sig, <'devresp', $W, transcript, claim>, pkW))
+    , ReaderAccepts($R, $W, transcript, claim)
+    ]->
+    [ ]
+
+/* ================================================================== */
+/* LEMMAS                                                             */
+/* ================================================================== */
+
+/* Sanity: an honest proximity exchange can complete. */
+lemma executable:
+  exists-trace
+  "Ex R W t c #i. ReaderAccepts(R, W, t, c) @ #i"
+
+/* SESSION BINDING / NO RELAY: if a reader accepts a response on a transcript, the device produced
+   that response for THAT SAME transcript — a response cannot be relayed into another session. */
+lemma session_binding:
+  "All R W t c #i.
+      ReaderAccepts(R, W, t, c) @ #i
+    ==>
+      (Ex #j. DeviceResponds(W, R, t, c) @ #j & #j < #i)
+      | (Ex #r. Reveal(W) @ #r)"
+
+/* CONSENT: a device response only exists after holder consent. */
+lemma consent_precedes_response:
+  "All W R t c #i.
+      DeviceResponds(W, R, t, c) @ #i ==> Ex #j. Consent(W, R) @ #j & (#j < #i | #j = #i)"
+
+/* CLAIM SECRECY: the disclosed claim stays secret from the network attacker between an honest
+   device and reader (BLE/NFC channel confidentiality of the disclosed attribute). */
+lemma claim_secrecy:
+  "All W R c #i.
+      SecretClaim(W, R, c) @ #i & not (Ex #r. Reveal(W) @ #r) & not (Ex #r. Reveal(R) @ #r)
+    ==>
+      not (Ex #k. K(c) @ #k)"
+
+end

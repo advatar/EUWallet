@@ -1,0 +1,110 @@
+/*
+  Tier-3 symbolic analysis of the payment SCA exchange with DYNAMIC LINKING (PSD2 RTS Art. 5).
+  See docs/IMPLEMENTATION_PLAN.md Section 11. Companion to the Tier-2 `PaymentModel.lean`.
+
+  This models the PROTOCOL DESIGN against a Dolev-Yao attacker who controls the network. The
+  property that matters for payments and that unit tests cannot establish: the authentication code
+  the payment service accepts is cryptographically bound to the EXACT amount and payee the user
+  authorised — an attacker who alters the amount or payee in flight cannot get a valid code.
+
+  Run:
+    tamarin-prover --prove payment_sca.spthy
+  (Install: `brew install tamarin-prover/tap/tamarin-prover`, or see https://tamarin-prover.com )
+
+  NOTE: a faithful STARTING model of the SCA subset (device-bound key, dynamic-linking binding over
+  creditor+amount+nonce). Some lemmas may need `reuse`/`sources` helpers or an oracle to automate.
+*/
+
+theory Payment_SCA
+begin
+
+builtins: signing
+
+/* Long-term keys. `$W` is the wallet's device (Secure Enclave) key; `$P` the payment service. */
+rule Register_pk:
+    [ Fr(~ltk) ]
+  -->
+    [ !Ltk($A, ~ltk), !Pk($A, pk(~ltk)), Out(pk(~ltk)) ]
+
+rule Reveal_ltk:
+    [ !Ltk($A, ~ltk) ]
+  --[ Reveal($A) ]->
+    [ Out(~ltk) ]
+
+/* ------------------------------------------------------------------ */
+/* The payment service issues a payment request: a fresh nonce plus    */
+/* the creditor (payee) and amount to be authorised.                   */
+/* ------------------------------------------------------------------ */
+rule PSP_Request:
+    [ Fr(~nonce) ]
+  --[ PSPRequests($P, $W, $creditor, $amount, ~nonce) ]->
+    [ Out( <$P, $W, $creditor, $amount, ~nonce> )
+    , PSP_Await($P, $W, $creditor, $amount, ~nonce)
+    ]
+
+/* ------------------------------------------------------------------ */
+/* The user APPROVES exactly what the confirmation screen showed, and  */
+/* the device signs the dynamic-linking binding over creditor+amount+  */
+/* nonce. `UserApproves` records the transaction the human authorised. */
+/* ------------------------------------------------------------------ */
+rule Wallet_Authorize:
+    [ In( <$P, $W, creditor, amount, nonce> )
+    , !Ltk($W, ltkW)
+    ]
+  --[ UserApproves($W, creditor, amount, nonce)
+    , DeviceSigns($W, $P, creditor, amount, nonce)
+    ]->
+    [ Out( <$W, $P, creditor, amount, nonce,
+            sign(<'sca', $W, $P, creditor, amount, nonce>, ltkW)> ) ]
+
+/* ------------------------------------------------------------------ */
+/* The payment service accepts a code only if it verifies over the     */
+/* binding for the creditor+amount it is expecting for that nonce.     */
+/* ------------------------------------------------------------------ */
+rule PSP_Accept:
+    [ PSP_Await($P, $W, creditor, amount, nonce)
+    , In( <$W, $P, creditor, amount, nonce, scasig> )
+    , !Pk($W, pkW)
+    ]
+  --[ Verify(verify(scasig, <'sca', $W, $P, creditor, amount, nonce>, pkW))
+    , PSPAccepts($P, $W, creditor, amount, nonce)
+    ]->
+    [ ]
+
+/* ================================================================== */
+/* LEMMAS                                                             */
+/* ================================================================== */
+
+/* Sanity: an honest payment can complete. */
+lemma executable:
+  exists-trace
+  "Ex P W cr am n #i. PSPAccepts(P, W, cr, am, n) @ #i"
+
+/* DYNAMIC LINKING (the core PSD2 property): if the payment service accepts a code for a given
+   creditor+amount+nonce, then the user actually approved THAT SAME creditor+amount for that
+   nonce. An attacker cannot get a code accepted for an amount/payee the user never authorised,
+   unless the device key was revealed. */
+lemma dynamic_linking:
+  "All P W cr am n #i.
+      PSPAccepts(P, W, cr, am, n) @ #i
+    ==>
+      (Ex #j. UserApproves(W, cr, am, n) @ #j & #j < #i)
+      | (Ex #r. Reveal(W) @ #r)"
+
+/* NO AMOUNT/PAYEE TAMPERING (contrapositive framing): the service never accepts a transaction
+   the user did not approve for that nonce. */
+lemma no_tampering:
+  "not (Ex P W cr am n #i.
+          PSPAccepts(P, W, cr, am, n) @ #i
+        & not (Ex #j. UserApproves(W, cr, am, n) @ #j)
+        & not (Ex #r. Reveal(W) @ #r))"
+
+/* REPLAY: acceptance on a nonce is matched by a genuine request the service issued on that nonce
+   (a code cannot be replayed onto a nonce the service never issued). */
+lemma request_authentic:
+  "All P W cr am n #i.
+      PSPAccepts(P, W, cr, am, n) @ #i
+    ==>
+      Ex #j. PSPRequests(P, W, cr, am, n) @ #j & #j < #i"
+
+end
