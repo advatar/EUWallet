@@ -25,6 +25,7 @@ members = [
     "crates/txnlog",
     "crates/w2w",
     "crates/wallet-core",
+    "crates/benches",
 ]
 
 [workspace.package]

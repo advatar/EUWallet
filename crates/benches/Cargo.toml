@@ -1,0 +1,19 @@
+[package]
+name = "benches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Dependency-budget note: this crate adds NO external dependency. It benchmarks the hot paths
+# through the real backend using only `std` (std::time + std::hint::black_box), so cargo-deny and
+# the minimal-dependency policy are unaffected. Run: cargo run -p benches --release
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }
+crypto-backend = { path = "../crypto-backend" }
+cose = { path = "../cose" }
+sdjwt = { path = "../sdjwt" }
+
+[lints]
+workspace = true
