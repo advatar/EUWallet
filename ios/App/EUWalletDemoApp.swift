@@ -20,7 +20,7 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             container
-                .navigationTitle("EUDI Wallet")
+                .navigationTitle("Advatar Wallet")
                 .padding()
         }
         // Derive coarse navigation milestones from what the core rendered — a thin mapping, NOT

@@ -14,9 +14,9 @@ account setup, which can't be committed to the repo.
   stub issuer and a canned verifier), so a tester can exercise the wallet's own machinery but cannot
   obtain a real PID or present to a real relying party. That's the "live eudiw.dev round-trip" item,
   which is gated on external services.
-- **Naming:** the display name is currently "EUDI Wallet". For internal testers that's fine; before
-  anything public, rename (e.g. "Advatar Wallet (demo)") — an official-sounding name invites App
-  Review scrutiny about implying EU endorsement.
+- **Naming:** the display name is **"Advatar Wallet (demo)"** (renamed off "EUDI Wallet" so it does
+  not imply official EU endorsement / invite App Review scrutiny). The in-app title is "Advatar
+  Wallet"; the bundle id stays `eu.advatar.wallet.demo`.
 
 ## One-time setup
 
