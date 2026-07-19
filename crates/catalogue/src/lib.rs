@@ -126,7 +126,8 @@ impl Catalogue {
     }
 }
 
-/// The default catalogue the wallet ships with: the Person Identification Data (PID) type.
+/// The default catalogue the wallet ships with: the Person Identification Data (PID) type and the
+/// mobile Driving Licence (mDL) — the two attestations the demo wallet can be issued.
 pub fn default_catalogue() -> Catalogue {
     let mut c = Catalogue::new();
     c.register(AttestationType {
@@ -137,6 +138,66 @@ pub fn default_catalogue() -> Catalogue {
             ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
             ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
             ClaimSpec { path: "birthdate".into(), display_name: "Date of birth".into(), mandatory: true },
+            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+        ],
+        trusted_issuers: vec!["https://issuer.example".into()],
+    });
+    c.register(AttestationType {
+        // ISO/IEC 18013-5 mDL modelled as an SD-JWT VC for the demo (the same core path issues it).
+        id: "urn:eudi:mdl:1".into(),
+        display_name: "Mobile Driving Licence".into(),
+        format: "dc+sd-jwt".into(),
+        claims: vec![
+            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
+            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
+            ClaimSpec { path: "driving_privileges".into(), display_name: "Driving categories".into(), mandatory: true },
+            ClaimSpec { path: "issuing_country".into(), display_name: "Issuing country".into(), mandatory: true },
+            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+        ],
+        trusted_issuers: vec!["https://issuer.example".into()],
+    });
+    c.register(AttestationType {
+        // ICAO 9303 / eMRTD electronic passport, modelled as an SD-JWT VC for the demo.
+        id: "urn:eudi:passport:1".into(),
+        display_name: "Passport".into(),
+        format: "dc+sd-jwt".into(),
+        claims: vec![
+            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
+            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
+            ClaimSpec { path: "document_number".into(), display_name: "Passport number".into(), mandatory: true },
+            ClaimSpec { path: "nationality".into(), display_name: "Nationality".into(), mandatory: true },
+            ClaimSpec { path: "expiry_date".into(), display_name: "Expiry date".into(), mandatory: true },
+            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+        ],
+        trusted_issuers: vec!["https://issuer.example".into()],
+    });
+    c.register(AttestationType {
+        // A generic national identity card.
+        id: "urn:eudi:nid:1".into(),
+        display_name: "National ID Card".into(),
+        format: "dc+sd-jwt".into(),
+        claims: vec![
+            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
+            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
+            ClaimSpec { path: "document_number".into(), display_name: "Document number".into(), mandatory: true },
+            ClaimSpec { path: "issuing_country".into(), display_name: "Issuing country".into(), mandatory: true },
+            ClaimSpec { path: "expiry_date".into(), display_name: "Expiry date".into(), mandatory: true },
+            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+        ],
+        trusted_issuers: vec!["https://issuer.example".into()],
+    });
+    c.register(AttestationType {
+        // The German national identity card (Personalausweis), as its eID PID profile.
+        id: "urn:eudi:pid:de:1".into(),
+        display_name: "German ID Card".into(),
+        format: "dc+sd-jwt".into(),
+        claims: vec![
+            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
+            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
+            ClaimSpec { path: "birthdate".into(), display_name: "Date of birth".into(), mandatory: true },
+            ClaimSpec { path: "place_of_birth".into(), display_name: "Place of birth".into(), mandatory: true },
+            ClaimSpec { path: "resident_address".into(), display_name: "Resident address".into(), mandatory: true },
+            ClaimSpec { path: "issuing_country".into(), display_name: "Issuing country".into(), mandatory: true },
             ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
@@ -176,20 +237,58 @@ mod tests {
     #[test]
     fn matching_and_policy() {
         let c = default_catalogue();
-        // Which types can prove age_over_18 / family_name.
-        assert_eq!(c.types_offering("age_over_18"), vec!["urn:eudi:pid:1"]);
+        // Every identity document proves age_over_18; the discriminating claims narrow the type.
+        assert_eq!(
+            c.types_offering("age_over_18"),
+            vec![
+                "urn:eudi:pid:1",
+                "urn:eudi:mdl:1",
+                "urn:eudi:passport:1",
+                "urn:eudi:nid:1",
+                "urn:eudi:pid:de:1"
+            ]
+        );
+        assert_eq!(c.types_offering("driving_privileges"), vec!["urn:eudi:mdl:1"]);
+        assert_eq!(c.types_offering("nationality"), vec!["urn:eudi:passport:1"]);
+        assert_eq!(c.types_offering("place_of_birth"), vec!["urn:eudi:pid:de:1"]);
+        // Date of birth is on both the PID and the German ID card.
+        assert_eq!(
+            c.types_offering("birthdate"),
+            vec!["urn:eudi:pid:1", "urn:eudi:pid:de:1"]
+        );
         assert!(c.types_offering("unknown_claim").is_empty());
 
-        // A request for held-and-offered claims resolves to the PID type.
+        // A request for name + age is satisfiable by any document; discriminating claims narrow it.
         assert_eq!(
             c.types_satisfying(&["family_name".into(), "age_over_18".into()]),
-            vec!["urn:eudi:pid:1"]
+            vec![
+                "urn:eudi:pid:1",
+                "urn:eudi:mdl:1",
+                "urn:eudi:passport:1",
+                "urn:eudi:nid:1",
+                "urn:eudi:pid:de:1"
+            ]
+        );
+        assert_eq!(
+            c.types_satisfying(&["family_name".into(), "birthdate".into()]),
+            vec!["urn:eudi:pid:1", "urn:eudi:pid:de:1"]
+        );
+        assert_eq!(
+            c.types_satisfying(&["given_name".into(), "driving_privileges".into()]),
+            vec!["urn:eudi:mdl:1"]
+        );
+        assert_eq!(
+            c.types_satisfying(&["given_name".into(), "nationality".into()]),
+            vec!["urn:eudi:passport:1"]
         );
         // A request including a claim no type offers resolves to nothing.
-        assert!(c.types_satisfying(&["family_name".into(), "passport_number".into()]).is_empty());
+        assert!(c.types_satisfying(&["family_name".into(), "iban".into()]).is_empty());
 
         // Issuer policy.
         assert!(c.issuer_allowed("urn:eudi:pid:1", "https://issuer.example"));
+        assert!(c.issuer_allowed("urn:eudi:mdl:1", "https://issuer.example"));
+        assert!(c.issuer_allowed("urn:eudi:passport:1", "https://issuer.example"));
+        assert!(c.issuer_allowed("urn:eudi:pid:de:1", "https://issuer.example"));
         assert!(!c.issuer_allowed("urn:eudi:pid:1", "https://evil.example"));
         assert!(!c.issuer_allowed("unknown", "https://issuer.example"));
     }

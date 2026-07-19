@@ -521,6 +521,26 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol DemoWalletProtocol : AnyObject {
     
     /**
+     * The full issuance setup + the issuer-signed credentials the stub endpoint returns per type.
+     * Everything the shell needs to run a REAL OpenID4VCI issuance through the core (see
+     * [`IssuanceScenario`]).
+     */
+    func issuanceScenario()  -> IssuanceScenario
+    
+    /**
+     * A PSD2/TS12 payment authorization request bound to a caller-chosen `nonce` (and a matching
+     * unique transaction id), for the same fresh-per-run reason as [`Self::presentation_request`].
+     */
+    func paymentRequest(nonce: UInt64)  -> Data
+    
+    /**
+     * An RP-signed OpenID4VP presentation request for `age_over_18`, bound to a caller-chosen
+     * `nonce`. A persistent wallet engine records used nonces (replay protection), so each new
+     * presentation must carry a fresh one — this lets the shell mint one per run.
+     */
+    func presentationRequest(nonce: UInt64)  -> Data
+    
+    /**
      * Build the full demo scenario (credential, trusted list, signed request, payment request).
      */
     func scenario()  -> DemoScenario
@@ -597,6 +617,43 @@ public convenience init() {
 
     
 
+    
+    /**
+     * The full issuance setup + the issuer-signed credentials the stub endpoint returns per type.
+     * Everything the shell needs to run a REAL OpenID4VCI issuance through the core (see
+     * [`IssuanceScenario`]).
+     */
+open func issuanceScenario() -> IssuanceScenario {
+    return try!  FfiConverterTypeIssuanceScenario.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_demowallet_issuance_scenario(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * A PSD2/TS12 payment authorization request bound to a caller-chosen `nonce` (and a matching
+     * unique transaction id), for the same fresh-per-run reason as [`Self::presentation_request`].
+     */
+open func paymentRequest(nonce: UInt64) -> Data {
+    return try!  FfiConverterData.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_demowallet_payment_request(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(nonce),$0
+    )
+})
+}
+    
+    /**
+     * An RP-signed OpenID4VP presentation request for `age_over_18`, bound to a caller-chosen
+     * `nonce`. A persistent wallet engine records used nonces (replay protection), so each new
+     * presentation must carry a fresh one — this lets the shell mint one per run.
+     */
+open func presentationRequest(nonce: UInt64) -> Data {
+    return try!  FfiConverterData.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_demowallet_presentation_request(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(nonce),$0
+    )
+})
+}
     
     /**
      * Build the full demo scenario (credential, trusted list, signed request, payment request).
@@ -700,6 +757,12 @@ public protocol WalletEngineProtocol : AnyObject {
      * event, returns a `{"error": "..."}` object instead of an array.
      */
     func handleEventJson(eventJson: String)  -> String
+    
+    /**
+     * The credentials the wallet holds as a JSON array (`[{vct, issuer, disclosuresByClaim}]`),
+     * including any just obtained via issuance. The wallet home renders these as cards.
+     */
+    func heldCredentialsJson()  -> String
     
     /**
      * Load a held credential: the issuer JWT plus a JSON object mapping claim name -> disclosure.
@@ -844,6 +907,17 @@ open func handleEventJson(eventJson: String) -> String {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_wallet_core_fn_method_walletengine_handle_event_json(self.uniffiClonePointer(),
         FfiConverterString.lower(eventJson),$0
+    )
+})
+}
+    
+    /**
+     * The credentials the wallet holds as a JSON array (`[{vct, issuer, disclosuresByClaim}]`),
+     * including any just obtained via issuance. The wallet home renders these as cards.
+     */
+open func heldCredentialsJson() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_held_credentials_json(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -1194,6 +1268,266 @@ public func FfiConverterTypeDemoScenario_lower(_ value: DemoScenario) -> RustBuf
     return FfiConverterTypeDemoScenario.lower(value)
 }
 
+
+/**
+ * Everything the shell must load/feed to drive a REAL OpenID4VCI issuance against the core: the
+ * trusted list (anchoring the issuer), the device key + Wallet Unit Attestation (so the in-core
+ * key-attestation gate passes), the pre-authorized offer, the issuer's certificate chain, and the
+ * issuer-signed credential the (stub) `/credential` endpoint returns for each offered type. The
+ * core runs the full issuance machine — trust decision, WUA gate, device-signed proof — exactly
+ * as in `shell-io`'s live-TCP lifecycle test; only the transport is stubbed.
+ */
+public struct IssuanceScenario {
+    /**
+     * Wall-clock (Unix seconds) for `setClock`.
+     */
+    public var epoch: Int64
+    /**
+     * Operator-signed trusted list anchoring the demo CA for issuance (pid + attestation) AND
+     * RP access, so one engine can both add credentials and present them.
+     */
+    public var trustList: Data
+    /**
+     * Raw public key that signed `trust_list`.
+     */
+    public var operatorPublicKey: Data
+    /**
+     * Raw device public key to load (`loadDeviceKey`) — the key the WUA attests.
+     */
+    public var devicePublicKey: Data
+    /**
+     * Wallet Unit Attestation JWT (`loadWua`): binds the device key at High assurance.
+     */
+    public var wuaJwt: Data
+    /**
+     * Raw public key that signed the WUA (the wallet provider).
+     */
+    public var walletProviderPublicKey: Data
+    /**
+     * The issuer's certificate chain (DER, leaf-first) for the `CredentialOfferReceived` event —
+     * it chains to the trusted CA, so in-core issuer trust validates against a real chain.
+     */
+    public var issuerCertChain: [Data]
+    /**
+     * The issuer identity recorded in the audit log.
+     */
+    public var issuerId: String
+    /**
+     * A pre-authorized credential offer (no PAR / browser / tx-code), fed via
+     * `credentialOfferReceived`.
+     */
+    public var offer: Data
+    /**
+     * The issuer-signed PID compact the stub `/credential` endpoint returns.
+     */
+    public var pidCredentialCompact: String
+    /**
+     * The issuer-signed mDL compact the stub `/credential` endpoint returns.
+     */
+    public var mdlCredentialCompact: String
+    /**
+     * The issuer-signed passport compact.
+     */
+    public var passportCredentialCompact: String
+    /**
+     * The issuer-signed national ID card compact.
+     */
+    public var nidCredentialCompact: String
+    /**
+     * The issuer-signed German ID card (Personalausweis) compact.
+     */
+    public var germanIdCredentialCompact: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Wall-clock (Unix seconds) for `setClock`.
+         */epoch: Int64, 
+        /**
+         * Operator-signed trusted list anchoring the demo CA for issuance (pid + attestation) AND
+         * RP access, so one engine can both add credentials and present them.
+         */trustList: Data, 
+        /**
+         * Raw public key that signed `trust_list`.
+         */operatorPublicKey: Data, 
+        /**
+         * Raw device public key to load (`loadDeviceKey`) — the key the WUA attests.
+         */devicePublicKey: Data, 
+        /**
+         * Wallet Unit Attestation JWT (`loadWua`): binds the device key at High assurance.
+         */wuaJwt: Data, 
+        /**
+         * Raw public key that signed the WUA (the wallet provider).
+         */walletProviderPublicKey: Data, 
+        /**
+         * The issuer's certificate chain (DER, leaf-first) for the `CredentialOfferReceived` event —
+         * it chains to the trusted CA, so in-core issuer trust validates against a real chain.
+         */issuerCertChain: [Data], 
+        /**
+         * The issuer identity recorded in the audit log.
+         */issuerId: String, 
+        /**
+         * A pre-authorized credential offer (no PAR / browser / tx-code), fed via
+         * `credentialOfferReceived`.
+         */offer: Data, 
+        /**
+         * The issuer-signed PID compact the stub `/credential` endpoint returns.
+         */pidCredentialCompact: String, 
+        /**
+         * The issuer-signed mDL compact the stub `/credential` endpoint returns.
+         */mdlCredentialCompact: String, 
+        /**
+         * The issuer-signed passport compact.
+         */passportCredentialCompact: String, 
+        /**
+         * The issuer-signed national ID card compact.
+         */nidCredentialCompact: String, 
+        /**
+         * The issuer-signed German ID card (Personalausweis) compact.
+         */germanIdCredentialCompact: String) {
+        self.epoch = epoch
+        self.trustList = trustList
+        self.operatorPublicKey = operatorPublicKey
+        self.devicePublicKey = devicePublicKey
+        self.wuaJwt = wuaJwt
+        self.walletProviderPublicKey = walletProviderPublicKey
+        self.issuerCertChain = issuerCertChain
+        self.issuerId = issuerId
+        self.offer = offer
+        self.pidCredentialCompact = pidCredentialCompact
+        self.mdlCredentialCompact = mdlCredentialCompact
+        self.passportCredentialCompact = passportCredentialCompact
+        self.nidCredentialCompact = nidCredentialCompact
+        self.germanIdCredentialCompact = germanIdCredentialCompact
+    }
+}
+
+
+
+extension IssuanceScenario: Equatable, Hashable {
+    public static func ==(lhs: IssuanceScenario, rhs: IssuanceScenario) -> Bool {
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.trustList != rhs.trustList {
+            return false
+        }
+        if lhs.operatorPublicKey != rhs.operatorPublicKey {
+            return false
+        }
+        if lhs.devicePublicKey != rhs.devicePublicKey {
+            return false
+        }
+        if lhs.wuaJwt != rhs.wuaJwt {
+            return false
+        }
+        if lhs.walletProviderPublicKey != rhs.walletProviderPublicKey {
+            return false
+        }
+        if lhs.issuerCertChain != rhs.issuerCertChain {
+            return false
+        }
+        if lhs.issuerId != rhs.issuerId {
+            return false
+        }
+        if lhs.offer != rhs.offer {
+            return false
+        }
+        if lhs.pidCredentialCompact != rhs.pidCredentialCompact {
+            return false
+        }
+        if lhs.mdlCredentialCompact != rhs.mdlCredentialCompact {
+            return false
+        }
+        if lhs.passportCredentialCompact != rhs.passportCredentialCompact {
+            return false
+        }
+        if lhs.nidCredentialCompact != rhs.nidCredentialCompact {
+            return false
+        }
+        if lhs.germanIdCredentialCompact != rhs.germanIdCredentialCompact {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(epoch)
+        hasher.combine(trustList)
+        hasher.combine(operatorPublicKey)
+        hasher.combine(devicePublicKey)
+        hasher.combine(wuaJwt)
+        hasher.combine(walletProviderPublicKey)
+        hasher.combine(issuerCertChain)
+        hasher.combine(issuerId)
+        hasher.combine(offer)
+        hasher.combine(pidCredentialCompact)
+        hasher.combine(mdlCredentialCompact)
+        hasher.combine(passportCredentialCompact)
+        hasher.combine(nidCredentialCompact)
+        hasher.combine(germanIdCredentialCompact)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeIssuanceScenario: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> IssuanceScenario {
+        return
+            try IssuanceScenario(
+                epoch: FfiConverterInt64.read(from: &buf), 
+                trustList: FfiConverterData.read(from: &buf), 
+                operatorPublicKey: FfiConverterData.read(from: &buf), 
+                devicePublicKey: FfiConverterData.read(from: &buf), 
+                wuaJwt: FfiConverterData.read(from: &buf), 
+                walletProviderPublicKey: FfiConverterData.read(from: &buf), 
+                issuerCertChain: FfiConverterSequenceData.read(from: &buf), 
+                issuerId: FfiConverterString.read(from: &buf), 
+                offer: FfiConverterData.read(from: &buf), 
+                pidCredentialCompact: FfiConverterString.read(from: &buf), 
+                mdlCredentialCompact: FfiConverterString.read(from: &buf), 
+                passportCredentialCompact: FfiConverterString.read(from: &buf), 
+                nidCredentialCompact: FfiConverterString.read(from: &buf), 
+                germanIdCredentialCompact: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: IssuanceScenario, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.epoch, into: &buf)
+        FfiConverterData.write(value.trustList, into: &buf)
+        FfiConverterData.write(value.operatorPublicKey, into: &buf)
+        FfiConverterData.write(value.devicePublicKey, into: &buf)
+        FfiConverterData.write(value.wuaJwt, into: &buf)
+        FfiConverterData.write(value.walletProviderPublicKey, into: &buf)
+        FfiConverterSequenceData.write(value.issuerCertChain, into: &buf)
+        FfiConverterString.write(value.issuerId, into: &buf)
+        FfiConverterData.write(value.offer, into: &buf)
+        FfiConverterString.write(value.pidCredentialCompact, into: &buf)
+        FfiConverterString.write(value.mdlCredentialCompact, into: &buf)
+        FfiConverterString.write(value.passportCredentialCompact, into: &buf)
+        FfiConverterString.write(value.nidCredentialCompact, into: &buf)
+        FfiConverterString.write(value.germanIdCredentialCompact, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeIssuanceScenario_lift(_ buf: RustBuffer) throws -> IssuanceScenario {
+    return try FfiConverterTypeIssuanceScenario.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeIssuanceScenario_lower(_ value: IssuanceScenario) -> RustBuffer {
+    return FfiConverterTypeIssuanceScenario.lower(value)
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -1296,6 +1630,15 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallet_core_checksum_func_verify_wallet_export() != 147) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_wallet_core_checksum_method_demowallet_issuance_scenario() != 49616) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_demowallet_payment_request() != 20283) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_demowallet_presentation_request() != 4851) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_wallet_core_checksum_method_demowallet_scenario() != 15393) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1309,6 +1652,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_handle_event_json() != 35687) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_held_credentials_json() != 56264) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_load_credential() != 34961) {

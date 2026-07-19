@@ -54,10 +54,18 @@ public enum WalletEffect: Decodable {
     case render(screen: ScreenDescription)
     case sign(keyRef: String, payload: [UInt8])
     case http(url: String, body: [UInt8])
+    // --- Issuance (OpenID4VCI) ---
+    case pushPar
+    case openAuthBrowser
+    case promptTxCode
+    case requestToken
+    case requestCredential(proofJwt: [UInt8])
+    // --- Wallet-to-wallet (TS09) ---
+    case publishTransferOffer(offeredKey: [UInt8])
     case close
 
     private enum CodingKeys: String, CodingKey {
-        case type, clientId, nonce, screen, keyRef, payload, url, body
+        case type, clientId, nonce, screen, keyRef, payload, url, body, proofJwt, offeredKey
     }
 
     public init(from decoder: Decoder) throws {
@@ -77,6 +85,14 @@ public enum WalletEffect: Decodable {
             self = .http(
                 url: try c.decode(String.self, forKey: .url),
                 body: try c.decode([UInt8].self, forKey: .body))
+        case "pushPar": self = .pushPar
+        case "openAuthBrowser": self = .openAuthBrowser
+        case "promptTxCode": self = .promptTxCode
+        case "requestToken": self = .requestToken
+        case "requestCredential":
+            self = .requestCredential(proofJwt: try c.decode([UInt8].self, forKey: .proofJwt))
+        case "publishTransferOffer":
+            self = .publishTransferOffer(offeredKey: try c.decode([UInt8].self, forKey: .offeredKey))
         case "close": self = .close
         default: self = .close
         }
@@ -108,9 +124,39 @@ public enum WalletEventJSON {
     public static func paymentApproved() -> String { #"{"type":"paymentApproved"}"# }
     public static func paymentDeclined() -> String { #"{"type":"paymentDeclined"}"# }
 
+    // --- Issuance (OpenID4VCI) ---
+    public static func credentialOfferReceived(
+        offer: Data, issuerCertChain: [Data], issuerId: String
+    ) -> String {
+        let chain = issuerCertChain.map { byteArray($0) }.joined(separator: ",")
+        return #"{"type":"credentialOfferReceived","offer":\#(byteArray(offer)),"issuerCertChain":[\#(chain)],"issuerId":\#(jsonString(issuerId))}"#
+    }
+    public static func tokenReceived(bound: Bool, cNonce: UInt64) -> String {
+        #"{"type":"tokenReceived","bound":\#(bound),"cNonce":\#(cNonce)}"#
+    }
+    public static func credentialReceived(format: String, bytes: Data) -> String {
+        #"{"type":"credentialReceived","format":\#(jsonString(format)),"bytes":\#(byteArray(bytes))}"#
+    }
+
     private static func byteArray(_ data: Data) -> String {
         "[" + data.map { String($0) }.joined(separator: ",") + "]"
     }
+
+    /// JSON-encode a string (quotes + escapes) so issuer ids / formats are always well-formed.
+    private static func jsonString(_ s: String) -> String {
+        let data = (try? JSONEncoder().encode(s)) ?? Data("\"\"".utf8)
+        return String(data: data, encoding: .utf8) ?? "\"\""
+    }
+}
+
+/// Answers the (stubbed here) OpenID4VCI issuer endpoints the core drives via `RequestToken` /
+/// `RequestCredential`. A production shell POSTs these over TLS; the demo returns an issuer-signed
+/// credential in-process. The core still runs the whole issuance machine either way.
+public protocol IssuerResponder {
+    /// The `/token` response: whether the token is sender-bound, and a fresh `c_nonce`.
+    func token() async -> (bound: Bool, cNonce: UInt64)
+    /// The `/credential` response for the assembled proof: the format + credential bytes.
+    func credential(proofJwt: Data) async -> (format: String, bytes: Data)
 }
 
 /// Fetches an RP's certificate chain (network I/O; injected so it can be stubbed in tests). The

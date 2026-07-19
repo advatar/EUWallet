@@ -57,7 +57,8 @@ struct CredentialCardView: View {
     }
 }
 
-/// The wallet home: cards + primary actions + a toolbar to the other screens.
+/// The wallet home: cards + primary actions + a toolbar to the other screens. Credentials are
+/// obtained through a real OpenID4VCI issuance (the "+" / Add flow) and reflect what the core holds.
 struct WalletHomeView: View {
     @ObservedObject var model: WalletModel
     let onPresent: () -> Void
@@ -67,6 +68,9 @@ struct WalletHomeView: View {
     let onOpenSettings: () -> Void
 
     @State private var detail: WalletCredential?
+    @State private var showAdd = false
+
+    private var heldTypeNames: Set<String> { Set(model.credentials.map(\.typeName)) }
 
     var body: some View {
         ScrollView {
@@ -74,24 +78,34 @@ struct WalletHomeView: View {
                 Text("Powered by the verified Rust core — every decision made on-device.")
                     .font(.caption).foregroundStyle(.secondary)
 
-                ForEach(model.credentials) { credential in
-                    Button {
-                        detail = credential
-                    } label: {
-                        CredentialCardView(credential: credential)
+                if model.credentials.isEmpty {
+                    EmptyWalletView { showAdd = true }
+                } else {
+                    ForEach(model.credentials) { credential in
+                        Button {
+                            detail = credential
+                        } label: {
+                            CredentialCardView(credential: credential)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
-                }
 
-                // Primary actions.
-                HStack(spacing: 12) {
-                    ActionButton(title: "Present", systemImage: "qrcode", action: onPresent)
-                    ActionButton(title: "Pay", systemImage: "creditcard", action: onPay)
+                    // Primary actions (require a held credential to present).
+                    HStack(spacing: 12) {
+                        ActionButton(title: "Present", systemImage: "qrcode", action: onPresent)
+                        ActionButton(title: "Pay", systemImage: "creditcard", action: onPay)
+                    }
+                    .padding(.top, 4)
                 }
-                .padding(.top, 4)
 
                 // Secondary navigation.
                 VStack(spacing: 0) {
+                    WalletRow(title: "Scan a QR", subtitle: "Add via an issuer, or sign in to a verifier",
+                              systemImage: "qrcode.viewfinder", action: { model.showConnectSheet = true })
+                    Divider().padding(.leading, 52)
+                    WalletRow(title: "Add a credential", subtitle: "Issue a PID or mDL (OpenID4VCI)",
+                              systemImage: "plus.circle", action: { showAdd = true })
+                    Divider().padding(.leading, 52)
                     WalletRow(title: "Transaction history", subtitle: "\(model.history.count) recorded",
                               systemImage: "list.bullet.rectangle", action: onOpenHistory)
                     Divider().padding(.leading, 52)
@@ -106,11 +120,107 @@ struct WalletHomeView: View {
                 .padding(.top, 4)
             }
         }
+        .overlay {
+            if model.isIssuing {
+                ProgressView("Issuing credential…")
+                    .padding(20)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    .shadow(radius: 8)
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { showAdd = true } label: { Image(systemName: "plus") }
+                    .accessibilityLabel("Add a credential")
+                    .disabled(model.isIssuing)
+            }
+        }
+        .sheet(isPresented: $showAdd) {
+            AddCredentialSheet(heldTypeNames: heldTypeNames) { type in
+                model.addCredential(type)
+            }
+        }
+        .sheet(isPresented: $model.showConnectSheet) {
+            ConnectView(model: model)
+        }
         .sheet(item: $detail) { c in
             CredentialDetailView(credential: c, onPresent: {
                 detail = nil
                 onPresent()
             })
+        }
+    }
+}
+
+/// Shown when the wallet holds nothing yet: a prompt to add the first credential.
+private struct EmptyWalletView: View {
+    let onAdd: () -> Void
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "wallet.pass")
+                .font(.system(size: 44)).foregroundStyle(.tint)
+            Text("Your wallet is empty").font(.headline)
+            Text("Add a credential to get started. It's issued to this device over OpenID4VCI and "
+                 + "stored by the verified core.")
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button(action: onAdd) {
+                Label("Add a credential", systemImage: "plus")
+                    .font(.headline).padding(.horizontal, 8).padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 32)
+    }
+}
+
+/// Pick a credential type to be issued. Each choice runs a real OpenID4VCI issuance in the core.
+struct AddCredentialSheet: View {
+    let heldTypeNames: Set<String>
+    let onAdd: (WalletModel.CredentialType) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(WalletModel.CredentialType.allCases) { type in
+                        Button {
+                            onAdd(type)
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: type.systemImage)
+                                    .font(.title3).frame(width: 30).foregroundStyle(.tint)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(type.displayName).font(.body).foregroundStyle(.primary)
+                                    Text(type.subtitle).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if heldTypeNames.contains(type.displayName) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.green)
+                                } else {
+                                    Image(systemName: "plus.circle").foregroundStyle(.tint)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } footer: {
+                    Text("A trusted issuer signs the credential; the core verifies issuer trust and "
+                         + "the device key attestation, and the device signs the proof of possession.")
+                }
+            }
+            .navigationTitle("Add a credential")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
         }
     }
 }

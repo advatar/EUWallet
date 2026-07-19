@@ -3,11 +3,12 @@ import Foundation
 // WalletShell sources, the generated UniFFI bindings, and these App sources are compiled into one
 // app module (see ios/project.yml), so no cross-module import is needed.
 
-/// Orchestrates the real Rust core for the demo app. Flows run through a WALLET ENGINE that is
-/// kept alive afterwards, so the P1 screens (history, deletion, report, export) operate on the
-/// engine's real in-core state over the FFI — redaction, wiping, reporting, and export are the
-/// Rust core's own functions, not Swift re-implementations. The device signer and RP trust come
-/// from `DemoWallet` (real aws-lc-rs keys), so every run is a genuine end-to-end flow.
+/// Orchestrates the real Rust core for the demo app. One PERSISTENT wallet engine lives for the
+/// session: credentials are obtained through a real OpenID4VCI issuance and stored in-core, the
+/// wallet home reflects exactly what the core holds, and presentations/payments/history/export all
+/// operate on that same engine's state over the FFI. The device signer and RP/issuer trust come
+/// from `DemoWallet` (real aws-lc-rs keys), so every run is a genuine end-to-end flow — only the
+/// network transport is stubbed.
 @MainActor
 final class WalletModel: ObservableObject {
     enum Phase: Equatable {
@@ -16,6 +17,44 @@ final class WalletModel: ObservableObject {
         case screen(ScreenDescription)
         case done(String)
         case failed(String)
+    }
+
+    /// The credential types this demo wallet can be issued (mirrors the core's attestation
+    /// catalogue). Each maps to an issuer-signed credential the stub issuer hands back.
+    enum CredentialType: String, CaseIterable, Identifiable {
+        case pid = "urn:eudi:pid:1"
+        case mdl = "urn:eudi:mdl:1"
+        case passport = "urn:eudi:passport:1"
+        case nid = "urn:eudi:nid:1"
+        case germanId = "urn:eudi:pid:de:1"
+        var id: String { rawValue }
+        var displayName: String {
+            switch self {
+            case .pid: return "Person Identification Data"
+            case .mdl: return "Mobile Driving Licence"
+            case .passport: return "Passport"
+            case .nid: return "National ID Card"
+            case .germanId: return "German ID Card"
+            }
+        }
+        var subtitle: String {
+            switch self {
+            case .pid: return "Your core identity attributes (PID)"
+            case .mdl: return "Driving entitlement + identity (mDL)"
+            case .passport: return "Travel document (ICAO 9303)"
+            case .nid: return "Government identity card"
+            case .germanId: return "Personalausweis (eID)"
+            }
+        }
+        var systemImage: String {
+            switch self {
+            case .pid: return "person.text.rectangle.fill"
+            case .mdl: return "car.fill"
+            case .passport: return "book.closed.fill"
+            case .nid: return "person.crop.rectangle.fill"
+            case .germanId: return "flag.fill"
+            }
+        }
     }
 
     @Published private(set) var phase: Phase = .home
@@ -27,85 +66,66 @@ final class WalletModel: ObservableObject {
     @Published private(set) var report: ActivityReport?
     /// The export sheet's content when presented (TS10).
     @Published var exportPreview: ExportPreview?
-    /// The credentials shown on the wallet home, decoded from the held credential's disclosures
-    /// with display names from the attestation catalogue (TS11).
+    /// The credentials shown on the wallet home — decoded from what the CORE actually holds
+    /// (`held_credentials_json`), labelled via the attestation catalogue (TS11).
     @Published private(set) var credentials: [WalletCredential] = []
+    /// True while a real OpenID4VCI issuance is running (drives the home's progress state).
+    @Published private(set) var isIssuing = false
+    /// Drives the real "Connect" sheet (scan/paste a link, probe the live issuer).
+    @Published var showConnectSheet = false
+    /// Human-readable classification of the last scanned/pasted link.
+    @Published var lastScan: String?
+    /// Result of probing the live EUDI reference issuer over real HTTPS.
+    @Published var probeResult: String?
 
+    private let demo = DemoWallet()
+    /// The one wallet engine for the whole session (issuance + holdings + presentation + history).
+    private let engine: WalletEngine
+    private let issuance: IssuanceScenario
+    /// RP trust material for presentation (static demo chain), captured once.
+    private let rpCertChain: [Data]
+    private let redirectUris: [String]
+    /// The executor bound to `engine` for the current flow (rebuilt per flow; same engine).
     private var executor: EffectExecutor?
-    /// The engine whose log/report/export the P1 screens operate on (the most recent flows).
-    private var engine: WalletEngine?
+    /// Monotonic nonce source: a persistent engine records used nonces (replay protection), so each
+    /// presentation/payment/issuance must carry a fresh one.
+    private var nonceCounter: UInt64 = 1
 
     init() {
-        loadWallet()
+        let (engine, issuance, rpCertChain, redirectUris) = Self.makeEngine(demo)
+        self.engine = engine
+        self.issuance = issuance
+        self.rpCertChain = rpCertChain
+        self.redirectUris = redirectUris
+        reloadCredentials()
+        reloadHistory()
     }
 
-    /// Populate the wallet's held credentials from the demo scenario, decoding each disclosure
-    /// (`[salt, name, value]`) to a display value and labelling it via the attestation catalogue.
-    private func loadWallet() {
-        let scenario = DemoWallet().scenario()
-        let pidType = catalogueItems().first { $0.id == "urn:eudi:pid:1" }
+    // MARK: - Engine + executor
 
-        // claim path -> display name, from the catalogue.
-        var display: [String: String] = [:]
-        for c in pidType?.claims ?? [] { display[c.path] = c.displayName }
-
-        // Decode disclosures: { "<claim>": "<base64url([salt,name,value])>" }.
-        var claims: [(String, String)] = []
-        if let data = scenario.disclosuresByClaimJson.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-            for (claim, disclosureB64) in obj.sorted(by: { $0.key < $1.key }) {
-                guard let raw = Self.base64urlDecode(disclosureB64),
-                      let arr = try? JSONSerialization.jsonObject(with: raw) as? [Any],
-                      arr.count == 3
-                else { continue }
-                let value = String(describing: arr[2])
-                claims.append((display[claim] ?? claim, value))
-            }
-        }
-        let holder = claims.first { $0.0 == "Family name" }.map { "A. \($0.1)" } ?? "EU Citizen"
-        credentials = [
-            WalletCredential(
-                id: "urn:eudi:pid:1",
-                typeName: pidType?.displayName ?? "Person Identification Data",
-                issuer: "issuer.example",
-                holder: holder,
-                claims: claims,
-                gradientHex: (0x2A5BD7, 0x6E48D9))
-        ]
-    }
-
-    /// Base64url (no padding) → bytes.
-    private static func base64urlDecode(_ s: String) -> Data? {
-        var b = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        while b.count % 4 != 0 { b.append("=") }
-        return Data(base64Encoded: b)
-    }
-
-
-    /// Build a fresh engine loaded with the demo credential, device key, and trusted list.
-    private func makeEngine() -> (WalletEngine, DemoWallet, DemoScenario) {
+    /// Build the persistent engine, configured for BOTH issuance and presentation: device key,
+    /// clock, an all-services trusted list, and the Wallet Unit Attestation — but NO credential
+    /// (the wallet starts empty; credentials arrive via issuance).
+    private static func makeEngine(
+        _ demo: DemoWallet
+    ) -> (WalletEngine, IssuanceScenario, [Data], [String]) {
         let engine = WalletEngine(walletClientId: "wallet.example", deviceKeyRef: "device-key")
-        let demo = DemoWallet()
+        let s = demo.issuanceScenario()
+        engine.loadDeviceKey(devicePublicKey: s.devicePublicKey)
+        // Set the clock BEFORE loading the trusted list: the core verifies the list and the
+        // CA/RP/issuer certificate validity windows against `now_epoch`.
+        _ = engine.handleEventJson(eventJson: WalletEventJSON.setClock(epoch: s.epoch))
+        _ = engine.loadTrustList(signedList: s.trustList, operatorPublicKey: s.operatorPublicKey)
+        // The in-core key-attestation gate for issuance: the WUA must verify and bind the device key.
+        _ = engine.loadWua(wuaJwt: s.wuaJwt, providerPublicKey: s.walletProviderPublicKey)
         let scenario = demo.scenario()
-        // These are FFI calls, not events. RP registration, minimisation, key binding: all in-core.
-        engine.loadCredential(
-            issuerJwt: scenario.issuerJwt,
-            disclosuresByClaimJson: scenario.disclosuresByClaimJson,
-            statusIndex: nil)
-        engine.loadDeviceKey(devicePublicKey: scenario.devicePublicKey)
-        // Set the clock BEFORE loading the trusted list: the core verifies the list and the RP/CA
-        // certificate validity windows against `now_epoch` (0/1970 when unset → certs not yet valid).
-        _ = engine.handleEventJson(eventJson: WalletEventJSON.setClock(epoch: scenario.epoch))
-        _ = engine.loadTrustList(
-            signedList: scenario.trustList,
-            operatorPublicKey: scenario.operatorPublicKey)
-        return (engine, demo, scenario)
+        return (engine, s, scenario.rpCertChain, scenario.registeredRedirectUris)
     }
 
-    /// Build an executor for `engine`; `render` maps the core's screens somewhere (the live UI, or
-    /// a no-op for silent seeding).
+    /// Build an executor bound to the persistent engine. `issuer` is supplied only for issuance;
+    /// `render` maps the core's screens to the live UI (or a no-op for silent seeding).
     private func makeExecutor(
-        _ engine: WalletEngine, _ demo: DemoWallet, _ scenario: DemoScenario,
+        issuer: IssuerResponder?,
         render: @escaping (ScreenDescription) -> Void
     ) -> EffectExecutor {
         EffectExecutor(
@@ -113,34 +133,114 @@ final class WalletModel: ObservableObject {
             signer: DemoSigner(demo: demo),
             http: StubHttpClient(),
             storage: InMemoryStorage(),
-            trust: DemoTrustResolver(
-                certChain: scenario.rpCertChain,
-                redirectUris: scenario.registeredRedirectUris),
+            trust: DemoTrustResolver(certChain: rpCertChain, redirectUris: redirectUris),
+            issuer: issuer,
             render: render)
     }
 
-    /// Build the live flow: renders drive the visible UI via `phase`.
-    private func freshFlow() -> DemoScenario {
-        let (engine, demo, scenario) = makeEngine()
-        self.engine = engine
-        self.executor = makeExecutor(engine, demo, scenario) { [weak self] screen in
+    private func liveExecutor() -> EffectExecutor {
+        let ex = makeExecutor(issuer: nil) { [weak self] screen in
             Task { @MainActor in self?.phase = .screen(screen) }
         }
-        return scenario
+        self.executor = ex
+        return ex
+    }
+
+    private func nextNonce() -> UInt64 {
+        nonceCounter += 1
+        return nonceCounter
     }
 
     private func note(_ line: String) { log.append(line) }
 
-    // MARK: - Flows
+    // MARK: - Add a credential (real OpenID4VCI issuance)
+
+    /// Add a credential to the wallet by running a REAL OpenID4VCI issuance through the core: the
+    /// core decides issuer trust in-core, gates on the WUA key-attestation, has the device sign the
+    /// proof-of-possession, and stores the issuer-signed credential it receives. The home then
+    /// reflects the new holding. Only the issuer's token/credential transport is stubbed.
+    func addCredential(_ type: CredentialType) {
+        guard !isIssuing else { return }
+        isIssuing = true
+        log = ["Adding \(type.displayName) via OpenID4VCI…"]
+        Task {
+            await issue(type)
+            note("Core ran the issuance machine: issuer-trust decision, WUA key-attestation gate, "
+                 + "device-signed proof-of-possession — then stored the issuer-signed credential.")
+            reloadCredentials()
+            reloadHistory()
+            isIssuing = false
+        }
+    }
+
+    /// Screenshot/demo affordance: issue BOTH a PID and an mDL (sequentially — a real issuance is
+    /// one OpenID4VCI session at a time), landing on a two-card home.
+    func seedBothForDemo() {
+        guard !isIssuing else { return }
+        isIssuing = true
+        Task {
+            await issue(.pid)
+            await issue(.mdl)
+            reloadCredentials()
+            reloadHistory()
+            isIssuing = false
+        }
+    }
+
+    /// Screenshot/demo affordance: issue the national ID + German ID cards (sequentially).
+    func seedIdCardsForDemo() {
+        guard !isIssuing else { return }
+        isIssuing = true
+        Task {
+            await issue(.nid)
+            await issue(.germanId)
+            reloadCredentials()
+            reloadHistory()
+            isIssuing = false
+        }
+    }
+
+    /// Screenshot/demo affordance: issue every supported credential type (sequentially).
+    func seedAllForDemo() {
+        guard !isIssuing else { return }
+        isIssuing = true
+        Task {
+            for type in CredentialType.allCases { await issue(type) }
+            reloadCredentials()
+            reloadHistory()
+            isIssuing = false
+        }
+    }
+
+    /// The awaitable core of issuance (also used to seed demo state silently).
+    private func issue(_ type: CredentialType) async {
+        let compact: String
+        switch type {
+        case .pid: compact = issuance.pidCredentialCompact
+        case .mdl: compact = issuance.mdlCredentialCompact
+        case .passport: compact = issuance.passportCredentialCompact
+        case .nid: compact = issuance.nidCredentialCompact
+        case .germanId: compact = issuance.germanIdCredentialCompact
+        }
+        let issuer = DemoIssuer(credentialCompact: Data(compact.utf8), cNonce: nextNonce())
+        let ex = makeExecutor(issuer: issuer, render: { _ in })
+        await ex.send(eventJson: WalletEventJSON.credentialOfferReceived(
+            offer: issuance.offer,
+            issuerCertChain: issuance.issuerCertChain,
+            issuerId: issuance.issuerId))
+    }
+
+    // MARK: - Flows (presentation / payment) on the persistent engine
 
     /// OpenID4VP remote presentation: request → in-core trust + data minimisation → consent.
     func startPresentation() {
+        guard !credentials.isEmpty else { return } // nothing to present yet
         phase = .running
         log = ["Presentation: feeding RP-signed authorization request…"]
-        let scenario = freshFlow()
+        let ex = liveExecutor()
+        let request = demo.presentationRequest(nonce: nextNonce())
         Task {
-            await executor?.send(
-                eventJson: WalletEventJSON.authorizationRequestReceived(scenario.presentationRequest))
+            await ex.send(eventJson: WalletEventJSON.authorizationRequestReceived(request))
             note("Core resolved RP trust in-core and computed the minimised consent screen.")
         }
     }
@@ -149,10 +249,10 @@ final class WalletModel: ObservableObject {
     func startPayment() {
         phase = .running
         log = ["Payment: feeding PSD2/TS12 authorization request…"]
-        let scenario = freshFlow()
+        let ex = liveExecutor()
+        let request = demo.paymentRequest(nonce: nextNonce())
         Task {
-            await executor?.send(
-                eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(scenario.paymentRequest))
+            await ex.send(eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(request))
             note("Core produced the payment confirmation screen (amount + payee bound in-core).")
         }
     }
@@ -192,25 +292,26 @@ final class WalletModel: ObservableObject {
         log = []
     }
 
-    /// Demo/screenshot affordance: drive a full presentation AND a full payment to completion
-    /// SILENTLY (no-op render) through ONE engine — exactly like the core's own txn_log test — so
-    /// the wallet log holds both entries and the P1 screens operate on real accumulated state.
-    /// `redactFirst` then erases entry #0 (the TS07 tombstone path); `thenExport` opens the TS10
-    /// export sheet.
+    /// Demo/screenshot affordance: add a PID, then drive a full presentation AND a full payment to
+    /// completion SILENTLY through the persistent engine, so the wallet holds a credential and the
+    /// log holds both entries. `redactFirst` erases entry #0 (TS07); `thenExport` opens the export
+    /// sheet (TS10).
     func seedHistoryForDemo(redactFirst: Bool = false, thenExport: Bool = false) {
         Task {
-            let (e, d, s) = makeEngine()
-            self.engine = e
-            let ex = makeExecutor(e, d, s, render: { _ in })
+            await issue(.pid)
+            let ex = makeExecutor(issuer: nil, render: { _ in })
             await ex.send(
-                eventJson: WalletEventJSON.authorizationRequestReceived(s.presentationRequest))
+                eventJson: WalletEventJSON.authorizationRequestReceived(
+                    demo.presentationRequest(nonce: nextNonce())))
             await ex.send(eventJson: WalletEventJSON.userConsented())
             await ex.send(
-                eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(s.paymentRequest))
+                eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(
+                    demo.paymentRequest(nonce: nextNonce())))
             await ex.send(eventJson: WalletEventJSON.paymentApproved())
             if redactFirst {
-                _ = e.redactTransaction(seq: 0)
+                _ = engine.redactTransaction(seq: 0)
             }
+            reloadCredentials()
             reloadHistory()
             if thenExport {
                 exportPreview = makeExport()
@@ -218,15 +319,76 @@ final class WalletModel: ObservableObject {
         }
     }
 
-    // MARK: - P1 operations (all real core functions over the FFI)
+    // MARK: - Holdings + P1 operations (all real core functions over the FFI)
+
+    /// Rebuild the wallet home's cards from what the core holds (`held_credentials_json`), labelled
+    /// via the attestation catalogue. Never shows raw disclosure blobs — decodes each to its value.
+    func reloadCredentials() {
+        let catalogue = catalogueItems()
+        guard let data = engine.heldCredentialsJson().data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else {
+            credentials = []
+            return
+        }
+        credentials = arr.enumerated().map { i, obj in
+            Self.decodeCard(obj, index: i, catalogue: catalogue)
+        }
+    }
+
+    /// Decode one `held_credentials_json` entry into a card: label each disclosure via the
+    /// catalogue, derive the holder from name claims, colour by type.
+    private static func decodeCard(
+        _ obj: [String: Any], index: Int, catalogue: [CatalogueItem]
+    ) -> WalletCredential {
+        let vct = obj["vct"] as? String ?? "unknown"
+        let issuer = (obj["issuer"] as? String ?? "").replacingOccurrences(of: "https://", with: "")
+        let disclosures = obj["disclosuresByClaim"] as? [String: String] ?? [:]
+        let type = catalogue.first { $0.id == vct }
+        var labelFor: [String: String] = [:]
+        for c in type?.claims ?? [] { labelFor[c.path] = c.displayName }
+
+        var claims: [(String, String)] = []
+        var given = "", family = ""
+        for (claim, disclosureB64) in disclosures.sorted(by: { $0.key < $1.key }) {
+            guard let raw = base64urlDecode(disclosureB64),
+                  let a = try? JSONSerialization.jsonObject(with: raw) as? [Any], a.count == 3
+            else { continue }
+            let value = String(describing: a[2])
+            if claim == "given_name" { given = value }
+            if claim == "family_name" { family = value }
+            claims.append((labelFor[claim] ?? claim, value))
+        }
+        let holder = [given, family].filter { !$0.isEmpty }.joined(separator: " ")
+        return WalletCredential(
+            id: "\(vct)#\(index)",
+            typeName: type?.displayName ?? vct,
+            issuer: issuer.isEmpty ? "issuer" : issuer,
+            holder: holder.isEmpty ? "EU Citizen" : holder,
+            claims: claims,
+            gradientHex: gradient(for: vct))
+    }
+
+    /// Card gradient by credential type (our own palette; not any product's branding).
+    private static func gradient(for vct: String) -> (UInt32, UInt32) {
+        switch vct {
+        case "urn:eudi:mdl:1": return (0x0E8F6B, 0x14B37D)      // teal-green: driving licence
+        case "urn:eudi:passport:1": return (0x7A1E2B, 0xB23A48) // burgundy: passport
+        case "urn:eudi:nid:1": return (0xB5651D, 0xE08A2E)      // amber: national ID
+        case "urn:eudi:pid:de:1": return (0x6B5410, 0xC9A227)   // bronze-gold: German ID
+        default: return (0x2A5BD7, 0x6E48D9)                    // blue-purple: PID
+        }
+    }
+
+    /// Base64url (no padding) → bytes.
+    private static func base64urlDecode(_ s: String) -> Data? {
+        var b = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while b.count % 4 != 0 { b.append("=") }
+        return Data(base64Encoded: b)
+    }
 
     /// Refresh the history list + activity report from the engine's in-core log.
     func reloadHistory() {
-        guard let engine else {
-            history = []
-            report = nil
-            return
-        }
         if let data = engine.transactionLogJson().data(using: .utf8),
            let items = try? JSONDecoder().decode([HistoryItem].self, from: data) {
             history = items
@@ -239,20 +401,19 @@ final class WalletModel: ObservableObject {
 
     /// Erase one entry's content (TS07). The core leaves a chain-preserving tombstone.
     func redact(seq: UInt64) {
-        _ = engine?.redactTransaction(seq: seq)
+        _ = engine.redactTransaction(seq: seq)
         reloadHistory()
     }
 
     /// Erase the entire log (TS07).
     func wipeLog() {
-        engine?.wipeTransactionLog()
+        engine.wipeTransactionLog()
         reloadHistory()
     }
 
     /// The integrity-protected export bundle (TS10) plus whether it verifies, and a proof that a
     /// TAMPERED copy fails — both checks performed by the core's own verifier.
     func makeExport() -> ExportPreview? {
-        guard let engine else { return nil }
         let json = engine.exportJson()
         let verifies = verifyWalletExport(json: json)
         let tampered = json.replacingOccurrences(of: "rp.example", with: "evil.example")
@@ -262,11 +423,64 @@ final class WalletModel: ObservableObject {
 
     /// The attestation catalogue (TS11): the credential types this wallet understands.
     func catalogueItems() -> [CatalogueItem] {
-        let e = engine ?? makeEngine().0
-        guard let data = e.attestationCatalogueJson().data(using: .utf8),
+        guard let data = engine.attestationCatalogueJson().data(using: .utf8),
               let items = try? JSONDecoder().decode([CatalogueItem].self, from: data)
         else { return [] }
         return items
+    }
+
+    // MARK: - Real connect (foundation for issuer/verifier over the network)
+
+    /// Classify a scanned/pasted link — what wallet action it would trigger (add a credential vs.
+    /// present to a verifier) — using the pure `ScannedRequest` parser.
+    func handleScanned(_ text: String) {
+        switch ScannedRequest.parse(text) {
+        case let .credentialOffer(issuer, ids):
+            lastScan = "✅ Credential offer from \(issuer)\n"
+                + "\(ids.count) type(s): \(ids.joined(separator: ", "))"
+        case let .credentialOfferByReference(uri):
+            lastScan = "✅ Credential offer (by reference)\n\(uri)"
+        case let .presentation(requestUri, clientId):
+            lastScan = "✅ Presentation request\nclient: \(clientId ?? "—")\n"
+                + "request_uri: \(requestUri ?? "—")"
+        case let .unknown(s):
+            lastScan = "⚠️ Not a recognised wallet link:\n\(s.prefix(80))"
+        }
+    }
+
+    /// Fetch the LIVE EUDI reference issuer's metadata over real HTTPS — proof that real networking
+    /// works end to end, and a listing of the credential types the reference issuer offers.
+    func probeReferenceIssuer() {
+        probeResult = "Contacting issuer.eudiw.dev…"
+        Task {
+            let client = URLSessionHttpClient()
+            let (status, data) = await client.fetchIssuerMetadata(issuer: "https://issuer.eudiw.dev")
+            var summary = "HTTP \(status)"
+            if status == 200,
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let iss = obj["credential_issuer"] as? String ?? "?"
+                let configs = (obj["credential_configurations_supported"] as? [String: Any])?.keys.sorted()
+                    ?? (obj["credentials_supported"] as? [String: Any])?.keys.sorted()
+                    ?? []
+                summary += "\nissuer: \(iss)\n\(configs.count) credential types; e.g.\n• "
+                    + configs.prefix(5).joined(separator: "\n• ")
+            } else {
+                summary += "\n" + String(decoding: data.prefix(200), as: UTF8.self)
+            }
+            probeResult = summary
+        }
+    }
+
+    /// A short fingerprint of the device's REAL signing key (Secure Enclave on device; a keychain
+    /// key on the Simulator). Proves a genuine key exists — the key the core binds and the WUA
+    /// attests when we wire issuance to a real issuer.
+    func deviceKeyPreview() -> String {
+        let signer = SecureEnclaveSigner()
+        if let pub = try? signer.publicKeyRaw(keyRef: "wallet-device-key") {
+            let head = pub.prefix(8).map { String(format: "%02x", $0) }.joined()
+            return "\(head)… (\(pub.count) bytes)"
+        }
+        return "unavailable"
     }
 }
 
@@ -309,7 +523,7 @@ struct ExportPreview: Identifiable {
     let tamperDetected: Bool
 }
 
-/// A credential shown on the wallet home — decoded from the held credential, labelled via the
+/// A credential shown on the wallet home — decoded from what the core holds, labelled via the
 /// catalogue. `claims` are (display name, value) pairs; the card never shows raw disclosure blobs.
 struct WalletCredential: Identifiable {
     let id: String

@@ -70,6 +70,27 @@ struct ContentView: View {
         guard let i = args.firstIndex(of: "-autostart"), i + 1 < args.count else { return }
         switch args[i + 1] {
         case "home": nav.send(.finishedOnboarding)
+        case "add", "issue":
+            // Exercise the real OpenID4VCI issuance and land on a populated home.
+            nav.send(.finishedOnboarding)
+            model.addCredential(.pid)
+        case "add-mdl":
+            nav.send(.finishedOnboarding)
+            model.addCredential(.mdl)
+        case "add-both":
+            nav.send(.finishedOnboarding)
+            model.seedBothForDemo()
+        case "add-all":
+            nav.send(.finishedOnboarding)
+            model.seedAllForDemo()
+        case "add-ids":
+            nav.send(.finishedOnboarding)
+            model.seedIdCardsForDemo()
+        case "probe-issuer":
+            // Open the real Connect sheet and hit the live EUDI reference issuer over HTTPS.
+            nav.send(.finishedOnboarding)
+            model.showConnectSheet = true
+            model.probeReferenceIssuer()
         case "presentation": nav.send(.startPresentation); model.startPresentation()
         case "payment": nav.send(.startPresentation); model.startPayment()
         case "history":

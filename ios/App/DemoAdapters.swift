@@ -27,3 +27,26 @@ final class DemoTrustResolver: TrustResolver {
         (chain, uris)
     }
 }
+
+/// Stands in for the OpenID4VCI issuer's `/token` + `/credential` endpoints during a demo issuance.
+/// A production shell POSTs these over TLS to a real issuer; here they return a fresh `c_nonce` and
+/// the issuer-signed credential minted by the Rust `DemoWallet`. The core runs the full issuance
+/// machine (trust gate, WUA key-attestation gate, device-signed proof) regardless — only the
+/// transport is stubbed. `cNonce` must be unique per issuance (the core rejects a replayed one).
+final class DemoIssuer: IssuerResponder {
+    private let credentialCompact: Data
+    private let cNonce: UInt64
+    private let format: String
+
+    init(credentialCompact: Data, cNonce: UInt64, format: String = "dc+sd-jwt") {
+        self.credentialCompact = credentialCompact
+        self.cNonce = cNonce
+        self.format = format
+    }
+
+    func token() async -> (bound: Bool, cNonce: UInt64) { (true, cNonce) }
+
+    func credential(proofJwt: Data) async -> (format: String, bytes: Data) {
+        (format, credentialCompact)
+    }
+}

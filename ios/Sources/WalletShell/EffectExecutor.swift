@@ -10,6 +10,7 @@ public final class EffectExecutor {
     private let http: HttpClient
     private let storage: SecureStorage
     private let trust: TrustResolver
+    private let issuer: IssuerResponder?
     private let render: (ScreenDescription) -> Void
 
     public init(
@@ -18,6 +19,7 @@ public final class EffectExecutor {
         http: HttpClient,
         storage: SecureStorage,
         trust: TrustResolver,
+        issuer: IssuerResponder? = nil,
         render: @escaping (ScreenDescription) -> Void
     ) {
         self.engine = engine
@@ -25,6 +27,7 @@ public final class EffectExecutor {
         self.http = http
         self.storage = storage
         self.trust = trust
+        self.issuer = issuer
         self.render = render
     }
 
@@ -67,6 +70,18 @@ public final class EffectExecutor {
             return WalletEventJSON.rpCertChainResolved(chain: t.certChain, redirectUris: t.redirectUris)
         case .persistNonce(let nonce):
             try? storage.put(key: "nonce:\(nonce)", value: Data())
+            return nil
+        // --- Issuance (OpenID4VCI). The demo's pre-authorized flow uses only token + credential;
+        //     PAR / browser / tx-code are unreachable here and safely no-op. ---
+        case .requestToken:
+            guard let issuer else { return nil }
+            let t = await issuer.token()
+            return WalletEventJSON.tokenReceived(bound: t.bound, cNonce: t.cNonce)
+        case .requestCredential(let proofJwt):
+            guard let issuer else { return nil }
+            let c = await issuer.credential(proofJwt: Data(proofJwt))
+            return WalletEventJSON.credentialReceived(format: c.format, bytes: c.bytes)
+        case .pushPar, .openAuthBrowser, .promptTxCode, .publishTransferOffer:
             return nil
         case .close:
             return nil

@@ -35,7 +35,7 @@ enum ActiveFlow {
 uniffi::setup_scaffolding!();
 
 mod demo;
-pub use demo::{DemoScenario, DemoWallet};
+pub use demo::{DemoScenario, DemoWallet, IssuanceScenario};
 
 pub mod export;
 
@@ -74,9 +74,58 @@ fn format_name(f: oid4vci::CredentialFormat) -> &'static str {
     }
 }
 
+/// Parse a `dc+sd-jwt` compact serialization (`<issuer-jwt>~<disclosure>~…~`) into a held
+/// credential: the issuer JWT plus each named disclosure keyed by its claim name. Returns `None`
+/// if the compact is malformed. This is how an issued credential (received over the wire) becomes
+/// a stored holding — the same shape the shell loads a credential in.
+fn held_credential_from_compact(bytes: &[u8]) -> Option<HeldCredential> {
+    let compact = core::str::from_utf8(bytes).ok()?;
+    let sd = sdjwt::SdJwtVc::parse(compact).ok()?;
+    let mut disclosures_by_claim = BTreeMap::new();
+    for raw in &sd.disclosures {
+        let d = sdjwt::Disclosure::parse(raw).ok()?;
+        // Object-member disclosures ([salt, name, value]) are the claims a wallet holds.
+        if let Some(name) = d.name {
+            disclosures_by_claim.insert(name, raw.clone());
+        }
+    }
+    Some(HeldCredential {
+        issuer_jwt: sd.issuer_jwt,
+        disclosures_by_claim,
+        status_index: None,
+    })
+}
+
+/// Read a credential's type (`vct`) and issuer (`iss`) from its issuer JWT payload, for display.
+/// Returns empty strings for anything unparseable — this is a UI hint, never a trust decision.
+fn credential_vct_and_issuer(issuer_jwt: &str) -> (String, String) {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    let payload_b64 = match issuer_jwt.split('.').nth(1) {
+        Some(p) => p,
+        None => return (String::new(), String::new()),
+    };
+    let Ok(bytes) = Base64UrlUnpadded::decode_vec(payload_b64) else {
+        return (String::new(), String::new());
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return (String::new(), String::new());
+    };
+    let vct = json
+        .get("vct")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let iss = json
+        .get("iss")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    (vct, iss)
+}
+
 /// A credential the wallet holds: the issuer-signed JWT plus its disclosures keyed by claim name,
 /// so the core can disclose exactly the requested-and-held subset.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HeldCredential {
     pub issuer_jwt: String,
     pub disclosures_by_claim: BTreeMap<String, String>,
@@ -233,7 +282,9 @@ pub struct Core {
     config: WalletConfig,
     vp: State,
     seen_nonces: Vec<u64>,
-    credential: Option<HeldCredential>,
+    /// The credentials the wallet holds. A real wallet holds several (a PID, an mDL, …); issuance
+    /// appends, and presentation selects the one that data-minimally satisfies the request.
+    credentials: Vec<HeldCredential>,
     session: Option<SessionInfo>,
     now_epoch: i64,
     // Payment SCA flow.
@@ -277,7 +328,7 @@ impl Core {
             },
             vp: State::Idle,
             seen_nonces: Vec::new(),
-            credential: None,
+            credentials: Vec::new(),
             session: None,
             now_epoch: 0,
             payment: payment::State::Idle,
@@ -404,7 +455,7 @@ impl Core {
     /// credential + the transaction log, under a SHA-256 hash over canonical bytes. The holder's
     /// explicit action; the shell adds at-rest encryption before it leaves the device.
     pub fn export_json(&self) -> String {
-        export::export_json(&AwsLc, self.now_epoch, self.credential.as_ref(), &self.log)
+        export::export_json(&AwsLc, self.now_epoch, self.credentials.first(), &self.log)
     }
 
     /// A privacy-preserving activity report as JSON (TS08): counts by kind, redaction count, and
@@ -444,7 +495,7 @@ impl Core {
     /// Should the held credential be blocked from presentation because it is revoked/suspended (or
     /// its status is unavailable under a fail-closed policy)? Decided in-core.
     fn status_blocks_presentation(&self) -> bool {
-        let Some(idx) = self.credential.as_ref().and_then(|c| c.status_index) else {
+        let Some(idx) = self.credentials.iter().find_map(|c| c.status_index) else {
             return false; // no status list reference → nothing to check
         };
         let st = self.status_list.as_ref().map(|l| l.status_at(idx as usize));
@@ -509,9 +560,37 @@ impl Core {
         }
     }
 
-    /// Store the wallet's credential (e.g. the PID obtained via issuance).
+    /// Add a credential to the wallet's holdings (e.g. a PID or mDL obtained via issuance).
+    /// Idempotent: loading a byte-identical credential twice does not duplicate it.
     pub fn load_credential(&mut self, credential: HeldCredential) {
-        self.credential = Some(credential);
+        if !self.credentials.contains(&credential) {
+            self.credentials.push(credential);
+        }
+    }
+
+    /// The credentials the wallet holds, as a JSON array the UI renders as cards. Each entry gives
+    /// the credential `vct`, its issuer (`iss`), and the disclosures by claim (so the shell can
+    /// decode the holder-visible values) — never the raw device/issuer keys. Reflects exactly what
+    /// the core stores, including credentials just obtained via issuance.
+    pub fn held_credentials_json(&self) -> String {
+        let items: Vec<String> = self
+            .credentials
+            .iter()
+            .map(|c| {
+                let (vct, iss) = credential_vct_and_issuer(&c.issuer_jwt);
+                let disclosures = c
+                    .disclosures_by_claim
+                    .iter()
+                    .map(|(k, v)| format!("{:?}:{:?}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    r#"{{"vct":{:?},"issuer":{:?},"disclosuresByClaim":{{{}}}}}"#,
+                    vct, iss, disclosures
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
     }
 
     /// The single entry point. Same state + same event ⇒ same effects (I/O is all in the shell).
@@ -619,6 +698,10 @@ impl Core {
                 issuer_id,
             } => {
                 self.active = ActiveFlow::Issuance;
+                // A new offer begins a FRESH OpenID4VCI session: reset the (one-shot) issuance
+                // machine to Idle so a wallet can be issued several credentials in one lifetime.
+                // Replay protection (`iss_seen_c_nonces`) deliberately persists across sessions.
+                self.issuance = oid4vci::State::Idle;
                 // Issuer trust is decided in-core against the trusted list (PID/attestation CAs).
                 self.issuer_trusted_current = self.resolve_issuer(&issuer_cert_chain);
                 self.issuer_id_current = issuer_id;
@@ -743,10 +826,16 @@ impl Core {
             .map(|o| self.translate_issuance(o))
             .collect();
 
-        // Record a completed issuance the moment the credential is issued (once).
+        // The moment the credential is issued (once): store it as a holding so it can be presented
+        // and shown on the wallet home, and record the completed issuance in the audit log.
         if !was_issued {
-            if let oid4vci::State::CredentialIssued { format, .. } = &self.issuance {
+            if let oid4vci::State::CredentialIssued { format, credential } = &self.issuance {
                 let fmt = format_name(*format).to_string();
+                if *format == oid4vci::CredentialFormat::DcSdJwt {
+                    if let Some(held) = held_credential_from_compact(credential) {
+                        self.load_credential(held);
+                    }
+                }
                 self.record_issuance(fmt);
             }
         }
@@ -924,7 +1013,19 @@ impl Core {
             return None;
         }
         let sess = self.session.as_ref()?;
-        let cred = self.credential.as_ref()?;
+        // Pick the held credential that data-minimally satisfies the request: prefer one that
+        // carries EVERY requested claim (a clean single-credential answer); otherwise fall back to
+        // the first holding. Selection never widens disclosure — only the requested-and-held subset
+        // is ever revealed.
+        let cred = self
+            .credentials
+            .iter()
+            .find(|c| {
+                sess.requested_claims
+                    .iter()
+                    .all(|r| c.disclosures_by_claim.contains_key(r))
+            })
+            .or_else(|| self.credentials.first())?;
         let held: Vec<String> = cred.disclosures_by_claim.keys().cloned().collect();
         let disclosures = minimum_claim_set(&sess.requested_claims, &held)
             .iter()
@@ -1087,11 +1188,13 @@ impl Core {
             ),
             None => (String::new(), String::new(), Vec::new()),
         };
+        // The consent screen offers the minimum subset the request needs that ANY holding can
+        // provide (selection later binds to one credential). Union of held claim names.
         let held: Vec<String> = self
-            .credential
-            .as_ref()
-            .map(|c| c.disclosures_by_claim.keys().cloned().collect())
-            .unwrap_or_default();
+            .credentials
+            .iter()
+            .flat_map(|c| c.disclosures_by_claim.keys().cloned())
+            .collect();
         ScreenDescription::Consent(ConsentScreen {
             rp_display_name: rp,
             purpose,
@@ -1263,6 +1366,12 @@ impl WalletEngine {
             .lock()
             .expect("poisoned")
             .attestation_catalogue_json()
+    }
+
+    /// The credentials the wallet holds as a JSON array (`[{vct, issuer, disclosuresByClaim}]`),
+    /// including any just obtained via issuance. The wallet home renders these as cards.
+    pub fn held_credentials_json(&self) -> String {
+        self.inner.lock().expect("poisoned").held_credentials_json()
     }
 
     /// Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed

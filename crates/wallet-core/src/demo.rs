@@ -70,6 +70,47 @@ pub struct DemoScenario {
     pub payment_request: Vec<u8>,
 }
 
+/// Everything the shell must load/feed to drive a REAL OpenID4VCI issuance against the core: the
+/// trusted list (anchoring the issuer), the device key + Wallet Unit Attestation (so the in-core
+/// key-attestation gate passes), the pre-authorized offer, the issuer's certificate chain, and the
+/// issuer-signed credential the (stub) `/credential` endpoint returns for each offered type. The
+/// core runs the full issuance machine — trust decision, WUA gate, device-signed proof — exactly
+/// as in `shell-io`'s live-TCP lifecycle test; only the transport is stubbed.
+#[derive(uniffi::Record, Clone)]
+pub struct IssuanceScenario {
+    /// Wall-clock (Unix seconds) for `setClock`.
+    pub epoch: i64,
+    /// Operator-signed trusted list anchoring the demo CA for issuance (pid + attestation) AND
+    /// RP access, so one engine can both add credentials and present them.
+    pub trust_list: Vec<u8>,
+    /// Raw public key that signed `trust_list`.
+    pub operator_public_key: Vec<u8>,
+    /// Raw device public key to load (`loadDeviceKey`) — the key the WUA attests.
+    pub device_public_key: Vec<u8>,
+    /// Wallet Unit Attestation JWT (`loadWua`): binds the device key at High assurance.
+    pub wua_jwt: Vec<u8>,
+    /// Raw public key that signed the WUA (the wallet provider).
+    pub wallet_provider_public_key: Vec<u8>,
+    /// The issuer's certificate chain (DER, leaf-first) for the `CredentialOfferReceived` event —
+    /// it chains to the trusted CA, so in-core issuer trust validates against a real chain.
+    pub issuer_cert_chain: Vec<Vec<u8>>,
+    /// The issuer identity recorded in the audit log.
+    pub issuer_id: String,
+    /// A pre-authorized credential offer (no PAR / browser / tx-code), fed via
+    /// `credentialOfferReceived`.
+    pub offer: Vec<u8>,
+    /// The issuer-signed PID compact the stub `/credential` endpoint returns.
+    pub pid_credential_compact: String,
+    /// The issuer-signed mDL compact the stub `/credential` endpoint returns.
+    pub mdl_credential_compact: String,
+    /// The issuer-signed passport compact.
+    pub passport_credential_compact: String,
+    /// The issuer-signed national ID card compact.
+    pub nid_credential_compact: String,
+    /// The issuer-signed German ID card (Personalausweis) compact.
+    pub german_id_credential_compact: String,
+}
+
 /// Holds the demo's ephemeral keys and mints [`DemoScenario`]s. Also acts as the device signer for
 /// the simulator, where no Secure Enclave exists.
 #[derive(uniffi::Object)]
@@ -124,6 +165,99 @@ impl DemoWallet {
             .sign(&KeyRef("device-key".into()), Alg::Es256, &payload)
             .expect("device sign")
     }
+
+    /// An RP-signed OpenID4VP presentation request for `age_over_18`, bound to a caller-chosen
+    /// `nonce`. A persistent wallet engine records used nonces (replay protection), so each new
+    /// presentation must carry a fresh one — this lets the shell mint one per run.
+    pub fn presentation_request(&self, nonce: u64) -> Vec<u8> {
+        self.sign_request(nonce, &["age_over_18"])
+    }
+
+    /// A PSD2/TS12 payment authorization request bound to a caller-chosen `nonce` (and a matching
+    /// unique transaction id), for the same fresh-per-run reason as [`Self::presentation_request`].
+    pub fn payment_request(&self, nonce: u64) -> Vec<u8> {
+        format!(
+            r#"{{"creditor_name":"Acme Store","creditor_account":"DE89370400440532013000","amount_minor":1299,"currency":"EUR","transaction_id":"txn-{nonce}","nonce":{nonce},"response_uri":"https://psp.example/authorize"}}"#
+        )
+        .into_bytes()
+    }
+
+    /// The full issuance setup + the issuer-signed credentials the stub endpoint returns per type.
+    /// Everything the shell needs to run a REAL OpenID4VCI issuance through the core (see
+    /// [`IssuanceScenario`]).
+    pub fn issuance_scenario(&self) -> IssuanceScenario {
+        let (pid_jwt, pid_claims) = self.issue_as(
+            "urn:eudi:pid:1",
+            &[
+                ("family_name", json!("Andersson")),
+                ("given_name", json!("Astrid")),
+                ("birthdate", json!("1988-04-12")),
+                ("age_over_18", json!(true)),
+            ],
+        );
+        let (mdl_jwt, mdl_claims) = self.issue_as(
+            "urn:eudi:mdl:1",
+            &[
+                ("family_name", json!("Andersson")),
+                ("given_name", json!("Astrid")),
+                ("driving_privileges", json!("A, B, BE")),
+                ("issuing_country", json!("SE")),
+                ("age_over_18", json!(true)),
+            ],
+        );
+        let (passport_jwt, passport_claims) = self.issue_as(
+            "urn:eudi:passport:1",
+            &[
+                ("family_name", json!("Andersson")),
+                ("given_name", json!("Astrid")),
+                ("document_number", json!("P1234567")),
+                ("nationality", json!("SE")),
+                ("expiry_date", json!("2032-05-01")),
+                ("age_over_18", json!(true)),
+            ],
+        );
+        let (nid_jwt, nid_claims) = self.issue_as(
+            "urn:eudi:nid:1",
+            &[
+                ("family_name", json!("Andersson")),
+                ("given_name", json!("Astrid")),
+                ("document_number", json!("ID987654")),
+                ("issuing_country", json!("SE")),
+                ("expiry_date", json!("2031-03-15")),
+                ("age_over_18", json!(true)),
+            ],
+        );
+        let (german_jwt, german_claims) = self.issue_as(
+            "urn:eudi:pid:de:1",
+            &[
+                ("family_name", json!("Andersson")),
+                ("given_name", json!("Astrid")),
+                ("birthdate", json!("1988-04-12")),
+                ("place_of_birth", json!("Berlin")),
+                ("resident_address", json!("Alexanderplatz 1, 10178 Berlin")),
+                ("issuing_country", json!("DE")),
+                ("age_over_18", json!(true)),
+            ],
+        );
+        IssuanceScenario {
+            epoch: DEMO_EPOCH,
+            trust_list: self.signed_trust_list_all_services(),
+            operator_public_key: self.operator.public_key_raw().to_vec(),
+            device_public_key: self.device.public_key_raw().to_vec(),
+            wua_jwt: self.wua_jwt(),
+            wallet_provider_public_key: self.wallet_provider.public_key_raw().to_vec(),
+            issuer_cert_chain: vec![RP_DER.to_vec()],
+            issuer_id: "https://issuer.example".into(),
+            offer:
+                br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#
+                    .to_vec(),
+            pid_credential_compact: Self::compact(&pid_jwt, &pid_claims),
+            mdl_credential_compact: Self::compact(&mdl_jwt, &mdl_claims),
+            passport_credential_compact: Self::compact(&passport_jwt, &passport_claims),
+            nid_credential_compact: Self::compact(&nid_jwt, &nid_claims),
+            german_id_credential_compact: Self::compact(&german_jwt, &german_claims),
+        }
+    }
 }
 
 impl DemoWallet {
@@ -174,6 +308,31 @@ impl DemoWallet {
 
     /// A Wallet Unit Attestation binding the demo device key at High assurance, signed by the demo
     /// wallet provider. The core verifies it in-core before proving possession during issuance.
+    /// A signed trusted list anchoring the demo CA for EVERY service the wallet needs in one
+    /// engine: RP access (presentation), and PID + attestation issuance (add-a-credential). Plain
+    /// Rust only (not FFI-exported).
+    fn signed_trust_list_all_services(&self) -> Vec<u8> {
+        let header = b64(br#"{"alg":"ES256"}"#);
+        let payload = b64(json!({
+            "seq": 1,
+            "valid_from": 0,
+            "valid_until": 4_000_000_000i64,
+            "anchors": [
+                { "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" },
+                { "cert": b64(CA_DER), "service": "pid", "status": "granted" },
+                { "cert": b64(CA_DER), "service": "attestation", "status": "granted" },
+            ],
+        })
+        .to_string()
+        .as_bytes());
+        let signing_input = format!("{header}.{payload}");
+        let sig = self
+            .operator
+            .sign(&KeyRef("op".into()), Alg::Es256, signing_input.as_bytes())
+            .expect("operator sign");
+        format!("{signing_input}.{}", b64(&sig)).into_bytes()
+    }
+
     pub fn wua_jwt(&self) -> Vec<u8> {
         let header = b64(br#"{"alg":"ES256","typ":"wallet-unit-attestation+jwt"}"#);
         let payload = b64(json!({
@@ -226,9 +385,14 @@ impl DemoWallet {
         format!("{signing_input}.{}", b64(&sig)).into_bytes()
     }
 
-    /// Issue an SD-JWT VC; return (issuer_jwt, disclosures_by_claim). Mirrors the issuance the
-    /// wallet-core e2e tests perform, so the credential is byte-compatible with the core.
-    fn issue(&self, claims: &[(&str, serde_json::Value)]) -> (String, BTreeMap<String, String>) {
+    /// Issue an SD-JWT VC of type `vct`; return (issuer_jwt, disclosures_by_claim). Mirrors the
+    /// issuance the wallet-core e2e tests perform, so the credential is byte-compatible with the
+    /// core.
+    fn issue_as(
+        &self,
+        vct: &str,
+        claims: &[(&str, serde_json::Value)],
+    ) -> (String, BTreeMap<String, String>) {
         let mut by_claim = BTreeMap::new();
         let mut sd = Vec::new();
         for (i, (name, value)) in claims.iter().enumerate() {
@@ -243,7 +407,7 @@ impl DemoWallet {
         let header = b64(br#"{"alg":"ES256","typ":"dc+sd-jwt"}"#);
         let payload = b64(serde_json::to_string(&json!({
             "iss": "https://issuer.example",
-            "vct": "urn:eudi:pid:1",
+            "vct": vct,
             "_sd_alg": "sha-256",
             "_sd": sd,
         }))
@@ -255,6 +419,22 @@ impl DemoWallet {
             .sign(&KeyRef("i".into()), Alg::Es256, signing_input.as_bytes())
             .expect("issuer sign");
         (format!("{signing_input}.{}", b64(&sig)), by_claim)
+    }
+
+    /// Issue a PID (`urn:eudi:pid:1`).
+    fn issue(&self, claims: &[(&str, serde_json::Value)]) -> (String, BTreeMap<String, String>) {
+        self.issue_as("urn:eudi:pid:1", claims)
+    }
+
+    /// The compact SD-JWT serialization (`<issuer-jwt>~<disclosure>~…~`) a pre-authorized issuer
+    /// hands back at the `/credential` endpoint — exactly what the live-I/O lifecycle test feeds.
+    fn compact(issuer_jwt: &str, by_claim: &BTreeMap<String, String>) -> String {
+        let disclosures = by_claim
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("~");
+        format!("{issuer_jwt}~{disclosures}~")
     }
 
     /// A signed trusted list granting the demo CA as an RP-access CA.
