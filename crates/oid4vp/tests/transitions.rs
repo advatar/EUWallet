@@ -36,6 +36,7 @@ fn req() -> AuthRequest {
         state: None,
         response_mode: "direct_post".into(),
         dcql_id: None,
+        requested_vcts: vec![],
         signed_payload: b"request-object".to_vec(),
         signature: b"sig".to_vec(),
         request_alg: Alg::Es256,

@@ -101,6 +101,9 @@ pub struct AuthRequest {
     pub response_mode: String,
     /// The id of the first DCQL credential query — the key the `vp_token` response object uses.
     pub dcql_id: Option<String>,
+    /// Acceptable SD-JWT VC types (`meta.vct_values`) — used to select a held credential of the
+    /// requested TYPE, not merely one that carries the requested claim names.
+    pub requested_vcts: Vec<String>,
     pub signed_payload: Vec<u8>,
     pub signature: Vec<u8>,
     pub request_alg: Alg,
@@ -456,10 +459,14 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         .unwrap_or("direct_post")
         .to_string();
     // Prefer the real DCQL query (OpenID4VP 1.0 §6); fall back to the legacy flat `claims` array.
-    let (requested_claims, dcql_id) = match p.get("dcql_query") {
+    let (requested_claims, dcql_id, requested_vcts) = match p.get("dcql_query") {
         Some(q) => match dcql::DcqlQuery::from_value(q) {
-            Some(dq) => (dq.requested_claim_paths(), dq.first_credential_id()),
-            None => (Vec::new(), None),
+            Some(dq) => (
+                dq.requested_claim_paths(),
+                dq.first_credential_id(),
+                dq.requested_vcts(),
+            ),
+            None => (Vec::new(), None, Vec::new()),
         },
         None => {
             let claims = p
@@ -471,7 +478,7 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
                         .collect()
                 })
                 .unwrap_or_default();
-            (claims, None)
+            (claims, None, Vec::new())
         }
     };
 
@@ -489,6 +496,7 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         state,
         response_mode,
         dcql_id,
+        requested_vcts,
         signed_payload,
         signature,
         request_alg,

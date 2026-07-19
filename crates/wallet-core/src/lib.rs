@@ -148,6 +148,8 @@ struct SessionInfo {
     rp_client_id: String,
     purpose: String,
     requested_claims: Vec<String>,
+    /// Acceptable credential types (DCQL `meta.vct_values`); empty for legacy/claims-only requests.
+    requested_vcts: Vec<String>,
     response_uri: String,
     /// The consent hash + the exact claim paths shown on the consent screen, captured when it is
     /// rendered, so the transaction log can record what was shared without storing values.
@@ -770,6 +772,7 @@ impl Core {
                 rp_client_id: req.client_id.clone(),
                 purpose: req.purpose.clone().unwrap_or_default(),
                 requested_claims: req.requested_claims.clone(),
+                requested_vcts: req.requested_vcts.clone(),
                 response_uri: req.response_uri.clone(),
                 consent_hash: [0u8; 32],
                 shared_claims: Vec::new(),
@@ -1013,19 +1016,30 @@ impl Core {
             return None;
         }
         let sess = self.session.as_ref()?;
-        // Pick the held credential that data-minimally satisfies the request: prefer one that
-        // carries EVERY requested claim (a clean single-credential answer); otherwise fall back to
-        // the first holding. Selection never widens disclosure — only the requested-and-held subset
-        // is ever revealed.
+        // Pick the held credential that data-minimally satisfies the request. When the DCQL query
+        // names acceptable types (`meta.vct_values`), a candidate must BE one of those types — so a
+        // request for `urn:eudi:pid:1` claims is answered by the PID, never by an mDL that happens
+        // to carry the same claim name. Among type-matching candidates (or all, for a legacy
+        // claims-only request), prefer one that carries every requested claim; else fall back to the
+        // first candidate. Selection never widens disclosure — only the requested-and-held subset is
+        // ever revealed.
+        let type_matches = |c: &HeldCredential| -> bool {
+            if sess.requested_vcts.is_empty() {
+                return true;
+            }
+            let (vct, _) = credential_vct_and_issuer(&c.issuer_jwt);
+            sess.requested_vcts.contains(&vct)
+        };
+        let carries_all = |c: &HeldCredential| -> bool {
+            sess.requested_claims
+                .iter()
+                .all(|r| c.disclosures_by_claim.contains_key(r))
+        };
         let cred = self
             .credentials
             .iter()
-            .find(|c| {
-                sess.requested_claims
-                    .iter()
-                    .all(|r| c.disclosures_by_claim.contains_key(r))
-            })
-            .or_else(|| self.credentials.first())?;
+            .find(|c| type_matches(c) && carries_all(c))
+            .or_else(|| self.credentials.iter().find(|c| type_matches(c)))?;
         let held: Vec<String> = cred.disclosures_by_claim.keys().cloned().collect();
         let disclosures = minimum_claim_set(&sess.requested_claims, &held)
             .iter()

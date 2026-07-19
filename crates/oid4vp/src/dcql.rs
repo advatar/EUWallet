@@ -109,6 +109,38 @@ impl DcqlQuery {
         self.credentials.first().map(|c| c.id.clone())
     }
 
+    /// Every acceptable SD-JWT VC type (`meta.vct_values`) across the query, de-duplicated. The
+    /// wallet uses this to select a held credential of the requested TYPE, not merely one that
+    /// happens to carry the requested claim names.
+    pub fn requested_vcts(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for c in &self.credentials {
+            if let Some(meta) = &c.meta {
+                for v in &meta.vct_values {
+                    if !out.contains(v) {
+                        out.push(v.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Every acceptable mdoc doctype (`meta.doctype_value`) across the query, de-duplicated.
+    pub fn requested_doctypes(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for c in &self.credentials {
+            if let Some(meta) = &c.meta {
+                if let Some(dt) = &meta.doctype_value {
+                    if !out.contains(dt) {
+                        out.push(dt.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The set of requested credential formats.
     pub fn formats(&self) -> Vec<String> {
         let mut fs = Vec::new();
