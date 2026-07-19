@@ -33,6 +33,9 @@ fn req() -> AuthRequest {
         redirect_uri: None,
         purpose: Some("age verification".into()),
         requested_claims: vec!["age_over_18".into()],
+        state: None,
+        response_mode: "direct_post".into(),
+        dcql_id: None,
         signed_payload: b"request-object".to_vec(),
         signature: b"sig".to_vec(),
         request_alg: Alg::Es256,
@@ -106,8 +109,9 @@ fn happy_path_idle_free_to_done() {
     match &out[0] {
         Output::SendVpToken(token) => {
             let t = String::from_utf8(token.clone()).unwrap();
+            // direct_post body; this req() has no DCQL id → the bare presentation under vp_token.
             // vp_token = <issuer-jwt>~<disclosure>~<kb-jwt>
-            assert!(t.starts_with("hdr.pay.sig~disc1~"));
+            assert!(t.starts_with("vp_token=hdr.pay.sig~disc1~"), "form body, got {t}");
             assert_eq!(t.matches('~').count(), 2);
         }
         other => panic!("expected SendVpToken, got {other:?}"),

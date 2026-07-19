@@ -159,7 +159,7 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
     let fx = core.handle_event(Event::DeviceSignatureProduced {
         signature: device_sig,
     });
-    let vp_token = fx
+    let body = fx
         .iter()
         .find_map(|e| match e {
             Effect::Http { body, .. } => Some(String::from_utf8(body.clone()).unwrap()),
@@ -167,8 +167,15 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
         })
         .expect("expected an Http effect carrying the vp_token");
 
+    // The core now posts the OpenID4VP `direct_post` form body; this request used the legacy
+    // `claims` array (no DCQL id), so `vp_token` carries the bare presentation.
+    let vp_token = body
+        .strip_prefix("vp_token=")
+        .and_then(|s| s.split('&').next())
+        .expect("vp_token form field");
+
     // 5) RP verifies the presentation with real crypto.
-    let sd = sdjwt::SdJwtVc::parse(&vp_token).unwrap();
+    let sd = sdjwt::SdJwtVc::parse(vp_token).unwrap();
     let kb = sdjwt::KeyBindingCheck {
         device_public_key: device.public_key_raw(),
         expected_aud: "rp.example",

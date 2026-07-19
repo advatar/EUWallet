@@ -225,7 +225,7 @@ fn full_lifecycle_issue_then_present_over_live_tcp() {
     assert_eq!(shell.core.state(), &oid4vp::State::Done);
 
     // The RP verifies the LIVE-delivered presentation of the LIVE-issued credential.
-    let vp_token = String::from_utf8(vp_rx.recv().expect("vp_token received")).unwrap();
+    let vp_token = vp_token_from_form(&vp_rx.recv().expect("vp_token received"));
     let sd = sdjwt::SdJwtVc::parse(&vp_token).expect("well-formed presentation");
     let claims = sd
         .verify_presentation(
@@ -250,4 +250,37 @@ fn full_lifecycle_issue_then_present_over_live_tcp() {
 
 fn core_str(bytes: &[u8]) -> &str {
     core::str::from_utf8(bytes).expect("utf8 credential")
+}
+
+/// Extract the SD-JWT presentation from an OpenID4VP 1.0 `direct_post` form body (DCQL id "pid").
+fn vp_token_from_form(body: &[u8]) -> String {
+    let s = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let raw = s
+        .strip_prefix("vp_token=")
+        .and_then(|v| v.split('&').next())
+        .expect("vp_token form field");
+    let decoded = percent_decode(raw);
+    let obj: serde_json::Value = serde_json::from_str(&decoded).expect("vp_token JSON object");
+    obj.get("pid")
+        .and_then(|v| v.as_str())
+        .expect("pid presentation")
+        .to_string()
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hi = (b[i + 1] as char).to_digit(16).unwrap();
+            let lo = (b[i + 2] as char).to_digit(16).unwrap();
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
 }

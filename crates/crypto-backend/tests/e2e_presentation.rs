@@ -140,8 +140,16 @@ fn full_remote_presentation_with_real_crypto() {
         .unwrap();
     let (s, out) = step(&s, &Input::DeviceSignatureProduced(device_sig), &env);
     assert_eq!(s, State::Presenting);
+    // The core posts an OpenID4VP `direct_post` form body; this request used no DCQL, so the
+    // `vp_token` field carries the bare presentation.
     let vp_token = match out.as_slice() {
-        [Output::SendVpToken(t)] => String::from_utf8(t.clone()).unwrap(),
+        [Output::SendVpToken(t)] => {
+            let body = String::from_utf8(t.clone()).unwrap();
+            body.strip_prefix("vp_token=")
+                .and_then(|s| s.split('&').next())
+                .expect("vp_token form field")
+                .to_string()
+        }
         other => panic!("expected SendVpToken, got {other:?}"),
     };
 

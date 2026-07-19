@@ -103,6 +103,12 @@ impl DcqlQuery {
         paths
     }
 
+    /// The id of the first credential query. The `vp_token` in an OpenID4VP 1.0 response is a JSON
+    /// object keyed by these ids (§8.1); the flows we support present one credential per query.
+    pub fn first_credential_id(&self) -> Option<String> {
+        self.credentials.first().map(|c| c.id.clone())
+    }
+
     /// The set of requested credential formats.
     pub fn formats(&self) -> Vec<String> {
         let mut fs = Vec::new();

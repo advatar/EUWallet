@@ -52,6 +52,10 @@ pub struct PendingPresentation {
     pub presentation: String,
     /// ASCII(`<kb-header-b64>.<kb-payload-b64>`) — the bytes the device key signs.
     pub kb_signing_input: String,
+    /// Echoed into the response body (OpenID4VP 1.0 §8).
+    pub state: Option<String>,
+    /// The DCQL query id the `vp_token` object is keyed by (None → legacy bare-token response).
+    pub dcql_id: Option<String>,
 }
 
 /// Every abort reason is the name of the guard that tripped (or an explicit user refusal).
@@ -91,6 +95,12 @@ pub struct AuthRequest {
     /// Claim names the RP asked for (a simplified stand-in for the DCQL query). Used for data
     /// minimisation upstream (the wallet discloses only the requested-and-held subset).
     pub requested_claims: Vec<String>,
+    /// The RP's opaque `state`, echoed verbatim in the response (OpenID4VP 1.0 §8).
+    pub state: Option<String>,
+    /// The response mode (`direct_post` is implemented; `direct_post.jwt` adds JWE encryption).
+    pub response_mode: String,
+    /// The id of the first DCQL credential query — the key the `vp_token` response object uses.
+    pub dcql_id: Option<String>,
     pub signed_payload: Vec<u8>,
     pub signature: Vec<u8>,
     pub request_alg: Alg,
@@ -134,7 +144,9 @@ pub enum Output {
         key_ref: String,
         signing_input: Vec<u8>,
     },
-    /// Post the vp_token to the response_uri (direct_post.jwt).
+    /// Post the assembled OpenID4VP `direct_post` response body (`application/x-www-form-urlencoded`
+    /// with `vp_token` + echoed `state`) to the `response_uri`. (`direct_post.jwt` response
+    /// encryption is a HAIP follow-on.)
     SendVpToken(Vec<u8>),
     /// Tear down the exchange.
     Close,
@@ -284,6 +296,8 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                 State::AwaitingDeviceSignature(Box::new(PendingPresentation {
                     presentation,
                     kb_signing_input,
+                    state: req.state.clone(),
+                    dcql_id: req.dcql_id.clone(),
                 })),
                 vec![Output::SignKeyBinding {
                     key_ref: env.device_key_ref.to_string(),
@@ -297,14 +311,16 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
             vec![Output::Close],
         ),
 
-        // HLR-VP-T-006 — device signature ready → assemble the key-bound vp_token and send it.
+        // HLR-VP-T-006 — device signature ready → assemble the key-bound presentation and the
+        // OpenID4VP 1.0 `direct_post` response body, then send it.
         (State::AwaitingDeviceSignature(p), Input::DeviceSignatureProduced(sig)) => {
             let kb_jwt = format!("{}.{}", p.kb_signing_input, base64url(sig));
             // `presentation` already ends with '~'; the KB-JWT occupies the final slot.
             let vp_token = format!("{}{}", p.presentation, kb_jwt);
+            let body = direct_post_body(&vp_token, p.dcql_id.as_deref(), p.state.as_deref());
             (
                 State::Presenting,
-                vec![Output::SendVpToken(vp_token.into_bytes())],
+                vec![Output::SendVpToken(body.into_bytes())],
             )
         }
 
@@ -318,6 +334,44 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
 
 fn base64url(bytes: &[u8]) -> String {
     Base64UrlUnpadded::encode_string(bytes)
+}
+
+/// Assemble the OpenID4VP 1.0 `direct_post` response body: `application/x-www-form-urlencoded`
+/// carrying `vp_token` and (if the RP sent one) the echoed `state`.
+///
+/// Per §8.1 the `vp_token` for a DCQL request is a JSON object keyed by the credential query `id`
+/// (`{"<id>":"<presentation>"}`). Without a DCQL id (the legacy `claims` path) we send the bare
+/// presentation string, which pre-1.0 verifiers accept.
+fn direct_post_body(vp_token: &str, dcql_id: Option<&str>, state: Option<&str>) -> String {
+    let vp_value = match dcql_id {
+        Some(id) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert(id.to_string(), serde_json::Value::String(vp_token.to_string()));
+            serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
+        }
+        None => vp_token.to_string(),
+    };
+    let mut body = format!("vp_token={}", form_urlencode(&vp_value));
+    if let Some(s) = state {
+        body.push_str("&state=");
+        body.push_str(&form_urlencode(s));
+    }
+    body
+}
+
+/// Percent-encode a value for `application/x-www-form-urlencoded` (RFC 3986 unreserved set kept;
+/// everything else, including spaces, percent-encoded — never `+`, so decoding is unambiguous).
+fn form_urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Build `<issuer-jwt>~<disclosure>~...~` (the SD-JWT VC presentation without the KB-JWT).
@@ -394,20 +448,31 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         .and_then(|v| v.as_str())
         .map(String::from);
     let purpose = p.get("purpose").and_then(|v| v.as_str()).map(String::from);
+    let state = p.get("state").and_then(|v| v.as_str()).map(String::from);
+    // direct_post is implemented; direct_post.jwt (encrypted JWE response) is a HAIP follow-on.
+    let response_mode = p
+        .get("response_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("direct_post")
+        .to_string();
     // Prefer the real DCQL query (OpenID4VP 1.0 §6); fall back to the legacy flat `claims` array.
-    let requested_claims = match p.get("dcql_query") {
-        Some(q) => dcql::DcqlQuery::from_value(q)
-            .map(|dq| dq.requested_claim_paths())
-            .unwrap_or_default(),
-        None => p
-            .get("claims")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default(),
+    let (requested_claims, dcql_id) = match p.get("dcql_query") {
+        Some(q) => match dcql::DcqlQuery::from_value(q) {
+            Some(dq) => (dq.requested_claim_paths(), dq.first_credential_id()),
+            None => (Vec::new(), None),
+        },
+        None => {
+            let claims = p
+                .get("claims")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (claims, None)
+        }
     };
 
     let signed_payload = format!("{}.{}", parts[0], parts[1]).into_bytes();
@@ -421,6 +486,9 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         redirect_uri,
         purpose,
         requested_claims,
+        state,
+        response_mode,
+        dcql_id,
         signed_payload,
         signature,
         request_alg,
@@ -523,5 +591,60 @@ pub mod model {
             St::Presenting => "presenting",
             St::Aborted => "aborted",
         }
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::{direct_post_body, form_urlencode};
+
+    #[test]
+    fn dcql_response_is_form_encoded_vp_token_object_with_state() {
+        // A DCQL request → vp_token is a JSON object keyed by the query id, form-encoded, + state.
+        let body = direct_post_body("issuer.jwt~disc~kb.jwt", Some("pid"), Some("xyz 123"));
+        // vp_token value is the JSON object {"pid":"<presentation>"} percent-encoded.
+        assert!(body.starts_with("vp_token=%7B%22pid%22%3A%22issuer.jwt~disc~kb.jwt%22%7D"));
+        // state is echoed and its space is percent-encoded (never '+').
+        assert!(body.ends_with("&state=xyz%20123"));
+        // A verifier that form-decodes then JSON-parses vp_token recovers the presentation.
+        let vp = body
+            .strip_prefix("vp_token=")
+            .and_then(|s| s.split("&state=").next())
+            .map(percent_decode)
+            .unwrap();
+        let obj: serde_json::Value = serde_json::from_str(&vp).unwrap();
+        assert_eq!(obj["pid"], serde_json::json!("issuer.jwt~disc~kb.jwt"));
+    }
+
+    #[test]
+    fn legacy_response_sends_bare_presentation_under_vp_token() {
+        let body = direct_post_body("issuer.jwt~disc~kb.jwt", None, None);
+        // The SD-JWT compact is entirely RFC3986-unreserved, so it is unchanged by encoding.
+        assert_eq!(body, "vp_token=issuer.jwt~disc~kb.jwt");
+    }
+
+    #[test]
+    fn urlencode_keeps_unreserved_and_percent_encodes_the_rest() {
+        assert_eq!(form_urlencode("aZ0-_.~"), "aZ0-_.~");
+        assert_eq!(form_urlencode("{}:\" "), "%7B%7D%3A%22%20");
+    }
+
+    /// Minimal percent-decoder for the test's round-trip check.
+    fn percent_decode(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hi = (bytes[i + 1] as char).to_digit(16).unwrap();
+                let lo = (bytes[i + 2] as char).to_digit(16).unwrap();
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
     }
 }

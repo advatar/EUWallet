@@ -136,9 +136,10 @@ fn full_presentation_over_live_tcp() {
     assert!(outcome.closed, "core closed the flow after delivery");
     assert_eq!(shell.core.state(), &oid4vp::State::Done);
 
-    // 3) The RP SERVER received the vp_token over the socket — verify it with real crypto.
+    // 3) The RP SERVER received the OpenID4VP direct_post body over the socket — extract the
+    //    DCQL-keyed vp_token and verify the presentation with real crypto.
     let posted = received.recv().expect("server received the vp_token");
-    let vp_token = String::from_utf8(posted).expect("utf8 vp_token");
+    let vp_token = vp_token_from_form(&posted);
     let sd = sdjwt::SdJwtVc::parse(&vp_token).expect("well-formed SD-JWT presentation");
     let claims = sd
         .verify_presentation(
@@ -159,4 +160,39 @@ fn full_presentation_over_live_tcp() {
         claims.get("family_name").is_none(),
         "data minimisation held across the wire: family_name was never disclosed"
     );
+}
+
+/// Extract the SD-JWT presentation from an OpenID4VP 1.0 `direct_post` form body. The request
+/// carried a DCQL query with id "pid", so `vp_token` is a percent-encoded JSON object
+/// `{"pid":"<presentation>"}` (§8.1).
+fn vp_token_from_form(body: &[u8]) -> String {
+    let s = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let raw = s
+        .strip_prefix("vp_token=")
+        .and_then(|v| v.split('&').next())
+        .expect("vp_token form field");
+    let decoded = percent_decode(raw);
+    let obj: serde_json::Value = serde_json::from_str(&decoded).expect("vp_token JSON object");
+    obj.get("pid")
+        .and_then(|v| v.as_str())
+        .expect("pid presentation")
+        .to_string()
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hi = (b[i + 1] as char).to_digit(16).unwrap();
+            let lo = (b[i + 2] as char).to_digit(16).unwrap();
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
 }
