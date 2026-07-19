@@ -461,6 +461,42 @@ pub fn device_authentication_bytes(
     Ok(tag24(device_auth.to_canonical()))
 }
 
+/// The OpenID4VP `SessionTranscript` for an mdoc presentation carried over OpenID4VP
+/// (ISO/IEC 18013-7 Annex B / OpenID4VP 1.0): `[ null, null, OID4VPHandover ]`, where
+/// `OID4VPHandover = [ clientIdHash, responseUriHash, nonce ]`,
+/// `clientIdHash = SHA-256( CBOR([ client_id, mdoc_generated_nonce ]) )`, and likewise for
+/// `responseUriHash`. `nonce` is the OpenID4VP request nonce; `mdoc_generated_nonce` is the
+/// wallet-chosen nonce that also binds the response channel. The device authentication signs
+/// over this transcript, so it defeats replay/relay of the presentation to a different verifier.
+pub fn oid4vp_session_transcript(
+    digest: &dyn Digest,
+    client_id: &str,
+    response_uri: &str,
+    nonce: &str,
+    mdoc_generated_nonce: &str,
+) -> Vec<u8> {
+    let hash_of = |value: &str| -> Vec<u8> {
+        let to_hash = Value::Array(vec![
+            Value::Text(value.into()),
+            Value::Text(mdoc_generated_nonce.into()),
+        ])
+        .to_canonical();
+        digest.sha256(&to_hash).to_vec()
+    };
+    let handover = Value::Array(vec![
+        Value::Bytes(hash_of(client_id)),
+        Value::Bytes(hash_of(response_uri)),
+        Value::Text(nonce.into()),
+    ]);
+    Value::Array(vec![Value::Null, Value::Null, handover]).to_canonical()
+}
+
+/// The `DeviceNameSpaces` a wallet sends when it adds no device-signed namespaces: an empty map,
+/// as the canonical-CBOR bytes that get tag-24 wrapped into `DeviceNameSpacesBytes`.
+pub fn empty_device_namespaces_bytes() -> Vec<u8> {
+    Value::Map(vec![]).to_canonical()
+}
+
 /// Assemble a real ISO 18013-5 `DeviceResponse` (one document):
 /// `{ "version": "1.0", "documents": [ { docType, issuerSigned, deviceSigned } ], "status": 0 }`,
 /// where `deviceSigned = { nameSpaces: #6.24(bstr), deviceAuth: { deviceSignature: COSE_Sign1 } }`.
