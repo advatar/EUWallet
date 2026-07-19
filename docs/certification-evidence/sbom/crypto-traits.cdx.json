@@ -1,0 +1,51 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.3",
+  "version": 1,
+  "serialNumber": "urn:uuid:aabcf7af-73b3-4f1d-add6-7320c64dc519",
+  "metadata": {
+    "timestamp": "2026-07-19T11:44:00.987844000Z",
+    "tools": [
+      {
+        "vendor": "CycloneDX",
+        "name": "cargo-cyclonedx",
+        "version": "0.5.9"
+      }
+    ],
+    "component": {
+      "type": "library",
+      "bom-ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1",
+      "name": "crypto-traits",
+      "version": "0.0.1",
+      "description": "Cryptographic trait boundary — the core depends only on these, never on a concrete crypto impl.",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/crypto-traits@0.0.1?download_url=file://.",
+      "components": [
+        {
+          "type": "library",
+          "bom-ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1 bin-target-0",
+          "name": "crypto_traits",
+          "version": "0.0.1",
+          "purl": "pkg:cargo/crypto-traits@0.0.1?download_url=file://.#src/lib.rs"
+        }
+      ]
+    },
+    "properties": [
+      {
+        "name": "cdx:rustc:sbom:target:triple",
+        "value": "aarch64-apple-darwin"
+      }
+    ]
+  },
+  "components": [],
+  "dependencies": [
+    {
+      "ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1"
+    }
+  ]
+}

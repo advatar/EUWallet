@@ -1,0 +1,115 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.3",
+  "version": 1,
+  "serialNumber": "urn:uuid:7d9717ae-25a7-4899-9b34-550d3d394f97",
+  "metadata": {
+    "timestamp": "2026-07-19T11:44:01.014278000Z",
+    "tools": [
+      {
+        "vendor": "CycloneDX",
+        "name": "cargo-cyclonedx",
+        "version": "0.5.9"
+      }
+    ],
+    "component": {
+      "type": "library",
+      "bom-ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/iso18013-5#0.0.1",
+      "name": "iso18013-5",
+      "version": "0.0.1",
+      "description": "ISO/IEC 18013-5 proximity: device engagement + session, sans-IO (opaque transport bytes).",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/iso18013-5@0.0.1?download_url=file://.",
+      "components": [
+        {
+          "type": "library",
+          "bom-ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/iso18013-5#0.0.1 bin-target-0",
+          "name": "iso18013_5",
+          "version": "0.0.1",
+          "purl": "pkg:cargo/iso18013-5@0.0.1?download_url=file://.#src/lib.rs"
+        }
+      ]
+    },
+    "properties": [
+      {
+        "name": "cdx:rustc:sbom:target:triple",
+        "value": "aarch64-apple-darwin"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/cose#0.0.1",
+      "name": "cose",
+      "version": "0.0.1",
+      "description": "COSE_Sign1 / COSE_Mac0 / COSE_Key (RFC 9052/9053) over crypto-traits.",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/cose@0.0.1?download_url=file://../cose"
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1",
+      "name": "crypto-traits",
+      "version": "0.0.1",
+      "description": "Cryptographic trait boundary — the core depends only on these, never on a concrete crypto impl.",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/crypto-traits@0.0.1?download_url=file://../crypto-traits"
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/mdoc#0.0.1",
+      "name": "mdoc",
+      "version": "0.0.1",
+      "description": "Deterministic/canonical CBOR + ISO/IEC 18013-5 mdoc structures.",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/mdoc@0.0.1?download_url=file://../mdoc"
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/cose#0.0.1",
+      "dependsOn": [
+        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1"
+      ]
+    },
+    {
+      "ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1"
+    },
+    {
+      "ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/iso18013-5#0.0.1",
+      "dependsOn": [
+        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/cose#0.0.1",
+        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1",
+        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/mdoc#0.0.1"
+      ]
+    },
+    {
+      "ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/mdoc#0.0.1",
+      "dependsOn": [
+        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/cose#0.0.1",
+        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.3",
+  "version": 1,
+  "serialNumber": "urn:uuid:f5172f88-9c1b-4520-976a-4787131cf170",
+  "metadata": {
+    "timestamp": "2026-07-19T11:44:01.022246000Z",
+    "tools": [
+      {
+        "vendor": "CycloneDX",
+        "name": "cargo-cyclonedx",
+        "version": "0.5.9"
+      }
+    ],
+    "component": {
+      "type": "library",
+      "bom-ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/zkp#0.0.1",
+      "name": "zkp",
+      "version": "0.0.1",
+      "description": "Pluggable zero-knowledge / unlinkable-presentation proof-provider abstraction (TS04, Watch).",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/zkp@0.0.1?download_url=file://.",
+      "components": [
+        {
+          "type": "library",
+          "bom-ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/zkp#0.0.1 bin-target-0",
+          "name": "zkp",
+          "version": "0.0.1",
+          "purl": "pkg:cargo/zkp@0.0.1?download_url=file://.#src/lib.rs"
+        }
+      ]
+    },
+    "properties": [
+      {
+        "name": "cdx:rustc:sbom:target:triple",
+        "value": "aarch64-apple-darwin"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1",
+      "name": "crypto-traits",
+      "version": "0.0.1",
+      "description": "Cryptographic trait boundary — the core depends only on these, never on a concrete crypto impl.",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/crypto-traits@0.0.1?download_url=file://../crypto-traits"
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1"
+    },
+    {
+      "ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/zkp#0.0.1",
+      "dependsOn": [
+        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1"
+      ]
+    }
+  ]
+}
