@@ -528,6 +528,13 @@ public protocol DemoWalletProtocol : AnyObject {
     func issuanceScenario()  -> IssuanceScenario
     
     /**
+     * An RP-signed OpenID4VP request carrying a DCQL `mso_mdoc` query for the mDL's `age_over_18`,
+     * bound to a caller-chosen `nonce`. Feeding this drives the wallet's mdoc-over-OpenID4VP path:
+     * the core selects the held mDL by doctype and answers with a signed ISO `DeviceResponse`.
+     */
+    func mdocPresentationRequest(nonce: UInt64)  -> Data
+    
+    /**
      * A PSD2/TS12 payment authorization request bound to a caller-chosen `nonce` (and a matching
      * unique transaction id), for the same fresh-per-run reason as [`Self::presentation_request`].
      */
@@ -626,6 +633,19 @@ public convenience init() {
 open func issuanceScenario() -> IssuanceScenario {
     return try!  FfiConverterTypeIssuanceScenario.lift(try! rustCall() {
     uniffi_wallet_core_fn_method_demowallet_issuance_scenario(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * An RP-signed OpenID4VP request carrying a DCQL `mso_mdoc` query for the mDL's `age_over_18`,
+     * bound to a caller-chosen `nonce`. Feeding this drives the wallet's mdoc-over-OpenID4VP path:
+     * the core selects the held mDL by doctype and answers with a signed ISO `DeviceResponse`.
+     */
+open func mdocPresentationRequest(nonce: UInt64) -> Data {
+    return try!  FfiConverterData.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_demowallet_mdoc_presentation_request(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(nonce),$0
     )
 })
 }
@@ -1647,6 +1667,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_demowallet_issuance_scenario() != 49616) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_demowallet_mdoc_presentation_request() != 30244) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_demowallet_payment_request() != 20283) {

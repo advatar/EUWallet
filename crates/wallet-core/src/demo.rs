@@ -176,6 +176,36 @@ impl DemoWallet {
         self.sign_request(nonce, &["age_over_18"])
     }
 
+    /// An RP-signed OpenID4VP request carrying a DCQL `mso_mdoc` query for the mDL's `age_over_18`,
+    /// bound to a caller-chosen `nonce`. Feeding this drives the wallet's mdoc-over-OpenID4VP path:
+    /// the core selects the held mDL by doctype and answers with a signed ISO `DeviceResponse`.
+    pub fn mdoc_presentation_request(&self, nonce: u64) -> Vec<u8> {
+        let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
+        let payload = b64(serde_json::to_string(&json!({
+            "client_id": "rp.example",
+            "nonce": nonce,
+            "aud": "wallet.example",
+            "response_uri": "https://rp.example/response",
+            "purpose": "Prove you are over 18 (mDL)",
+            "dcql_query": {
+                "credentials": [{
+                    "id": "mdl",
+                    "format": "mso_mdoc",
+                    "meta": { "doctype_value": "org.iso.18013.5.1.mDL" },
+                    "claims": [{ "path": ["org.iso.18013.5.1", "age_over_18"] }]
+                }]
+            },
+        }))
+        .expect("serialize request")
+        .as_bytes());
+        let signing_input = format!("{header}.{payload}");
+        let sig = self
+            .rp
+            .sign(&KeyRef("r".into()), Alg::Es256, signing_input.as_bytes())
+            .expect("rp sign");
+        format!("{signing_input}.{}", b64(&sig)).into_bytes()
+    }
+
     /// A PSD2/TS12 payment authorization request bound to a caller-chosen `nonce` (and a matching
     /// unique transaction id), for the same fresh-per-run reason as [`Self::presentation_request`].
     pub fn payment_request(&self, nonce: u64) -> Vec<u8> {

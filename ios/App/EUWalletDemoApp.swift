@@ -45,6 +45,7 @@ struct ContentView: View {
                 model: model,
                 onPresent: { nav.send(.startPresentation); model.startPresentation() },
                 onPay: { nav.send(.startPresentation); model.startPayment() },
+                onPresentMdoc: { nav.send(.startPresentation); model.startMdocPresentation() },
                 onOpenHistory: { model.reloadHistory(); nav.send(.openHistory) },
                 onOpenCatalogue: { nav.send(.openCatalogue) },
                 onOpenSettings: { nav.send(.openSettings) })

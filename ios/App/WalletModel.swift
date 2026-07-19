@@ -27,6 +27,9 @@ final class WalletModel: ObservableObject {
         case passport = "urn:eudi:passport:1"
         case nid = "urn:eudi:nid:1"
         case germanId = "urn:eudi:pid:de:1"
+        // ISO 18013-5 mDL in the mso_mdoc format (rawValue is the doctype). Issued and presented
+        // over the mdoc-over-OpenID4VP path: the response is a signed DeviceResponse, not an SD-JWT.
+        case mdlMdoc = "org.iso.18013.5.1.mDL"
         var id: String { rawValue }
         var displayName: String {
             switch self {
@@ -35,6 +38,7 @@ final class WalletModel: ObservableObject {
             case .passport: return "Passport"
             case .nid: return "National ID Card"
             case .germanId: return "German ID Card"
+            case .mdlMdoc: return "Mobile Driving Licence (mdoc)"
             }
         }
         var subtitle: String {
@@ -44,6 +48,7 @@ final class WalletModel: ObservableObject {
             case .passport: return "Travel document (ICAO 9303)"
             case .nid: return "Government identity card"
             case .germanId: return "Personalausweis (eID)"
+            case .mdlMdoc: return "ISO 18013-5 mDL · mso_mdoc / CBOR"
             }
         }
         var systemImage: String {
@@ -53,7 +58,12 @@ final class WalletModel: ObservableObject {
             case .passport: return "book.closed.fill"
             case .nid: return "person.crop.rectangle.fill"
             case .germanId: return "flag.fill"
+            case .mdlMdoc: return "car.circle.fill"
             }
+        }
+        /// The credential format this type issues in — routes the issuance offer + response.
+        var issuanceFormat: String {
+            self == .mdlMdoc ? "mso_mdoc" : "dc+sd-jwt"
         }
     }
 
@@ -212,7 +222,14 @@ final class WalletModel: ObservableObject {
         }
     }
 
-    /// The awaitable core of issuance (also used to seed demo state silently).
+    /// A pre-authorized `mso_mdoc` credential offer — the mdoc analogue of `issuance.offer`, which
+    /// declares `dc+sd-jwt`. The offer format must match the issued credential's format (the core
+    /// aborts on mismatch), so the mdoc issuance path advertises `mso_mdoc` up front.
+    private static let mdocOffer = Data(
+        #"{"format":"mso_mdoc","grant":"pre-authorized","tx_code_required":false}"#.utf8)
+
+    /// The awaitable core of issuance (also used to seed demo state silently). Routes the credential
+    /// compact, offer, and format by type — `.mdlMdoc` issues the ISO 18013-5 mDL in `mso_mdoc`.
     private func issue(_ type: CredentialType) async {
         let compact: String
         switch type {
@@ -221,11 +238,16 @@ final class WalletModel: ObservableObject {
         case .passport: compact = issuance.passportCredentialCompact
         case .nid: compact = issuance.nidCredentialCompact
         case .germanId: compact = issuance.germanIdCredentialCompact
+        case .mdlMdoc: compact = issuance.mdlMdocCredential
         }
-        let issuer = DemoIssuer(credentialCompact: Data(compact.utf8), cNonce: nextNonce())
+        let offer = type == .mdlMdoc ? Self.mdocOffer : issuance.offer
+        let issuer = DemoIssuer(
+            credentialCompact: Data(compact.utf8),
+            cNonce: nextNonce(),
+            format: type.issuanceFormat)
         let ex = makeExecutor(issuer: issuer, render: { _ in })
         await ex.send(eventJson: WalletEventJSON.credentialOfferReceived(
-            offer: issuance.offer,
+            offer: offer,
             issuerCertChain: issuance.issuerCertChain,
             issuerId: issuance.issuerId))
     }
@@ -242,6 +264,20 @@ final class WalletModel: ObservableObject {
         Task {
             await ex.send(eventJson: WalletEventJSON.authorizationRequestReceived(request))
             note("Core resolved RP trust in-core and computed the minimised consent screen.")
+        }
+    }
+
+    /// mdoc-over-OpenID4VP: a DCQL `mso_mdoc` request selects the held mDL by doctype; the core
+    /// answers with a signed ISO 18013-5 `DeviceResponse` (device auth over the SessionTranscript).
+    func startMdocPresentation() {
+        guard credentials.contains(where: { $0.format == "mso_mdoc" }) else { return }
+        phase = .running
+        log = ["mdoc presentation: feeding RP-signed DCQL mso_mdoc request…"]
+        let ex = liveExecutor()
+        let request = demo.mdocPresentationRequest(nonce: nextNonce())
+        Task {
+            await ex.send(eventJson: WalletEventJSON.authorizationRequestReceived(request))
+            note("Core selected the mDL by doctype and will emit a signed DeviceResponse vp_token.")
         }
     }
 
@@ -342,30 +378,45 @@ final class WalletModel: ObservableObject {
         _ obj: [String: Any], index: Int, catalogue: [CatalogueItem]
     ) -> WalletCredential {
         let vct = obj["vct"] as? String ?? "unknown"
+        let format = obj["format"] as? String ?? "dc+sd-jwt"
         let issuer = (obj["issuer"] as? String ?? "").replacingOccurrences(of: "https://", with: "")
-        let disclosures = obj["disclosuresByClaim"] as? [String: String] ?? [:]
         let type = catalogue.first { $0.id == vct }
         var labelFor: [String: String] = [:]
         for c in type?.claims ?? [] { labelFor[c.path] = c.displayName }
 
         var claims: [(String, String)] = []
         var given = "", family = ""
-        for (claim, disclosureB64) in disclosures.sorted(by: { $0.key < $1.key }) {
-            guard let raw = base64urlDecode(disclosureB64),
-                  let a = try? JSONSerialization.jsonObject(with: raw) as? [Any], a.count == 3
-            else { continue }
-            let value = String(describing: a[2])
-            if claim == "given_name" { given = value }
-            if claim == "family_name" { family = value }
-            claims.append((labelFor[claim] ?? claim, value))
+        // mdoc entries carry their (already-decoded) element values directly in `claims`; SD-JWT
+        // entries carry base64url disclosure blobs in `disclosuresByClaim`.
+        if let mdocClaims = obj["claims"] as? [String: Any], !mdocClaims.isEmpty {
+            for (elementId, value) in mdocClaims.sorted(by: { $0.key < $1.key }) {
+                let v = String(describing: value)
+                if elementId == "given_name" { given = v }
+                if elementId == "family_name" { family = v }
+                claims.append((labelFor[elementId] ?? elementId, v))
+            }
+        } else {
+            let disclosures = obj["disclosuresByClaim"] as? [String: String] ?? [:]
+            for (claim, disclosureB64) in disclosures.sorted(by: { $0.key < $1.key }) {
+                guard let raw = base64urlDecode(disclosureB64),
+                      let a = try? JSONSerialization.jsonObject(with: raw) as? [Any], a.count == 3
+                else { continue }
+                let value = String(describing: a[2])
+                if claim == "given_name" { given = value }
+                if claim == "family_name" { family = value }
+                claims.append((labelFor[claim] ?? claim, value))
+            }
         }
         let holder = [given, family].filter { !$0.isEmpty }.joined(separator: " ")
+        let typeName = type?.displayName
+            ?? (format == "mso_mdoc" ? "Mobile Driving Licence (mdoc)" : vct)
         return WalletCredential(
             id: "\(vct)#\(index)",
-            typeName: type?.displayName ?? vct,
+            typeName: typeName,
             issuer: issuer.isEmpty ? "issuer" : issuer,
             holder: holder.isEmpty ? "EU Citizen" : holder,
             claims: claims,
+            format: format,
             gradientHex: gradient(for: vct))
     }
 
@@ -531,6 +582,8 @@ struct WalletCredential: Identifiable {
     let issuer: String
     let holder: String
     let claims: [(String, String)]
+    /// The credential format (`dc+sd-jwt` or `mso_mdoc`) — drives the format badge + mdoc present.
+    let format: String
     /// Two hex colors for the card gradient.
     let gradientHex: (UInt32, UInt32)
 }

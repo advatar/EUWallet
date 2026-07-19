@@ -63,6 +63,7 @@ struct WalletHomeView: View {
     @ObservedObject var model: WalletModel
     let onPresent: () -> Void
     let onPay: () -> Void
+    let onPresentMdoc: () -> Void
     let onOpenHistory: () -> Void
     let onOpenCatalogue: () -> Void
     let onOpenSettings: () -> Void
@@ -71,6 +72,7 @@ struct WalletHomeView: View {
     @State private var showAdd = false
 
     private var heldTypeNames: Set<String> { Set(model.credentials.map(\.typeName)) }
+    private var hasMdoc: Bool { model.credentials.contains { $0.format == "mso_mdoc" } }
 
     var body: some View {
         ScrollView {
@@ -96,6 +98,14 @@ struct WalletHomeView: View {
                         ActionButton(title: "Pay", systemImage: "creditcard", action: onPay)
                     }
                     .padding(.top, 4)
+
+                    // mdoc-over-OpenID4VP: only offered when an ISO 18013-5 mDL is held.
+                    if hasMdoc {
+                        ActionButton(
+                            title: "Present mDL (mdoc)",
+                            systemImage: "car.circle.fill",
+                            action: onPresentMdoc)
+                    }
                 }
 
                 // Secondary navigation.

@@ -52,6 +52,41 @@ fn add_credential(
     assert!(fx.iter().any(|e| matches!(e, Effect::Close)));
 }
 
+/// Run ONE pre-authorized OID4VCI issuance of an `mso_mdoc` credential to completion. Mirrors
+/// [`add_credential`] but advertises the `mso_mdoc` offer + response format — the exact path the
+/// iOS "Add mDL (mdoc)" button drives — so the core parses the DeviceResponse-bearing IssuerSigned
+/// into an mdoc holding.
+fn add_mdoc_credential(
+    core: &mut Core,
+    wallet: &DemoWallet,
+    scn: &IssuanceScenario,
+    c_nonce: u64,
+    credential_b64: &str,
+) {
+    let offer = br#"{"format":"mso_mdoc","grant":"pre-authorized","tx_code_required":false}"#;
+    let fx = core.handle_event(Event::CredentialOfferReceived {
+        offer: offer.to_vec(),
+        issuer_cert_chain: scn.issuer_cert_chain.clone(),
+        issuer_id: scn.issuer_id.clone(),
+    });
+    assert!(fx.contains(&Effect::RequestToken), "mso_mdoc offer proceeds: {fx:?}");
+
+    let fx = core.handle_event(Event::TokenReceived { bound: true, c_nonce });
+    let signing_input = sign_payload(&fx).expect("attested proof key → Sign effect");
+    let sig = wallet.sign_device(signing_input);
+    let fx = core.handle_event(Event::DeviceSignatureProduced { signature: sig });
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::RequestCredential { .. })),
+        "signed proof → RequestCredential, got {fx:?}"
+    );
+
+    let fx = core.handle_event(Event::CredentialReceived {
+        format: "mso_mdoc".into(),
+        bytes: credential_b64.as_bytes().to_vec(),
+    });
+    assert!(fx.iter().any(|e| matches!(e, Effect::Close)));
+}
+
 /// The payload of the first `Sign` effect in `fx`, if any.
 fn sign_payload(fx: &[Effect]) -> Option<Vec<u8>> {
     fx.iter().find_map(|e| match e {
@@ -157,6 +192,33 @@ fn empty_wallet_gains_two_distinct_credentials_then_presents_one() {
     assert!(
         vp.contains('~'),
         "the delivered vp_token is an SD-JWT presentation"
+    );
+}
+
+/// The iOS "Add mDL (mdoc)" path, end to end in the core: a full `mso_mdoc` OpenID4VCI issuance
+/// stores the credential as an mdoc holding, and `held_credentials_json` surfaces it with the
+/// `mso_mdoc` format and its (CBOR-decoded) element values — what the wallet home renders.
+#[test]
+fn mso_mdoc_issuance_stores_a_presentable_mdoc_holding() {
+    let wallet = DemoWallet::new();
+    let scn = wallet.issuance_scenario();
+    let mut core = issuance_ready_core(&scn);
+
+    add_mdoc_credential(&mut core, &wallet, &scn, 601, &scn.mdl_mdoc_credential);
+    let held = core.held_credentials_json();
+    assert!(held.contains(r#""format":"mso_mdoc""#), "mdoc holding stored: {held}");
+    assert!(
+        held.contains("org.iso.18013.5.1.mDL"),
+        "held mdoc surfaces its doctype: {held}"
+    );
+    assert!(held.contains("age_over_18"), "mdoc element values surfaced: {held}");
+
+    // Re-issuing the same mdoc is idempotent in the holdings.
+    add_mdoc_credential(&mut core, &wallet, &scn, 602, &scn.mdl_mdoc_credential);
+    assert_eq!(
+        core.held_credentials_json().matches("org.iso.18013.5.1.mDL").count(),
+        1,
+        "re-issuing the mdoc does not duplicate the holding"
     );
 }
 
