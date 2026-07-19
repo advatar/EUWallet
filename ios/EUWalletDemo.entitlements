@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- A credential wallet holds device-bound keys + attestations. Require complete data
+         protection: on-disk state is unreadable while the device is locked. The Secure Enclave
+         signing key itself needs no entitlement (it is created with kSecAttrTokenIDSecureEnclave)
+         and camera access is declared via Info.plist (NSCameraUsageDescription). -->
+    <key>com.apple.developer.default-data-protection</key>
+    <string>NSFileProtectionComplete</string>
+</dict>
+</plist>
