@@ -1,0 +1,3 @@
+[submodule "LandingPage"]
+	path = LandingPage
+	url = git@github.com:advatar/euro-wallet-echo.git

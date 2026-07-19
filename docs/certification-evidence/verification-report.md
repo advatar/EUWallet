@@ -13,7 +13,7 @@ Mapped requirements carry `Mapped_symbols`, `Mapped_tests`, and `Status=implemen
 
 | Metric | Value |
 |---|---|
-| Workspace tests passed | 187 |
+| Workspace tests passed | 191 |
 | Result | **PASS** |
 
 ## Tier 2 — state-machine proofs (Lean, machine-checked) + oracle→Rust conformance
