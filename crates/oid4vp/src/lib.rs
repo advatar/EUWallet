@@ -36,26 +36,48 @@ pub enum State {
     Aborted(AbortReason),
 }
 
-/// The SD-JWT VC the wallet will present, chosen during consent (data-minimised upstream).
+/// The credential the wallet will present, chosen during consent (data-minimised upstream).
+/// OpenID4VP carries either an SD-JWT VC or an ISO 18013-5 mdoc, so this is format-tagged.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SelectedCredential {
-    /// The issuer-signed JWT (compact JWS).
-    pub issuer_jwt: String,
-    /// The disclosures to reveal (already minimised to the requested-and-held set).
-    pub disclosures: Vec<String>,
+pub enum SelectedCredential {
+    /// SD-JWT VC: the issuer-signed JWT and the disclosures to reveal (already minimised).
+    SdJwt {
+        issuer_jwt: String,
+        disclosures: Vec<String>,
+    },
+    /// mdoc (ISO 18013-5) presented over OpenID4VP: the (already-minimised) issuer-signed
+    /// structure, the doctype, the OpenID4VP SessionTranscript the device auth binds, and the
+    /// device-namespaces bytes.
+    Mdoc {
+        doctype: String,
+        issuer_signed: mdoc::IssuerSigned,
+        session_transcript: Vec<u8>,
+        device_namespaces: Vec<u8>,
+    },
 }
 
-/// In-flight presentation awaiting the device signature over the key-binding JWT.
+/// In-flight presentation awaiting the device signature. SD-JWT signs a key-binding JWT; mdoc
+/// signs the COSE `DeviceAuthentication` structure — different assembly, same two-step handshake.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingPresentation {
-    /// `<issuer-jwt>~<disclosure>~...~` (no KB-JWT yet).
-    pub presentation: String,
-    /// ASCII(`<kb-header-b64>.<kb-payload-b64>`) — the bytes the device key signs.
-    pub kb_signing_input: String,
-    /// Echoed into the response body (OpenID4VP 1.0 §8).
-    pub state: Option<String>,
-    /// The DCQL query id the `vp_token` object is keyed by (None → legacy bare-token response).
-    pub dcql_id: Option<String>,
+pub enum PendingPresentation {
+    SdJwt {
+        /// `<issuer-jwt>~<disclosure>~...~` (no KB-JWT yet).
+        presentation: String,
+        /// ASCII(`<kb-header-b64>.<kb-payload-b64>`) — the bytes the device key signs.
+        kb_signing_input: String,
+        state: Option<String>,
+        dcql_id: Option<String>,
+    },
+    Mdoc {
+        doctype: String,
+        issuer_signed: mdoc::IssuerSigned,
+        device_namespaces: Vec<u8>,
+        /// The COSE protected header the device signature was produced under (reassembled into the
+        /// detached-payload `CoseSign1`).
+        protected_header: Vec<u8>,
+        state: Option<String>,
+        dcql_id: Option<String>,
+    },
 }
 
 /// Every abort reason is the name of the guard that tripped (or an explicit user refusal).
@@ -290,18 +312,58 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
             let Some(cred) = env.selected_credential else {
                 return (State::Aborted(AbortReason::NoCredential), vec![]);
             };
-            let presentation = build_presentation(&cred.issuer_jwt, &cred.disclosures);
-            let sd_hash = base64url(&env.digest.sha256(presentation.as_bytes()));
-            let kb_signing_input =
-                kb_jwt_signing_input(req.nonce, &req.client_id, env.now_epoch, &sd_hash);
-            let signing_bytes = kb_signing_input.clone().into_bytes();
+            let (pending, signing_bytes) = match cred {
+                // SD-JWT VC: sign the key-binding JWT over the presentation's sd_hash.
+                SelectedCredential::SdJwt {
+                    issuer_jwt,
+                    disclosures,
+                } => {
+                    let presentation = build_presentation(issuer_jwt, disclosures);
+                    let sd_hash = base64url(&env.digest.sha256(presentation.as_bytes()));
+                    let kb_signing_input =
+                        kb_jwt_signing_input(req.nonce, &req.client_id, env.now_epoch, &sd_hash);
+                    let bytes = kb_signing_input.clone().into_bytes();
+                    (
+                        PendingPresentation::SdJwt {
+                            presentation,
+                            kb_signing_input,
+                            state: req.state.clone(),
+                            dcql_id: req.dcql_id.clone(),
+                        },
+                        bytes,
+                    )
+                }
+                // mdoc: sign the COSE DeviceAuthentication over the OpenID4VP SessionTranscript.
+                SelectedCredential::Mdoc {
+                    doctype,
+                    issuer_signed,
+                    session_transcript,
+                    device_namespaces,
+                } => {
+                    let Ok(device_auth) = mdoc::device_authentication_bytes(
+                        session_transcript,
+                        doctype,
+                        device_namespaces,
+                    ) else {
+                        return (State::Aborted(AbortReason::NoCredential), vec![]);
+                    };
+                    let protected_header = cose::encode_protected_header(Alg::Es256);
+                    let signing_input = cose::sig_structure(&protected_header, &[], &device_auth);
+                    (
+                        PendingPresentation::Mdoc {
+                            doctype: doctype.clone(),
+                            issuer_signed: issuer_signed.clone(),
+                            device_namespaces: device_namespaces.clone(),
+                            protected_header,
+                            state: req.state.clone(),
+                            dcql_id: req.dcql_id.clone(),
+                        },
+                        signing_input,
+                    )
+                }
+            };
             (
-                State::AwaitingDeviceSignature(Box::new(PendingPresentation {
-                    presentation,
-                    kb_signing_input,
-                    state: req.state.clone(),
-                    dcql_id: req.dcql_id.clone(),
-                })),
+                State::AwaitingDeviceSignature(Box::new(pending)),
                 vec![Output::SignKeyBinding {
                     key_ref: env.device_key_ref.to_string(),
                     signing_input: signing_bytes,
@@ -317,10 +379,40 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
         // HLR-VP-T-006 — device signature ready → assemble the key-bound presentation and the
         // OpenID4VP 1.0 `direct_post` response body, then send it.
         (State::AwaitingDeviceSignature(p), Input::DeviceSignatureProduced(sig)) => {
-            let kb_jwt = format!("{}.{}", p.kb_signing_input, base64url(sig));
-            // `presentation` already ends with '~'; the KB-JWT occupies the final slot.
-            let vp_token = format!("{}{}", p.presentation, kb_jwt);
-            let body = direct_post_body(&vp_token, p.dcql_id.as_deref(), p.state.as_deref());
+            let body = match p.as_ref() {
+                PendingPresentation::SdJwt {
+                    presentation,
+                    kb_signing_input,
+                    state,
+                    dcql_id,
+                } => {
+                    let kb_jwt = format!("{}.{}", kb_signing_input, base64url(sig));
+                    // `presentation` already ends with '~'; the KB-JWT occupies the final slot.
+                    let vp_token = format!("{presentation}{kb_jwt}");
+                    direct_post_body(&vp_token, dcql_id.as_deref(), state.as_deref())
+                }
+                PendingPresentation::Mdoc {
+                    doctype,
+                    issuer_signed,
+                    device_namespaces,
+                    protected_header,
+                    state,
+                    dcql_id,
+                } => {
+                    // Reassemble the device DeviceAuth as a detached-payload COSE_Sign1 with the
+                    // enclave signature, then serialise the full DeviceResponse as the vp_token.
+                    let device_auth = cose::CoseSign1 {
+                        protected: protected_header.clone(),
+                        unprotected: cose::UnprotectedHeader::default(),
+                        payload: None,
+                        signature: sig.clone(),
+                    };
+                    let device_response =
+                        mdoc::device_response(doctype, issuer_signed, device_namespaces, &device_auth);
+                    let vp_token = base64url(&device_response);
+                    direct_post_body(&vp_token, dcql_id.as_deref(), state.as_deref())
+                }
+            };
             (
                 State::Presenting,
                 vec![Output::SendVpToken(body.into_bytes())],

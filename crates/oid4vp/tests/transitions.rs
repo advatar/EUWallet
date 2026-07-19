@@ -66,7 +66,7 @@ fn env<'a>(seen: &'a [u64], v: &'a dyn Verifier, d: &'a dyn Digest) -> Env<'a> {
 #[test]
 fn happy_path_idle_free_to_done() {
     let seen: Vec<u64> = vec![];
-    let cred = SelectedCredential {
+    let cred = SelectedCredential::SdJwt {
         issuer_jwt: "hdr.pay.sig".into(),
         disclosures: vec!["disc1".into()],
     };

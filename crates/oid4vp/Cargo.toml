@@ -18,3 +18,7 @@ cose = { path = "../cose" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64ct = { workspace = true }
+
+[dev-dependencies]
+# Real aws-lc-rs crypto for the mdoc-over-OpenID4VP assembly test (issuer + device signatures).
+crypto-backend = { path = "../crypto-backend" }

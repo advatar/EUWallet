@@ -93,8 +93,10 @@ pub fn sig_structure(protected: &[u8], external_aad: &[u8], payload: &[u8]) -> V
 }
 
 /// Encode the canonical protected header `{1: alg}` as a CBOR byte string body (the bytes
-/// that go on the wire and into the Sig_structure).
-fn encode_protected_header(alg: Alg) -> Vec<u8> {
+/// that go on the wire and into the Sig_structure). Public so a sans-IO caller that has the
+/// signature produced out of band (e.g. an mdoc DeviceAuth signed by the Secure Enclave) can
+/// reassemble the exact `CoseSign1` and its `Sig_structure`.
+pub fn encode_protected_header(alg: Alg) -> Vec<u8> {
     // A one-entry map {1: alg_id}. alg_id is negative → CBOR major type 1 (Nint(arg)).
     let id = cose_alg_id(alg);
     let alg_val = if id < 0 {

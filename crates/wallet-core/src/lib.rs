@@ -1045,7 +1045,7 @@ impl Core {
             .iter()
             .filter_map(|c| cred.disclosures_by_claim.get(c).cloned())
             .collect();
-        Some(SelectedCredential {
+        Some(SelectedCredential::SdJwt {
             issuer_jwt: cred.issuer_jwt.clone(),
             disclosures,
         })

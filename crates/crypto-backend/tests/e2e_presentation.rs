@@ -92,7 +92,7 @@ fn full_remote_presentation_with_real_crypto() {
 
     // The wallet drives the sans-IO machine.
     let seen: Vec<u64> = vec![];
-    let cred = SelectedCredential {
+    let cred = SelectedCredential::SdJwt {
         issuer_jwt: issuer_jwt.clone(),
         disclosures: disclosures.clone(),
     };
