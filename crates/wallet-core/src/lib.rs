@@ -122,6 +122,33 @@ fn cbor_value_display(v: &cose::cbor::Value) -> String {
     }
 }
 
+/// The disclosed value of an SD-JWT disclosure `base64url([salt, name, value])`.
+fn sd_disclosure_value(b64: &str) -> Option<serde_json::Value> {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    let raw = Base64UrlUnpadded::decode_vec(b64).ok()?;
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(&raw).ok()?;
+    arr.into_iter().nth(2)
+}
+
+/// Render a JSON value the way [`cbor_value_display`] renders CBOR (strings unquoted), so a DCQL
+/// `values` constraint can be compared against an mdoc element value.
+fn json_value_display(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Find an mdoc element's value by its namespaced path (`<namespace>.<element>`).
+fn mdoc_value_at<'a>(issued: &'a mdoc::IssuerSigned, path: &str) -> Option<&'a cose::cbor::Value> {
+    issued.name_spaces.iter().find_map(|(ns, items)| {
+        items
+            .iter()
+            .find(|it| format!("{ns}.{}", it.element_id) == path)
+            .map(|it| &it.element_value)
+    })
+}
+
 /// Drop the issuer-signed items a request did not ask for (mdoc data minimisation). The MSO
 /// (`issuerAuth`) is left intact; a verifier checks each *presented* item's digest against it, so
 /// omitting items is valid and reveals only the requested-and-held subset.
@@ -1201,9 +1228,34 @@ impl Core {
             .collect();
         let dcql_id = Some(q.id.clone());
 
+        // A DCQL `values` constraint means the RP only accepts a credential whose claim value is one
+        // of the listed values (e.g. `age_over_18 ∈ [true]`). A candidate that can't satisfy it is
+        // not eligible — the wallet never presents a value the verifier asked to exclude.
+        let mdoc_values_ok = |issued: &mdoc::IssuerSigned| -> bool {
+            q.claims.iter().all(|cq| match &cq.values {
+                None => true,
+                Some(allowed) => mdoc_value_at(issued, &cq.path_string())
+                    .map(cbor_value_display)
+                    .is_some_and(|disp| allowed.iter().any(|a| json_value_display(a) == disp)),
+            })
+        };
+        let sdjwt_values_ok = |c: &HeldCredential| -> bool {
+            q.claims.iter().all(|cq| match &cq.values {
+                None => true,
+                Some(allowed) => c
+                    .disclosures_by_claim
+                    .get(&cq.path_string())
+                    .and_then(|d| sd_disclosure_value(d))
+                    .is_some_and(|v| allowed.contains(&v)),
+            })
+        };
+
         if q.format == "mso_mdoc" {
             let doctype = q.meta.as_ref().and_then(|m| m.doctype_value.clone())?;
-            let holding = self.mdoc_holdings.iter().find(|h| h.doctype == doctype)?;
+            let holding = self
+                .mdoc_holdings
+                .iter()
+                .find(|h| h.doctype == doctype && mdoc_values_ok(&h.issuer_signed))?;
             let issuer_signed = minimise_mdoc(&holding.issuer_signed, &claims);
             let mgn = mdoc_generated_nonce(sess.nonce);
             let session_transcript = mdoc::oid4vp_session_transcript(
@@ -1234,8 +1286,12 @@ impl Core {
         let cred = self
             .credentials
             .iter()
-            .find(|c| type_matches(c) && carries_all(c))
-            .or_else(|| self.credentials.iter().find(|c| type_matches(c)))?;
+            .find(|c| type_matches(c) && sdjwt_values_ok(c) && carries_all(c))
+            .or_else(|| {
+                self.credentials
+                    .iter()
+                    .find(|c| type_matches(c) && sdjwt_values_ok(c))
+            })?;
         let held: Vec<String> = cred.disclosures_by_claim.keys().cloned().collect();
         let disclosures = minimum_claim_set(&claims, &held)
             .iter()
