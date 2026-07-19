@@ -440,6 +440,54 @@ impl IssuerSigned {
             (Value::Text("issuerAuth".into()), self.issuer_auth.to_value()),
         ])
     }
+
+    /// Parse an `IssuerSigned` from canonical CBOR bytes (the inverse of `to_value`), so a wallet
+    /// can store and later re-present an mdoc it received over the wire.
+    pub fn parse(bytes: &[u8]) -> Result<Self, MdocError> {
+        Self::from_value(&cbor::from_canonical_slice(bytes)?)
+    }
+
+    /// Parse from a decoded CBOR value.
+    pub fn from_value(v: &Value) -> Result<Self, MdocError> {
+        let Value::Map(pairs) = v else {
+            return Err(MdocError::Malformed("IssuerSigned not a map"));
+        };
+        let ns_val = map_get(pairs, "nameSpaces").ok_or(MdocError::Malformed("nameSpaces"))?;
+        let Value::Map(ns_pairs) = ns_val else {
+            return Err(MdocError::Malformed("nameSpaces not a map"));
+        };
+        let mut name_spaces = BTreeMap::new();
+        for (k, arr) in ns_pairs {
+            let ns = as_text(k, "namespace")?;
+            let Value::Array(items) = arr else {
+                return Err(MdocError::Malformed("namespace items not an array"));
+            };
+            let mut parsed = Vec::with_capacity(items.len());
+            for it in items {
+                // Each element is an `IssuerSignedItemBytes` (#6.24(bstr .cbor IssuerSignedItem)).
+                parsed.push(IssuerSignedItem::from_item_bytes(&it.to_canonical())?);
+            }
+            name_spaces.insert(ns, parsed);
+        }
+        let issuer_auth_val = map_get(pairs, "issuerAuth").ok_or(MdocError::Malformed("issuerAuth"))?;
+        let issuer_auth =
+            CoseSign1::from_value(issuer_auth_val).map_err(|_| MdocError::Malformed("issuerAuth"))?;
+        Ok(IssuerSigned {
+            name_spaces,
+            issuer_auth,
+        })
+    }
+
+    /// The credential's doctype, read from the MSO embedded in `issuerAuth`.
+    pub fn doc_type(&self) -> Result<String, MdocError> {
+        let payload = self
+            .issuer_auth
+            .payload
+            .as_ref()
+            .ok_or(MdocError::Malformed("issuerAuth payload"))?;
+        let mso = MobileSecurityObject::from_value(&cbor::from_canonical_slice(&untag24(payload)?)?)?;
+        Ok(mso.doc_type)
+    }
 }
 
 /// The `DeviceAuthenticationBytes` the device key signs (ISO 18013-5 §9.1.3.4):

@@ -190,6 +190,44 @@ impl CoseSign1 {
         Ok(())
     }
 
+    /// Parse a COSE_Sign1 from its wire structure (the inverse of [`to_value`]):
+    /// `[ protected: bstr, unprotected: map, payload: bstr / nil, signature: bstr ]`.
+    /// Only the `kid` unprotected parameter is retained; `verify` re-checks the protected header.
+    pub fn from_value(v: &Value) -> Result<Self, CoseError> {
+        let Value::Array(items) = v else {
+            return Err(CoseError::MalformedStructure);
+        };
+        if items.len() != 4 {
+            return Err(CoseError::MalformedStructure);
+        }
+        let protected = match &items[0] {
+            Value::Bytes(b) => b.clone(),
+            _ => return Err(CoseError::MalformedStructure),
+        };
+        let kid = match &items[1] {
+            Value::Map(pairs) => pairs.iter().find_map(|(k, val)| match (k, val) {
+                (Value::Uint(l), Value::Bytes(b)) if *l == label::KID => Some(b.clone()),
+                _ => None,
+            }),
+            _ => return Err(CoseError::MalformedStructure),
+        };
+        let payload = match &items[2] {
+            Value::Bytes(b) => Some(b.clone()),
+            Value::Null => None,
+            _ => return Err(CoseError::MalformedStructure),
+        };
+        let signature = match &items[3] {
+            Value::Bytes(b) => b.clone(),
+            _ => return Err(CoseError::MalformedStructure),
+        };
+        Ok(CoseSign1 {
+            protected,
+            unprotected: UnprotectedHeader { kid },
+            payload,
+            signature,
+        })
+    }
+
     /// Encode as the COSE_Sign1 wire structure (RFC 9052 §4.2):
     /// `[ protected: bstr, unprotected: map, payload: bstr / nil, signature: bstr ]`.
     /// A detached payload (`None`) is encoded as CBOR `null`.

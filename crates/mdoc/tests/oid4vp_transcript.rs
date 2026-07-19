@@ -46,3 +46,45 @@ fn transcript_changes_with_every_field() {
         "a different mdoc_generated_nonce must yield a different transcript"
     );
 }
+
+#[test]
+fn issuer_signed_round_trips_through_bytes() {
+    use std::collections::BTreeMap;
+    use crypto_backend::SoftwareSigner;
+    use crypto_traits::{Alg, KeyRef};
+    use mdoc::{build_and_sign, verify_issuer_signed, IssuerSigned, IssuerSignedItem, ValidityInfo};
+
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let item = IssuerSignedItem {
+        digest_id: 0,
+        random: vec![0x22; 16],
+        element_id: "age_over_18".into(),
+        element_value: Value::Bool(true),
+    };
+    let mut ns = BTreeMap::new();
+    ns.insert("org.iso.18013.5.1".to_string(), vec![item]);
+    let issued = build_and_sign(
+        ns,
+        "org.iso.18013.5.1.mDL",
+        Value::Map(vec![]),
+        ValidityInfo {
+            signed: "2026-07-19T00:00:00Z".into(),
+            valid_from: "2026-07-19T00:00:00Z".into(),
+            valid_until: "2035-01-01T00:00:00Z".into(),
+        },
+        &AwsLc,
+        &issuer,
+        &KeyRef("issuer".into()),
+        Alg::Es256,
+    )
+    .unwrap();
+
+    // Serialize → parse → identical structure + recoverable doctype.
+    let bytes = issued.to_value().to_canonical();
+    let parsed = IssuerSigned::parse(&bytes).expect("round-trips from bytes");
+    assert_eq!(parsed, issued);
+    assert_eq!(parsed.doc_type().unwrap(), "org.iso.18013.5.1.mDL");
+    // The parsed credential still verifies against the issuer key + item digests.
+    verify_issuer_signed(&parsed, &AwsLc, &AwsLc, issuer.public_key_raw(), Alg::Es256)
+        .expect("parsed IssuerSigned verifies");
+}
