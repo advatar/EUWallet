@@ -53,6 +53,9 @@ pub enum SelectedCredential {
         issuer_signed: mdoc::IssuerSigned,
         session_transcript: Vec<u8>,
         device_namespaces: Vec<u8>,
+        /// The wallet's `mdoc_generated_nonce`. It is folded into `session_transcript`; the verifier
+        /// needs it to rebuild the same transcript, so the response conveys it (see `direct_post`).
+        mdoc_generated_nonce: String,
     },
 }
 
@@ -75,6 +78,8 @@ pub enum PendingPresentation {
         /// The COSE protected header the device signature was produced under (reassembled into the
         /// detached-payload `CoseSign1`).
         protected_header: Vec<u8>,
+        /// Conveyed to the verifier so it can rebuild the SessionTranscript the device auth binds.
+        mdoc_generated_nonce: String,
         state: Option<String>,
         dcql_id: Option<String>,
     },
@@ -126,6 +131,8 @@ pub struct AuthRequest {
     /// Acceptable SD-JWT VC types (`meta.vct_values`) — used to select a held credential of the
     /// requested TYPE, not merely one that carries the requested claim names.
     pub requested_vcts: Vec<String>,
+    /// Acceptable mdoc doctypes (`meta.doctype_value`) — the mso_mdoc analogue of `requested_vcts`.
+    pub requested_doctypes: Vec<String>,
     pub signed_payload: Vec<u8>,
     pub signature: Vec<u8>,
     pub request_alg: Alg,
@@ -339,6 +346,7 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                     issuer_signed,
                     session_transcript,
                     device_namespaces,
+                    mdoc_generated_nonce,
                 } => {
                     let Ok(device_auth) = mdoc::device_authentication_bytes(
                         session_transcript,
@@ -355,6 +363,7 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                             issuer_signed: issuer_signed.clone(),
                             device_namespaces: device_namespaces.clone(),
                             protected_header,
+                            mdoc_generated_nonce: mdoc_generated_nonce.clone(),
                             state: req.state.clone(),
                             dcql_id: req.dcql_id.clone(),
                         },
@@ -389,13 +398,14 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                     let kb_jwt = format!("{}.{}", kb_signing_input, base64url(sig));
                     // `presentation` already ends with '~'; the KB-JWT occupies the final slot.
                     let vp_token = format!("{presentation}{kb_jwt}");
-                    direct_post_body(&vp_token, dcql_id.as_deref(), state.as_deref())
+                    direct_post_body(&vp_token, dcql_id.as_deref(), state.as_deref(), None)
                 }
                 PendingPresentation::Mdoc {
                     doctype,
                     issuer_signed,
                     device_namespaces,
                     protected_header,
+                    mdoc_generated_nonce,
                     state,
                     dcql_id,
                 } => {
@@ -410,7 +420,12 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                     let device_response =
                         mdoc::device_response(doctype, issuer_signed, device_namespaces, &device_auth);
                     let vp_token = base64url(&device_response);
-                    direct_post_body(&vp_token, dcql_id.as_deref(), state.as_deref())
+                    direct_post_body(
+                        &vp_token,
+                        dcql_id.as_deref(),
+                        state.as_deref(),
+                        Some(mdoc_generated_nonce),
+                    )
                 }
             };
             (
@@ -437,7 +452,16 @@ fn base64url(bytes: &[u8]) -> String {
 /// Per §8.1 the `vp_token` for a DCQL request is a JSON object keyed by the credential query `id`
 /// (`{"<id>":"<presentation>"}`). Without a DCQL id (the legacy `claims` path) we send the bare
 /// presentation string, which pre-1.0 verifiers accept.
-fn direct_post_body(vp_token: &str, dcql_id: Option<&str>, state: Option<&str>) -> String {
+///
+/// For an mdoc response `mdoc_generated_nonce` carries the wallet's nonce so the verifier can
+/// rebuild the SessionTranscript the DeviceAuth signature binds (it is the `apu` of an encrypted
+/// response; for unencrypted `direct_post` we convey it as a companion form field).
+fn direct_post_body(
+    vp_token: &str,
+    dcql_id: Option<&str>,
+    state: Option<&str>,
+    mdoc_generated_nonce: Option<&str>,
+) -> String {
     let vp_value = match dcql_id {
         Some(id) => {
             let mut obj = serde_json::Map::new();
@@ -450,6 +474,10 @@ fn direct_post_body(vp_token: &str, dcql_id: Option<&str>, state: Option<&str>) 
     if let Some(s) = state {
         body.push_str("&state=");
         body.push_str(&form_urlencode(s));
+    }
+    if let Some(mgn) = mdoc_generated_nonce {
+        body.push_str("&mdoc_generated_nonce=");
+        body.push_str(&form_urlencode(mgn));
     }
     body
 }
@@ -551,14 +579,15 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         .unwrap_or("direct_post")
         .to_string();
     // Prefer the real DCQL query (OpenID4VP 1.0 §6); fall back to the legacy flat `claims` array.
-    let (requested_claims, dcql_id, requested_vcts) = match p.get("dcql_query") {
+    let (requested_claims, dcql_id, requested_vcts, requested_doctypes) = match p.get("dcql_query") {
         Some(q) => match dcql::DcqlQuery::from_value(q) {
             Some(dq) => (
                 dq.requested_claim_paths(),
                 dq.first_credential_id(),
                 dq.requested_vcts(),
+                dq.requested_doctypes(),
             ),
-            None => (Vec::new(), None, Vec::new()),
+            None => (Vec::new(), None, Vec::new(), Vec::new()),
         },
         None => {
             let claims = p
@@ -570,7 +599,7 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
                         .collect()
                 })
                 .unwrap_or_default();
-            (claims, None, Vec::new())
+            (claims, None, Vec::new(), Vec::new())
         }
     };
 
@@ -589,6 +618,7 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         response_mode,
         dcql_id,
         requested_vcts,
+        requested_doctypes,
         signed_payload,
         signature,
         request_alg,
@@ -701,7 +731,7 @@ mod response_tests {
     #[test]
     fn dcql_response_is_form_encoded_vp_token_object_with_state() {
         // A DCQL request → vp_token is a JSON object keyed by the query id, form-encoded, + state.
-        let body = direct_post_body("issuer.jwt~disc~kb.jwt", Some("pid"), Some("xyz 123"));
+        let body = direct_post_body("issuer.jwt~disc~kb.jwt", Some("pid"), Some("xyz 123"), None);
         // vp_token value is the JSON object {"pid":"<presentation>"} percent-encoded.
         assert!(body.starts_with("vp_token=%7B%22pid%22%3A%22issuer.jwt~disc~kb.jwt%22%7D"));
         // state is echoed and its space is percent-encoded (never '+').
@@ -718,9 +748,17 @@ mod response_tests {
 
     #[test]
     fn legacy_response_sends_bare_presentation_under_vp_token() {
-        let body = direct_post_body("issuer.jwt~disc~kb.jwt", None, None);
+        let body = direct_post_body("issuer.jwt~disc~kb.jwt", None, None, None);
         // The SD-JWT compact is entirely RFC3986-unreserved, so it is unchanged by encoding.
         assert_eq!(body, "vp_token=issuer.jwt~disc~kb.jwt");
+    }
+
+    #[test]
+    fn mdoc_response_conveys_generated_nonce_as_companion_field() {
+        // An mdoc response carries mdoc_generated_nonce so the verifier can rebuild the transcript.
+        let body = direct_post_body("ZGV2aWNlcmVzcG9uc2U", Some("mdl"), None, Some("mgn-abc123"));
+        assert!(body.starts_with("vp_token=%7B%22mdl%22%3A%22ZGV2aWNlcmVzcG9uc2U%22%7D"));
+        assert!(body.ends_with("&mdoc_generated_nonce=mgn-abc123"));
     }
 
     #[test]
@@ -809,6 +847,7 @@ mod internal_tests {
             response_mode: "direct_post".into(),
             dcql_id: None,
             requested_vcts: vec![],
+            requested_doctypes: vec![],
             signed_payload: b"x".to_vec(),
             signature: b"y".to_vec(),
             request_alg: Alg::Es256,

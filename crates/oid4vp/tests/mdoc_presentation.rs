@@ -86,6 +86,7 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
         response_mode: "direct_post".into(),
         dcql_id: Some("cred1".into()),
         requested_vcts: vec![],
+        requested_doctypes: vec![],
         signed_payload: b"x".to_vec(),
         signature: b"y".to_vec(),
         request_alg: Alg::Es256,
@@ -95,6 +96,7 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
         issuer_signed: issuer_signed.clone(),
         session_transcript: transcript.clone(),
         device_namespaces: ns_bytes.clone(),
+        mdoc_generated_nonce: MGN.into(),
     };
     let env = Env {
         wallet_client_id: "wallet.example",
@@ -125,6 +127,12 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
         [Output::SendVpToken(b)] => String::from_utf8(b.clone()).unwrap(),
         other => panic!("expected SendVpToken, got {other:?}"),
     };
+
+    // The response conveys the mdoc_generated_nonce so the verifier can rebuild the transcript.
+    assert!(
+        body.contains(&format!("mdoc_generated_nonce={MGN}")),
+        "direct_post body must carry the mdoc_generated_nonce, got {body}"
+    );
 
     // ---- Extract the DeviceResponse from the direct_post body and VERIFY the device signature. ----
     let vp_json = body.strip_prefix("vp_token=").and_then(|s| s.split('&').next()).unwrap();

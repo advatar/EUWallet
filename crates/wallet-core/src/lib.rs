@@ -96,6 +96,78 @@ fn held_credential_from_compact(bytes: &[u8]) -> Option<HeldCredential> {
     })
 }
 
+/// Parse an issued `mso_mdoc` credential into a holding. OpenID4VCI delivers it as a base64url
+/// string of the `IssuerSigned` CBOR; we decode, parse, and read its doctype from the MSO.
+fn mdoc_holding_from_credential(bytes: &[u8]) -> Option<MdocHolding> {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    let compact = core::str::from_utf8(bytes).ok()?;
+    let cbor = Base64UrlUnpadded::decode_vec(compact.trim()).ok()?;
+    let issuer_signed = mdoc::IssuerSigned::parse(&cbor).ok()?;
+    let doctype = issuer_signed.doc_type().ok()?;
+    Some(MdocHolding {
+        doctype,
+        issuer_signed,
+    })
+}
+
+/// A human-readable rendering of an mdoc element value for the card display (UI hint only).
+fn cbor_value_display(v: &cose::cbor::Value) -> String {
+    use cose::cbor::Value as V;
+    match v {
+        V::Text(s) => s.clone(),
+        V::Bool(b) => b.to_string(),
+        V::Uint(n) => n.to_string(),
+        V::Nint(n) => format!("-{}", *n as i128 + 1),
+        _ => "…".into(),
+    }
+}
+
+/// Drop the issuer-signed items a request did not ask for (mdoc data minimisation). The MSO
+/// (`issuerAuth`) is left intact; a verifier checks each *presented* item's digest against it, so
+/// omitting items is valid and reveals only the requested-and-held subset.
+fn minimise_mdoc(issued: &mdoc::IssuerSigned, requested_claims: &[String]) -> mdoc::IssuerSigned {
+    // mdoc DCQL claim paths are `[namespace, element]`, rendered "<namespace>.<element>". Match the
+    // issuer-signed items against that namespaced identity.
+    let all: Vec<String> = mdoc_claim_ids(issued);
+    let keep = minimum_claim_set(requested_claims, &all);
+    let name_spaces = issued
+        .name_spaces
+        .iter()
+        .map(|(ns, items)| {
+            (
+                ns.clone(),
+                items
+                    .iter()
+                    .filter(|it| keep.contains(&format!("{ns}.{}", it.element_id)))
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .collect();
+    mdoc::IssuerSigned {
+        name_spaces,
+        issuer_auth: issued.issuer_auth.clone(),
+    }
+}
+
+/// The namespaced claim identities (`<namespace>.<element>`) an mdoc holding carries.
+fn mdoc_claim_ids(issued: &mdoc::IssuerSigned) -> Vec<String> {
+    issued
+        .name_spaces
+        .iter()
+        .flat_map(|(ns, items)| items.iter().map(move |it| format!("{ns}.{}", it.element_id)))
+        .collect()
+}
+
+/// A deterministic `mdoc_generated_nonce` derived from the request nonce. The sans-IO core has no
+/// RNG; a production shell should instead supply a fresh random value (bound into the JWE `apu`
+/// for encrypted responses). Deriving it per-request keeps the unencrypted direct_post transcript
+/// well-formed and unique per presentation.
+fn mdoc_generated_nonce(nonce: u64) -> String {
+    let h = AwsLc.sha256(format!("eudi-mdoc-generated-nonce:{nonce}").as_bytes());
+    format!("mgn-{}", hex_bytes(&h[..12]))
+}
+
 /// Read a credential's type (`vct`) and issuer (`iss`) from its issuer JWT payload, for display.
 /// Returns empty strings for anything unparseable — this is a UI hint, never a trust decision.
 fn credential_vct_and_issuer(issuer_jwt: &str) -> (String, String) {
@@ -133,6 +205,14 @@ pub struct HeldCredential {
     pub status_index: Option<u64>,
 }
 
+/// An ISO 18013-5 mdoc the wallet holds (issued in the `mso_mdoc` format): the parsed
+/// issuer-signed structure and its doctype. Presented over OpenID4VP as a `DeviceResponse`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MdocHolding {
+    pub doctype: String,
+    pub issuer_signed: mdoc::IssuerSigned,
+}
+
 /// Static wallet configuration.
 #[derive(Clone, Debug)]
 pub struct WalletConfig {
@@ -150,6 +230,10 @@ struct SessionInfo {
     requested_claims: Vec<String>,
     /// Acceptable credential types (DCQL `meta.vct_values`); empty for legacy/claims-only requests.
     requested_vcts: Vec<String>,
+    /// Acceptable mdoc doctypes (DCQL `meta.doctype_value`); empty when no mdoc was requested.
+    requested_doctypes: Vec<String>,
+    /// The request nonce, needed to bind the mdoc OpenID4VP SessionTranscript.
+    nonce: u64,
     response_uri: String,
     /// The consent hash + the exact claim paths shown on the consent screen, captured when it is
     /// rendered, so the transaction log can record what was shared without storing values.
@@ -287,6 +371,8 @@ pub struct Core {
     /// The credentials the wallet holds. A real wallet holds several (a PID, an mDL, …); issuance
     /// appends, and presentation selects the one that data-minimally satisfies the request.
     credentials: Vec<HeldCredential>,
+    /// mdoc holdings (ISO 18013-5), presented over OpenID4VP as DeviceResponses.
+    mdoc_holdings: Vec<MdocHolding>,
     session: Option<SessionInfo>,
     now_epoch: i64,
     // Payment SCA flow.
@@ -331,6 +417,7 @@ impl Core {
             vp: State::Idle,
             seen_nonces: Vec::new(),
             credentials: Vec::new(),
+            mdoc_holdings: Vec::new(),
             session: None,
             now_epoch: 0,
             payment: payment::State::Idle,
@@ -570,12 +657,19 @@ impl Core {
         }
     }
 
+    /// Add an mdoc holding (e.g. an mso_mdoc mDL obtained via issuance). Idempotent.
+    pub fn load_mdoc_credential(&mut self, holding: MdocHolding) {
+        if !self.mdoc_holdings.contains(&holding) {
+            self.mdoc_holdings.push(holding);
+        }
+    }
+
     /// The credentials the wallet holds, as a JSON array the UI renders as cards. Each entry gives
     /// the credential `vct`, its issuer (`iss`), and the disclosures by claim (so the shell can
     /// decode the holder-visible values) — never the raw device/issuer keys. Reflects exactly what
     /// the core stores, including credentials just obtained via issuance.
     pub fn held_credentials_json(&self) -> String {
-        let items: Vec<String> = self
+        let mut items: Vec<String> = self
             .credentials
             .iter()
             .map(|c| {
@@ -587,11 +681,27 @@ impl Core {
                     .collect::<Vec<_>>()
                     .join(",");
                 format!(
-                    r#"{{"vct":{:?},"issuer":{:?},"disclosuresByClaim":{{{}}}}}"#,
+                    r#"{{"vct":{:?},"issuer":{:?},"format":"dc+sd-jwt","disclosuresByClaim":{{{}}}}}"#,
                     vct, iss, disclosures
                 )
             })
             .collect();
+        // mdoc holdings: values are already decoded (no salted disclosures) — surface them under
+        // `claims` so the shell renders the card; `disclosuresByClaim` stays empty for this format.
+        for h in &self.mdoc_holdings {
+            let claims = h
+                .issuer_signed
+                .name_spaces
+                .values()
+                .flatten()
+                .map(|it| format!("{:?}:{:?}", it.element_id, cbor_value_display(&it.element_value)))
+                .collect::<Vec<_>>()
+                .join(",");
+            items.push(format!(
+                r#"{{"vct":{:?},"issuer":"ISO 18013-5 mdoc","format":"mso_mdoc","claims":{{{}}},"disclosuresByClaim":{{}}}}"#,
+                h.doctype, claims
+            ));
+        }
         format!("[{}]", items.join(","))
     }
 
@@ -773,6 +883,8 @@ impl Core {
                 purpose: req.purpose.clone().unwrap_or_default(),
                 requested_claims: req.requested_claims.clone(),
                 requested_vcts: req.requested_vcts.clone(),
+                requested_doctypes: req.requested_doctypes.clone(),
+                nonce: req.nonce,
                 response_uri: req.response_uri.clone(),
                 consent_hash: [0u8; 32],
                 shared_claims: Vec::new(),
@@ -834,9 +946,17 @@ impl Core {
         if !was_issued {
             if let oid4vci::State::CredentialIssued { format, credential } = &self.issuance {
                 let fmt = format_name(*format).to_string();
-                if *format == oid4vci::CredentialFormat::DcSdJwt {
-                    if let Some(held) = held_credential_from_compact(credential) {
-                        self.load_credential(held);
+                match *format {
+                    oid4vci::CredentialFormat::DcSdJwt => {
+                        if let Some(held) = held_credential_from_compact(credential) {
+                            self.load_credential(held);
+                        }
+                    }
+                    // mso_mdoc credential response = base64url(IssuerSigned CBOR); store it parsed.
+                    oid4vci::CredentialFormat::MsoMdoc => {
+                        if let Some(holding) = mdoc_holding_from_credential(credential) {
+                            self.load_mdoc_credential(holding);
+                        }
                     }
                 }
                 self.record_issuance(fmt);
@@ -1016,6 +1136,35 @@ impl Core {
             return None;
         }
         let sess = self.session.as_ref()?;
+
+        // mdoc first: if the DCQL query names an acceptable doctype we hold, present it as an ISO
+        // 18013-5 DeviceResponse. Minimise by dropping issuer-signed items the request didn't ask
+        // for (the MSO is unchanged; the verifier checks each presented item's digest against it).
+        if !sess.requested_doctypes.is_empty() {
+            if let Some(holding) = self
+                .mdoc_holdings
+                .iter()
+                .find(|h| sess.requested_doctypes.contains(&h.doctype))
+            {
+                let issuer_signed = minimise_mdoc(&holding.issuer_signed, &sess.requested_claims);
+                let mgn = mdoc_generated_nonce(sess.nonce);
+                let session_transcript = mdoc::oid4vp_session_transcript(
+                    &AwsLc,
+                    &sess.rp_client_id,
+                    &sess.response_uri,
+                    &sess.nonce.to_string(),
+                    &mgn,
+                );
+                return Some(SelectedCredential::Mdoc {
+                    doctype: holding.doctype.clone(),
+                    issuer_signed,
+                    session_transcript,
+                    device_namespaces: mdoc::empty_device_namespaces_bytes(),
+                    mdoc_generated_nonce: mgn,
+                });
+            }
+        }
+
         // Pick the held credential that data-minimally satisfies the request. When the DCQL query
         // names acceptable types (`meta.vct_values`), a candidate must BE one of those types — so a
         // request for `urn:eudi:pid:1` claims is answered by the PID, never by an mDL that happens
@@ -1203,12 +1352,14 @@ impl Core {
             None => (String::new(), String::new(), Vec::new()),
         };
         // The consent screen offers the minimum subset the request needs that ANY holding can
-        // provide (selection later binds to one credential). Union of held claim names.
-        let held: Vec<String> = self
+        // provide (selection later binds to one credential). Union of held claim names across both
+        // SD-JWT disclosures and mdoc issuer-signed element identifiers.
+        let mut held: Vec<String> = self
             .credentials
             .iter()
             .flat_map(|c| c.disclosures_by_claim.keys().cloned())
             .collect();
+        held.extend(self.mdoc_holdings.iter().flat_map(|h| mdoc_claim_ids(&h.issuer_signed)));
         ScreenDescription::Consent(ConsentScreen {
             rp_display_name: rp,
             purpose,

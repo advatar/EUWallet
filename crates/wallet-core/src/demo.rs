@@ -109,6 +109,9 @@ pub struct IssuanceScenario {
     pub nid_credential_compact: String,
     /// The issuer-signed German ID card (Personalausweis) compact.
     pub german_id_credential_compact: String,
+    /// An issuer-signed mDL in the ISO 18013-5 `mso_mdoc` format, base64url(IssuerSigned CBOR) —
+    /// what an mso_mdoc `/credential` endpoint returns. Presented over OpenID4VP as a DeviceResponse.
+    pub mdl_mdoc_credential: String,
 }
 
 /// Holds the demo's ephemeral keys and mints [`DemoScenario`]s. Also acts as the device signer for
@@ -256,6 +259,7 @@ impl DemoWallet {
             passport_credential_compact: Self::compact(&passport_jwt, &passport_claims),
             nid_credential_compact: Self::compact(&nid_jwt, &nid_claims),
             german_id_credential_compact: Self::compact(&german_jwt, &german_claims),
+            mdl_mdoc_credential: self.mdl_mdoc_credential(),
         }
     }
 }
@@ -383,6 +387,65 @@ impl DemoWallet {
             .sign(&KeyRef("r".into()), Alg::Es256, signing_input.as_bytes())
             .expect("rp sign");
         format!("{signing_input}.{}", b64(&sig)).into_bytes()
+    }
+
+    /// Issue a real ISO 18013-5 mDL in the `mso_mdoc` format, binding the demo device key, and
+    /// return it as base64url(IssuerSigned CBOR) — the shape an `mso_mdoc` `/credential` endpoint
+    /// returns and the wallet presents over OpenID4VP as a signed `DeviceResponse`.
+    fn mdl_mdoc_credential(&self) -> String {
+        use mdoc::cbor::Value;
+        use mdoc::{build_and_sign, IssuerSignedItem, ValidityInfo};
+
+        let items = vec![
+            IssuerSignedItem {
+                digest_id: 0,
+                random: vec![0x1a; 16],
+                element_id: "family_name".into(),
+                element_value: Value::Text("Andersson".into()),
+            },
+            IssuerSignedItem {
+                digest_id: 1,
+                random: vec![0x2b; 16],
+                element_id: "given_name".into(),
+                element_value: Value::Text("Astrid".into()),
+            },
+            IssuerSignedItem {
+                digest_id: 2,
+                random: vec![0x3c; 16],
+                element_id: "age_over_18".into(),
+                element_value: Value::Bool(true),
+            },
+        ];
+        let mut name_spaces = BTreeMap::new();
+        name_spaces.insert("org.iso.18013.5.1".to_string(), items);
+        let issued = build_and_sign(
+            name_spaces,
+            "org.iso.18013.5.1.mDL",
+            Self::cose_key(self.device.public_key_raw()),
+            ValidityInfo {
+                signed: "2026-07-19T00:00:00Z".into(),
+                valid_from: "2026-07-19T00:00:00Z".into(),
+                valid_until: "2035-01-01T00:00:00Z".into(),
+            },
+            &AwsLc,
+            &self.issuer,
+            &KeyRef("i".into()),
+            Alg::Es256,
+        )
+        .expect("issue demo mdoc");
+        Base64UrlUnpadded::encode_string(&issued.to_value().to_canonical())
+    }
+
+    /// A COSE_Key (EC2 / P-256) for an uncompressed SEC1 public key `0x04 || X(32) || Y(32)`:
+    /// `{1: 2 (EC2), -1: 1 (P-256), -2: X, -3: Y}`.
+    fn cose_key(pubkey: &[u8]) -> mdoc::cbor::Value {
+        use mdoc::cbor::Value;
+        Value::Map(vec![
+            (Value::Uint(1), Value::Uint(2)),
+            (Value::Nint(0), Value::Uint(1)),
+            (Value::Nint(1), Value::Bytes(pubkey[1..33].to_vec())),
+            (Value::Nint(2), Value::Bytes(pubkey[33..65].to_vec())),
+        ])
     }
 
     /// Issue an SD-JWT VC of type `vct`; return (issuer_jwt, disclosures_by_claim). Mirrors the
