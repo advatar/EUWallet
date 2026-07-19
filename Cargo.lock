@@ -151,6 +151,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "benches"
+version = "0.0.1"
+dependencies = [
+ "cose",
+ "crypto-backend",
+ "crypto-traits",
+ "sdjwt",
+]
+
+[[package]]
 name = "bincode"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

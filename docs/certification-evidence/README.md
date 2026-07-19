@@ -15,7 +15,12 @@ module reaches its definition-of-done (plan Section 12).
 | `dpia.md` | Data Protection Impact Assessment | GDPR |
 | `known-answer-tests.md` | KAT results for every crypto operation (via crypto-traits backend) | EUCC |
 | `fcaf-reports/` | Pinned FCAF v0.0.7 run outputs from CI | FCAF |
-| `sbom/` | CycloneDX SBOMs per release + cargo-audit results | CRA |
+| `sbom/` | **Published** CycloneDX 1.3 SBOMs (21 crates; regen via `tools/evidence/sbom.sh`) | CRA |
+| `verification-report.md` | Reproducible Tier 0–3 results (`tools/evidence/generate.sh`) | EUCC |
+| `perf-benchmarks.md` | Hot-path latency/throughput vs. the real backend (`crates/benches`) | — |
+| `mutation-testing.md` | cargo-mutants score for the presentation machine | EUCC (test adequacy) |
+| `interop.md` | Reference-environment reachability + wire-shape probe (`tools/interop/probe.sh`) | interoperability |
+| `payment-sca.md` | PSD2 RTS Art. 4–5 dynamic-linking traceability | 2018/389 |
 
 ## External conformance suites (where to run real interop/certification tests)
 

@@ -656,3 +656,82 @@ mod response_tests {
         String::from_utf8(out).unwrap()
     }
 }
+
+#[cfg(test)]
+mod internal_tests {
+    use super::{base64url, guards, kb_jwt_signing_input, parse_request, AuthRequest, ResolvedTrust};
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    use crypto_traits::Alg;
+
+    fn req_jws(alg: &str) -> Vec<u8> {
+        let header = Base64UrlUnpadded::encode_string(format!(r#"{{"alg":"{alg}"}}"#).as_bytes());
+        let payload = Base64UrlUnpadded::encode_string(
+            br#"{"client_id":"rp.example","nonce":1,"aud":"wallet.example"}"#,
+        );
+        let sig = Base64UrlUnpadded::encode_string(&[0u8; 64]);
+        format!("{header}.{payload}.{sig}").into_bytes()
+    }
+
+    #[test]
+    fn parse_request_accepts_each_supported_alg() {
+        assert_eq!(parse_request(&req_jws("ES256")).unwrap().request_alg, Alg::Es256);
+        assert_eq!(parse_request(&req_jws("ES384")).unwrap().request_alg, Alg::Es384);
+        assert_eq!(parse_request(&req_jws("EdDSA")).unwrap().request_alg, Alg::EdDsa);
+    }
+
+    #[test]
+    fn parse_request_rejects_unknown_alg_and_wrong_part_count() {
+        assert!(parse_request(&req_jws("RS256")).is_err(), "unsupported alg must be rejected");
+        assert!(parse_request(b"only.two").is_err(), "a non-3-part JWS must be rejected");
+        assert!(parse_request(b"not-a-jws").is_err());
+    }
+
+    #[test]
+    fn base64url_encodes_expected() {
+        assert_eq!(base64url(b"abc"), "YWJj");
+        assert_eq!(base64url(&[]), "");
+    }
+
+    #[test]
+    fn kb_jwt_signing_input_binds_nonce_and_aud() {
+        let s = kb_jwt_signing_input(42, "rp.example", 100, "sd-hash");
+        assert_eq!(s.matches('.').count(), 1, "header.payload, no signature yet");
+        let payload_b64 = s.split('.').nth(1).unwrap();
+        let bytes = Base64UrlUnpadded::decode_vec(payload_b64).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["nonce"], serde_json::json!(42));
+        assert_eq!(v["aud"], serde_json::json!("rp.example"));
+        assert_eq!(v["sd_hash"], serde_json::json!("sd-hash"));
+    }
+
+    fn auth_request(redirect: Option<&str>) -> AuthRequest {
+        AuthRequest {
+            client_id: "rp.example".into(),
+            nonce: 1,
+            audience: "wallet.example".into(),
+            response_uri: "https://rp.example/resp".into(),
+            redirect_uri: redirect.map(String::from),
+            purpose: Some("p".into()),
+            requested_claims: vec![],
+            state: None,
+            response_mode: "direct_post".into(),
+            dcql_id: None,
+            requested_vcts: vec![],
+            signed_payload: b"x".to_vec(),
+            signature: b"y".to_vec(),
+            request_alg: Alg::Es256,
+        }
+    }
+
+    #[test]
+    fn redirect_uri_guard_matches_registered_only() {
+        let trust = ResolvedTrust {
+            registered: true,
+            rp_public_key: vec![],
+            registered_redirect_uris: vec!["https://rp.example/cb".into()],
+        };
+        assert!(guards::redirect_uri_is_registered(&auth_request(Some("https://rp.example/cb")), &trust));
+        assert!(!guards::redirect_uri_is_registered(&auth_request(Some("https://evil.example/cb")), &trust));
+        assert!(guards::redirect_uri_is_registered(&auth_request(None), &trust), "absent redirect is allowed");
+    }
+}

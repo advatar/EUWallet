@@ -20,3 +20,4 @@ fuzz/artifacts
 # Python
 tools/**/.venv
 __pycache__/
+/mutants.out/

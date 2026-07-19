@@ -228,4 +228,36 @@ mod tests {
         .unwrap();
         assert_eq!(q.requested_claim_paths(), vec!["given_name".to_string(), "birthdate".to_string()]);
     }
+
+    #[test]
+    fn selection_accessors_vct_doctype_and_id() {
+        let pid = DcqlQuery::parse(PID_QUERY).unwrap();
+        assert_eq!(pid.first_credential_id(), Some("pid".to_string()));
+        assert_eq!(pid.requested_vcts(), vec!["urn:eudi:pid:1".to_string()]);
+        assert!(pid.requested_doctypes().is_empty());
+
+        let mdl = DcqlQuery::parse(
+            br#"{"credentials":[{"id":"mdl","format":"mso_mdoc",
+                "meta":{"doctype_value":"org.iso.18013.5.1.mDL"},"claims":[{"path":["age_over_18"]}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(mdl.first_credential_id(), Some("mdl".to_string()));
+        assert_eq!(mdl.requested_doctypes(), vec!["org.iso.18013.5.1.mDL".to_string()]);
+        assert!(mdl.requested_vcts().is_empty());
+
+        // from_value parses an equivalent serde_json::Value.
+        assert!(DcqlQuery::from_value(&serde_json::json!({
+            "credentials": [{ "id": "x", "format": "dc+sd-jwt" }]
+        }))
+        .is_some());
+
+        // Dedup across credential queries (the `if !out.contains(..)` guards).
+        let dup = DcqlQuery::parse(
+            br#"{"credentials":[
+                {"id":"a","format":"dc+sd-jwt","meta":{"vct_values":["v1"]}},
+                {"id":"b","format":"dc+sd-jwt","meta":{"vct_values":["v1"]}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(dup.requested_vcts(), vec!["v1".to_string()]);
+    }
 }
