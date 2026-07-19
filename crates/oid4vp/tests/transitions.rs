@@ -38,6 +38,7 @@ fn req() -> AuthRequest {
         dcql_id: None,
         requested_vcts: vec![],
         requested_doctypes: vec![],
+        dcql: None,
         response_encryption_key: None,
         signed_payload: b"request-object".to_vec(),
         signature: b"sig".to_vec(),
@@ -60,7 +61,7 @@ fn env<'a>(seen: &'a [u64], v: &'a dyn Verifier, d: &'a dyn Digest) -> Env<'a> {
         verifier: v,
         digest: d,
         now_epoch: 1_790_000_000,
-        selected_credential: None,
+        selected_credentials: &[],
         device_key_ref: "device-key",
     }
 }
@@ -68,17 +69,18 @@ fn env<'a>(seen: &'a [u64], v: &'a dyn Verifier, d: &'a dyn Digest) -> Env<'a> {
 #[test]
 fn happy_path_idle_free_to_done() {
     let seen: Vec<u64> = vec![];
-    let cred = SelectedCredential::SdJwt {
+    let creds = [SelectedCredential::SdJwt {
         issuer_jwt: "hdr.pay.sig".into(),
         disclosures: vec!["disc1".into()],
-    };
+        dcql_id: None,
+    }];
     let e = Env {
         wallet_client_id: "wallet.example",
         seen_nonces: &seen,
         verifier: &Accept,
         digest: &StubDigest,
         now_epoch: 1_790_000_000,
-        selected_credential: Some(&cred),
+        selected_credentials: &creds,
         device_key_ref: "device-key",
     };
 
@@ -141,7 +143,7 @@ fn resolve_with(
         verifier: v,
         digest: &StubDigest,
         now_epoch: 1_790_000_000,
-        selected_credential: None,
+        selected_credentials: &[],
         device_key_ref: "device-key",
     };
     step(

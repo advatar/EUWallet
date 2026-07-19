@@ -87,6 +87,7 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
         dcql_id: Some("cred1".into()),
         requested_vcts: vec![],
         requested_doctypes: vec![],
+        dcql: None,
         response_encryption_key: None,
         signed_payload: b"x".to_vec(),
         signature: b"y".to_vec(),
@@ -98,6 +99,7 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
         session_transcript: transcript.clone(),
         device_namespaces: ns_bytes.clone(),
         mdoc_generated_nonce: MGN.into(),
+        dcql_id: Some("cred1".into()),
     };
     let env = Env {
         wallet_client_id: "wallet.example",
@@ -105,7 +107,7 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
         verifier: &AwsLc,
         digest: &AwsLc,
         now_epoch: 100,
-        selected_credential: Some(&selected),
+        selected_credentials: std::slice::from_ref(&selected),
         device_key_ref: "device-key",
     };
 

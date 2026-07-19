@@ -92,17 +92,18 @@ fn full_remote_presentation_with_real_crypto() {
 
     // The wallet drives the sans-IO machine.
     let seen: Vec<u64> = vec![];
-    let cred = SelectedCredential::SdJwt {
+    let creds = [SelectedCredential::SdJwt {
         issuer_jwt: issuer_jwt.clone(),
         disclosures: disclosures.clone(),
-    };
+        dcql_id: None,
+    }];
     let env = Env {
         wallet_client_id: "wallet.example",
         seen_nonces: &seen,
         verifier: &AwsLc,
         digest: &AwsLc,
         now_epoch: 1_790_000_000,
-        selected_credential: Some(&cred),
+        selected_credentials: &creds,
         device_key_ref: "device-key",
     };
 

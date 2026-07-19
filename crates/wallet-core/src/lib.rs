@@ -255,11 +255,9 @@ pub struct WalletConfig {
 struct SessionInfo {
     rp_client_id: String,
     purpose: String,
+    /// The union of requested claim paths across all DCQL queries — drives the consent screen and
+    /// the legacy (no-DCQL) single-credential selection. Per-query selection reads `dcql` instead.
     requested_claims: Vec<String>,
-    /// Acceptable credential types (DCQL `meta.vct_values`); empty for legacy/claims-only requests.
-    requested_vcts: Vec<String>,
-    /// Acceptable mdoc doctypes (DCQL `meta.doctype_value`); empty when no mdoc was requested.
-    requested_doctypes: Vec<String>,
     /// The request nonce, needed to bind the mdoc OpenID4VP SessionTranscript.
     nonce: u64,
     response_uri: String,
@@ -267,6 +265,9 @@ struct SessionInfo {
     response_mode: String,
     /// The verifier's response-encryption key (uncompressed P-256), present iff `direct_post.jwt`.
     response_encryption_key: Option<Vec<u8>>,
+    /// The full DCQL query when present — one credential query per credential the RP wants, so the
+    /// wallet can select and present ONE credential per query (multi-credential presentation).
+    dcql: Option<oid4vp::dcql::DcqlQuery>,
     /// The consent hash + the exact claim paths shown on the consent screen, captured when it is
     /// rendered, so the transaction log can record what was shared without storing values.
     consent_hash: [u8; 32],
@@ -887,8 +888,8 @@ impl Core {
     }
 
     fn drive(&mut self, input: Input) -> Vec<Effect> {
-        // For consent, compute the data-minimised credential selection to present.
-        let selected = self.select_credential_for(&input);
+        // For consent, compute the data-minimised selection — one credential per DCQL query.
+        let selected = self.select_credentials_for(&input);
 
         let verifier = AwsLc;
         let digest = AwsLc;
@@ -899,7 +900,7 @@ impl Core {
                 verifier: &verifier,
                 digest: &digest,
                 now_epoch: self.now_epoch,
-                selected_credential: selected.as_ref(),
+                selected_credentials: &selected,
                 device_key_ref: &self.config.device_key_ref,
             };
             oid4vp::step(&self.vp, &input, &env)
@@ -914,12 +915,11 @@ impl Core {
                 rp_client_id: req.client_id.clone(),
                 purpose: req.purpose.clone().unwrap_or_default(),
                 requested_claims: req.requested_claims.clone(),
-                requested_vcts: req.requested_vcts.clone(),
-                requested_doctypes: req.requested_doctypes.clone(),
                 nonce: req.nonce,
                 response_uri: req.response_uri.clone(),
                 response_mode: req.response_mode.clone(),
                 response_encryption_key: req.response_encryption_key.clone(),
+                dcql: req.dcql.clone(),
                 consent_hash: [0u8; 32],
                 shared_claims: Vec::new(),
             });
@@ -1165,55 +1165,93 @@ impl Core {
         }
     }
 
-    fn select_credential_for(&self, input: &Input) -> Option<SelectedCredential> {
+    /// Choose what to present: one credential per DCQL credential query (multi-credential), each
+    /// keyed by its query id. A legacy flat-`claims` request (no DCQL) yields a single bare SD-JWT.
+    /// Selection never widens disclosure — only the requested-and-held subset is ever revealed.
+    fn select_credentials_for(&self, input: &Input) -> Vec<SelectedCredential> {
         if !matches!(input, Input::ConsentGranted) {
-            return None;
+            return Vec::new();
         }
-        let sess = self.session.as_ref()?;
-
-        // mdoc first: if the DCQL query names an acceptable doctype we hold, present it as an ISO
-        // 18013-5 DeviceResponse. Minimise by dropping issuer-signed items the request didn't ask
-        // for (the MSO is unchanged; the verifier checks each presented item's digest against it).
-        if !sess.requested_doctypes.is_empty() {
-            if let Some(holding) = self
-                .mdoc_holdings
-                .iter()
-                .find(|h| sess.requested_doctypes.contains(&h.doctype))
-            {
-                let issuer_signed = minimise_mdoc(&holding.issuer_signed, &sess.requested_claims);
-                let mgn = mdoc_generated_nonce(sess.nonce);
-                let session_transcript = mdoc::oid4vp_session_transcript(
-                    &AwsLc,
-                    &sess.rp_client_id,
-                    &sess.response_uri,
-                    &sess.nonce.to_string(),
-                    &mgn,
-                );
-                return Some(SelectedCredential::Mdoc {
-                    doctype: holding.doctype.clone(),
-                    issuer_signed,
-                    session_transcript,
-                    device_namespaces: mdoc::empty_device_namespaces_bytes(),
-                    mdoc_generated_nonce: mgn,
-                });
-            }
-        }
-
-        // Pick the held credential that data-minimally satisfies the request. When the DCQL query
-        // names acceptable types (`meta.vct_values`), a candidate must BE one of those types — so a
-        // request for `urn:eudi:pid:1` claims is answered by the PID, never by an mDL that happens
-        // to carry the same claim name. Among type-matching candidates (or all, for a legacy
-        // claims-only request), prefer one that carries every requested claim; else fall back to the
-        // first candidate. Selection never widens disclosure — only the requested-and-held subset is
-        // ever revealed.
-        let type_matches = |c: &HeldCredential| -> bool {
-            if sess.requested_vcts.is_empty() {
-                return true;
-            }
-            let (vct, _) = credential_vct_and_issuer(&c.issuer_jwt);
-            sess.requested_vcts.contains(&vct)
+        let Some(sess) = self.session.as_ref() else {
+            return Vec::new();
         };
-        let carries_all = |c: &HeldCredential| -> bool {
+        match &sess.dcql {
+            Some(dcql) if !dcql.credentials.is_empty() => dcql
+                .credentials
+                .iter()
+                .filter_map(|q| self.select_for_query(sess, q))
+                .collect(),
+            _ => self.select_legacy_sdjwt(sess).into_iter().collect(),
+        }
+    }
+
+    /// Select a credential for ONE DCQL credential query, minimised to that query's claims and
+    /// keyed by its id. `mso_mdoc` → an ISO DeviceResponse; otherwise an SD-JWT VC of a matching
+    /// `vct`. `None` if nothing held satisfies this query.
+    fn select_for_query(
+        &self,
+        sess: &SessionInfo,
+        q: &oid4vp::dcql::CredentialQuery,
+    ) -> Option<SelectedCredential> {
+        let claims: Vec<String> = q
+            .claims
+            .iter()
+            .map(|c| c.path_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let dcql_id = Some(q.id.clone());
+
+        if q.format == "mso_mdoc" {
+            let doctype = q.meta.as_ref().and_then(|m| m.doctype_value.clone())?;
+            let holding = self.mdoc_holdings.iter().find(|h| h.doctype == doctype)?;
+            let issuer_signed = minimise_mdoc(&holding.issuer_signed, &claims);
+            let mgn = mdoc_generated_nonce(sess.nonce);
+            let session_transcript = mdoc::oid4vp_session_transcript(
+                &AwsLc,
+                &sess.rp_client_id,
+                &sess.response_uri,
+                &sess.nonce.to_string(),
+                &mgn,
+            );
+            return Some(SelectedCredential::Mdoc {
+                doctype: holding.doctype.clone(),
+                issuer_signed,
+                session_transcript,
+                device_namespaces: mdoc::empty_device_namespaces_bytes(),
+                mdoc_generated_nonce: mgn,
+                dcql_id,
+            });
+        }
+
+        // SD-JWT VC: a candidate must BE one of the query's `vct_values` (when given) — so a request
+        // for `urn:eudi:pid:1` is answered by the PID, never an mDL that carries the same claim name.
+        let vcts = q.meta.as_ref().map(|m| m.vct_values.clone()).unwrap_or_default();
+        let type_matches = |c: &HeldCredential| -> bool {
+            vcts.is_empty() || vcts.contains(&credential_vct_and_issuer(&c.issuer_jwt).0)
+        };
+        let carries_all =
+            |c: &HeldCredential| claims.iter().all(|r| c.disclosures_by_claim.contains_key(r));
+        let cred = self
+            .credentials
+            .iter()
+            .find(|c| type_matches(c) && carries_all(c))
+            .or_else(|| self.credentials.iter().find(|c| type_matches(c)))?;
+        let held: Vec<String> = cred.disclosures_by_claim.keys().cloned().collect();
+        let disclosures = minimum_claim_set(&claims, &held)
+            .iter()
+            .filter_map(|c| cred.disclosures_by_claim.get(c).cloned())
+            .collect();
+        Some(SelectedCredential::SdJwt {
+            issuer_jwt: cred.issuer_jwt.clone(),
+            disclosures,
+            dcql_id,
+        })
+    }
+
+    /// The legacy flat-`claims` path (no DCQL): one SD-JWT, minimised to the requested claims, sent
+    /// as a bare `vp_token` (no DCQL id) — exactly the pre-DCQL behaviour.
+    fn select_legacy_sdjwt(&self, sess: &SessionInfo) -> Option<SelectedCredential> {
+        let carries_all = |c: &HeldCredential| {
             sess.requested_claims
                 .iter()
                 .all(|r| c.disclosures_by_claim.contains_key(r))
@@ -1221,8 +1259,8 @@ impl Core {
         let cred = self
             .credentials
             .iter()
-            .find(|c| type_matches(c) && carries_all(c))
-            .or_else(|| self.credentials.iter().find(|c| type_matches(c)))?;
+            .find(|c| carries_all(c))
+            .or_else(|| self.credentials.first())?;
         let held: Vec<String> = cred.disclosures_by_claim.keys().cloned().collect();
         let disclosures = minimum_claim_set(&sess.requested_claims, &held)
             .iter()
@@ -1231,6 +1269,7 @@ impl Core {
         Some(SelectedCredential::SdJwt {
             issuer_jwt: cred.issuer_jwt.clone(),
             disclosures,
+            dcql_id: None,
         })
     }
 
