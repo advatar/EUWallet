@@ -15,11 +15,11 @@ import SwiftUI
 ///  3. It runs on the main actor.
 @MainActor
 public final class NavigationMachine: ObservableObject {
-    public enum State: Equatable {
+    public enum State: Equatable, CaseIterable {
         case onboarding, home, presenting, issuing, scanning, settings, history, catalogue
     }
 
-    public enum Event {
+    public enum Event: CaseIterable {
         case finishedOnboarding
         case startPresentation
         case startIssuance

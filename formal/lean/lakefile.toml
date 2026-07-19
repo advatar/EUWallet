@@ -25,6 +25,12 @@ name = "QesModel"
 [[lean_lib]]
 name = "W2wModel"
 
+# App-shell navigation statechart (ios/Sources/WalletShell/Navigation.swift). Flow-safety only —
+# NOT security (that lives in the core models above). Bound to the Swift machine by an exhaustive
+# (state × event) conformance test.
+[[lean_lib]]
+name = "NavigationModel"
+
 [[lean_exe]]
 name = "traces"
 root = "Traces"
