@@ -17,6 +17,7 @@
 //!   verifier accepts both (it tries DER, then fixed).
 
 use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
+use aws_lc_rs::agreement::{agree, PrivateKey, UnparsedPublicKey as AgreementPublicKey, ECDH_P256};
 use aws_lc_rs::hkdf::{Salt, HKDF_SHA256};
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use aws_lc_rs::signature::{
@@ -24,7 +25,9 @@ use aws_lc_rs::signature::{
     ECDSA_P256_SHA256_FIXED, ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_ASN1,
     ECDSA_P384_SHA384_FIXED, ED25519,
 };
-use crypto_traits::{Aead, Alg, CryptoError, Digest, Kdf, KeyRef, Random, Signer, Verifier};
+use crypto_traits::{
+    Aead, Alg, CryptoError, Digest, EcdhEs, Kdf, KeyAgreement, KeyRef, Random, Signer, Verifier,
+};
 
 /// Stateless aws-lc-rs backend: verification, digest, KDF, AEAD, randomness. No private keys.
 #[derive(Clone, Copy, Debug, Default)]
@@ -143,6 +146,65 @@ fn nonce_from(nonce: &[u8]) -> Result<Nonce, CryptoError> {
     let mut n = [0u8; NONCE_LEN];
     n.copy_from_slice(nonce);
     Ok(Nonce::assume_unique_for_key(n))
+}
+
+impl KeyAgreement for AwsLc {
+    fn ecdh_es_p256(&self, recipient_public: &[u8]) -> Result<EcdhEs, CryptoError> {
+        let my_private = PrivateKey::generate(&ECDH_P256)
+            .map_err(|_| CryptoError::Backend("ecdh keygen failed".into()))?;
+        let my_public = my_private
+            .compute_public_key()
+            .map_err(|_| CryptoError::Backend("ecdh public-key derivation failed".into()))?;
+        let peer = AgreementPublicKey::new(&ECDH_P256, recipient_public);
+        let shared_secret = agree(
+            &my_private,
+            peer,
+            CryptoError::Backend("ecdh agreement rejected the recipient key".into()),
+            |z| Ok(z.to_vec()),
+        )?;
+        Ok(EcdhEs {
+            ephemeral_public: my_public.as_ref().to_vec(),
+            shared_secret,
+        })
+    }
+}
+
+/// A P-256 key-agreement keypair for a **recipient** (e.g. an OpenID4VP verifier that decrypts a
+/// `direct_post.jwt` response, or a test standing in for one): holds the private key, publishes the
+/// public key, and agrees with a sender's ephemeral `epk` to recover the same shared secret `Z`.
+pub struct P256AgreementKey {
+    private: PrivateKey,
+    public: Vec<u8>,
+}
+
+impl P256AgreementKey {
+    /// Generate a fresh P-256 agreement keypair.
+    pub fn generate() -> Result<Self, CryptoError> {
+        let private = PrivateKey::generate(&ECDH_P256)
+            .map_err(|_| CryptoError::Backend("ecdh keygen failed".into()))?;
+        let public = private
+            .compute_public_key()
+            .map_err(|_| CryptoError::Backend("ecdh public-key derivation failed".into()))?
+            .as_ref()
+            .to_vec();
+        Ok(Self { private, public })
+    }
+
+    /// The public key, uncompressed SEC1 (`0x04 || X || Y`) — published in the request's JWKS.
+    pub fn public_raw(&self) -> &[u8] {
+        &self.public
+    }
+
+    /// Agree with a sender's ephemeral public key (uncompressed SEC1) → shared secret `Z`.
+    pub fn agree(&self, ephemeral_public: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let peer = AgreementPublicKey::new(&ECDH_P256, ephemeral_public);
+        agree(
+            &self.private,
+            peer,
+            CryptoError::Backend("ecdh agreement rejected the ephemeral key".into()),
+            |z| Ok(z.to_vec()),
+        )
+    }
 }
 
 /// A software ECDSA P-256 signer for tests and server-side roles (e.g. an issuer). Produces

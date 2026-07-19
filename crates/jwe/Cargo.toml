@@ -1,0 +1,17 @@
+[package]
+name = "jwe"
+description = "JWE compact (ECDH-ES + A256GCM) for OpenID4VP direct_post.jwt response encryption — pure assembly over the crypto-traits boundary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-traits = { path = "../crypto-traits" }
+serde_json = { workspace = true }
+base64ct = { workspace = true }
+
+[dev-dependencies]
+# Real aws-lc-rs ECDH/AEAD for the encrypt→decrypt round-trip test (a stand-in verifier decrypts).
+crypto-backend = { path = "../crypto-backend" }

@@ -133,6 +133,9 @@ pub struct AuthRequest {
     pub requested_vcts: Vec<String>,
     /// Acceptable mdoc doctypes (`meta.doctype_value`) — the mso_mdoc analogue of `requested_vcts`.
     pub requested_doctypes: Vec<String>,
+    /// The verifier's response-encryption public key (uncompressed SEC1 P-256), parsed from
+    /// `client_metadata.jwks` when the RP asks for `direct_post.jwt`. `None` ⇒ unencrypted response.
+    pub response_encryption_key: Option<Vec<u8>>,
     pub signed_payload: Vec<u8>,
     pub signature: Vec<u8>,
     pub request_alg: Alg,
@@ -603,6 +606,9 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         }
     };
 
+    // For direct_post.jwt, the verifier publishes its response-encryption key in client_metadata.
+    let response_encryption_key = p.get("client_metadata").and_then(parse_enc_jwk);
+
     let signed_payload = format!("{}.{}", parts[0], parts[1]).into_bytes();
     let signature = Base64UrlUnpadded::decode_vec(parts[2]).map_err(|_| ())?;
 
@@ -619,10 +625,42 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         dcql_id,
         requested_vcts,
         requested_doctypes,
+        response_encryption_key,
         signed_payload,
         signature,
         request_alg,
     })
+}
+
+/// Extract a response-encryption public key from `client_metadata`: the first EC P-256 key in
+/// `jwks.keys` marked for encryption (`use == "enc"`, or an ECDH-ES `alg`). Returns it as an
+/// uncompressed SEC1 point (`0x04 || X || Y`), or `None` if absent/unsupported.
+fn parse_enc_jwk(md: &serde_json::Value) -> Option<Vec<u8>> {
+    let keys = md.get("jwks")?.get("keys")?.as_array()?;
+    for k in keys {
+        let is_enc = k.get("use").and_then(|v| v.as_str()) == Some("enc")
+            || k.get("alg")
+                .and_then(|v| v.as_str())
+                .is_some_and(|a| a.starts_with("ECDH-ES"));
+        if !is_enc || k.get("kty").and_then(|v| v.as_str()) != Some("EC") {
+            continue;
+        }
+        if k.get("crv").and_then(|v| v.as_str()) != Some("P-256") {
+            continue;
+        }
+        let x = k.get("x").and_then(|v| v.as_str())?;
+        let y = k.get("y").and_then(|v| v.as_str())?;
+        let x = Base64UrlUnpadded::decode_vec(x).ok()?;
+        let y = Base64UrlUnpadded::decode_vec(y).ok()?;
+        if x.len() == 32 && y.len() == 32 {
+            let mut point = Vec::with_capacity(65);
+            point.push(0x04);
+            point.extend_from_slice(&x);
+            point.extend_from_slice(&y);
+            return Some(point);
+        }
+    }
+    None
 }
 
 /// Reference model that MIRRORS the Lean Tier-2 model (formal/lean/WalletModel.lean).
@@ -848,6 +886,7 @@ mod internal_tests {
             dcql_id: None,
             requested_vcts: vec![],
             requested_doctypes: vec![],
+            response_encryption_key: None,
             signed_payload: b"x".to_vec(),
             signature: b"y".to_vec(),
             request_alg: Alg::Es256,

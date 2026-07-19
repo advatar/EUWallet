@@ -72,6 +72,24 @@ pub trait Random {
     fn fill(&self, out: &mut [u8]);
 }
 
+/// ECDH key agreement on P-256, for JWE `ECDH-ES` (OpenID4VP `direct_post.jwt` response
+/// encryption). The sender generates an ephemeral keypair, agrees with the recipient's public key,
+/// and returns the ephemeral public key (uncompressed SEC1, `0x04 || X || Y`) to place in the JWE
+/// `epk`, plus the raw shared secret `Z` the Concat KDF turns into the content-encryption key.
+pub trait KeyAgreement {
+    fn ecdh_es_p256(&self, recipient_public: &[u8]) -> Result<EcdhEs, CryptoError>;
+}
+
+/// The result of an ephemeral ECDH-ES agreement: the ephemeral public key to publish and the
+/// shared secret `Z` (never leaves the device except as derived key material).
+#[derive(Clone, Debug)]
+pub struct EcdhEs {
+    /// Ephemeral public key, uncompressed SEC1 (`0x04 || X(32) || Y(32)`).
+    pub ephemeral_public: Vec<u8>,
+    /// The raw ECDH shared secret `Z`.
+    pub shared_secret: Vec<u8>,
+}
+
 /// Verify a platform key-attestation chain (used by `wua`). Never trust device self-claims.
 pub trait KeyAttestation {
     fn verify_chain(

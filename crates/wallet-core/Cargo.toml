@@ -25,6 +25,7 @@ mdoc = { path = "../mdoc" }
 sdjwt = { path = "../sdjwt" }
 x509 = { path = "../x509" }
 oid4vp = { path = "../oid4vp" }
+jwe = { path = "../jwe" }
 oid4vci = { path = "../oid4vci" }
 iso18013-5 = { path = "../iso18013-5" }
 trust = { path = "../trust" }

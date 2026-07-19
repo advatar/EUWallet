@@ -579,6 +579,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jwe"
+version = "0.0.1"
+dependencies = [
+ "base64ct",
+ "crypto-backend",
+ "crypto-traits",
+ "serde_json",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1360,6 +1370,7 @@ dependencies = [
  "crypto-backend",
  "crypto-traits",
  "iso18013-5",
+ "jwe",
  "mdoc",
  "miniz_oxide",
  "oid4vci",

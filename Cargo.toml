@@ -13,6 +13,7 @@ members = [
     "crates/x509",
     "crates/oid4vp",
     "crates/oid4vci",
+    "crates/jwe",
     "crates/iso18013-5",
     "crates/trust",
     "crates/status",

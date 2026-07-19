@@ -168,6 +168,34 @@ fn mdoc_generated_nonce(nonce: u64) -> String {
     format!("mgn-{}", hex_bytes(&h[..12]))
 }
 
+/// Percent-decode an `application/x-www-form-urlencoded` value (reverses `form_urlencode`).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(hi), Some(lo)) =
+                ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16))
+            {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Read one field's (percent-decoded) value from a form-encoded body (`k=v&k2=v2`).
+fn form_field(body: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    body.split('&')
+        .find_map(|kv| kv.strip_prefix(&prefix).map(percent_decode))
+}
+
 /// Read a credential's type (`vct`) and issuer (`iss`) from its issuer JWT payload, for display.
 /// Returns empty strings for anything unparseable — this is a UI hint, never a trust decision.
 fn credential_vct_and_issuer(issuer_jwt: &str) -> (String, String) {
@@ -235,6 +263,10 @@ struct SessionInfo {
     /// The request nonce, needed to bind the mdoc OpenID4VP SessionTranscript.
     nonce: u64,
     response_uri: String,
+    /// The response mode: `direct_post` (form body) or `direct_post.jwt` (JWE-encrypted response).
+    response_mode: String,
+    /// The verifier's response-encryption key (uncompressed P-256), present iff `direct_post.jwt`.
+    response_encryption_key: Option<Vec<u8>>,
     /// The consent hash + the exact claim paths shown on the consent screen, captured when it is
     /// rendered, so the transaction log can record what was shared without storing values.
     consent_hash: [u8; 32],
@@ -886,6 +918,8 @@ impl Core {
                 requested_doctypes: req.requested_doctypes.clone(),
                 nonce: req.nonce,
                 response_uri: req.response_uri.clone(),
+                response_mode: req.response_mode.clone(),
+                response_encryption_key: req.response_encryption_key.clone(),
                 consent_hash: [0u8; 32],
                 shared_claims: Vec::new(),
             });
@@ -1395,15 +1429,61 @@ impl Core {
                 payload: signing_input,
             }],
             O::SendVpToken(body) => {
-                let url = self
-                    .session
-                    .as_ref()
-                    .map(|s| s.response_uri.clone())
-                    .unwrap_or_default();
-                vec![Effect::Http { url, body }]
+                let sess = self.session.as_ref();
+                let url = sess.map(|s| s.response_uri.clone()).unwrap_or_default();
+                // For `direct_post.jwt` the response is JWE-encrypted (ECDH-ES + A256GCM) to the
+                // verifier's key before it leaves the device. Encryption needs RNG (ephemeral key +
+                // IV), so it happens here in the facade, not in the sans-IO `oid4vp` core.
+                let enc_key = sess.and_then(|s| {
+                    (s.response_mode == "direct_post.jwt")
+                        .then_some(s.response_encryption_key.as_deref())
+                        .flatten()
+                });
+                match enc_key {
+                    Some(key) => match self.encrypt_direct_post_jwt(&body, key) {
+                        Some(encrypted) => vec![Effect::Http { url, body: encrypted }],
+                        // Fail closed: the verifier asked for encryption, so never fall back to a
+                        // plaintext POST that would disclose the presentation.
+                        None => vec![],
+                    },
+                    None => vec![Effect::Http { url, body }],
+                }
             }
             O::Close => vec![Effect::Close],
         }
+    }
+
+    /// Turn the `direct_post` form body into a `direct_post.jwt` body: `response=<compact JWE>`.
+    /// The JWE plaintext is the OpenID4VP response object `{"vp_token": …, "state": …}`; it is
+    /// encrypted with `ECDH-ES` (P-256) + `A256GCM` to `recipient_key`, binding the request nonce
+    /// (`apv`) and the mdoc_generated_nonce (`apu`, when present) into the key derivation. Returns
+    /// `None` — so the caller fails closed — if the body or key can't be turned into a JWE.
+    fn encrypt_direct_post_jwt(&self, form_body: &[u8], recipient_key: &[u8]) -> Option<Vec<u8>> {
+        let body = core::str::from_utf8(form_body).ok()?;
+        let vp_token_raw = form_field(body, "vp_token")?;
+        // The DCQL response object (`{"<id>": "<presentation>"}`) is embedded as a JSON value.
+        let vp_token: serde_json::Value = serde_json::from_str(&vp_token_raw).ok()?;
+        let mut obj = serde_json::Map::new();
+        obj.insert("vp_token".to_string(), vp_token);
+        if let Some(state) = form_field(body, "state") {
+            obj.insert("state".to_string(), serde_json::Value::String(state));
+        }
+        let plaintext = serde_json::to_string(&serde_json::Value::Object(obj)).ok()?;
+
+        let apu = form_field(body, "mdoc_generated_nonce").unwrap_or_default();
+        let apv = self.session.as_ref().map(|s| s.nonce.to_string()).unwrap_or_default();
+        let jwe = jwe::encrypt_ecdh_es_a256gcm(
+            plaintext.as_bytes(),
+            recipient_key,
+            apu.as_bytes(),
+            apv.as_bytes(),
+            &AwsLc,
+            &AwsLc,
+            &AwsLc,
+            &AwsLc,
+        )
+        .ok()?;
+        Some(format!("response={jwe}").into_bytes())
     }
 
     /// The current presentation state (for the shell / tests to inspect).

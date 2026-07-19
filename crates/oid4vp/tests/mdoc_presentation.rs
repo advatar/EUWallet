@@ -87,6 +87,7 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
         dcql_id: Some("cred1".into()),
         requested_vcts: vec![],
         requested_doctypes: vec![],
+        response_encryption_key: None,
         signed_payload: b"x".to_vec(),
         signature: b"y".to_vec(),
         request_alg: Alg::Es256,
