@@ -35,6 +35,10 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_CFBundleDisplayName: "Advatar Wallet (demo)"
         INFOPLIST_KEY_NSCameraUsageDescription: "Scan credential-offer and verifier-request QR codes."
+        # Standard, exempt encryption only (AES-GCM / ECDH / TLS via the platform + aws-lc). Declaring
+        # this lets every TestFlight build distribute immediately instead of stalling on a manual
+        # export-compliance question each upload.
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1"
