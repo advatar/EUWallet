@@ -1337,6 +1337,11 @@ public struct IssuanceScenario {
      * The issuer-signed German ID card (Personalausweis) compact.
      */
     public var germanIdCredentialCompact: String
+    /**
+     * An issuer-signed mDL in the ISO 18013-5 `mso_mdoc` format, base64url(IssuerSigned CBOR) —
+     * what an mso_mdoc `/credential` endpoint returns. Presented over OpenID4VP as a DeviceResponse.
+     */
+    public var mdlMdocCredential: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1385,7 +1390,11 @@ public struct IssuanceScenario {
          */nidCredentialCompact: String, 
         /**
          * The issuer-signed German ID card (Personalausweis) compact.
-         */germanIdCredentialCompact: String) {
+         */germanIdCredentialCompact: String, 
+        /**
+         * An issuer-signed mDL in the ISO 18013-5 `mso_mdoc` format, base64url(IssuerSigned CBOR) —
+         * what an mso_mdoc `/credential` endpoint returns. Presented over OpenID4VP as a DeviceResponse.
+         */mdlMdocCredential: String) {
         self.epoch = epoch
         self.trustList = trustList
         self.operatorPublicKey = operatorPublicKey
@@ -1400,6 +1409,7 @@ public struct IssuanceScenario {
         self.passportCredentialCompact = passportCredentialCompact
         self.nidCredentialCompact = nidCredentialCompact
         self.germanIdCredentialCompact = germanIdCredentialCompact
+        self.mdlMdocCredential = mdlMdocCredential
     }
 }
 
@@ -1449,6 +1459,9 @@ extension IssuanceScenario: Equatable, Hashable {
         if lhs.germanIdCredentialCompact != rhs.germanIdCredentialCompact {
             return false
         }
+        if lhs.mdlMdocCredential != rhs.mdlMdocCredential {
+            return false
+        }
         return true
     }
 
@@ -1467,6 +1480,7 @@ extension IssuanceScenario: Equatable, Hashable {
         hasher.combine(passportCredentialCompact)
         hasher.combine(nidCredentialCompact)
         hasher.combine(germanIdCredentialCompact)
+        hasher.combine(mdlMdocCredential)
     }
 }
 
@@ -1491,7 +1505,8 @@ public struct FfiConverterTypeIssuanceScenario: FfiConverterRustBuffer {
                 mdlCredentialCompact: FfiConverterString.read(from: &buf), 
                 passportCredentialCompact: FfiConverterString.read(from: &buf), 
                 nidCredentialCompact: FfiConverterString.read(from: &buf), 
-                germanIdCredentialCompact: FfiConverterString.read(from: &buf)
+                germanIdCredentialCompact: FfiConverterString.read(from: &buf), 
+                mdlMdocCredential: FfiConverterString.read(from: &buf)
         )
     }
 
@@ -1510,6 +1525,7 @@ public struct FfiConverterTypeIssuanceScenario: FfiConverterRustBuffer {
         FfiConverterString.write(value.passportCredentialCompact, into: &buf)
         FfiConverterString.write(value.nidCredentialCompact, into: &buf)
         FfiConverterString.write(value.germanIdCredentialCompact, into: &buf)
+        FfiConverterString.write(value.mdlMdocCredential, into: &buf)
     }
 }
 
