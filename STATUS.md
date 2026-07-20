@@ -105,11 +105,11 @@ operational solution needed to enter those processes.
         metadata, status lists, credential offers and presentation requests fetched by reference.
   - [x] Reject unregistered origins plus duplicate, conflicting, dropped and oversized security
         inputs in the iOS QR/deep-link parser.
-  - [ ] Add an Android Intent/QR ingress layer with the same scheme/verified-origin and ambiguity
-        policy; the current Android module has no deep-link entry point.
-    - [ ] Add a bounded pure parser for exact registered wallet schemes, explicitly allowlisted
+  - [x] Add an Android Intent/QR ingress layer with the same scheme/verified-origin and ambiguity
+        policy without inventing an application entry point in the current AAR-only module.
+    - [x] Add a bounded pure parser for exact registered wallet schemes, explicitly allowlisted
           HTTPS origins and by-reference OpenID4VCI/OpenID4VP inputs, with hostile ambiguity tests.
-    - [ ] Expose a narrow Android `Intent` adapter without inventing an Activity or app manifest;
+    - [x] Expose a narrow Android `Intent` adapter without inventing an Activity or app manifest;
           the AAR host remains responsible for verified-link declarations and platform routing.
   - [ ] Split the generic POST effect into typed protocol response contracts before enforcing MIME;
         the shared OpenID4VP/payment/QES effect intentionally advertises `*/*` today.

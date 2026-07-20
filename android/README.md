@@ -27,6 +27,17 @@ an Android UI, a generated UniFFI/JNI bridge, or approved national-wallet servic
   refuses to run unless its detector identifies an emulator. It is absent from release artifacts.
 - A blocking, redirect-disabled, HTTPS-only `UrlConnectionHttpClient` with finite timeouts and a
   one-MiB response limit. Run the executor on a worker thread.
+- A pure `WalletIngressParser` for bounded OpenID4VCI offer and OpenID4VP by-reference QR/deep-link
+  inputs. Registered schemes require the exact empty-authority/path form; HTTPS links require an
+  explicitly configured canonical origin; duplicate, conflicting, unsupported, malformed and
+  oversized security inputs fail closed. `AndroidWalletIngress` extracts only unambiguous
+  browsable `ACTION_VIEW` data from a host-provided `Intent`.
+
+This module is still an AAR and intentionally declares no Activity or intent filter. The host app
+must configure Android-verified App Links for every HTTPS origin it passes to
+`WalletIngressParser`, route external intents through `AndroidWalletIngress`, and pass QR scanner
+text directly to the pure parser. Origin allowlisting inside the library complements platform link
+verification; it does not claim that an arbitrary explicit Intent was verified by Android.
 
 The production signing policy requires hardware-enforced user authentication with a 30-second
 validity window by default. The host application must complete an allowed biometric or device-
@@ -58,7 +69,8 @@ This foundation does not make the Android wallet launch-ready. The host applicat
   and wallet-to-wallet transport;
 - national-wallet key enrollment/attestation and device-integrity policy in addition to local
   `KeyInfo` checks;
-- biometric/device-credential UX, Android UI and accessibility, deep links, secure backup/migration
-  policy, telemetry/privacy controls, and physical-device interoperability/conformance testing.
+- biometric/device-credential UX, Android UI and accessibility, deep-link Activity and verified
+  App Link routing, secure backup/migration policy, telemetry/privacy controls, and physical-device
+  interoperability/conformance testing.
 
 Until those adapters exist, unsupported effects throw instead of fabricating progress.
