@@ -15,17 +15,26 @@ operational solution needed to enter those processes.
 
 ## Active phase — P0 trustworthy foundation
 
-- [ ] Repair CI paths and make every claimed assurance gate fail closed.
-- [ ] Make OpenID4VP response delivery HTTPS-only, endpoint-bound, mode-strict, and fail closed when
+- [x] Repair CI paths and make every claimed assurance gate fail closed.
+- [x] Make OpenID4VP response delivery HTTPS-only, endpoint-bound, mode-strict, and fail closed when
       `direct_post.jwt` encryption metadata is absent or invalid.
-- [ ] Propagate typed transport/signing failures through the Swift effect executor.
-- [ ] Make Secure Enclave key creation fail closed on physical devices.
-- [ ] Introduce a single verified credential-ingestion path for SD-JWT VC and mdoc.
-- [ ] Route OpenID4VCI-issued credentials through verified ingestion and reject untrusted,
+- [x] Propagate typed transport/signing failures through the Swift effect executor.
+- [x] Make Secure Enclave key creation fail closed on physical devices.
+- [x] Introduce a single verified credential-ingestion path for SD-JWT VC and mdoc.
+- [x] Route OpenID4VCI-issued credentials through verified ingestion and reject untrusted,
       expired, wrongly typed, unbound, malformed, or revoked credentials.
-- [ ] Remove or test-gate unchecked credential-loading APIs from production FFI.
+- [x] Remove or test-gate unchecked credential-loading APIs from production FFI.
 - [ ] Bind the rendered consent contract to holder authorization across core and FFI.
-- [ ] Make credential status per-credential, issuer/list-bound, fresh, and resource-bounded.
+- [x] Make credential status per-credential, issuer/list-bound, fresh, and resource-bounded.
+- [ ] Revalidate credential and trust evidence at every presentation decision and reject clock
+      rollback.
+- [ ] Bind the credential issuer identity and EUDI service type to the authenticated certificate
+      path instead of caller-provided metadata.
+- [ ] Replace the incomplete X.509 path validator with strict RFC 5280 and EUDI profile validation.
+- [ ] Implement recursive RFC 9901 disclosures, reject invalid issued SD-JWT+KB/control claims,
+      and include permanently visible PII in consent.
+- [ ] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths.
+- [ ] Add flow operation IDs, explicit terminal outcomes and recoverable failure/cancel transitions.
 
 ## Next phase — production clients and provider platform
 
@@ -56,4 +65,5 @@ operational solution needed to enter those processes.
 - [x] Extensive architecture, security, compliance, interoperability, mobile, assurance and
       operational readiness review completed on 2026-07-20.
 - [x] Full-wallet engineering epic opened as GitHub issue #1.
-
+- [x] Android production-shell foundation added with a closed effect contract, StrongBox-first
+      P-256 signing, HTTPS transport policy and release-artifact tests.
