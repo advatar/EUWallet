@@ -18,7 +18,7 @@ operational solution needed to enter those processes.
 - [x] Repair CI paths and make every claimed assurance gate fail closed.
 - [x] Restore hosted Swift, Kani and Tamarin CI compatibility with pinned/scoped tooling
       ([#13](https://github.com/advatar/EUWallet/issues/13)).
-- [ ] [#17](https://github.com/advatar/EUWallet/issues/17): pin current reviewed GitHub Actions,
+- [x] [#17](https://github.com/advatar/EUWallet/issues/17): pin current reviewed GitHub Actions,
       declare least-privilege workflow permissions and reject mutable/deprecated CI dependencies.
 - [x] Make OpenID4VP response delivery HTTPS-only, endpoint-bound, mode-strict, and fail closed when
       `direct_post.jwt` encryption metadata is absent or invalid.
