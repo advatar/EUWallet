@@ -152,18 +152,18 @@ operational solution needed to enter those processes.
   - [x] Make transaction-log append and restoration bounded and fallible; atomically reject
         non-canonical chains unless they match an externally anchored head before any durable
         wallet-state schema can import audit history.
-  - [ ] Restore only bounded authenticated holdings, replay state and audit data through current
+  - [x] Restore only bounded authenticated holdings, replay state and audit data through current
         trust/WUA/device-key revalidation; never revive pending operations or protocol sessions.
-    - [ ] Add a migration-ready canonical CBOR checkpoint v1 with explicit magic, version and
+    - [x] Add a migration-ready canonical CBOR checkpoint v1 with explicit magic, version and
           authenticated-envelope generation; hard 32 MiB and structural allocation budgets; and
           deterministic rejection of duplicate, non-canonical, unknown, trailing or future data.
-    - [ ] Export only production credential source evidence, sorted replay memberships and the
+    - [x] Export only production credential source evidence, sorted replay memberships and the
           externally anchored transaction log; document the legacy numeric issuance nonce in v1
           and exclude every active protocol machine, pending operation, callback and fixture.
-    - [ ] Restore into a staged core only after current clock, trust-list sequence, device key and
+    - [x] Restore into a staged core only after current clock, trust-list sequence, device key and
           high-assurance WUA checks; reauthenticate every credential and atomically retain the
           current environment while replacing only authenticated durable state.
-    - [ ] Prove exact resource boundaries, deterministic encoding, context/tamper/corruption
+    - [x] Prove exact resource boundaries, deterministic encoding, context/tamper/corruption
           rejection, credential and transaction revalidation, zero partial mutation, and that
           process-death restoration cannot revive stale callbacks or operation identifiers.
   - [ ] Add atomic, rollback-detecting, device-bound iOS and Android stores with backup exclusion,

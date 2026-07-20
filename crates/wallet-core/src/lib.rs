@@ -116,6 +116,7 @@ uniffi::setup_scaffolding!();
 mod demo;
 pub use demo::{DemoScenario, DemoWallet, IssuanceScenario};
 
+pub mod durable;
 pub mod export;
 
 /// Verify a wallet export bundle's integrity hash (TS10). Callable from the shell before re-import.
