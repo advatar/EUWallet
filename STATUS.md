@@ -26,8 +26,9 @@ operational solution needed to enter those processes.
 - [x] Remove or test-gate unchecked credential-loading APIs from production FFI.
 - [ ] Bind the rendered consent contract to holder authorization across core and FFI.
 - [x] Make credential status per-credential, issuer/list-bound, fresh, and resource-bounded.
-- [ ] Revalidate credential and trust evidence at every presentation decision and reject clock
-      rollback.
+- [x] [#5](https://github.com/advatar/EUWallet/issues/5): freeze and revalidate selected credential
+      provenance/validity plus RP, issuer and status trust before consent, signing and delivery;
+      reject clock rollback, and recheck WUA time when it authorizes issuance proofs.
 - [ ] Bind the credential issuer identity and EUDI service type to the authenticated certificate
       path instead of caller-provided metadata.
 - [ ] Replace the incomplete X.509 path validator with strict RFC 5280 and EUDI profile validation.

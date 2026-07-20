@@ -63,6 +63,33 @@ fn verifies_and_exposes_granted_anchors() {
 }
 
 #[test]
+fn cached_anchors_are_not_authorizing_after_the_list_expires() {
+    let op = SoftwareSigner::generate_p256().unwrap();
+    let parsed = parse_and_verify(
+        &signed_list(&op, 1, 10, 20),
+        op.public_key_raw(),
+        &AwsLc,
+        Alg::Es256,
+        15,
+    )
+    .unwrap();
+    let mut store = TrustStore::new();
+    store.update(parsed).unwrap();
+
+    assert!(store.is_valid_at(20));
+    assert_eq!(
+        store
+            .parsed_anchors_at(ServiceType::RelyingPartyAccessCa, 20)
+            .len(),
+        1
+    );
+    assert!(!store.is_valid_at(21));
+    assert!(store
+        .parsed_anchors_at(ServiceType::RelyingPartyAccessCa, 21)
+        .is_empty());
+}
+
+#[test]
 fn rejects_wrong_operator_signature() {
     let op = SoftwareSigner::generate_p256().unwrap();
     let attacker = SoftwareSigner::generate_p256().unwrap();

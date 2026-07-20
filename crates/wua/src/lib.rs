@@ -85,7 +85,7 @@ pub fn parse_and_verify(
         .get("exp")
         .and_then(|v| v.as_i64())
         .ok_or(WuaError::Malformed)?;
-    if now > valid_until {
+    if now >= valid_until {
         return Err(WuaError::Expired);
     }
     let assurance_level = payload
@@ -122,6 +122,16 @@ impl WalletUnitAttestation {
     /// Convenience: verified, binds this key, and meets at least the required assurance level.
     pub fn is_valid_for(&self, device_public_key: &[u8], min_level: AssuranceLevel) -> bool {
         self.attests_key(device_public_key) && self.meets(min_level)
+    }
+
+    /// Revalidate a cached attestation at the current trusted time before it authorizes a proof.
+    pub fn is_valid_for_at(
+        &self,
+        device_public_key: &[u8],
+        min_level: AssuranceLevel,
+        now: i64,
+    ) -> bool {
+        now < self.valid_until && self.is_valid_for(device_public_key, min_level)
     }
 
     fn meets(&self, min: AssuranceLevel) -> bool {

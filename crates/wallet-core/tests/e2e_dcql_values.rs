@@ -179,3 +179,44 @@ fn an_unsatisfiable_value_constraint_presents_nothing() {
         "the presentation aborts because no held credential satisfies the value constraint"
     );
 }
+
+#[test]
+fn a_credential_missing_the_requested_claim_never_reaches_signing() {
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let operator = SoftwareSigner::generate_p256().unwrap();
+    let mut core = ready_core(&issuer, &operator);
+
+    // No holding carries `resident_address`; a partial fallback must not disclose a different
+    // subset or create a key-binding signature for an incomplete query.
+    core.handle_event(Event::AuthorizationRequestReceived {
+        request: sign_values_request(&rp, NONCE, "resident_address", json!(["Berlin"])),
+    });
+    let effects = core.handle_event(Event::RpCertChainResolved {
+        rp_cert_chain: vec![RP_DER.to_vec()],
+        registered_redirect_uris: vec!["https://rp.example/response".into()],
+    });
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Error { code, .. }
+        } if code == "no_eligible_credential"
+    )));
+    assert!(effects.contains(&Effect::Close));
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Consent(_)
+        } | Effect::Sign { .. }
+            | Effect::Http { .. }
+    )));
+
+    let late_consent = core.handle_event(Event::UserConsented);
+    assert!(!late_consent
+        .iter()
+        .any(|effect| matches!(effect, Effect::Sign { .. } | Effect::Http { .. })));
+    assert_eq!(
+        core.state(),
+        &oid4vp::State::Aborted(oid4vp::AbortReason::NoCredential)
+    );
+}

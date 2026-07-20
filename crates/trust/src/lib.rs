@@ -196,6 +196,13 @@ impl TrustStore {
         self.current.as_ref().map(|l| l.sequence_number)
     }
 
+    /// Whether the installed, signature-verified list is current at `now`.
+    pub fn is_valid_at(&self, now: i64) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|list| now >= list.valid_from && now <= list.valid_until)
+    }
+
     /// DER-encoded certificates of the *granted* anchors for a service — pass these to
     /// `x509::parse_cert` + `x509::validate_path` to decide whether a chain is trusted.
     pub fn granted_anchors(&self, service: ServiceType) -> Vec<Vec<u8>> {
@@ -211,9 +218,27 @@ impl TrustStore {
             .unwrap_or_default()
     }
 
+    /// Granted anchors only when the signed list itself is current. This is the variant security
+    /// decisions should use after the clock may have advanced since list ingestion.
+    pub fn granted_anchors_at(&self, service: ServiceType, now: i64) -> Vec<Vec<u8>> {
+        if self.is_valid_at(now) {
+            self.granted_anchors(service)
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Parse the granted anchors for a service into `x509::ParsedCert`s (skips unparseable ones).
     pub fn parsed_anchors(&self, service: ServiceType) -> Vec<x509::ParsedCert> {
         self.granted_anchors(service)
+            .iter()
+            .filter_map(|der| x509::parse_cert(der).ok())
+            .collect()
+    }
+
+    /// Parsed granted anchors only while the signed trust list is current at `now`.
+    pub fn parsed_anchors_at(&self, service: ServiceType, now: i64) -> Vec<x509::ParsedCert> {
+        self.granted_anchors_at(service, now)
             .iter()
             .filter_map(|der| x509::parse_cert(der).ok())
             .collect()

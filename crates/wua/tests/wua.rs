@@ -51,6 +51,17 @@ fn verifies_and_binds_device_key() {
 }
 
 #[test]
+fn cached_attestation_is_rechecked_at_the_time_it_authorizes_a_proof() {
+    let provider = SoftwareSigner::generate_p256().unwrap();
+    let device = SoftwareSigner::generate_p256().unwrap();
+    let wua = issue_wua(&provider, device.public_key_raw(), "high", 100);
+    let att = parse_and_verify(&wua, provider.public_key_raw(), &AwsLc, Alg::Es256, 99).unwrap();
+
+    assert!(att.is_valid_for_at(device.public_key_raw(), AssuranceLevel::High, 99));
+    assert!(!att.is_valid_for_at(device.public_key_raw(), AssuranceLevel::High, 100));
+}
+
+#[test]
 fn rejects_wrong_provider() {
     let provider = SoftwareSigner::generate_p256().unwrap();
     let attacker = SoftwareSigner::generate_p256().unwrap();
