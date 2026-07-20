@@ -189,6 +189,12 @@ operational solution needed to enter those processes.
             event across executor replacement and retain the original typed failure category.
       - [ ] Make the lifecycle coordinator the only production event path; remove or isolate raw
             `WalletEngine` event driving so application composition cannot bypass persistence.
+        - [x] Require both native effect executors to receive a concrete lifecycle coordinator and
+              exercise their public APIs only through coordinator-backed tests.
+        - [x] Route iOS application events, including transaction redaction and history wipe,
+              through the coordinator and keep generated Core access behind a controlled adapter.
+        - [ ] Add the missing Android generated bridge/application composition and enforce the same
+              sole-event-path rule there; the current AAR alone cannot close this parent item.
       - [x] Align the Core/iOS/Android checkpoint plaintext ceiling at 33,554,312 bytes and reject
             growth of every durable replay set before persistent mutation; reset the active flow
             and preserve an exportable prior checkpoint at the exact boundary.

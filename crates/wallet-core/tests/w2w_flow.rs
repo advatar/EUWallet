@@ -98,6 +98,18 @@ fn sender_transfer(
         .unwrap()
 }
 
+fn assert_transfer_rejection(effects: &[Effect]) {
+    assert!(matches!(
+        effects,
+        [
+            Effect::Render {
+                screen: presenter::ScreenDescription::Error { code, .. }
+            },
+            Effect::Close
+        ] if code == "wallet_transfer_rejected"
+    ));
+}
+
 #[test]
 fn accepts_a_trusted_peer_bound_transfer_in_core() {
     let device = SoftwareSigner::generate_p256().unwrap();
@@ -111,7 +123,7 @@ fn accepts_a_trusted_peer_bound_transfer_in_core() {
     let sig = sender_transfer(&sender, device.public_key_raw(), &cred, &consent, 1);
 
     core.handle_event(Event::WalletTransferOfferCreated);
-    core.handle_event(Event::WalletTransferReceived {
+    let effects = core.handle_event(Event::WalletTransferReceived {
         credential: cred.clone(),
         issuer_cert_chain: vec![issuer_leaf()],
         sender_public_key: sender.public_key_raw().to_vec(),
@@ -127,6 +139,10 @@ fn accepts_a_trusted_peer_bound_transfer_in_core() {
     );
     // A privacy-preserving Transfer entry is logged.
     assert!(core.transaction_report_json().contains(r#""transfers":1"#));
+    assert_eq!(effects, vec![Effect::Close]);
+    assert!(core
+        .handle_event(Event::RedactTransaction { seq: 0 })
+        .is_empty());
 }
 
 #[test]
@@ -142,7 +158,8 @@ fn rejects_an_untrusted_issuer_in_core() {
     let consent = [7u8; 32];
     let sig = sender_transfer(&sender, device.public_key_raw(), &cred, &consent, 2);
 
-    core.handle_event(Event::WalletTransferReceived {
+    core.handle_event(Event::WalletTransferOfferCreated);
+    let effects = core.handle_event(Event::WalletTransferReceived {
         credential: cred,
         issuer_cert_chain: vec![issuer_leaf()],
         sender_public_key: sender.public_key_raw().to_vec(),
@@ -155,6 +172,8 @@ fn rejects_an_untrusted_issuer_in_core() {
         None,
         "untrusted issuer → rejected"
     );
+    assert_transfer_rejection(&effects);
+    assert!(core.handle_event(Event::WipeTransactionLog).is_empty());
 }
 
 #[test]
@@ -174,7 +193,8 @@ fn rejects_a_misdirected_transfer_in_core() {
         .to_vec();
     let sig = sender_transfer(&sender, &other_key, &cred, &consent, 3);
 
-    core.handle_event(Event::WalletTransferReceived {
+    core.handle_event(Event::WalletTransferOfferCreated);
+    let effects = core.handle_event(Event::WalletTransferReceived {
         credential: cred,
         issuer_cert_chain: vec![issuer_leaf()],
         sender_public_key: sender.public_key_raw().to_vec(),
@@ -187,6 +207,66 @@ fn rejects_a_misdirected_transfer_in_core() {
         None,
         "misdirected transfer → rejected"
     );
+    assert_transfer_rejection(&effects);
+}
+
+#[test]
+fn transfer_events_cannot_overwrite_an_active_payment() {
+    let device = SoftwareSigner::generate_p256().unwrap();
+    let operator = SoftwareSigner::generate_p256().unwrap();
+    let sender = SoftwareSigner::generate_p256().unwrap();
+    let issuer = SoftwareSigner::from_pkcs8_der(ISSUER_PKCS8).unwrap();
+    let mut core = receiver(&device, true, &operator);
+
+    let payment = serde_json::to_vec(&json!({
+        "creditor_name": "Acme Store",
+        "creditor_account": "DE89370400440532013000",
+        "amount_minor": 100,
+        "currency": "EUR",
+        "transaction_id": "txn-1",
+        "nonce": 91,
+        "response_uri": "https://psp.example/authorize"
+    }))
+    .unwrap();
+    assert!(core
+        .handle_event(Event::PaymentAuthorizationRequestReceived { request: payment })
+        .iter()
+        .any(|effect| matches!(
+            effect,
+            Effect::Render {
+                screen: presenter::ScreenDescription::PaymentConfirmation(_)
+            }
+        )));
+
+    let rejected_offer = core.handle_event(Event::WalletTransferOfferCreated);
+    assert!(matches!(
+        rejected_offer.as_slice(),
+        [Effect::Render {
+            screen: presenter::ScreenDescription::Error { code, .. }
+        }] if code == "wallet_transfer_in_progress"
+    ));
+
+    let credential = issued_credential(&issuer, device.public_key_raw());
+    let consent = [4u8; 32];
+    let signature = sender_transfer(&sender, device.public_key_raw(), &credential, &consent, 92);
+    let rejected = core.handle_event(Event::WalletTransferReceived {
+        credential,
+        issuer_cert_chain: vec![issuer_leaf()],
+        sender_public_key: sender.public_key_raw().to_vec(),
+        sender_signature: signature,
+        sender_consent_hash: consent.to_vec(),
+        nonce: 92,
+    });
+    assert!(matches!(
+        rejected.as_slice(),
+        [Effect::Render {
+            screen: presenter::ScreenDescription::Error { code, .. }
+        }] if code == "wallet_transfer_in_progress"
+    ));
+    assert!(core
+        .handle_event(Event::PaymentApproved)
+        .iter()
+        .any(|effect| matches!(effect, Effect::Sign { .. })));
 }
 
 #[test]

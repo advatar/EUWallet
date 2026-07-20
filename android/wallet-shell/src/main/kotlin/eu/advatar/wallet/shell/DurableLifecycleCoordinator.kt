@@ -52,13 +52,6 @@ interface DurableWalletEngineDriving : WalletEngineDriving {
     fun restoreDurableCheckpointRecord(checkpoint: CoreDurableCheckpoint)
 }
 
-/** Exact retry seam consumed by [EffectExecutor]. */
-interface DurableLifecycleRetrying {
-    val hasPendingCommit: Boolean
-
-    fun retryPendingEvent(eventJson: String): String
-}
-
 enum class DurableLifecycleErrorCode(val stableMessage: String) {
     INVALID_IDENTITY("durable_lifecycle_invalid_identity"),
     ALREADY_BOOTSTRAPPED("durable_lifecycle_already_bootstrapped"),
@@ -133,7 +126,7 @@ class DurableLifecycleCoordinator(
     private val engine: DurableWalletEngineDriving,
     private val store: DurableStateStore,
     private val context: DurableStateContext,
-) : WalletEngineDriving, DurableLifecycleRetrying {
+) : WalletEngineDriving {
     private sealed interface State {
         data object Uninitialized : State
         data object Bootstrapping : State
@@ -160,7 +153,7 @@ class DurableLifecycleCoordinator(
 
     private var state: State = State.Uninitialized
 
-    override val hasPendingCommit: Boolean
+    val hasPendingCommit: Boolean
         @Synchronized get() = state is State.PendingExport || state is State.PendingCommit
 
     @Synchronized
@@ -252,7 +245,7 @@ class DurableLifecycleCoordinator(
     }
 
     @Synchronized
-    override fun retryPendingEvent(eventJson: String): String = when (val current = state) {
+    fun retryPendingEvent(eventJson: String): String = when (val current = state) {
         is State.PendingExport -> {
             if (current.value.eventJson != eventJson) {
                 fail(DurableLifecycleErrorCode.RETRY_EVENT_MISMATCH)

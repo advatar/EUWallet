@@ -210,10 +210,22 @@ fn json_ffi_surface_round_trips() {
     let out = core
         .handle_event_json(r#"{"type":"authorizationRequestReceived","request":[110,111]}"#)
         .unwrap();
-    // "no" is not a valid JWS → the machine aborts; no ResolveRpTrust effect is emitted.
-    assert_eq!(out, "[]");
+    // "no" is not a valid JWS → the machine visibly aborts and releases its active marker.
+    let effects: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(effects[0]["type"], "render");
+    assert_eq!(
+        effects[0]["screen"]["code"],
+        "presentation_request_malformed"
+    );
+    assert_eq!(effects[1]["type"], "close");
     assert!(matches!(
         core.state(),
         oid4vp::State::Aborted(oid4vp::AbortReason::MalformedRequest)
     ));
+    assert_eq!(
+        core.handle_event_json(r#"{"type":"wipeTransactionLog"}"#)
+            .unwrap(),
+        "[]",
+        "terminal presentation abort must not block a later history event"
+    );
 }

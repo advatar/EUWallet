@@ -2095,7 +2095,16 @@ mod tests {
             oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid)
         ));
         assert!(core.pending_verified_credential.is_none());
-        assert_eq!(effects, vec![Effect::Close]);
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                Effect::Render {
+                    screen: ScreenDescription::Error { code, .. }
+                },
+                Effect::Close
+            ] if code == "credential_issuance_rejected"
+        ));
+        assert_eq!(core.active, ActiveFlow::None);
         assert_eq!(core.export_durable_checkpoint(23).unwrap(), checkpoint);
         assert_eq!(
             core.log, audit,
@@ -2203,6 +2212,88 @@ mod tests {
             .handle_event_json(r#"{"type":"operationSucceeded","operationId":42}"#)
             .unwrap_err();
         assert!(stale.contains("stale or unknown operationId 42"));
+    }
+
+    #[test]
+    fn history_mutation_events_fail_closed_during_flows_and_round_trip_durably() {
+        let scenario = DemoWallet::new().issuance_scenario();
+        let mut source = configured_core(&scenario, "wallet.example", "device-key");
+        append_history(&mut source);
+        let original = source.export_durable_checkpoint(30).unwrap();
+
+        source.active = ActiveFlow::Presentation;
+        for effects in [
+            source.handle_event(Event::RedactTransaction { seq: 0 }),
+            source.handle_event(Event::WipeTransactionLog),
+        ] {
+            assert!(matches!(
+                effects.as_slice(),
+                [Effect::Render {
+                    screen: ScreenDescription::Error { code, .. }
+                }] if code == "history_mutation_in_progress"
+            ));
+        }
+        assert_eq!(source.active, ActiveFlow::Presentation);
+        source.active = ActiveFlow::None;
+        assert_eq!(
+            source.export_durable_checkpoint(30).unwrap(),
+            original,
+            "history must not change while a protocol flow is active"
+        );
+
+        source.pending_operations.insert(
+            42,
+            PendingOperation {
+                flow: ActiveFlow::Presentation,
+                result: OperationResultKind::Persisted,
+                authorization_hash: None,
+            },
+        );
+        for effects in [
+            source.handle_event(Event::RedactTransaction { seq: 0 }),
+            source.handle_event(Event::WipeTransactionLog),
+        ] {
+            assert!(matches!(
+                effects.as_slice(),
+                [Effect::Render {
+                    screen: ScreenDescription::Error { code, .. }
+                }] if code == "history_mutation_in_progress"
+            ));
+        }
+        assert!(source.pending_operations.contains_key(&42));
+        source.pending_operations.clear();
+        assert_eq!(
+            source.export_durable_checkpoint(30).unwrap(),
+            original,
+            "history must not change while a native callback is pending"
+        );
+
+        assert!(source
+            .handle_event(Event::RedactTransaction { seq: 0 })
+            .is_empty());
+        assert!(source.log.entries()[0].redacted);
+        let redacted_checkpoint = source.export_durable_checkpoint(31).unwrap();
+
+        let mut redacted_target = configured_core(&scenario, "wallet.example", "device-key");
+        redacted_target
+            .restore_durable_checkpoint(&redacted_checkpoint, 31)
+            .unwrap();
+        assert_eq!(redacted_target.log, source.log);
+        assert!(redacted_target.log.entries()[0].redacted);
+        assert!(redacted_target.log.verify_integrity(&AwsLc));
+
+        source.audit_log_available = false;
+        assert!(source.handle_event(Event::WipeTransactionLog).is_empty());
+        assert!(source.audit_log_available);
+        assert!(source.log.is_empty());
+        let wiped_checkpoint = source.export_durable_checkpoint(32).unwrap();
+
+        let mut wiped_target = configured_core(&scenario, "wallet.example", "device-key");
+        wiped_target
+            .restore_durable_checkpoint(&wiped_checkpoint, 32)
+            .unwrap();
+        assert!(wiped_target.log.is_empty());
+        assert!(wiped_target.audit_log_available);
     }
 
     #[test]

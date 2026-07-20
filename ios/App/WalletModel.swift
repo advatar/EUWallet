@@ -89,8 +89,9 @@ final class WalletModel: ObservableObject {
     @Published var probeResult: String?
 
     private let demo = DemoWallet()
-    /// The one wallet engine for the whole session (issuance + holdings + presentation + history).
-    private let engine: WalletEngine
+    /// The one controlled runtime for the whole session. Core mutations are available only through
+    /// its durable lifecycle; read-only projections remain available for rendering wallet state.
+    private let runtime: FfiWalletRuntime?
     private let issuance: IssuanceScenario
     /// RP trust material for presentation (static demo chain), captured once.
     private let rpCertChain: [Data]
@@ -107,11 +108,17 @@ final class WalletModel: ObservableObject {
     private var nonceCounter: UInt64 = 1
 
     init() {
-        let (engine, issuance, rpCertChain, redirectUris) = Self.makeEngine(demo)
-        self.engine = engine
+        let issuance = demo.issuanceScenario()
+        let scenario = demo.scenario()
         self.issuance = issuance
-        self.rpCertChain = rpCertChain
-        self.redirectUris = redirectUris
+        self.rpCertChain = scenario.rpCertChain
+        self.redirectUris = scenario.registeredRedirectUris
+        do {
+            runtime = try Self.makeRuntime(issuance)
+        } catch {
+            runtime = nil
+            phase = .failed("Durable wallet startup failed: \(error.localizedDescription)")
+        }
         reloadCredentials()
         reloadHistory()
     }
@@ -121,20 +128,18 @@ final class WalletModel: ObservableObject {
     /// Build the persistent engine, configured for BOTH issuance and presentation: device key,
     /// clock, an all-services trusted list, and the Wallet Unit Attestation — but NO credential
     /// (the wallet starts empty; credentials arrive via issuance).
-    private static func makeEngine(
-        _ demo: DemoWallet
-    ) -> (WalletEngine, IssuanceScenario, [Data], [String]) {
-        let engine = WalletEngine(walletClientId: "wallet.example", deviceKeyRef: "device-key")
-        let s = demo.issuanceScenario()
-        engine.loadDeviceKey(devicePublicKey: s.devicePublicKey)
-        // Set the clock BEFORE loading the trusted list: the core verifies the list and the
-        // CA/RP/issuer certificate validity windows against `now_epoch`.
-        _ = engine.handleEventJson(eventJson: WalletEventJSON.setClock(epoch: s.epoch))
-        _ = engine.loadTrustList(signedList: s.trustList, operatorPublicKey: s.operatorPublicKey)
-        // The in-core key-attestation gate for issuance: the WUA must verify and bind the device key.
-        _ = engine.loadWua(wuaJwt: s.wuaJwt, providerPublicKey: s.walletProviderPublicKey)
-        let scenario = demo.scenario()
-        return (engine, s, scenario.rpCertChain, scenario.registeredRedirectUris)
+    private static func makeRuntime(_ issuance: IssuanceScenario) throws -> FfiWalletRuntime {
+        try FfiWalletRuntime.ephemeralDemo(
+            applicationIdentifier: "eu.advatar.wallet.demo",
+            walletClientId: "wallet.example",
+            deviceKeyReference: "device-key",
+            environment: CoreDurableEnvironment(
+                clockEpoch: issuance.epoch,
+                signedTrustList: issuance.trustList,
+                operatorPublicKey: issuance.operatorPublicKey,
+                devicePublicKey: issuance.devicePublicKey,
+                wuaJwt: issuance.wuaJwt,
+                wuaProviderPublicKey: issuance.walletProviderPublicKey))
     }
 
     /// Build an executor bound to the persistent engine. `issuer` is supplied only for issuance;
@@ -142,9 +147,13 @@ final class WalletModel: ObservableObject {
     private func makeExecutor(
         issuer: IssuerResponder?,
         render: @escaping (UInt64?, Data?, ScreenDescription) -> Void
-    ) -> EffectExecutor {
-        EffectExecutor(
-            engine: engine,
+    ) -> EffectExecutor? {
+        guard let runtime else {
+            phase = .failed("Durable wallet lifecycle is unavailable")
+            return nil
+        }
+        return EffectExecutor(
+            lifecycle: runtime.lifecycle,
             signer: DemoSigner(demo: demo),
             http: StubHttpClient(),
             storage: InMemoryStorage(),
@@ -153,9 +162,10 @@ final class WalletModel: ObservableObject {
             render: render)
     }
 
-    private func liveExecutor() -> EffectExecutor {
+    private func liveExecutor() -> EffectExecutor? {
         clearDecision()
-        let ex = makeExecutor(issuer: nil) { [weak self] operationId, authorizationHash, screen in
+        guard let ex = makeExecutor(issuer: nil, render: {
+            [weak self] operationId, authorizationHash, screen in
             Task { @MainActor in
                 guard let self else { return }
                 if let kind = WalletDecisionKind(screen: screen) {
@@ -167,7 +177,7 @@ final class WalletModel: ObservableObject {
                 }
                 self.phase = .screen(screen)
             }
-        }
+        }) else { return nil }
         self.executor = ex
         return ex
     }
@@ -189,10 +199,13 @@ final class WalletModel: ObservableObject {
         case awaitingInput
         case succeeded
         case declined
+        case idle
 
         func matches(_ outcome: EffectCascadeOutcome) -> Bool {
             switch (self, outcome) {
             case (.awaitingInput, .awaitingInput), (.succeeded, .succeeded), (.declined, .declined):
+                return true
+            case (.idle, .idle):
                 return true
             default:
                 return false
@@ -312,7 +325,9 @@ final class WalletModel: ObservableObject {
             credentialCompact: Data(compact.utf8),
             cNonce: nextNonce(),
             format: type.issuanceFormat)
-        let ex = makeExecutor(issuer: issuer, render: { _, _, _ in })
+        guard let ex = makeExecutor(issuer: issuer, render: { _, _, _ in }) else {
+            return false
+        }
         return await run(ex, eventJson: WalletEventJSON.credentialOfferReceived(
             offer: offer,
             issuerCertChain: issuance.issuerCertChain,
@@ -326,7 +341,7 @@ final class WalletModel: ObservableObject {
         guard !credentials.isEmpty else { return } // nothing to present yet
         phase = .running
         log = ["Presentation: feeding RP-signed authorization request…"]
-        let ex = liveExecutor()
+        guard let ex = liveExecutor() else { return }
         let request = demo.presentationRequest(nonce: nextNonce())
         Task {
             guard await run(
@@ -344,7 +359,7 @@ final class WalletModel: ObservableObject {
         guard credentials.contains(where: { $0.format == "mso_mdoc" }) else { return }
         phase = .running
         log = ["mdoc presentation: feeding RP-signed DCQL mso_mdoc request…"]
-        let ex = liveExecutor()
+        guard let ex = liveExecutor() else { return }
         let request = demo.mdocPresentationRequest(nonce: nextNonce())
         Task {
             guard await run(
@@ -360,7 +375,7 @@ final class WalletModel: ObservableObject {
     func startPayment() {
         phase = .running
         log = ["Payment: feeding PSD2/TS12 authorization request…"]
-        let ex = liveExecutor()
+        guard let ex = liveExecutor() else { return }
         let request = demo.paymentRequest(nonce: nextNonce())
         Task {
             guard await run(
@@ -452,10 +467,11 @@ final class WalletModel: ObservableObject {
             guard await issue(.pid) else { return }
             var seededOperationId: UInt64?
             var seededAuthorizationHash: Data?
-            let ex = makeExecutor(issuer: nil) { operationId, authorizationHash, _ in
+            guard let ex = makeExecutor(issuer: nil, render: {
+                operationId, authorizationHash, _ in
                 seededOperationId = operationId
                 seededAuthorizationHash = authorizationHash
-            }
+            }) else { return }
             guard await run(
                 ex,
                 eventJson: WalletEventJSON.authorizationRequestReceived(
@@ -483,7 +499,11 @@ final class WalletModel: ObservableObject {
                     authorizationHash: paymentAuthorizationHash),
                 requiring: .succeeded) else { return }
             if redactFirst {
-                _ = engine.redactTransaction(seq: 0)
+                guard await run(
+                    ex,
+                    eventJson: WalletEventJSON.historyRedaction(seq: 0),
+                    requiring: .idle
+                ) else { return }
             }
             reloadCredentials()
             reloadHistory()
@@ -499,7 +519,8 @@ final class WalletModel: ObservableObject {
     /// via the attestation catalogue. Never shows raw disclosure blobs — decodes each to its value.
     func reloadCredentials() {
         let catalogue = catalogueItems()
-        guard let data = engine.heldCredentialsJson().data(using: .utf8),
+        guard let runtime,
+              let data = runtime.heldCredentialsJSON().data(using: .utf8),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else {
             credentials = []
@@ -578,11 +599,16 @@ final class WalletModel: ObservableObject {
 
     /// Refresh the history list + activity report from the engine's in-core log.
     func reloadHistory() {
-        if let data = engine.transactionLogJson().data(using: .utf8),
+        guard let runtime else {
+            history = []
+            report = nil
+            return
+        }
+        if let data = runtime.transactionLogJSON().data(using: .utf8),
            let items = try? JSONDecoder().decode([HistoryItem].self, from: data) {
             history = items
         }
-        if let data = engine.transactionReportJson().data(using: .utf8),
+        if let data = runtime.transactionReportJSON().data(using: .utf8),
            let r = try? JSONDecoder().decode(ActivityReport.self, from: data) {
             report = r
         }
@@ -590,20 +616,35 @@ final class WalletModel: ObservableObject {
 
     /// Erase one entry's content (TS07). The core leaves a chain-preserving tombstone.
     func redact(seq: UInt64) {
-        _ = engine.redactTransaction(seq: seq)
-        reloadHistory()
+        guard let executor = makeExecutor(issuer: nil, render: { _, _, _ in }) else { return }
+        Task {
+            guard await run(
+                executor,
+                eventJson: WalletEventJSON.historyRedaction(seq: seq),
+                requiring: .idle
+            ) else { return }
+            reloadHistory()
+        }
     }
 
     /// Erase the entire log (TS07).
     func wipeLog() {
-        engine.wipeTransactionLog()
-        reloadHistory()
+        guard let executor = makeExecutor(issuer: nil, render: { _, _, _ in }) else { return }
+        Task {
+            guard await run(
+                executor,
+                eventJson: WalletEventJSON.historyWipe(),
+                requiring: .idle
+            ) else { return }
+            reloadHistory()
+        }
     }
 
     /// The integrity-protected export bundle (TS10) plus whether it verifies, and a proof that a
     /// TAMPERED copy fails — both checks performed by the core's own verifier.
     func makeExport() -> ExportPreview? {
-        let json = engine.exportJson()
+        guard let runtime else { return nil }
+        let json = runtime.exportJSON()
         let verifies = verifyWalletExport(json: json)
         let tampered = json.replacingOccurrences(of: "rp.example", with: "evil.example")
         let tamperDetected = tampered != json && !verifyWalletExport(json: tampered)
@@ -612,7 +653,8 @@ final class WalletModel: ObservableObject {
 
     /// The attestation catalogue (TS11): the credential types this wallet understands.
     func catalogueItems() -> [CatalogueItem] {
-        guard let data = engine.attestationCatalogueJson().data(using: .utf8),
+        guard let runtime,
+              let data = runtime.attestationCatalogueJSON().data(using: .utf8),
               let items = try? JSONDecoder().decode([CatalogueItem].self, from: data)
         else { return [] }
         return items

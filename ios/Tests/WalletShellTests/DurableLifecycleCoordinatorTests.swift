@@ -326,7 +326,7 @@ final class DurableLifecycleCoordinatorTests: XCTestCase {
         try lifecycle.bootstrap(environment: environment)
         var renders = 0
         let executor = EffectExecutor(
-            engine: lifecycle,
+            lifecycle: lifecycle,
             signer: StubSigner(),
             http: StubHttpClient(),
             storage: InMemoryStorage(),
@@ -373,7 +373,7 @@ final class DurableLifecycleCoordinatorTests: XCTestCase {
         try lifecycle.bootstrap(environment: environment)
         var renders = 0
         let executor = EffectExecutor(
-            engine: lifecycle,
+            lifecycle: lifecycle,
             signer: StubSigner(),
             http: StubHttpClient(),
             storage: InMemoryStorage(),
@@ -388,7 +388,7 @@ final class DurableLifecycleCoordinatorTests: XCTestCase {
             XCTAssertEqual(error as? DurableLifecycleError, .checkpointGenerationMismatch)
         }
         let replacementExecutor = EffectExecutor(
-            engine: lifecycle,
+            lifecycle: lifecycle,
             signer: StubSigner(),
             http: StubHttpClient(),
             storage: InMemoryStorage(),

@@ -8,6 +8,12 @@ import org.json.JSONObject
 object WalletEventJson {
     fun setClock(epoch: Long): String = event("setClock").put("epoch", epoch).toString()
 
+    fun redactTransaction(seq: ULong): String = event("redactTransaction")
+        .put("seq", unsignedNumber(seq))
+        .toString()
+
+    fun wipeTransactionLog(): String = event("wipeTransactionLog").toString()
+
     fun authorizationRequestReceived(request: ByteArray): String = eventWithBytes(
         type = "authorizationRequestReceived",
         key = "request",

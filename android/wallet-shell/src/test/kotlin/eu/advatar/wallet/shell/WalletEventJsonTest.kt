@@ -19,6 +19,20 @@ class WalletEventJsonTest {
     }
 
     @Test
+    fun transactionHistoryMutationsMatchTheCoreEventContract() {
+        val redact = parse(WalletEventJson.redactTransaction(ULong.MAX_VALUE))
+        val wipe = parse(WalletEventJson.wipeTransactionLog())
+
+        assertEquals(setOf("type", "seq"), redact.keys)
+        assertEquals("redactTransaction", (redact["type"] as JsonPrimitive).content)
+        val seq = redact["seq"] as JsonPrimitive
+        assertFalse(seq.isString)
+        assertEquals(ULong.MAX_VALUE.toString(), seq.content)
+        assertEquals(setOf("type"), wipe.keys)
+        assertEquals("wipeTransactionLog", (wipe["type"] as JsonPrimitive).content)
+    }
+
+    @Test
     fun approvalEchoesOperationAndAuthorizationHash() {
         val hash = ByteArray(32) { it.toByte() }
         val root = parse(WalletEventJson.userConsented(42, hash))

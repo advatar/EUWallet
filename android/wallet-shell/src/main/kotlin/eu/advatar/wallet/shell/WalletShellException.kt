@@ -11,9 +11,6 @@ sealed class WalletShellException(
     class NoPendingDurableCommit :
         WalletShellException("No durable wallet transition is awaiting retry")
 
-    class DurableRetryUnavailable :
-        WalletShellException("The wallet engine has no durable retry seam")
-
     class CoreRejected(val detail: String) :
         WalletShellException("Wallet core rejected the event: $detail")
 

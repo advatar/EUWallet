@@ -83,3 +83,31 @@ fn presentation_json_contract_is_camel_case() {
         "expected the minimised claim, got: {out}"
     );
 }
+
+#[test]
+fn history_mutation_json_contract_uses_camel_case_commands_and_numeric_seq() {
+    let mut core = Core::new("wallet.example", "device-key");
+
+    assert_eq!(
+        core.handle_event_json(r#"{"type":"redactTransaction","seq":0}"#)
+            .unwrap(),
+        "[]"
+    );
+    assert_eq!(
+        core.handle_event_json(r#"{"type":"wipeTransactionLog"}"#)
+            .unwrap(),
+        "[]"
+    );
+
+    for invalid in [
+        r#"{"type":"redact_transaction","seq":0}"#,
+        r#"{"type":"redactTransaction","transactionId":0}"#,
+        r#"{"type":"redactTransaction","seq":"0"}"#,
+        r#"{"type":"wipe_transaction_log"}"#,
+    ] {
+        assert!(
+            core.handle_event_json(invalid).is_err(),
+            "accepted non-contract history event: {invalid}"
+        );
+    }
+}

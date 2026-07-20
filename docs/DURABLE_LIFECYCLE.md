@@ -42,6 +42,12 @@ ingestion also project authenticated record count, each evidence component and a
 before the successful storage transition. The projection follows exact upsert semantics, including
 replacement and test-fixture promotion; rejection leaves the prior checkpoint and audit unchanged.
 
+Transaction redaction and full history wipe are Core events under the same commit boundary. Core
+admits them only when no protocol flow or native callback is pending, and the native shells report a
+blocked mutation as an error rather than an idle success. Successful and aborted terminal issuance,
+presentation, payment, QES and wallet-to-wallet transitions release their active marker and pending
+callbacks before a later history event can be admitted.
+
 ## Failure and retry semantics
 
 An export or commit failure retains the exact event and effect batch in process memory. A retry is
@@ -76,8 +82,17 @@ FFI and coordinator failures are stable, low-cardinality codes without source er
 generations, events, effects, credential material or checkpoint bytes. Native environment and
 checkpoint wrappers have redacted string/debug representations and defensively copy byte arrays.
 
-The coordinators are production-facing seams, but application composition is still open. The iOS
-app must make the coordinator the sole owner-facing Core event path. Android still needs generated
-Rust bindings, a durable-engine adapter and an application entry point. Both clients also need
-migration/recovery UX, physical-device evidence and a provider monotonic receipt (or evaluated
-platform monotonic anchor) before stronger rollback or delivery claims are justified.
+Both native effect executors now require a concrete coordinator, and their public behavior is tested
+through coordinator-backed engines. The current iOS application routes protocol and history events
+through that coordinator; a file-private adapter owns generated-engine mutation, and a CI
+architecture test guards the current application sources against direct construction or known raw
+mutators. The generated binding remains a public compatibility surface, so this is source-level
+composition enforcement rather than proof that arbitrary future client code cannot bypass it.
+
+The iOS demo deliberately uses a process-local CAS store because its fixture identities rotate on
+every launch. Production composition must instead inject `AppleDurableStateStore` with stable,
+device-bound installation identities. Android still needs generated Rust bindings, a durable-engine
+adapter and an application entry point, so the cross-platform sole-event-path parent remains open.
+Both clients also need migration/recovery UX, physical-device evidence and a provider monotonic
+receipt (or evaluated platform monotonic anchor) before stronger rollback or delivery claims are
+justified.

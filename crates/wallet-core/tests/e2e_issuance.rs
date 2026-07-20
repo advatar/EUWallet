@@ -184,6 +184,18 @@ fn offer_event() -> Event {
     }
 }
 
+fn assert_credential_rejection(effects: &[Effect]) {
+    assert!(matches!(
+        effects,
+        [
+            Effect::Render {
+                screen: presenter::ScreenDescription::Error { code, .. }
+            },
+            Effect::Close
+        ] if code == "credential_issuance_rejected"
+    ));
+}
+
 #[test]
 fn full_issuance_with_in_core_trust_and_attestation() {
     let (mut core, device, issuer) = setup(true, true);
@@ -221,13 +233,20 @@ fn full_issuance_with_in_core_trust_and_attestation() {
 
     // Credential returned → issued.
     let cred = issued_sd_jwt(&issuer, device.public_key_raw(), None);
-    core.handle_event(Event::CredentialReceived {
+    let effects = core.handle_event(Event::CredentialReceived {
         format: "dc+sd-jwt".into(),
         bytes: cred.clone(),
     });
+    assert_eq!(effects, vec![Effect::Close]);
     let (fmt, bytes) = core.issued_credential().expect("credential issued");
     assert_eq!(fmt, "dc+sd-jwt");
     assert_eq!(bytes, cred);
+
+    // Terminal issuance released the active marker, so history mutation is immediately admitted.
+    assert!(core
+        .handle_event(Event::RedactTransaction { seq: 0 })
+        .is_empty());
+    assert!(core.transaction_log().entries()[0].redacted);
 }
 
 #[test]
@@ -266,13 +285,14 @@ fn issuer_provided_key_binding_jwt_is_rejected_during_issuance() {
         format: "dc+sd-jwt".into(),
         bytes: issued_presentation.into_bytes(),
     });
-    assert_eq!(effects, vec![Effect::Close]);
+    assert_credential_rejection(&effects);
     assert!(core.issued_credential().is_none());
     assert_eq!(core.held_credentials_json(), "[]");
     assert_eq!(
         core.last_credential_ingestion_error(),
         Some(&CredentialIngestionError::MalformedCredential)
     );
+    assert!(core.handle_event(Event::WipeTransactionLog).is_empty());
 }
 
 #[test]
@@ -364,13 +384,31 @@ fn forged_credential_response_aborts_and_is_not_stored() {
         bytes: forged,
     });
 
-    assert_eq!(effects, vec![Effect::Close]);
+    assert_credential_rejection(&effects);
     assert!(core.issued_credential().is_none());
     assert_eq!(core.held_credentials_json(), "[]");
     assert_eq!(
         core.last_credential_ingestion_error(),
         Some(&CredentialIngestionError::SignatureInvalid)
     );
+    assert!(core.handle_event(Event::WipeTransactionLog).is_empty());
+}
+
+#[test]
+fn out_of_order_credential_response_is_visible_and_does_not_wedge_the_wallet() {
+    let (mut core, _device, _issuer) = setup(true, true);
+    let effects = core.handle_event(Event::CredentialReceived {
+        format: "dc+sd-jwt".into(),
+        bytes: b"unexpected".to_vec(),
+    });
+
+    assert_credential_rejection(&effects);
+    assert_eq!(core.held_credentials_json(), "[]");
+    assert_eq!(
+        core.last_credential_ingestion_error(),
+        Some(&CredentialIngestionError::UnexpectedCredentialResponse)
+    );
+    assert!(core.handle_event(Event::WipeTransactionLog).is_empty());
 }
 
 #[test]

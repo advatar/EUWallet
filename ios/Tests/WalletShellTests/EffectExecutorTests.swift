@@ -4,9 +4,11 @@ import XCTest
 /// A scripted engine standing in for the Rust WalletEngine over the JSON contract. It returns the
 /// same effect sequence the real core does, so the shell's dispatch and fail-closed boundaries can
 /// be tested on the host without linking the xcframework.
-final class MockEngine: WalletEngineDriving {
+final class MockEngine: DurableWalletEngineDriving {
     private let response: (String) -> String
     private(set) var receivedEvents: [String] = []
+    private(set) var exportedGenerations: [UInt64] = []
+    private(set) var preparationCount = 0
 
     init(response: @escaping (String) -> String = MockEngine.happyPathResponse) {
         self.response = response
@@ -16,6 +18,19 @@ final class MockEngine: WalletEngineDriving {
         receivedEvents.append(eventJson)
         return response(eventJson)
     }
+
+    func prepareForDurableRestore(environment: CoreDurableEnvironment) {
+        preparationCount += 1
+    }
+
+    func makeDurableCheckpoint(generation: UInt64) -> CoreDurableCheckpoint {
+        exportedGenerations.append(generation)
+        var encodedGeneration = generation.bigEndian
+        let bytes = withUnsafeBytes(of: &encodedGeneration) { Data($0) }
+        return CoreDurableCheckpoint(generation: generation, bytes: bytes)
+    }
+
+    func restoreDurableCheckpointRecord(_ checkpoint: CoreDurableCheckpoint) {}
 
     private static func happyPathResponse(_ eventJson: String) -> String {
         if eventJson.contains("\"authorizationRequestReceived\"") {
@@ -52,6 +67,31 @@ final class MockEngine: WalletEngineDriving {
     }
 }
 
+private final class ExecutorTestDurableStore: DurableStateStore {
+    private(set) var record: DurableStateRecord?
+
+    func load(context: DurableStateContext) -> DurableStateLoadResult {
+        record.map(DurableStateLoadResult.record) ?? .empty
+    }
+
+    func commit(
+        expectedGeneration: UInt64,
+        nextGeneration: UInt64,
+        plaintext: Data,
+        context: DurableStateContext
+    ) throws -> DurableStateRecord {
+        let actual = record?.generation ?? 0
+        guard actual == expectedGeneration else {
+            throw DurableStateStoreError.generationConflict(
+                expected: expectedGeneration,
+                actual: actual)
+        }
+        let committed = DurableStateRecord(generation: nextGeneration, plaintext: plaintext)
+        record = committed
+        return committed
+    }
+}
+
 private enum ExpectedFailure: Error { case failure }
 
 private final class FailingSigner: Signer {
@@ -74,6 +114,16 @@ private final class FailingIssuer: IssuerResponder {
 
     func credential(proofJwt: Data) async throws -> (format: String, bytes: Data) {
         throw ExpectedFailure.failure
+    }
+}
+
+private final class FixedCredentialIssuer: IssuerResponder {
+    func token() async -> (bound: Bool, cNonce: UInt64) {
+        (true, 1)
+    }
+
+    func credential(proofJwt: Data) async -> (format: String, bytes: Data) {
+        ("dc+sd-jwt", Data("issuer-credential".utf8))
     }
 }
 
@@ -148,6 +198,7 @@ final class EffectExecutorTests: XCTestCase {
 
     private func makeExecutor(
         engine: MockEngine = MockEngine(),
+        durableStore: ExecutorTestDurableStore = ExecutorTestDurableStore(),
         signer: Signer = StubSigner(),
         http: HttpClient = StubHttpClient(),
         storage: SecureStorage = InMemoryStorage(),
@@ -157,8 +208,23 @@ final class EffectExecutorTests: XCTestCase {
         presentationRedirectHandler: OpenID4VPRedirectHandler? = nil,
         render: @escaping (UInt64?, Data?, ScreenDescription) throws -> Void = { _, _, _ in }
     ) -> EffectExecutor {
-        EffectExecutor(
+        let context = try! DurableLifecycleContextFactory.make(
+            applicationIdentifier: "eu.advatar.wallet.tests",
+            walletClientId: "wallet.test",
+            deviceKeyReference: "device-test-key")
+        let lifecycle = DurableLifecycleCoordinator(
             engine: engine,
+            store: durableStore,
+            context: context)
+        try! lifecycle.bootstrap(environment: CoreDurableEnvironment(
+            clockEpoch: 1_790_000_000,
+            signedTrustList: Data([1]),
+            operatorPublicKey: Data([2]),
+            devicePublicKey: Data([3]),
+            wuaJwt: Data([4]),
+            wuaProviderPublicKey: Data([5])))
+        return EffectExecutor(
+            lifecycle: lifecycle,
             signer: signer,
             http: http,
             storage: storage,
@@ -183,6 +249,47 @@ final class EffectExecutorTests: XCTestCase {
             "Infrastructure failure became presentationDelivered",
             file: file,
             line: line)
+    }
+
+    func testExecutorCommitsThroughConcreteLifecycleBeforeRendering() async throws {
+        let engine = MockEngine { _ in
+            #"[{"type":"render","screen":{"screen":"loading"}}]"#
+        }
+        let store = ExecutorTestDurableStore()
+        var rendered = false
+        let executor = makeExecutor(engine: engine, durableStore: store) { _, _, _ in
+            rendered = true
+        }
+
+        let outcome = try await executor.send(eventJson: #"{"type":"start"}"#)
+
+        XCTAssertEqual(outcome, .awaitingInput)
+        XCTAssertTrue(rendered)
+        XCTAssertEqual(engine.preparationCount, 1)
+        XCTAssertEqual(engine.exportedGenerations, [1])
+        XCTAssertEqual(store.record?.generation, 1)
+    }
+
+    func testHistoryMaintenanceEventsAreDurablyCommittedIdleTransitions() async throws {
+        let engine = MockEngine { _ in "[]" }
+        let store = ExecutorTestDurableStore()
+        let executor = makeExecutor(engine: engine, durableStore: store)
+
+        let redactionOutcome = try await executor.send(
+            eventJson: WalletEventJSON.historyRedaction(seq: 7))
+        let wipeOutcome = try await executor.send(eventJson: WalletEventJSON.historyWipe())
+
+        XCTAssertEqual(redactionOutcome, .idle)
+        XCTAssertEqual(wipeOutcome, .idle)
+
+        XCTAssertEqual(
+            engine.receivedEvents,
+            [
+                #"{"type":"redactTransaction","seq":7}"#,
+                #"{"type":"wipeTransactionLog"}"#,
+            ])
+        XCTAssertEqual(engine.exportedGenerations, [1, 2])
+        XCTAssertEqual(store.record?.generation, 2)
     }
 
     func testRequestRendersConsentScreen() async throws {
@@ -468,7 +575,7 @@ final class EffectExecutorTests: XCTestCase {
         XCTAssertEqual(afterCloseOutcome, .aborted(.effectAfterClose))
     }
 
-    func testMalformedCoreOutputThrowsTypedError() async {
+    func testMalformedCoreOutputIsRejectedByLifecycleBeforeCommit() async {
         let engine = MockEngine { _ in "not-json" }
         let executor = makeExecutor(engine: engine)
 
@@ -478,13 +585,10 @@ final class EffectExecutorTests: XCTestCase {
                     operationId: 1,
                     authorizationHash: Self.authorizationHash))
             XCTFail("expected malformed core output to fail")
-        } catch let error as EffectExecutorError {
-            guard case .ffi(.malformedCoreOutput) = error else {
-                return XCTFail("unexpected error: \(error)")
-            }
         } catch {
-            XCTFail("untyped error: \(error)")
+            XCTAssertEqual(error as? DurableLifecycleError, .malformedCoreOutput)
         }
+        XCTAssertTrue(engine.exportedGenerations.isEmpty)
         assertNoSemanticSuccessOrDecline(engine.receivedEvents)
     }
 
@@ -771,6 +875,46 @@ final class EffectExecutorTests: XCTestCase {
             .aborted(.coreError(code: "operation_failed", message: "Operation failed")))
         XCTAssertTrue(engine.receivedEvents.contains { $0.contains("\"failure\":\"issuer\"") })
         assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+    }
+
+    func testCredentialCallbackAcknowledgesOnlyCoreAcceptedCompletion() async throws {
+        let rejectedEngine = MockEngine { event in
+            if event.contains("\"credentialReceived\"") {
+                return #"[{"type":"render","screen":{"screen":"error","code":"credential_issuance_rejected","message":"Credential rejected"}},{"type":"close"}]"#
+            }
+            return #"[{"type":"requestCredential","operationId":25,"proofJwt":[1,2,3]}]"#
+        }
+        let rejectedExecutor = makeExecutor(
+            engine: rejectedEngine,
+            issuer: FixedCredentialIssuer())
+
+        let rejectedOutcome = try await rejectedExecutor.send(eventJson: "{}")
+
+        XCTAssertEqual(
+            rejectedOutcome,
+            .aborted(.coreError(
+                code: "credential_issuance_rejected",
+                message: "Credential rejected")))
+
+        let acceptedEngine = MockEngine { event in
+            if event.contains("\"credentialReceived\"") {
+                return #"[{"type":"close"}]"#
+            }
+            return #"[{"type":"requestCredential","operationId":26,"proofJwt":[4,5,6]}]"#
+        }
+        let acceptedExecutor = makeExecutor(
+            engine: acceptedEngine,
+            issuer: FixedCredentialIssuer())
+
+        let acceptedOutcome = try await acceptedExecutor.send(eventJson: "{}")
+
+        XCTAssertEqual(acceptedOutcome, .succeeded)
+        XCTAssertTrue(rejectedEngine.receivedEvents.contains {
+            $0.contains("\"type\":\"credentialReceived\"")
+        })
+        XCTAssertTrue(acceptedEngine.receivedEvents.contains {
+            $0.contains("\"type\":\"credentialReceived\"")
+        })
     }
 
     func testUnimplementedProtocolEffectFailsExplicitly() async throws {

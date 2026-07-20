@@ -332,7 +332,7 @@ class DurableLifecycleCoordinatorTest {
         lifecycle.bootstrap(environment)
         var renders = 0
         val executor = EffectExecutor(
-            engine = lifecycle,
+            lifecycle = lifecycle,
             signer = WalletSigner { _, _ -> byteArrayOf(1) },
             httpClient = WalletHttpClient { _, _, _ -> HttpResponse(200, byteArrayOf()) },
             storage = WalletStorage { _, _ -> },
@@ -370,7 +370,7 @@ class DurableLifecycleCoordinatorTest {
         lifecycle.bootstrap(environment)
         var renders = 0
         val executor = EffectExecutor(
-            engine = lifecycle,
+            lifecycle = lifecycle,
             signer = WalletSigner { _, _ -> byteArrayOf(1) },
             httpClient = WalletHttpClient { _, _, _ -> HttpResponse(200, byteArrayOf()) },
             storage = WalletStorage { _, _ -> },
@@ -383,7 +383,7 @@ class DurableLifecycleCoordinatorTest {
             executor.send(firstEvent)
         }
         val replacementExecutor = EffectExecutor(
-            engine = lifecycle,
+            lifecycle = lifecycle,
             signer = WalletSigner { _, _ -> byteArrayOf(1) },
             httpClient = WalletHttpClient { _, _, _ -> HttpResponse(200, byteArrayOf()) },
             storage = WalletStorage { _, _ -> },
