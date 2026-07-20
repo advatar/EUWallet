@@ -2,7 +2,7 @@ name: euwallet-ci
 
 # Definition-of-done gates for the EUDI wallet (plan Section 13). Every job here must be
 # green before a change merges. Jobs mirror the architecture layers: Rust core, formal
-# tiers 1/2/3, the iOS shell, traceability, and supply-chain evidence.
+# tiers 1/2/3, both native shells, traceability, and supply-chain evidence.
 
 on:
   push:
@@ -156,6 +156,40 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+
+  android-shell:
+    name: Android shell (test, lint, release)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up the supported JDK
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Validate and configure the Gradle wrapper
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
+        with:
+          validate-wrappers: true
+      - name: Verify the pinned Android build environment
+        run: |
+          set -euo pipefail
+          java -version
+          ./gradlew --version
+          test -n "${ANDROID_HOME:-}"
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -d "$ANDROID_HOME/build-tools/36.0.0"
+      - name: Test, lint and assemble the release library
+        run: >-
+          ./gradlew
+          :wallet-shell:test
+          :wallet-shell:lint
+          :wallet-shell:assembleRelease
+          --console=plain
+          --stacktrace
 
   traceability:
     name: HLR traceability import
