@@ -69,9 +69,13 @@ operational solution needed to enter those processes.
         holder-visible consent contract.
 - [x] Bound DCQL request/query/path/value cardinality and fail closed on malformed queries or
       unsupported selection, trust and transaction-data modifiers.
-- [ ] Implement final DCQL `credential_sets`, `claim_sets`, `trusted_authorities`, multiple-return,
-      retention-intent and `transaction_data` semantics; they are rejected until enforceable end
-      to end.
+- [ ] [#14](https://github.com/advatar/EUWallet/issues/14): implement final DCQL selection and
+      transaction binding semantics without over-disclosure or partial responses.
+  - [ ] Replace opaque `claim_sets` and `credential_sets` with bounded OpenID4VP 1.0 types, then
+        integrate deterministic preference-order claim selection and atomic required/optional
+        credential-set planning for supported SD-JWT VC and mdoc holdings.
+  - [ ] Implement authenticated `trusted_authorities`, `multiple=true`, mdoc retention intent and
+        typed `transaction_data`; these modifiers remain rejected until each is bound end to end.
 - [x] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths
       ([#6](https://github.com/advatar/EUWallet/issues/6)).
   - [x] Require and emit canonical CBOR tag-0 RFC 3339 `tdate` validity values, with malformed
