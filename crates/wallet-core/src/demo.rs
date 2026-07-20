@@ -16,17 +16,19 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use base64ct::{Base64UrlUnpadded, Encoding};
+use base64ct::{Base64, Base64UrlUnpadded, Encoding};
 use crypto_backend::{AwsLc, SoftwareSigner};
 use crypto_traits::{Alg, Digest, KeyRef, Signer};
 use serde_json::json;
 
-// Real openssl-generated RP chain, reused from the x509 crate's conformance vectors: `rp.der`
-// (leaf reader cert) is issued by `ca.der`; `rp.pkcs8.der` is the leaf's private key. The demo
-// trusted list anchors `ca.der`, so in-core RP registration validates against a real chain.
+// Real openssl-generated certificates from the x509 conformance vectors. `rp.der` is the reader
+// leaf; the credential issuer uses a distinct leaf with exactly one HTTPS URI SAN. Both leaves use
+// the fixture private key and chain to `ca.der`, allowing one demo signer without conflating their
+// authenticated certificate profiles.
 const CA_DER: &[u8] = include_bytes!("../../x509/tests/vectors/ca.der");
 const RP_DER: &[u8] = include_bytes!("../../x509/tests/vectors/rp.der");
 const RP_PKCS8: &[u8] = include_bytes!("../../x509/tests/vectors/rp.pkcs8.der");
+const ISSUER_DER_B64: &str = include_str!("../../x509/tests/vectors/issuer.der.b64");
 
 /// A fixed clock inside the demo credential/trust-list validity windows.
 const DEMO_EPOCH: i64 = 1_790_000_000;
@@ -41,6 +43,10 @@ const PAYMENT_REQUEST_JSON: &[u8] = br#"{"creditor_name":"Acme Store","creditor_
 
 fn b64(bytes: &[u8]) -> String {
     Base64UrlUnpadded::encode_string(bytes)
+}
+
+fn issuer_certificate_der() -> Vec<u8> {
+    Base64::decode_vec(ISSUER_DER_B64.trim()).expect("embedded issuer certificate")
 }
 
 /// Everything the shell must load/feed to drive the demo flows against the real core.
@@ -135,8 +141,8 @@ impl DemoWallet {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             device: SoftwareSigner::generate_p256().expect("device keygen"),
-            // The issuer must sign with the key authenticated by `RP_DER`; a random unrelated key
-            // would make the demo credential structurally parseable but cryptographically false.
+            // The issuer must sign with the key authenticated by the URI-SAN issuer certificate; a
+            // random unrelated key would make the credential cryptographically false.
             issuer: SoftwareSigner::from_pkcs8_der(RP_PKCS8).expect("issuer key"),
             operator: SoftwareSigner::generate_p256().expect("operator keygen"),
             rp: SoftwareSigner::from_pkcs8_der(RP_PKCS8).expect("rp key"),
@@ -285,7 +291,7 @@ impl DemoWallet {
             device_public_key: self.device.public_key_raw().to_vec(),
             wua_jwt: self.wua_jwt(),
             wallet_provider_public_key: self.wallet_provider.public_key_raw().to_vec(),
-            issuer_cert_chain: vec![RP_DER.to_vec()],
+            issuer_cert_chain: vec![issuer_certificate_der()],
             issuer_id: "https://issuer.example".into(),
             offer: br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#
                 .to_vec(),

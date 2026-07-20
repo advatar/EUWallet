@@ -1,21 +1,24 @@
 //! OID4VCI issuance driven through wallet-core, proving issuer_trusted and proof_key_attested are
 //! computed IN-CORE (trust+x509 for the issuer chain; a verified WUA bound to the device key) —
 //! not shell booleans. Real aws-lc-rs crypto throughout.
-use base64ct::{Base64UrlUnpadded, Encoding};
+use base64ct::{Base64, Base64UrlUnpadded, Encoding};
 use crypto_backend::{AwsLc, SoftwareSigner};
 use crypto_traits::{Alg, Digest, KeyRef, Signer};
 use serde_json::json;
 use wallet_core::{Core, CredentialIngestionError, Effect, Event};
 
-// The issuer chain reuses the real openssl leaf (rp.der) chaining to the trusted CA (ca.der);
-// issuer trust is chain validity to a trusted PID anchor, independent of the EKU profile.
+// The issuer leaf carries exactly one authenticated URI SAN and chains to the PID CA.
 const CA_DER: &[u8] = include_bytes!("../../x509/tests/vectors/ca.der");
-const ISSUER_CHAIN_LEAF: &[u8] = include_bytes!("../../x509/tests/vectors/rp.der");
+const ISSUER_CHAIN_LEAF_B64: &str = include_str!("../../x509/tests/vectors/issuer.der.b64");
 const ISSUER_PKCS8: &[u8] = include_bytes!("../../x509/tests/vectors/rp.pkcs8.der");
 const NOW: i64 = 1_790_000_000;
 
 fn b64(b: &[u8]) -> String {
     Base64UrlUnpadded::encode_string(b)
+}
+
+fn issuer_chain_leaf() -> Vec<u8> {
+    Base64::decode_vec(ISSUER_CHAIN_LEAF_B64.trim()).expect("embedded issuer certificate")
 }
 
 fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
@@ -125,7 +128,7 @@ fn setup(load_trust: bool, load_wua: bool) -> (Core, SoftwareSigner, SoftwareSig
 fn offer_event() -> Event {
     Event::CredentialOfferReceived {
         offer: OFFER.to_vec(),
-        issuer_cert_chain: vec![ISSUER_CHAIN_LEAF.to_vec()],
+        issuer_cert_chain: vec![issuer_chain_leaf()],
         issuer_id: "https://issuer.example".into(),
     }
 }
@@ -184,6 +187,20 @@ fn untrusted_issuer_is_rejected_in_core() {
     assert!(
         !fx.contains(&Effect::RequestToken),
         "an untrusted issuer must not proceed"
+    );
+}
+
+#[test]
+fn shell_issuer_id_is_only_a_checked_compatibility_assertion() {
+    let (mut core, _device, _issuer) = setup(true, true);
+    let fx = core.handle_event(Event::CredentialOfferReceived {
+        offer: OFFER.to_vec(),
+        issuer_cert_chain: vec![issuer_chain_leaf()],
+        issuer_id: "https://other-issuer.example".into(),
+    });
+    assert!(
+        !fx.contains(&Effect::RequestToken),
+        "a shell identity mismatch must not authorize issuance: {fx:?}"
     );
 }
 
@@ -261,7 +278,7 @@ fn authenticated_status_uri_and_index_are_preserved_as_one_reference() {
     core.ingest_credential(
         "dc+sd-jwt",
         &credential,
-        &[ISSUER_CHAIN_LEAF.to_vec()],
+        &[issuer_chain_leaf()],
         "https://issuer.example",
     )
     .unwrap();
@@ -293,7 +310,7 @@ fn non_integer_or_non_https_status_references_never_enter_storage() {
             core.ingest_credential(
                 "dc+sd-jwt",
                 &credential,
-                &[ISSUER_CHAIN_LEAF.to_vec()],
+                &[issuer_chain_leaf()],
                 "https://issuer.example",
             ),
             Err(CredentialIngestionError::UnsupportedStatusReference)

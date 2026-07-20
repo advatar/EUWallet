@@ -23,6 +23,15 @@ pub struct ClaimSpec {
     pub mandatory: bool,
 }
 
+/// Trusted-list service domain authorised to issue a credential type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IssuerTrustDomain {
+    /// Person Identification Data issuer service.
+    Pid,
+    /// Electronic attestation issuer service, including mdoc and (Q)EAA credentials.
+    Attestation,
+}
+
 /// A credential type the wallet understands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttestationType {
@@ -31,6 +40,8 @@ pub struct AttestationType {
     pub display_name: String,
     /// Credential format: `dc+sd-jwt` or `mso_mdoc`.
     pub format: String,
+    /// The exact trusted-list service whose anchors may authenticate issuers of this type.
+    pub issuer_trust_domain: IssuerTrustDomain,
     pub claims: Vec<ClaimSpec>,
     /// Issuer ids trusted to issue this type.
     pub trusted_issuers: Vec<String>,
@@ -114,6 +125,11 @@ impl Catalogue {
             .unwrap_or(false)
     }
 
+    /// The trusted-list service domain required for issuers of type `id`.
+    pub fn issuer_trust_domain(&self, id: &str) -> Option<IssuerTrustDomain> {
+        self.get(id).map(|t| t.issuer_trust_domain)
+    }
+
     /// Does the set of `held` claim paths satisfy type `id`'s mandatory claims? False if unknown id.
     pub fn satisfies_mandatory(&self, id: &str, held: &[String]) -> bool {
         match self.get(id) {
@@ -134,6 +150,7 @@ pub fn default_catalogue() -> Catalogue {
         id: "urn:eudi:pid:1".into(),
         display_name: "Person Identification Data".into(),
         format: "dc+sd-jwt".into(),
+        issuer_trust_domain: IssuerTrustDomain::Pid,
         claims: vec![
             ClaimSpec {
                 path: "family_name".into(),
@@ -163,6 +180,7 @@ pub fn default_catalogue() -> Catalogue {
         id: "urn:eudi:mdl:1".into(),
         display_name: "Mobile Driving Licence".into(),
         format: "dc+sd-jwt".into(),
+        issuer_trust_domain: IssuerTrustDomain::Attestation,
         claims: vec![
             ClaimSpec {
                 path: "family_name".into(),
@@ -196,6 +214,7 @@ pub fn default_catalogue() -> Catalogue {
         id: "org.iso.18013.5.1.mDL".into(),
         display_name: "Mobile Driving Licence (mdoc)".into(),
         format: "mso_mdoc".into(),
+        issuer_trust_domain: IssuerTrustDomain::Attestation,
         claims: vec![
             ClaimSpec {
                 path: "family_name".into(),
@@ -220,6 +239,7 @@ pub fn default_catalogue() -> Catalogue {
         id: "urn:eudi:passport:1".into(),
         display_name: "Passport".into(),
         format: "dc+sd-jwt".into(),
+        issuer_trust_domain: IssuerTrustDomain::Attestation,
         claims: vec![
             ClaimSpec {
                 path: "family_name".into(),
@@ -259,6 +279,7 @@ pub fn default_catalogue() -> Catalogue {
         id: "urn:eudi:nid:1".into(),
         display_name: "National ID Card".into(),
         format: "dc+sd-jwt".into(),
+        issuer_trust_domain: IssuerTrustDomain::Attestation,
         claims: vec![
             ClaimSpec {
                 path: "family_name".into(),
@@ -298,6 +319,7 @@ pub fn default_catalogue() -> Catalogue {
         id: "urn:eudi:pid:de:1".into(),
         display_name: "German ID Card".into(),
         format: "dc+sd-jwt".into(),
+        issuer_trust_domain: IssuerTrustDomain::Pid,
         claims: vec![
             ClaimSpec {
                 path: "family_name".into(),
@@ -352,6 +374,7 @@ mod tests {
             id: "t1".into(),
             display_name: "One".into(),
             format: "dc+sd-jwt".into(),
+            issuer_trust_domain: IssuerTrustDomain::Pid,
             claims: vec![],
             trusted_issuers: vec![],
         }));
@@ -361,11 +384,16 @@ mod tests {
             id: "t1".into(),
             display_name: "One v2".into(),
             format: "mso_mdoc".into(),
+            issuer_trust_domain: IssuerTrustDomain::Attestation,
             claims: vec![],
             trusted_issuers: vec![],
         }));
         assert_eq!(c.len(), 1);
         assert_eq!(c.get("t1").unwrap().display_name, "One v2");
+        assert_eq!(
+            c.issuer_trust_domain("t1"),
+            Some(IssuerTrustDomain::Attestation)
+        );
         assert!(c.get("missing").is_none());
     }
 
@@ -437,6 +465,14 @@ mod tests {
         assert!(c.issuer_allowed("urn:eudi:pid:de:1", "https://issuer.example"));
         assert!(!c.issuer_allowed("urn:eudi:pid:1", "https://evil.example"));
         assert!(!c.issuer_allowed("unknown", "https://issuer.example"));
+        assert_eq!(
+            c.issuer_trust_domain("urn:eudi:pid:1"),
+            Some(IssuerTrustDomain::Pid)
+        );
+        assert_eq!(
+            c.issuer_trust_domain("org.iso.18013.5.1.mDL"),
+            Some(IssuerTrustDomain::Attestation)
+        );
     }
 
     #[test]

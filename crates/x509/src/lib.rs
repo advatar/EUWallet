@@ -15,7 +15,9 @@
 
 use crypto_traits::{Alg, Verifier};
 use der::{Decode, Encode};
-use x509_cert::ext::pkix::{BasicConstraints, CertificatePolicies, ExtendedKeyUsage};
+use x509_cert::ext::pkix::{
+    name::GeneralName, BasicConstraints, CertificatePolicies, ExtendedKeyUsage, SubjectAltName,
+};
 use x509_cert::Certificate;
 
 /// ISO/IEC 18013-5 mdoc **reader authentication** EKU — the real OID a relying party's reader
@@ -28,6 +30,7 @@ pub const EKU_SERVER_AUTH: &str = "1.3.6.1.5.5.7.3.1";
 const OID_EKU: &str = "2.5.29.37";
 const OID_POLICIES: &str = "2.5.29.32";
 const OID_BASIC_CONSTRAINTS: &str = "2.5.29.19";
+const OID_SUBJECT_ALT_NAME: &str = "2.5.29.17";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum X509Error {
@@ -54,6 +57,8 @@ pub struct ParsedCert {
     pub public_key_raw: Vec<u8>,
     pub subject: String,
     pub issuer: String,
+    /// URI identities carried by the leaf's Subject Alternative Name extension.
+    pub uri_sans: Vec<String>,
     pub not_before: i64,
     pub not_after: i64,
     pub is_ca: bool,
@@ -95,6 +100,7 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
     let mut is_ca = false;
     let mut eku = Vec::new();
     let mut policies = Vec::new();
+    let mut uri_sans = Vec::new();
 
     if let Some(exts) = &tbs.extensions {
         for ext in exts {
@@ -117,6 +123,14 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
                                 .collect();
                     }
                 }
+                OID_SUBJECT_ALT_NAME => {
+                    let san = SubjectAltName::from_der(ext.extn_value.as_bytes())
+                        .map_err(|_| X509Error::Der)?;
+                    uri_sans.extend(san.0.iter().filter_map(|name| match name {
+                        GeneralName::UniformResourceIdentifier(uri) => Some(uri.to_string()),
+                        _ => None,
+                    }));
+                }
                 _ => {}
             }
         }
@@ -130,12 +144,180 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
         public_key_raw,
         subject: tbs.subject.to_string(),
         issuer: tbs.issuer.to_string(),
+        uri_sans,
         not_before,
         not_after,
         is_ca,
         eku,
         policies,
     })
+}
+
+/// A credential-issuer leaf that has passed both path validation and the repository's current
+/// explicit issuer profile. The trust service/domain remains a caller decision because the
+/// `x509` crate deliberately has no dependency on the trusted-list model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedCredentialIssuer {
+    /// The single authenticated HTTPS URI carried in the leaf certificate's SAN extension.
+    pub identity: String,
+    pub public_key_raw: Vec<u8>,
+    pub not_before: i64,
+    pub not_after: i64,
+}
+
+/// Validate a credential issuer against one already service-scoped anchor set.
+///
+/// This is intentionally a narrow interim EUDI profile: the leaf must be an end entity and carry
+/// exactly one canonical HTTPS-origin URI SAN, which becomes the issuer identity used by
+/// credential policy. The accepted grammar is `https://<lowercase ASCII DNS name>[:<port>]`, with
+/// at least two DNS labels and an optional non-zero, non-default port. Paths (including `/`), IP
+/// literals, userinfo, query, fragment, whitespace and alternate normalizations are rejected. It
+/// does not claim to replace complete RFC 5280 or the final PID/(Q)EAA certificate profiles.
+pub fn check_credential_issuer(
+    chain_der: &[Vec<u8>],
+    trust_anchors: &[ParsedCert],
+    now: i64,
+    verifier: &dyn Verifier,
+) -> Result<ValidatedCredentialIssuer, X509Error> {
+    let path = validate_path(chain_der, trust_anchors, now, verifier)?;
+    let leaf = &path[0];
+    if leaf.is_ca {
+        return Err(X509Error::ProfileViolation(
+            "credential issuer leaf must be an end-entity",
+        ));
+    }
+    let identity = match leaf.uri_sans.as_slice() {
+        [identity] if valid_https_issuer_identity(identity) => identity.clone(),
+        [] => {
+            return Err(X509Error::ProfileViolation(
+                "credential issuer identity URI is missing",
+            ));
+        }
+        [_] => {
+            return Err(X509Error::ProfileViolation(
+                "credential issuer identity must be an HTTPS URI",
+            ));
+        }
+        _ => {
+            return Err(X509Error::ProfileViolation(
+                "credential issuer identity is ambiguous",
+            ));
+        }
+    };
+    Ok(ValidatedCredentialIssuer {
+        identity,
+        public_key_raw: leaf.public_key_raw.clone(),
+        not_before: leaf.not_before,
+        not_after: leaf.not_after,
+    })
+}
+
+fn valid_https_issuer_identity(identity: &str) -> bool {
+    if !identity.is_ascii()
+        || identity
+            .chars()
+            .any(|c| c.is_ascii_control() || c.is_whitespace())
+    {
+        return false;
+    }
+    let Some(authority) = identity.strip_prefix("https://") else {
+        return false;
+    };
+    if authority.is_empty()
+        || authority.contains(['/', '?', '#', '@', '\\', '[', ']'])
+        || authority.matches(':').count() > 1
+    {
+        return false;
+    }
+    let (host, port) = authority
+        .rsplit_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    if !valid_canonical_dns_name(host) {
+        return false;
+    }
+    match port {
+        None => true,
+        Some(port) => {
+            !(port.len() > 1 && port.starts_with('0'))
+                && port
+                    .parse::<u16>()
+                    .is_ok_and(|port| port != 0 && port != 443)
+        }
+    }
+}
+
+fn valid_canonical_dns_name(host: &str) -> bool {
+    if host.len() > 253
+        || !host.contains('.')
+        || host.parse::<std::net::Ipv4Addr>().is_ok()
+        || host.bytes().any(|b| b.is_ascii_uppercase())
+    {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            && label
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && label
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+    })
+}
+
+#[cfg(test)]
+mod issuer_identity_tests {
+    use super::valid_https_issuer_identity;
+
+    #[test]
+    fn accepts_only_the_documented_canonical_https_origin_grammar() {
+        for identity in [
+            "https://issuer.example",
+            "https://pid-1.issuer.example",
+            "https://issuer.example:8443",
+        ] {
+            assert!(valid_https_issuer_identity(identity), "rejected {identity}");
+        }
+
+        for identity in [
+            "http://issuer.example",
+            "HTTPS://issuer.example",
+            "https://",
+            "https://issuer",
+            "https://Issuer.example",
+            "https://issuer.example/",
+            "https://issuer.example/path",
+            "https://issuer.example?tenant=1",
+            "https://issuer.example#fragment",
+            "https://user@issuer.example",
+            "https://issuer.example\\redirect",
+            "https://issuer..example",
+            "https://-issuer.example",
+            "https://issuer-.example",
+            "https://issuer_example.test",
+            "https://127.0.0.1",
+            "https://[2001:db8::1]",
+            "https://issuer.example:",
+            "https://issuer.example:0",
+            "https://issuer.example:443",
+            "https://issuer.example:08443",
+            "https://issuer.example:65536",
+            "https://issuer.example:abc",
+            "https://issuer.example :8443",
+            "https://issuer.example\n",
+        ] {
+            assert!(
+                !valid_https_issuer_identity(identity),
+                "accepted {identity:?}"
+            );
+        }
+    }
 }
 
 /// Step 1 — path validation (a pragmatic RFC 5280 subset): chain the leaf up to a trust anchor,

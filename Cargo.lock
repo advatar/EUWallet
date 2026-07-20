@@ -1445,6 +1445,7 @@ dependencies = [
 name = "x509"
 version = "0.0.1"
 dependencies = [
+ "base64ct",
  "crypto-traits",
  "der",
  "x509-cert",
