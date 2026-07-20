@@ -9,6 +9,7 @@
 //! identical bytes. Digests and signatures are computed only through the `crypto-traits`
 //! boundary — this crate never implements a cryptographic algorithm.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use cose::cbor::{CborError, Value};
@@ -74,6 +75,185 @@ fn as_uint(v: &Value, ctx: &'static str) -> Result<u64, MdocError> {
         Value::Uint(n) => Ok(*n),
         _ => Err(MdocError::Malformed(ctx)),
     }
+}
+
+/// A parsed CBOR tag-0 date/time. Ordering is by the represented instant, including an arbitrary
+/// number of fractional-second digits, rather than by the original offset spelling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TDate {
+    unix_seconds: i64,
+    // Trailing zeroes are removed, so equal instants have equal representations here.
+    fraction: Vec<u8>,
+}
+
+impl TDate {
+    /// Parse RFC 3339 `date-time` as refined for CBOR tag 0 by RFC 8949 / RFC 4287: uppercase `T`,
+    /// uppercase `Z` when UTC is named directly, an optional non-empty decimal fraction, and a
+    /// required `Z` or numeric offset. Calendar and clock component ranges are checked.
+    pub fn parse(value: &str) -> Option<Self> {
+        let bytes = value.as_bytes();
+        if bytes.len() < 20
+            || bytes[4] != b'-'
+            || bytes[7] != b'-'
+            || bytes[10] != b'T'
+            || bytes[13] != b':'
+            || bytes[16] != b':'
+        {
+            return None;
+        }
+        let digits = |start: usize, end: usize| -> Option<i64> {
+            bytes.get(start..end)?.iter().try_fold(0i64, |n, byte| {
+                byte.is_ascii_digit()
+                    .then_some(n * 10 + i64::from(byte - b'0'))
+            })
+        };
+        let (year, month, day, hour, minute, second) = (
+            digits(0, 4)?,
+            digits(5, 7)?,
+            digits(8, 10)?,
+            digits(11, 13)?,
+            digits(14, 16)?,
+            digits(17, 19)?,
+        );
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let month_days = [
+            31,
+            if leap { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        if !(1..=9999).contains(&year)
+            || !(1..=12).contains(&month)
+            || day < 1
+            || day > month_days[(month - 1) as usize]
+            || hour > 23
+            || minute > 59
+            || second > 59
+        {
+            return None;
+        }
+
+        let mut suffix = 19;
+        let mut fraction = Vec::new();
+        if bytes.get(suffix) == Some(&b'.') {
+            suffix += 1;
+            let fraction_start = suffix;
+            while bytes.get(suffix).is_some_and(u8::is_ascii_digit) {
+                fraction.push(bytes[suffix] - b'0');
+                suffix += 1;
+            }
+            if suffix == fraction_start {
+                return None;
+            }
+            while fraction.last() == Some(&0) {
+                fraction.pop();
+            }
+        }
+
+        let offset_seconds = match bytes.get(suffix) {
+            Some(b'Z') if suffix + 1 == bytes.len() => 0i64,
+            Some(sign @ (b'+' | b'-')) if suffix + 6 == bytes.len() => {
+                if bytes[suffix + 3] != b':' {
+                    return None;
+                }
+                let offset_hour = digits(suffix + 1, suffix + 3)?;
+                let offset_minute = digits(suffix + 4, suffix + 6)?;
+                if offset_hour > 23 || offset_minute > 59 {
+                    return None;
+                }
+                // RFC 4287 does not permit RFC 3339's "unknown local offset" spelling.
+                if *sign == b'-' && offset_hour == 0 && offset_minute == 0 {
+                    return None;
+                }
+                let magnitude = offset_hour * 3_600 + offset_minute * 60;
+                if *sign == b'+' {
+                    magnitude
+                } else {
+                    -magnitude
+                }
+            }
+            _ => return None,
+        };
+
+        // Howard Hinnant's civil-date conversion. With years constrained to 1..=9999 all
+        // intermediate values and the offset adjustment fit comfortably in i64.
+        let adjusted_year = year - i64::from(month <= 2);
+        let era = adjusted_year / 400;
+        let year_of_era = adjusted_year - era * 400;
+        let shifted_month = month + if month > 2 { -3 } else { 9 };
+        let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        let days = era * 146_097 + day_of_era - 719_468;
+        let local_seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
+        Some(Self {
+            unix_seconds: local_seconds - offset_seconds,
+            fraction,
+        })
+    }
+
+    /// Represent an integral Unix timestamp for comparison with a shell-provided wall clock.
+    pub fn from_unix_seconds(unix_seconds: i64) -> Self {
+        Self {
+            unix_seconds,
+            fraction: Vec::new(),
+        }
+    }
+
+    /// Smallest integral Unix timestamp that is not earlier than this instant. This is suitable
+    /// for conservatively retaining a fractional validity boundary when the shell clock exposes
+    /// only whole seconds.
+    pub fn unix_seconds_ceil(&self) -> i64 {
+        self.unix_seconds
+            .saturating_add(i64::from(!self.fraction.is_empty()))
+    }
+}
+
+impl Ord for TDate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.unix_seconds.cmp(&other.unix_seconds).then_with(|| {
+            let length = self.fraction.len().max(other.fraction.len());
+            (0..length)
+                .map(|index| {
+                    self.fraction
+                        .get(index)
+                        .copied()
+                        .unwrap_or(0)
+                        .cmp(&other.fraction.get(index).copied().unwrap_or(0))
+                })
+                .find(|ordering| *ordering != Ordering::Equal)
+                .unwrap_or(Ordering::Equal)
+        })
+    }
+}
+
+impl PartialOrd for TDate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn tdate_value(value: &str, ctx: &'static str) -> Result<Value, MdocError> {
+    TDate::parse(value).ok_or(MdocError::Malformed(ctx))?;
+    Ok(Value::Tag(0, Box::new(Value::Text(value.to_string()))))
+}
+
+fn as_tdate(v: &Value, ctx: &'static str) -> Result<String, MdocError> {
+    let Value::Tag(0, inner) = v else {
+        return Err(MdocError::Malformed(ctx));
+    };
+    let Value::Text(value) = inner.as_ref() else {
+        return Err(MdocError::Malformed(ctx));
+    };
+    TDate::parse(value).ok_or(MdocError::Malformed(ctx))?;
+    Ok(value.clone())
 }
 
 /// Wrap canonical CBOR bytes as `#6.24(bstr)` — the "embedded CBOR" tag mdoc uses for
@@ -171,7 +351,7 @@ impl IssuerSignedItem {
 // MobileSecurityObject
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidityInfo {
     pub signed: String,
     pub valid_from: String,
@@ -192,7 +372,7 @@ pub struct MobileSecurityObject {
 }
 
 impl MobileSecurityObject {
-    fn to_value(&self) -> Value {
+    fn to_value(&self) -> Result<Value, MdocError> {
         let value_digests = Value::Map(
             self.value_digests
                 .iter()
@@ -210,18 +390,18 @@ impl MobileSecurityObject {
         let validity = Value::Map(vec![
             (
                 Value::Text("signed".into()),
-                Value::Text(self.validity_info.signed.clone()),
+                tdate_value(&self.validity_info.signed, "signed tdate")?,
             ),
             (
                 Value::Text("validFrom".into()),
-                Value::Text(self.validity_info.valid_from.clone()),
+                tdate_value(&self.validity_info.valid_from, "validFrom tdate")?,
             ),
             (
                 Value::Text("validUntil".into()),
-                Value::Text(self.validity_info.valid_until.clone()),
+                tdate_value(&self.validity_info.valid_until, "validUntil tdate")?,
             ),
         ]);
-        Value::Map(vec![
+        Ok(Value::Map(vec![
             (
                 Value::Text("version".into()),
                 Value::Text(self.version.clone()),
@@ -243,7 +423,7 @@ impl MobileSecurityObject {
                 Value::Text(self.doc_type.clone()),
             ),
             (Value::Text("validityInfo".into()), validity),
-        ])
+        ]))
     }
 
     fn from_value(v: &Value) -> Result<Self, MdocError> {
@@ -278,19 +458,22 @@ impl MobileSecurityObject {
             _ => Value::Null,
         };
 
-        let validity_info = match map_get(pairs, "validityInfo") {
-            Some(Value::Map(vi)) => ValidityInfo {
-                signed: map_get(vi, "signed")
-                    .and_then(|v| as_text(v, "signed").ok())
-                    .unwrap_or_default(),
-                valid_from: map_get(vi, "validFrom")
-                    .and_then(|v| as_text(v, "validFrom").ok())
-                    .unwrap_or_default(),
-                valid_until: map_get(vi, "validUntil")
-                    .and_then(|v| as_text(v, "validUntil").ok())
-                    .unwrap_or_default(),
-            },
-            _ => ValidityInfo::default(),
+        let Some(Value::Map(vi)) = map_get(pairs, "validityInfo") else {
+            return Err(MdocError::Malformed("validityInfo"));
+        };
+        let validity_info = ValidityInfo {
+            signed: as_tdate(
+                map_get(vi, "signed").ok_or(MdocError::Malformed("signed tdate"))?,
+                "signed tdate",
+            )?,
+            valid_from: as_tdate(
+                map_get(vi, "validFrom").ok_or(MdocError::Malformed("validFrom tdate"))?,
+                "validFrom tdate",
+            )?,
+            valid_until: as_tdate(
+                map_get(vi, "validUntil").ok_or(MdocError::Malformed("validUntil tdate"))?,
+                "validUntil tdate",
+            )?,
         };
 
         Ok(MobileSecurityObject {
@@ -313,8 +496,8 @@ impl MobileSecurityObject {
     }
 
     /// The `MobileSecurityObjectBytes`: `#6.24(bstr .cbor MSO)` — the COSE_Sign1 payload.
-    pub fn to_mso_bytes(&self) -> Vec<u8> {
-        tag24(self.to_value().to_canonical())
+    pub fn to_mso_bytes(&self) -> Result<Vec<u8>, MdocError> {
+        Ok(tag24(self.to_value()?.to_canonical()))
     }
 }
 
@@ -359,7 +542,7 @@ pub fn build_and_sign(
         device_key,
         validity_info,
     };
-    let mso_bytes = mso.to_mso_bytes();
+    let mso_bytes = mso.to_mso_bytes()?;
     let issuer_auth = CoseSign1::sign(
         signer,
         key,

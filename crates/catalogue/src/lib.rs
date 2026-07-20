@@ -13,11 +13,58 @@
 //!
 //! Pure and sans-IO: the catalogue is a value the shell ships / updates; no I/O here.
 
+/// A format-aware claim identity. mdoc claims remain structurally bound to their namespace;
+/// callers never have to infer that boundary by splitting a dotted string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClaimPath {
+    Json(String),
+    Mdoc { namespace: String, element: String },
+}
+
+impl ClaimPath {
+    pub fn mdoc(namespace: impl Into<String>, element: impl Into<String>) -> Self {
+        Self::Mdoc {
+            namespace: namespace.into(),
+            element: element.into(),
+        }
+    }
+
+    /// External request/display spelling. Structural mdoc checks use the enum fields directly.
+    pub fn request_path(&self) -> String {
+        match self {
+            Self::Json(path) => path.clone(),
+            Self::Mdoc { namespace, element } => format!("{namespace}.{element}"),
+        }
+    }
+
+    fn matches_request(&self, requested: &str) -> bool {
+        match self {
+            Self::Json(path) => path == requested,
+            Self::Mdoc { namespace, element } => requested
+                .strip_prefix(namespace)
+                .and_then(|suffix| suffix.strip_prefix('.'))
+                .is_some_and(|suffix| suffix == element),
+        }
+    }
+}
+
+impl From<&str> for ClaimPath {
+    fn from(value: &str) -> Self {
+        Self::Json(value.into())
+    }
+}
+
+impl From<String> for ClaimPath {
+    fn from(value: String) -> Self {
+        Self::Json(value)
+    }
+}
+
 /// One claim a credential type carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaimSpec {
-    /// Claim path/identity (e.g. `age_over_18`, `family_name`).
-    pub path: String,
+    /// Format-aware claim identity.
+    pub path: ClaimPath,
     pub display_name: String,
     /// Whether the type is invalid without this claim.
     pub mandatory: bool,
@@ -49,16 +96,16 @@ pub struct AttestationType {
 
 impl AttestationType {
     /// The mandatory claim paths of this type.
-    pub fn mandatory_claims(&self) -> Vec<&str> {
+    pub fn mandatory_claims(&self) -> Vec<&ClaimPath> {
         self.claims
             .iter()
             .filter(|c| c.mandatory)
-            .map(|c| c.path.as_str())
+            .map(|c| &c.path)
             .collect()
     }
 
     fn offers(&self, path: &str) -> bool {
-        self.claims.iter().any(|c| c.path == path)
+        self.claims.iter().any(|c| c.path.matches_request(path))
     }
 }
 
@@ -136,8 +183,22 @@ impl Catalogue {
             Some(t) => t
                 .mandatory_claims()
                 .iter()
-                .all(|m| held.iter().any(|h| h == m)),
+                .all(|m| matches!(m, ClaimPath::Json(path) if held.iter().any(|h| h == path))),
             None => false,
+        }
+    }
+
+    /// Does an mdoc with this exact signed document type and these exact namespace/element pairs
+    /// contain every mandatory catalogue claim? JSON paths and bare element names never match.
+    pub fn satisfies_mandatory_mdoc(&self, doc_type: &str, held: &[(String, String)]) -> bool {
+        match self.get(doc_type) {
+            Some(t) if t.format == "mso_mdoc" => t.mandatory_claims().iter().all(|claim| {
+                matches!(claim,
+                    ClaimPath::Mdoc { namespace, element }
+                        if held.iter().any(|(held_namespace, held_element)|
+                            held_namespace == namespace && held_element == element))
+            }),
+            _ => false,
         }
     }
 }
@@ -217,17 +278,17 @@ pub fn default_catalogue() -> Catalogue {
         issuer_trust_domain: IssuerTrustDomain::Attestation,
         claims: vec![
             ClaimSpec {
-                path: "family_name".into(),
+                path: ClaimPath::mdoc("org.iso.18013.5.1", "family_name"),
                 display_name: "Family name".into(),
                 mandatory: true,
             },
             ClaimSpec {
-                path: "given_name".into(),
+                path: ClaimPath::mdoc("org.iso.18013.5.1", "given_name"),
                 display_name: "Given name".into(),
                 mandatory: true,
             },
             ClaimSpec {
-                path: "age_over_18".into(),
+                path: ClaimPath::mdoc("org.iso.18013.5.1", "age_over_18"),
                 display_name: "Over 18".into(),
                 mandatory: false,
             },
@@ -406,11 +467,14 @@ mod tests {
             vec![
                 "urn:eudi:pid:1",
                 "urn:eudi:mdl:1",
-                "org.iso.18013.5.1.mDL",
                 "urn:eudi:passport:1",
                 "urn:eudi:nid:1",
                 "urn:eudi:pid:de:1"
             ]
+        );
+        assert_eq!(
+            c.types_offering("org.iso.18013.5.1.age_over_18"),
+            vec!["org.iso.18013.5.1.mDL"]
         );
         assert_eq!(
             c.types_offering("driving_privileges"),
@@ -434,11 +498,17 @@ mod tests {
             vec![
                 "urn:eudi:pid:1",
                 "urn:eudi:mdl:1",
-                "org.iso.18013.5.1.mDL",
                 "urn:eudi:passport:1",
                 "urn:eudi:nid:1",
                 "urn:eudi:pid:de:1"
             ]
+        );
+        assert_eq!(
+            c.types_satisfying(&[
+                "org.iso.18013.5.1.family_name".into(),
+                "org.iso.18013.5.1.age_over_18".into()
+            ]),
+            vec!["org.iso.18013.5.1.mDL"]
         );
         assert_eq!(
             c.types_satisfying(&["family_name".into(), "birthdate".into()]),
@@ -493,5 +563,23 @@ mod tests {
             &["family_name".into(), "age_over_18".into()]
         ));
         assert!(!c.satisfies_mandatory("unknown", &[]));
+
+        let exact_mdoc_claims = vec![
+            ("org.iso.18013.5.1".into(), "family_name".into()),
+            ("org.iso.18013.5.1".into(), "given_name".into()),
+        ];
+        assert!(c.satisfies_mandatory_mdoc("org.iso.18013.5.1.mDL", &exact_mdoc_claims));
+        assert!(!c.satisfies_mandatory_mdoc(
+            "org.iso.18013.5.1.mDL",
+            &[
+                ("org.example.lookalike".into(), "family_name".into()),
+                ("org.example.lookalike".into(), "given_name".into()),
+            ]
+        ));
+        assert!(!c.satisfies_mandatory_mdoc("org.example.lookalike.mDL", &exact_mdoc_claims));
+        assert!(!c.satisfies_mandatory(
+            "org.iso.18013.5.1.mDL",
+            &["family_name".into(), "given_name".into()]
+        ));
     }
 }

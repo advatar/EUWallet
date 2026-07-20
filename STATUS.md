@@ -42,7 +42,13 @@ operational solution needed to enter those processes.
 - [ ] Replace the incomplete X.509 path validator with strict RFC 5280 and EUDI profile validation.
 - [ ] Implement recursive RFC 9901 disclosures, reject invalid issued SD-JWT+KB/control claims,
       and include permanently visible PII in consent.
-- [ ] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths.
+- [ ] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths
+      ([#6](https://github.com/advatar/EUWallet/issues/6)).
+  - [x] Require and emit canonical CBOR tag-0 RFC 3339 `tdate` validity values, with malformed
+        date/tag rejection and genuine-style fixtures.
+  - [x] Bind mandatory mdoc catalogue claims to the exact doctype, namespace and element.
+  - [ ] Preserve validated COSE label 33 `x5chain` header values without treating them as trust.
+  - [ ] Route the embedded issuer chain through the approved EUDI trust/path-validation profile.
 - [ ] Add flow operation IDs, explicit terminal outcomes and recoverable failure/cancel transitions.
 - [ ] Harden QR/deep-link and protocol networking with HTTPS-only URL policy, bounded responses,
       redirect/origin controls and SSRF-resistant destination validation.
