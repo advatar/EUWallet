@@ -117,6 +117,7 @@ jobs:
           brew tap tamarin-prover/tap
           brew trust --formula tamarin-prover/tap/tamarin-prover
           brew trust --formula tamarin-prover/tap/maude
+          brew trust --formula tamarin-prover/tap/libbuddy
           brew install tamarin-prover/tap/tamarin-prover
       - name: Prove every Tamarin model
         run: |
