@@ -16,7 +16,12 @@ use serde::{de, Deserialize, Deserializer};
 // intermediate path/value clones within fixed, reviewable bounds before wallet-core sees a query.
 const MAX_DCQL_BYTES: usize = 128 * 1024;
 const MAX_CREDENTIAL_QUERIES: usize = 16;
+const MAX_CREDENTIAL_SET_QUERIES: usize = 16;
+const MAX_CREDENTIAL_SET_OPTIONS: usize = 16;
+const MAX_CREDENTIAL_IDS_PER_OPTION: usize = MAX_CREDENTIAL_QUERIES;
 const MAX_CLAIMS_PER_QUERY: usize = 64;
+const MAX_CLAIM_SET_OPTIONS: usize = 32;
+const MAX_CLAIM_IDS_PER_OPTION: usize = MAX_CLAIMS_PER_QUERY;
 const MAX_PATH_DEPTH: usize = 16;
 const MAX_VALUES_PER_CLAIM: usize = 64;
 const MAX_META_VALUES: usize = 32;
@@ -52,14 +57,34 @@ where
     Ok(claims)
 }
 
-/// A full DCQL query: a set of credential queries (the RP wants all of them satisfied).
+/// A full DCQL query. Without `credential_sets` every Credential Query is required; with them,
+/// required and optional combinations determine the presented subset.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DcqlQuery {
     #[serde(deserialize_with = "deserialize_non_empty_credentials")]
     pub credentials: Vec<CredentialQuery>,
-    /// Parsed so unsupported credential-set semantics cannot be silently ignored.
+    /// Alternative required/optional combinations of Credential Query identifiers.
     #[serde(default)]
-    pub credential_sets: Option<serde_json::Value>,
+    pub credential_sets: Option<Vec<CredentialSetQuery>>,
+}
+
+/// One non-empty alternative inside a [`CredentialSetQuery`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct CredentialSetOption(pub Vec<String>);
+
+/// A DCQL Credential Set Query (OpenID4VP 1.0 §6.2).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CredentialSetQuery {
+    /// Ordered alternatives; every identifier refers to a Credential Query.
+    pub options: Vec<CredentialSetOption>,
+    /// Required by default when omitted on the wire.
+    #[serde(default = "required_by_default")]
+    pub required: bool,
+}
+
+const fn required_by_default() -> bool {
+    true
 }
 
 /// One requested credential.
@@ -75,9 +100,10 @@ pub struct CredentialQuery {
     /// invalid in OpenID4VP 1.0 and is rejected during deserialization.
     #[serde(default, deserialize_with = "deserialize_present_claims")]
     pub claims: Vec<ClaimQuery>,
-    /// These final-spec modifiers are parsed but rejected until the selector implements them.
+    /// Preference-ordered alternative combinations of claim identifiers.
     #[serde(default)]
-    pub claim_sets: Option<serde_json::Value>,
+    pub claim_sets: Option<Vec<ClaimSet>>,
+    /// These final-spec modifiers are parsed but rejected until the selector implements them.
     #[serde(default)]
     pub trusted_authorities: Option<serde_json::Value>,
     #[serde(default)]
@@ -110,6 +136,11 @@ pub struct ClaimQuery {
     pub intent_to_retain: Option<bool>,
 }
 
+/// One non-empty alternative inside a Credential Query's `claim_sets` array.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct ClaimSet(pub Vec<String>);
+
 impl ClaimQuery {
     /// Render the path to a stable identity string per DCQL element kinds.
     pub fn path_string(&self) -> String {
@@ -135,6 +166,33 @@ impl ClaimQuery {
     }
 }
 
+impl CredentialQuery {
+    /// Resolve claim-set identifiers into preference-ordered claim indices.
+    ///
+    /// Absent `claims` produces one empty option (mandatory claims only); absent `claim_sets`
+    /// produces one option containing every claim. `None` means this value was constructed outside
+    /// the bounded parser and contains a dangling or ambiguous identifier.
+    pub fn claim_selection_options(&self) -> Option<Vec<Vec<usize>>> {
+        match &self.claim_sets {
+            None => Some(vec![(0..self.claims.len()).collect()]),
+            Some(claim_sets) => claim_sets
+                .iter()
+                .map(|claim_set| {
+                    claim_set
+                        .0
+                        .iter()
+                        .map(|id| {
+                            self.claims
+                                .iter()
+                                .position(|claim| claim.id.as_deref() == Some(id))
+                        })
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+}
+
 impl DcqlQuery {
     /// Parse a DCQL query from JSON bytes; `None` if malformed.
     pub fn parse(bytes: &[u8]) -> Option<DcqlQuery> {
@@ -147,7 +205,10 @@ impl DcqlQuery {
 
     /// Parse from a `serde_json::Value` (the request payload's `dcql_query` field); `None` if malformed.
     pub fn from_value(v: &serde_json::Value) -> Option<DcqlQuery> {
-        if !json_value_within_budget(v, 0) || contains_unsupported_selection_modifier(v) {
+        if !json_value_within_budget(v, 0)
+            || !known_optional_arrays_are_non_empty(v)
+            || contains_unsupported_selection_modifier(v)
+        {
             return None;
         }
         let query: DcqlQuery = serde_json::from_value(v.clone()).ok()?;
@@ -155,8 +216,7 @@ impl DcqlQuery {
     }
 
     fn within_budget(&self) -> bool {
-        self.credential_sets.is_none()
-            && !self.credentials.is_empty()
+        !self.credentials.is_empty()
             && self.credentials.len() <= MAX_CREDENTIAL_QUERIES
             && self
                 .credentials
@@ -170,7 +230,6 @@ impl DcqlQuery {
                         && !credential.format.is_empty()
                         && credential.format.len() <= MAX_IDENTIFIER_BYTES
                         && credential.claims.len() <= MAX_CLAIMS_PER_QUERY
-                        && credential.claim_sets.is_none()
                         && credential.trusted_authorities.is_none()
                         && credential.multiple != Some(true)
                         && credential.meta.is_some()
@@ -199,7 +258,8 @@ impl DcqlQuery {
                                         .iter()
                                         .filter_map(|earlier| earlier.id.as_ref())
                                         .any(|earlier| earlier == id)
-                            }) && !claim.path.is_empty()
+                            }) && (credential.claim_sets.is_none() || claim.id.is_some())
+                                && !claim.path.is_empty()
                                 && claim.path.len() <= MAX_PATH_DEPTH
                                 && claim.path.iter().all(|element| match element {
                                     serde_json::Value::String(name) => {
@@ -226,11 +286,105 @@ impl DcqlQuery {
                                     .iter()
                                     .any(|earlier| earlier.path == claim.path)
                         })
+                        && credential.claim_sets.as_ref().is_none_or(|claim_sets| {
+                            !claim_sets.is_empty()
+                                && claim_sets.len() <= MAX_CLAIM_SET_OPTIONS
+                                && claim_sets.iter().enumerate().all(|(set_index, claim_set)| {
+                                    !claim_set.0.is_empty()
+                                        && claim_set.0.len() <= MAX_CLAIM_IDS_PER_OPTION
+                                        && claim_set.0.iter().enumerate().all(|(id_index, id)| {
+                                            valid_dcql_id(id)
+                                                && !claim_set.0[..id_index].contains(id)
+                                                && credential
+                                                    .claims
+                                                    .iter()
+                                                    .any(|claim| claim.id.as_ref() == Some(id))
+                                        })
+                                        && !claim_sets[..set_index].iter().any(|earlier| {
+                                            same_identifier_set(&earlier.0, &claim_set.0)
+                                        })
+                                })
+                        })
                 })
+            && self.credential_sets.as_ref().is_none_or(|credential_sets| {
+                !credential_sets.is_empty()
+                    && credential_sets.len() <= MAX_CREDENTIAL_SET_QUERIES
+                    && credential_sets.iter().all(|credential_set| {
+                        !credential_set.options.is_empty()
+                            && credential_set.options.len() <= MAX_CREDENTIAL_SET_OPTIONS
+                            && credential_set.options.iter().enumerate().all(
+                                |(option_index, option)| {
+                                    !option.0.is_empty()
+                                        && option.0.len() <= MAX_CREDENTIAL_IDS_PER_OPTION
+                                        && option.0.iter().enumerate().all(|(id_index, id)| {
+                                            valid_dcql_id(id)
+                                                && !option.0[..id_index].contains(id)
+                                                && self
+                                                    .credentials
+                                                    .iter()
+                                                    .any(|credential| credential.id == *id)
+                                        })
+                                        && !credential_set.options[..option_index].iter().any(
+                                            |earlier| same_identifier_set(&earlier.0, &option.0),
+                                        )
+                                },
+                            )
+                    })
+            })
     }
 
-    /// Every requested claim path across all credential queries, de-duplicated in first-seen order.
-    /// This is what the wallet minimises against (discloses only requested-and-held claims).
+    /// Compute a deterministic, atomic Credential Query plan from candidate availability.
+    ///
+    /// Without `credential_sets`, every Credential Query is required. With sets, the first
+    /// satisfiable option of each set is selected; an unavailable optional set is skipped, while
+    /// an unavailable required set rejects the complete plan. The returned indices always follow
+    /// original `credentials` order, so signing, consent and response assembly remain stable.
+    pub fn credential_selection_plan(&self, satisfiable: &[bool]) -> Option<Vec<usize>> {
+        if satisfiable.len() != self.credentials.len() {
+            return None;
+        }
+        let Some(credential_sets) = &self.credential_sets else {
+            return satisfiable
+                .iter()
+                .all(|available| *available)
+                .then(|| (0..self.credentials.len()).collect());
+        };
+
+        let mut selected = vec![false; self.credentials.len()];
+        for credential_set in credential_sets {
+            let option = credential_set.options.iter().find(|option| {
+                option.0.iter().all(|id| {
+                    self.credentials
+                        .iter()
+                        .position(|credential| credential.id == *id)
+                        .is_some_and(|index| satisfiable[index])
+                })
+            });
+            let Some(option) = option else {
+                if credential_set.required {
+                    return None;
+                }
+                continue;
+            };
+            for id in &option.0 {
+                let index = self
+                    .credentials
+                    .iter()
+                    .position(|credential| credential.id == *id)?;
+                selected[index] = true;
+            }
+        }
+        Some(
+            selected
+                .iter()
+                .enumerate()
+                .filter_map(|(index, selected)| selected.then_some(index))
+                .collect(),
+        )
+    }
+
+    /// Every declared claim path across all queries and alternatives, de-duplicated in first-seen
+    /// order. Actual disclosure and consent use the planner-selected claim and credential options.
     pub fn requested_claim_paths(&self) -> Vec<String> {
         let mut paths = Vec::new();
         for c in &self.credentials {
@@ -302,21 +456,45 @@ fn valid_dcql_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+fn same_identifier_set(left: &[String], right: &[String]) -> bool {
+    left.len() == right.len() && left.iter().all(|id| right.contains(id))
+}
+
+fn known_optional_arrays_are_non_empty(value: &serde_json::Value) -> bool {
+    let Some(query) = value.as_object() else {
+        return false;
+    };
+    if query
+        .get("credential_sets")
+        .is_some_and(|sets| !sets.as_array().is_some_and(|sets| !sets.is_empty()))
+    {
+        return false;
+    }
+    query
+        .get("credentials")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(|credentials| {
+            credentials.iter().all(|credential| {
+                credential.as_object().is_none_or(|credential| {
+                    !credential
+                        .get("claim_sets")
+                        .is_some_and(|sets| !sets.as_array().is_some_and(|sets| !sets.is_empty()))
+                })
+            })
+        })
+}
+
 fn contains_unsupported_selection_modifier(value: &serde_json::Value) -> bool {
     let Some(query) = value.as_object() else {
         return false;
     };
-    if query.contains_key("credential_sets") {
-        return true;
-    }
     query
         .get("credentials")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|credentials| {
             credentials.iter().any(|credential| {
                 credential.as_object().is_some_and(|credential| {
-                    credential.contains_key("claim_sets")
-                        || credential.contains_key("trusted_authorities")
+                    credential.contains_key("trusted_authorities")
                         || credential
                             .get("require_cryptographic_holder_binding")
                             .is_some_and(|value| !value.is_boolean())
@@ -551,6 +729,184 @@ mod tests {
                 "require_cryptographic_holder_binding":false}]
         }))
         .is_some());
+    }
+
+    #[test]
+    fn parses_typed_sets_ignores_extensions_and_resolves_preference_order() {
+        let query = DcqlQuery::from_value(&serde_json::json!({
+            "credentials": [
+                {
+                    "id": "pid",
+                    "format": "dc+sd-jwt",
+                    "meta": {"vct_values": ["urn:eudi:pid:1"], "future_meta": true},
+                    "claims": [
+                        {"id": "age", "path": ["age_over_18"], "future_claim": 7},
+                        {"id": "birth", "path": ["birthdate"]}
+                    ],
+                    "claim_sets": [["age"], ["birth"]],
+                    "future_credential": {"ignored": true}
+                },
+                {
+                    "id": "mdl",
+                    "format": "mso_mdoc",
+                    "meta": {"doctype_value": "org.iso.18013.5.1.mDL"}
+                }
+            ],
+            "credential_sets": [{
+                "options": [["pid"], ["mdl"]],
+                "future_set_property": "ignored"
+            }],
+            "future_top_level": [1, 2, 3]
+        }))
+        .expect("unknown extension properties are ignored within global budgets");
+
+        assert_eq!(
+            query.credentials[0].claim_selection_options(),
+            Some(vec![vec![0], vec![1]])
+        );
+        let sets = query.credential_sets.as_ref().expect("typed sets");
+        assert!(sets[0].required, "required defaults to true");
+        assert_eq!(sets[0].options[0].0, vec!["pid"]);
+        assert_eq!(
+            query.credential_selection_plan(&[true, false]),
+            Some(vec![0])
+        );
+        assert_eq!(
+            query.credential_selection_plan(&[false, true]),
+            Some(vec![1])
+        );
+        assert_eq!(query.credential_selection_plan(&[false, false]), None);
+    }
+
+    #[test]
+    fn credential_set_planner_is_atomic_deterministic_and_optional() {
+        let query = DcqlQuery::from_value(&serde_json::json!({
+            "credentials": [
+                {"id":"a", "format":"dc+sd-jwt", "meta":{"vct_values":["a"]}},
+                {"id":"b", "format":"dc+sd-jwt", "meta":{"vct_values":["b"]}},
+                {"id":"c", "format":"dc+sd-jwt", "meta":{"vct_values":["c"]}}
+            ],
+            "credential_sets": [
+                {"options": [["a", "b"], ["c"]]},
+                {"required": false, "options": [["b"]]}
+            ]
+        }))
+        .unwrap();
+
+        // The first required option is incomplete, so the complete second option wins. The
+        // unavailable optional set is skipped rather than becoming an implicit requirement.
+        assert_eq!(
+            query.credential_selection_plan(&[true, false, true]),
+            Some(vec![2])
+        );
+        // When the preferred required and optional options are both satisfiable, their union is
+        // returned once and in original Credential Query order.
+        assert_eq!(
+            query.credential_selection_plan(&[true, true, true]),
+            Some(vec![0, 1])
+        );
+        assert_eq!(
+            query.credential_selection_plan(&[false, false, false]),
+            None
+        );
+        assert_eq!(query.credential_selection_plan(&[true, true]), None);
+
+        let optional_only = DcqlQuery::from_value(&serde_json::json!({
+            "credentials": [
+                {"id":"a", "format":"dc+sd-jwt", "meta":{"vct_values":["a"]}}
+            ],
+            "credential_sets": [{"required":false, "options":[["a"]]}]
+        }))
+        .unwrap();
+        assert_eq!(
+            optional_only.credential_selection_plan(&[false]),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn rejects_empty_duplicate_and_dangling_set_identifiers() {
+        for query in [
+            serde_json::json!({
+                "credentials":[{"id":"pid", "format":"dc+sd-jwt",
+                    "meta":{"vct_values":["v1"]}, "claims":[
+                        {"path":["age_over_18"]}
+                    ], "claim_sets":[["age"]]}]
+            }),
+            serde_json::json!({
+                "credentials":[{"id":"pid", "format":"dc+sd-jwt",
+                    "meta":{"vct_values":["v1"]}, "claims":[
+                        {"id":"age", "path":["age_over_18"]}
+                    ], "claim_sets":[["missing"]]}]
+            }),
+            serde_json::json!({
+                "credentials":[{"id":"pid", "format":"dc+sd-jwt",
+                    "meta":{"vct_values":["v1"]}, "claims":[
+                        {"id":"age", "path":["age_over_18"]}
+                    ], "claim_sets":[["age", "age"]]}]
+            }),
+            serde_json::json!({
+                "credentials":[{"id":"pid", "format":"dc+sd-jwt",
+                    "meta":{"vct_values":["v1"]}, "claims":[
+                        {"id":"age", "path":["age_over_18"]},
+                        {"id":"birth", "path":["birthdate"]}
+                    ], "claim_sets":[["age", "birth"], ["birth", "age"]]}]
+            }),
+            serde_json::json!({
+                "credentials":[{"id":"pid", "format":"dc+sd-jwt",
+                    "meta":{"vct_values":["v1"]}}],
+                "credential_sets":[{"options":[["missing"]]}]
+            }),
+            serde_json::json!({
+                "credentials":[{"id":"pid", "format":"dc+sd-jwt",
+                    "meta":{"vct_values":["v1"]}}],
+                "credential_sets":[{"options":[["pid", "pid"]]}]
+            }),
+            serde_json::json!({
+                "credentials":[
+                    {"id":"a", "format":"dc+sd-jwt", "meta":{"vct_values":["a"]}},
+                    {"id":"b", "format":"dc+sd-jwt", "meta":{"vct_values":["b"]}}
+                ],
+                "credential_sets":[{"options":[["a", "b"], ["b", "a"]]}]
+            }),
+            serde_json::json!({
+                "credentials":[{"id":"pid", "format":"dc+sd-jwt",
+                    "meta":{"vct_values":["v1"]}}], "credential_sets":[]
+            }),
+            serde_json::json!({
+                "credentials":[{"id":"pid", "format":"dc+sd-jwt",
+                    "meta":{"vct_values":["v1"]}, "claims":[
+                        {"id":"age", "path":["age_over_18"]}
+                    ], "claim_sets":[[]]}]
+            }),
+        ] {
+            assert!(DcqlQuery::from_value(&query).is_none(), "accepted {query}");
+        }
+    }
+
+    #[test]
+    fn bounds_claim_and_credential_set_planning_work() {
+        let claim_sets: Vec<serde_json::Value> = (0..=MAX_CLAIM_SET_OPTIONS)
+            .map(|_| serde_json::json!(["age"]))
+            .collect();
+        assert!(DcqlQuery::from_value(&serde_json::json!({
+            "credentials":[{"id":"pid", "format":"dc+sd-jwt",
+                "meta":{"vct_values":["v1"]},
+                "claims":[{"id":"age", "path":["age_over_18"]}],
+                "claim_sets":claim_sets
+            }]
+        }))
+        .is_none());
+
+        let credential_sets: Vec<serde_json::Value> = (0..=MAX_CREDENTIAL_SET_QUERIES)
+            .map(|_| serde_json::json!({"required":false, "options":[["pid"]]}))
+            .collect();
+        assert!(DcqlQuery::from_value(&serde_json::json!({
+            "credentials":[{"id":"pid", "format":"dc+sd-jwt",
+                "meta":{"vct_values":["v1"]}}],
+            "credential_sets":credential_sets
+        }))
+        .is_none());
     }
 
     #[test]

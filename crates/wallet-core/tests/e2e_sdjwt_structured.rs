@@ -159,6 +159,10 @@ fn nested_credential(issuer: &SoftwareSigner, device_public_key: &[u8]) -> Neste
 }
 
 fn signed_request(rp: &SoftwareSigner, nonce: u64, credential_query: Value) -> Vec<u8> {
+    signed_dcql_request(rp, nonce, json!({ "credentials": [credential_query] }))
+}
+
+fn signed_dcql_request(rp: &SoftwareSigner, nonce: u64, dcql_query: Value) -> Vec<u8> {
     let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
     let payload = b64(json!({
         "client_id": "rp.example",
@@ -167,7 +171,7 @@ fn signed_request(rp: &SoftwareSigner, nonce: u64, credential_query: Value) -> V
         "response_uri": RESPONSE_URI,
         "response_mode": "direct_post",
         "purpose": "Contact verification",
-        "dcql_query": { "credentials": [credential_query] }
+        "dcql_query": dcql_query
     })
     .to_string()
     .as_bytes());
@@ -363,4 +367,69 @@ fn absent_dcql_claims_reveals_no_selective_disclosures() {
     let presentation = finish_presentation(&mut core, &device);
     let parsed = sdjwt::SdJwtVc::parse(&presentation).unwrap();
     assert!(parsed.disclosures.is_empty());
+}
+
+#[test]
+fn preferred_claim_set_is_dependency_closed_and_minimised() {
+    let (mut core, device, issuer, _operator, credential) = setup();
+    let request = signed_dcql_request(
+        &issuer,
+        89,
+        json!({
+            "credentials": [{
+                "id": "pid",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["urn:eudi:pid:1"] },
+                "claims": [
+                    { "id": "street", "path": ["address", "street"] },
+                    { "id": "locality", "path": ["address", "locality"] }
+                ],
+                "claim_sets": [["street"], ["locality"]]
+            }]
+        }),
+    );
+
+    let consent = drive_to_consent(&mut core, request);
+    assert!(consent.contains(&"address.street".to_string()));
+    assert!(consent.contains(&"address.country".to_string()));
+    assert!(!consent.contains(&"address.locality".to_string()));
+
+    let presentation = finish_presentation(&mut core, &device);
+    let parsed = sdjwt::SdJwtVc::parse(&presentation).unwrap();
+    assert!(parsed.disclosures.contains(&credential.address));
+    assert!(parsed.disclosures.contains(&credential.street));
+    assert!(!parsed.disclosures.contains(&credential.locality));
+}
+
+#[test]
+fn claim_set_falls_back_only_after_the_preferred_option_is_unsatisfied() {
+    let (mut core, device, issuer, _operator, credential) = setup();
+    let request = signed_dcql_request(
+        &issuer,
+        90,
+        json!({
+            "credentials": [{
+                "id": "pid",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["urn:eudi:pid:1"] },
+                "claims": [
+                    { "id": "unavailable", "path": ["address", "postal_code"] },
+                    { "id": "locality", "path": ["address", "locality"] }
+                ],
+                "claim_sets": [["unavailable"], ["locality"]]
+            }]
+        }),
+    );
+
+    let consent = drive_to_consent(&mut core, request);
+    assert!(consent.contains(&"address.locality".to_string()));
+    assert!(consent.contains(&"address.country".to_string()));
+    assert!(!consent.contains(&"address.postal_code".to_string()));
+    assert!(!consent.contains(&"address.street".to_string()));
+
+    let presentation = finish_presentation(&mut core, &device);
+    let parsed = sdjwt::SdJwtVc::parse(&presentation).unwrap();
+    assert!(parsed.disclosures.contains(&credential.address));
+    assert!(parsed.disclosures.contains(&credential.locality));
+    assert!(!parsed.disclosures.contains(&credential.street));
 }
