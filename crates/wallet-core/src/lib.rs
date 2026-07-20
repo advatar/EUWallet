@@ -77,7 +77,7 @@ fn format_name(f: oid4vci::CredentialFormat) -> &'static str {
 /// Convert an already authenticated SD-JWT VC into the wallet's presentation holding.
 fn held_credential_from_verified_sd(
     sd: &sdjwt::SdJwtVc,
-    status_index: Option<u64>,
+    status: Option<StatusReference>,
 ) -> Result<HeldCredential, CredentialIngestionError> {
     let mut disclosures_by_claim = BTreeMap::new();
     for raw in &sd.disclosures {
@@ -93,21 +93,18 @@ fn held_credential_from_verified_sd(
     Ok(HeldCredential {
         issuer_jwt: sd.issuer_jwt.clone(),
         disclosures_by_claim,
-        status_index,
+        status,
     })
 }
 
 /// Decode the OpenID4VCI representation of an mdoc (`base64url(IssuerSigned CBOR)`).
-fn decode_mdoc_credential(
-    bytes: &[u8],
-) -> Result<mdoc::IssuerSigned, CredentialIngestionError> {
+fn decode_mdoc_credential(bytes: &[u8]) -> Result<mdoc::IssuerSigned, CredentialIngestionError> {
     use base64ct::{Base64UrlUnpadded, Encoding};
-    let compact = core::str::from_utf8(bytes)
-        .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+    let compact =
+        core::str::from_utf8(bytes).map_err(|_| CredentialIngestionError::MalformedCredential)?;
     let cbor = Base64UrlUnpadded::decode_vec(compact.trim())
         .map_err(|_| CredentialIngestionError::MalformedCredential)?;
-    mdoc::IssuerSigned::parse(&cbor)
-        .map_err(|_| CredentialIngestionError::MalformedCredential)
+    mdoc::IssuerSigned::parse(&cbor).map_err(|_| CredentialIngestionError::MalformedCredential)
 }
 
 fn json_epoch_claim(
@@ -143,7 +140,10 @@ fn validate_json_validity(
     Ok(())
 }
 
-fn sdjwt_device_binding_matches(claims: &serde_json::Map<String, serde_json::Value>, key: &[u8]) -> bool {
+fn sdjwt_device_binding_matches(
+    claims: &serde_json::Map<String, serde_json::Value>,
+    key: &[u8],
+) -> bool {
     use base64ct::{Base64UrlUnpadded, Encoding};
 
     if key.len() != 65 || key.first() != Some(&0x04) {
@@ -179,9 +179,53 @@ fn sdjwt_device_binding_matches(claims: &serde_json::Map<String, serde_json::Val
     x.len() == 32 && y.len() == 32 && key[1..33] == x && key[33..65] == y
 }
 
-fn status_index_from_claims(
+fn valid_status_uri(uri: &str) -> bool {
+    const MAX_STATUS_URI_BYTES: usize = 2048;
+    if uri.is_empty()
+        || uri.len() > MAX_STATUS_URI_BYTES
+        || !uri.is_ascii()
+        || uri
+            .bytes()
+            .any(|b| b.is_ascii_control() || b == b' ' || b == b'\\')
+        || uri.contains('#')
+    {
+        return false;
+    }
+    let Some(remainder) = uri.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = remainder.split(['/', '?']).next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    if authority.starts_with('[') {
+        return authority.find(']').is_some_and(|end| {
+            if end <= 1 {
+                return false;
+            }
+            let suffix = &authority[end + 1..];
+            suffix.is_empty()
+                || suffix.strip_prefix(':').is_some_and(|port| {
+                    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+                })
+        });
+    }
+    if authority.matches(':').count() > 1 {
+        return false;
+    }
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        && port.is_none_or(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn status_reference_from_claims(
     claims: &serde_json::Map<String, serde_json::Value>,
-) -> Result<Option<u64>, CredentialIngestionError> {
+) -> Result<Option<StatusReference>, CredentialIngestionError> {
     let Some(status) = claims.get("status") else {
         return Ok(None);
     };
@@ -191,17 +235,17 @@ fn status_index_from_claims(
     let Some(uri) = reference.get("uri").and_then(|v| v.as_str()) else {
         return Err(CredentialIngestionError::UnsupportedStatusReference);
     };
-    if !uri.starts_with("https://") {
+    if !valid_status_uri(uri) {
         return Err(CredentialIngestionError::UnsupportedStatusReference);
     }
     let index = reference
         .get("idx")
-        .and_then(|v| {
-            v.as_u64()
-                .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-        })
+        .and_then(|v| v.as_u64())
         .ok_or(CredentialIngestionError::UnsupportedStatusReference)?;
-    Ok(Some(index))
+    Ok(Some(StatusReference {
+        uri: uri.to_string(),
+        index,
+    }))
 }
 
 fn mdoc_device_binding_matches(device_key: &cose::cbor::Value, key: &[u8]) -> bool {
@@ -243,9 +287,9 @@ fn mdoc_datetime_epoch(value: &str) -> Option<i64> {
         return None;
     }
     let number = |start: usize, end: usize| -> Option<i64> {
-        bytes[start..end]
-            .iter()
-            .try_fold(0i64, |n, b| b.is_ascii_digit().then_some(n * 10 + i64::from(b - b'0')))
+        bytes[start..end].iter().try_fold(0i64, |n, b| {
+            b.is_ascii_digit().then_some(n * 10 + i64::from(b - b'0'))
+        })
     };
     let (year, month, day, hour, minute, second) = (
         number(0, 4)?,
@@ -256,7 +300,20 @@ fn mdoc_datetime_epoch(value: &str) -> Option<i64> {
         number(17, 19)?,
     );
     let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     if !(1970..=9999).contains(&year)
         || !(1..=12).contains(&month)
         || day < 1
@@ -373,7 +430,11 @@ fn mdoc_claim_ids(issued: &mdoc::IssuerSigned) -> Vec<String> {
     issued
         .name_spaces
         .iter()
-        .flat_map(|(ns, items)| items.iter().map(move |it| format!("{ns}.{}", it.element_id)))
+        .flat_map(|(ns, items)| {
+            items
+                .iter()
+                .map(move |it| format!("{ns}.{}", it.element_id))
+        })
         .collect()
 }
 
@@ -393,9 +454,10 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(hi), Some(lo)) =
-                ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16))
-            {
+            if let (Some(hi), Some(lo)) = (
+                (b[i + 1] as char).to_digit(16),
+                (b[i + 2] as char).to_digit(16),
+            ) {
                 out.push((hi * 16 + lo) as u8);
                 i += 3;
                 continue;
@@ -443,12 +505,21 @@ fn credential_vct_and_issuer(issuer_jwt: &str) -> (String, String) {
 
 /// A credential the wallet holds: the issuer-signed JWT plus its disclosures keyed by claim name,
 /// so the core can disclose exactly the requested-and-held subset.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusReference {
+    /// Exact HTTPS URI of the Status List Token. Its signed `sub` must be byte-for-byte equal.
+    pub uri: String,
+    /// Non-negative entry index within that list.
+    pub index: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HeldCredential {
     pub issuer_jwt: String,
     pub disclosures_by_claim: BTreeMap<String, String>,
-    /// This credential's index in its Token Status List, if it has one. Checked before presenting.
-    pub status_index: Option<u64>,
+    /// Authenticated, indivisible status reference. URI and index can never be mixed across lists.
+    pub status: Option<StatusReference>,
 }
 
 /// An ISO 18013-5 mdoc the wallet holds (issued in the `mso_mdoc` format): the parsed
@@ -479,6 +550,16 @@ pub enum CredentialIngestionError {
     DeviceBindingMismatch,
     DuplicateClaim,
     UnsupportedStatusReference,
+}
+
+/// Why a downloaded status assertion was refused before entering the bounded cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StatusLoadError {
+    ClockNotSet,
+    InvalidUri,
+    UntrustedProvider,
+    InvalidToken(status::StatusError),
+    CacheFull,
 }
 
 /// The only values allowed across the authentication-to-storage boundary.
@@ -592,6 +673,14 @@ pub enum Event {
     TokenReceived { bound: bool, c_nonce: u64 },
     /// The credential endpoint returned a credential.
     CredentialReceived { format: String, bytes: Vec<u8> },
+    /// The shell completed an HTTPS Token Status List fetch. The token is trusted only after the
+    /// core validates the exact URI, 2xx response, status-provider certificate path and JWS.
+    StatusListReceived {
+        uri: String,
+        http_status: u16,
+        token: Vec<u8>,
+        provider_cert_chain: Vec<Vec<u8>>,
+    },
     /// The holder wants to RECEIVE a credential from a peer wallet (TS09): publish an offer
     /// carrying this wallet's key + a fresh nonce over the peer transport (BLE/QR).
     WalletTransferOfferCreated,
@@ -646,11 +735,28 @@ pub enum Effect {
     RequestToken,
     /// Request the credential with the assembled proof, then send back `CredentialReceived`.
     RequestCredential { proof_jwt: Vec<u8> },
+    /// Fetch a Token Status List over HTTPS. The shell must cap the response at
+    /// `status::MAX_TOKEN_BYTES`, then return `StatusListReceived` with the status signer's chain.
+    FetchStatusList { uri: String },
     /// Publish a wallet-to-wallet receive offer over the peer transport: this wallet's key (the
     /// binding the sender must target). The shell adds a fresh nonce + BLE/QR transport (TS09).
     PublishTransferOffer { offered_key: Vec<u8> },
     /// Tear down the exchange.
     Close,
+}
+
+const MAX_CACHED_STATUS_LISTS: usize = 8;
+const MAX_STATUS_LISTS_PER_PRESENTATION: usize = 8;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StatusGate {
+    Ready,
+    Fetch {
+        all_references: Vec<StatusReference>,
+        uris: Vec<String>,
+    },
+    Revoked,
+    Indeterminate,
 }
 
 /// The whole wallet state.
@@ -685,8 +791,10 @@ pub struct Core {
     /// Parsed credential that crossed the authentication/policy boundary for this response.
     pending_verified_credential: Option<VerifiedCredential>,
     last_credential_ingestion_error: Option<CredentialIngestionError>,
-    // Revocation: the current verified Token Status List, checked before presenting.
-    status_list: Option<status::StatusList>,
+    // Revocation: URI-keyed verified lists plus the exact selected references awaiting refresh.
+    // Both collections are explicitly bounded to keep hostile issuer data from growing memory.
+    status_lists: BTreeMap<String, status::StatusList>,
+    pending_status_references: Vec<StatusReference>,
     // Transaction (audit) log: privacy-preserving, tamper-evident record of completed flows (TS06).
     log: txnlog::TransactionLog,
     // Payment details captured at the confirmation screen, recorded into the log on authorization.
@@ -730,7 +838,8 @@ impl Core {
             issuer_public_key_current: Vec::new(),
             pending_verified_credential: None,
             last_credential_ingestion_error: None,
-            status_list: None,
+            status_lists: BTreeMap::new(),
+            pending_status_references: Vec::new(),
             log: txnlog::TransactionLog::new(),
             pay_summary: None,
             pay_consent_hash: [0u8; 32],
@@ -862,33 +971,131 @@ impl Core {
         )
     }
 
-    /// Verify + store a Token Status List used to check credential revocation before presenting.
+    /// Verify + store one URI-bound Token Status List in the bounded cache.
     pub fn load_status_list(
         &mut self,
+        uri: &str,
         token: &[u8],
-        provider_public_key: &[u8],
-    ) -> Result<(), String> {
+        provider_cert_chain: &[Vec<u8>],
+    ) -> Result<(), StatusLoadError> {
+        if self.now_epoch <= 0 {
+            return Err(StatusLoadError::ClockNotSet);
+        }
+        if !valid_status_uri(uri) {
+            return Err(StatusLoadError::InvalidUri);
+        }
+        let provider_public_key = self
+            .resolve_status_provider_key(provider_cert_chain)
+            .ok_or(StatusLoadError::UntrustedProvider)?;
         let list = status::parse_and_verify(
             token,
-            provider_public_key,
+            uri,
+            &provider_public_key,
             &AwsLc,
             Alg::Es256,
             self.now_epoch,
         )
-        .map_err(|e| format!("{e:?}"))?;
-        self.status_list = Some(list);
+        .map_err(StatusLoadError::InvalidToken)?;
+
+        // Drop stale entries before applying the fixed cache cardinality cap. A fresh entry may
+        // replace the same URI, but an attacker cannot fill an unbounded number of distinct lists.
+        let now = self.now_epoch;
+        self.status_lists
+            .retain(|_, cached| cached.is_fresh_at(now));
+        if !self.status_lists.contains_key(uri)
+            && self.status_lists.len() >= MAX_CACHED_STATUS_LISTS
+        {
+            return Err(StatusLoadError::CacheFull);
+        }
+        self.status_lists.insert(uri.to_string(), list);
         Ok(())
     }
 
-    /// Should the held credential be blocked from presentation because it is revoked/suspended (or
-    /// its status is unavailable under a fail-closed policy)? Decided in-core.
-    fn status_blocks_presentation(&self) -> bool {
-        let Some(idx) = self.credentials.iter().find_map(|c| c.status_index) else {
-            return false; // no status list reference → nothing to check
+    /// Evaluate status for exactly the credentials selected for this consent. Missing/stale lists
+    /// request a refresh; known-bad, out-of-range and structurally inconsistent values fail closed.
+    fn presentation_status_gate(&self) -> StatusGate {
+        let selected = self.select_credentials_for(&Input::ConsentGranted);
+        let mut references = Vec::<StatusReference>::new();
+
+        for selected_credential in selected {
+            let SelectedCredential::SdJwt { issuer_jwt, .. } = selected_credential else {
+                continue;
+            };
+            let Some(holding) = self
+                .credentials
+                .iter()
+                .find(|candidate| candidate.issuer_jwt == issuer_jwt)
+            else {
+                return StatusGate::Indeterminate;
+            };
+            if let Some(reference) = &holding.status {
+                if !references.contains(reference) {
+                    references.push(reference.clone());
+                }
+            }
+        }
+
+        if references.len() > MAX_STATUS_LISTS_PER_PRESENTATION {
+            return StatusGate::Indeterminate;
+        }
+
+        let mut fetch_uris = Vec::new();
+        for reference in &references {
+            let Some(list) = self.status_lists.get(&reference.uri) else {
+                if !fetch_uris.contains(&reference.uri) {
+                    fetch_uris.push(reference.uri.clone());
+                }
+                continue;
+            };
+            if !list.is_fresh_at(self.now_epoch) {
+                if !fetch_uris.contains(&reference.uri) {
+                    fetch_uris.push(reference.uri.clone());
+                }
+                continue;
+            }
+            let Ok(index) = usize::try_from(reference.index) else {
+                return StatusGate::Indeterminate;
+            };
+            match list.status_at(index) {
+                status::CredentialStatus::Valid => {}
+                status::CredentialStatus::Invalid | status::CredentialStatus::Suspended => {
+                    return StatusGate::Revoked;
+                }
+                status::CredentialStatus::Unknown => return StatusGate::Indeterminate,
+            }
+        }
+
+        if fetch_uris.is_empty() {
+            StatusGate::Ready
+        } else {
+            StatusGate::Fetch {
+                all_references: references,
+                uris: fetch_uris,
+            }
+        }
+    }
+
+    fn status_block_effects(revoked: bool) -> Vec<Effect> {
+        let (code, message) = if revoked {
+            (
+                "credential_revoked",
+                "This credential is revoked or suspended and cannot be shared.",
+            )
+        } else {
+            (
+                "credential_status_unavailable",
+                "A fresh, trusted status assertion is required before this credential can be shared.",
+            )
         };
-        let st = self.status_list.as_ref().map(|l| l.status_at(idx as usize));
-        // Remote presentation is online → fail closed if the status can't be resolved.
-        status::decide(st, status::FailPolicy::FailClosed) == status::Decision::Reject
+        vec![
+            Effect::Render {
+                screen: ScreenDescription::Error {
+                    code: code.into(),
+                    message: message.into(),
+                },
+            },
+            Effect::Close,
+        ]
     }
 
     /// Register the device public key (the Secure Enclave key the WUA attests). Needed to check
@@ -1035,7 +1242,13 @@ impl Core {
                 .name_spaces
                 .values()
                 .flatten()
-                .map(|it| format!("{:?}:{:?}", it.element_id, cbor_value_display(&it.element_value)))
+                .map(|it| {
+                    format!(
+                        "{:?}:{:?}",
+                        it.element_id,
+                        cbor_value_display(&it.element_value)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(",");
             items.push(format!(
@@ -1055,6 +1268,7 @@ impl Core {
             }
             Event::AuthorizationRequestReceived { request } => {
                 self.active = ActiveFlow::Presentation;
+                self.pending_status_references.clear();
                 self.drive(Input::AuthorizationRequest(request))
             }
             Event::RpCertChainResolved {
@@ -1070,23 +1284,31 @@ impl Core {
                 }))
             }
             Event::UserConsented => {
-                // Never present a revoked/suspended credential (checked in-core against the
-                // Token Status List) — refuse before disclosing anything.
-                if self.status_blocks_presentation() {
-                    return vec![
-                        Effect::Render {
-                            screen: ScreenDescription::Error {
-                                code: "credential_revoked".into(),
-                                message: "This credential is no longer valid and cannot be shared."
-                                    .into(),
-                            },
-                        },
-                        Effect::Close,
-                    ];
+                // Status is resolved after explicit consent but before any signature/disclosure.
+                // Missing or stale selected lists become bounded HTTPS fetch effects; known-bad
+                // and indeterminate values fail closed immediately.
+                match self.presentation_status_gate() {
+                    StatusGate::Ready => {
+                        self.pending_status_references.clear();
+                        self.drive(Input::ConsentGranted)
+                    }
+                    StatusGate::Fetch {
+                        all_references,
+                        uris,
+                    } => {
+                        self.pending_status_references = all_references;
+                        uris.into_iter()
+                            .map(|uri| Effect::FetchStatusList { uri })
+                            .collect()
+                    }
+                    StatusGate::Revoked => Self::status_block_effects(true),
+                    StatusGate::Indeterminate => Self::status_block_effects(false),
                 }
-                self.drive(Input::ConsentGranted)
             }
-            Event::UserDeclined => self.drive(Input::ConsentDeclined),
+            Event::UserDeclined => {
+                self.pending_status_references.clear();
+                self.drive(Input::ConsentDeclined)
+            }
             Event::DeviceSignatureProduced { signature } => match self.active {
                 // Route the device signature to whichever flow requested it.
                 ActiveFlow::Payment => {
@@ -1217,6 +1439,49 @@ impl Core {
                     self.drive_issuance(oid4vci::Input::CredentialResponseRejected)
                 }
             },
+            Event::StatusListReceived {
+                uri,
+                http_status,
+                token,
+                provider_cert_chain,
+            } => {
+                let expected = self
+                    .pending_status_references
+                    .iter()
+                    .any(|reference| reference.uri == uri);
+                if !expected || !(200..=299).contains(&http_status) {
+                    self.pending_status_references.clear();
+                    return Self::status_block_effects(false);
+                }
+                if self
+                    .load_status_list(&uri, &token, &provider_cert_chain)
+                    .is_err()
+                {
+                    self.pending_status_references.clear();
+                    return Self::status_block_effects(false);
+                }
+
+                match self.presentation_status_gate() {
+                    StatusGate::Ready => {
+                        self.pending_status_references.clear();
+                        self.drive(Input::ConsentGranted)
+                    }
+                    StatusGate::Fetch { all_references, .. } => {
+                        // All missing URIs were emitted together on consent. Wait for the other
+                        // in-flight responses without issuing duplicates.
+                        self.pending_status_references = all_references;
+                        Vec::new()
+                    }
+                    StatusGate::Revoked => {
+                        self.pending_status_references.clear();
+                        Self::status_block_effects(true)
+                    }
+                    StatusGate::Indeterminate => {
+                        self.pending_status_references.clear();
+                        Self::status_block_effects(false)
+                    }
+                }
+            }
         }
     }
 
@@ -1351,6 +1616,22 @@ impl Core {
             .and_then(|path| path.first().map(|leaf| leaf.public_key_raw.clone()))
     }
 
+    /// Resolve a status-signing key only through anchors authorised for the StatusProvider
+    /// service. A PID issuer, RP or arbitrary shell-supplied key cannot sign cache entries.
+    fn resolve_status_provider_key(&self, chain: &[Vec<u8>]) -> Option<Vec<u8>> {
+        let anchors = self.trust_store.parsed_anchors(ServiceType::StatusProvider);
+        if anchors.is_empty() {
+            return None;
+        }
+        x509::validate_path(chain, &anchors, self.now_epoch, &AwsLc)
+            .ok()
+            .and_then(|path| {
+                path.first()
+                    .filter(|leaf| !leaf.is_ca)
+                    .map(|leaf| leaf.public_key_raw.clone())
+            })
+    }
+
     fn verify_received_credential(
         &self,
         format: oid4vci::CredentialFormat,
@@ -1445,8 +1726,8 @@ impl Core {
         if !sdjwt_device_binding_matches(&claims, &self.device_public_key) {
             return Err(CredentialIngestionError::DeviceBindingMismatch);
         }
-        let status_index = status_index_from_claims(&claims)?;
-        let holding = held_credential_from_verified_sd(&sd, status_index)?;
+        let status = status_reference_from_claims(&claims)?;
+        let holding = held_credential_from_verified_sd(&sd, status)?;
         Ok(VerifiedCredential::SdJwt(holding))
     }
 
@@ -1546,9 +1827,8 @@ impl Core {
                     _ => {
                         // Defensive invariant: the OID4VCI machine must never reach its success
                         // state without a corresponding authenticated value to store.
-                        self.issuance = oid4vci::State::Aborted(
-                            oid4vci::AbortReason::CredentialInvalid,
-                        );
+                        self.issuance =
+                            oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid);
                         self.last_credential_ingestion_error =
                             Some(CredentialIngestionError::MalformedCredential);
                     }
@@ -1809,12 +2089,19 @@ impl Core {
 
         // SD-JWT VC: a candidate must BE one of the query's `vct_values` (when given) — so a request
         // for `urn:eudi:pid:1` is answered by the PID, never an mDL that carries the same claim name.
-        let vcts = q.meta.as_ref().map(|m| m.vct_values.clone()).unwrap_or_default();
+        let vcts = q
+            .meta
+            .as_ref()
+            .map(|m| m.vct_values.clone())
+            .unwrap_or_default();
         let type_matches = |c: &HeldCredential| -> bool {
             vcts.is_empty() || vcts.contains(&credential_vct_and_issuer(&c.issuer_jwt).0)
         };
-        let carries_all =
-            |c: &HeldCredential| claims.iter().all(|r| c.disclosures_by_claim.contains_key(r));
+        let carries_all = |c: &HeldCredential| {
+            claims
+                .iter()
+                .all(|r| c.disclosures_by_claim.contains_key(r))
+        };
         let cred = self
             .credentials
             .iter()
@@ -2013,7 +2300,11 @@ impl Core {
             .iter()
             .flat_map(|c| c.disclosures_by_claim.keys().cloned())
             .collect();
-        held.extend(self.mdoc_holdings.iter().flat_map(|h| mdoc_claim_ids(&h.issuer_signed)));
+        held.extend(
+            self.mdoc_holdings
+                .iter()
+                .flat_map(|h| mdoc_claim_ids(&h.issuer_signed)),
+        );
         ScreenDescription::Consent(ConsentScreen {
             rp_display_name: rp,
             purpose,
@@ -2101,7 +2392,11 @@ impl Core {
         let plaintext = serde_json::to_string(&serde_json::Value::Object(obj)).ok()?;
 
         let apu = form_field(body, "mdoc_generated_nonce").unwrap_or_default();
-        let apv = self.session.as_ref().map(|s| s.nonce.to_string()).unwrap_or_default();
+        let apv = self
+            .session
+            .as_ref()
+            .map(|s| s.nonce.to_string())
+            .unwrap_or_default();
         let jwe = jwe::encrypt_ecdh_es_a256gcm(
             plaintext.as_bytes(),
             recipient_key,
@@ -2161,16 +2456,21 @@ impl WalletEngine {
             .load_device_key(device_public_key);
     }
 
-    /// Verify + store a Token Status List (for revocation checks). Returns "" on success.
-    pub fn load_status_list(&self, token: Vec<u8>, provider_public_key: Vec<u8>) -> String {
-        match self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .load_status_list(&token, &provider_public_key)
-        {
+    /// Verify + cache a URI-bound Token Status List from a trusted status-provider certificate.
+    /// Returns "" on success.
+    pub fn load_status_list(
+        &self,
+        uri: String,
+        token: Vec<u8>,
+        provider_cert_chain: Vec<Vec<u8>>,
+    ) -> String {
+        match self.inner.lock().expect("poisoned").load_status_list(
+            &uri,
+            &token,
+            &provider_cert_chain,
+        ) {
             Ok(()) => String::new(),
-            Err(e) => e,
+            Err(e) => format!("{e:?}"),
         }
     }
 

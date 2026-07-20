@@ -49,7 +49,11 @@ fn issue_wua(provider: &SoftwareSigner, device_pub: &[u8]) -> Vec<u8> {
 }
 
 /// An issuer-authenticated, device-bound PID with every mandatory catalogue claim.
-fn issued_sd_jwt(issuer: &SoftwareSigner, device_pub: &[u8]) -> Vec<u8> {
+fn issued_sd_jwt(
+    issuer: &SoftwareSigner,
+    device_pub: &[u8],
+    status: Option<serde_json::Value>,
+) -> Vec<u8> {
     let disclosures: Vec<String> = [
         ("family_name", json!("Andersson")),
         ("given_name", json!("Astrid")),
@@ -57,31 +61,35 @@ fn issued_sd_jwt(issuer: &SoftwareSigner, device_pub: &[u8]) -> Vec<u8> {
     ]
     .into_iter()
     .enumerate()
-    .map(|(i, (name, value))| b64(json!([format!("salt-{i}"), name, value]).to_string().as_bytes()))
+    .map(|(i, (name, value))| {
+        b64(json!([format!("salt-{i}"), name, value])
+            .to_string()
+            .as_bytes())
+    })
     .collect();
     let digests: Vec<String> = disclosures
         .iter()
         .map(|raw| b64(&AwsLc.sha256(raw.as_bytes())))
         .collect();
     let header = b64(br#"{"alg":"ES256","typ":"dc+sd-jwt"}"#);
-    let payload = b64(
-        json!({
-            "iss":"https://issuer.example",
-            "iat": NOW,
-            "exp": 4_000_000_000i64,
-            "vct":"urn:eudi:pid:1",
-            "_sd_alg": "sha-256",
-            "_sd": digests,
-            "cnf": { "jwk": {
-                "kty": "EC",
-                "crv": "P-256",
-                "x": b64(&device_pub[1..33]),
-                "y": b64(&device_pub[33..65]),
-            }}
-        })
-            .to_string()
-            .as_bytes(),
-    );
+    let mut claims = json!({
+        "iss":"https://issuer.example",
+        "iat": NOW,
+        "exp": 4_000_000_000i64,
+        "vct":"urn:eudi:pid:1",
+        "_sd_alg": "sha-256",
+        "_sd": digests,
+        "cnf": { "jwk": {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": b64(&device_pub[1..33]),
+            "y": b64(&device_pub[33..65]),
+        }}
+    });
+    if let Some(status) = status {
+        claims["status"] = status;
+    }
+    let payload = b64(claims.to_string().as_bytes());
     let si = format!("{header}.{payload}");
     let sig = issuer
         .sign(&KeyRef("i".into()), Alg::Es256, si.as_bytes())
@@ -158,7 +166,7 @@ fn full_issuance_with_in_core_trust_and_attestation() {
         .any(|e| matches!(e, Effect::RequestCredential { .. })));
 
     // Credential returned → issued.
-    let cred = issued_sd_jwt(&issuer, device.public_key_raw());
+    let cred = issued_sd_jwt(&issuer, device.public_key_raw(), None);
     core.handle_event(Event::CredentialReceived {
         format: "dc+sd-jwt".into(),
         bytes: cred.clone(),
@@ -198,7 +206,9 @@ fn unattested_proof_key_is_rejected_in_core() {
 fn forged_credential_response_aborts_and_is_not_stored() {
     let (mut core, device, _issuer) = setup(true, true);
     let attacker = SoftwareSigner::generate_p256().unwrap();
-    assert!(core.handle_event(offer_event()).contains(&Effect::RequestToken));
+    assert!(core
+        .handle_event(offer_event())
+        .contains(&Effect::RequestToken));
     let fx = core.handle_event(Event::TokenReceived {
         bound: true,
         c_nonce: 333,
@@ -219,7 +229,7 @@ fn forged_credential_response_aborts_and_is_not_stored() {
 
     // The response is well-formed and device-bound, but the signer is not the key from the
     // validated issuer certificate path.
-    let forged = issued_sd_jwt(&attacker, device.public_key_raw());
+    let forged = issued_sd_jwt(&attacker, device.public_key_raw(), None);
     let effects = core.handle_event(Event::CredentialReceived {
         format: "dc+sd-jwt".into(),
         bytes: forged,
@@ -232,4 +242,62 @@ fn forged_credential_response_aborts_and_is_not_stored() {
         core.last_credential_ingestion_error(),
         Some(&CredentialIngestionError::SignatureInvalid)
     );
+}
+
+#[test]
+fn authenticated_status_uri_and_index_are_preserved_as_one_reference() {
+    let (mut core, device, issuer) = setup(true, false);
+    let credential = issued_sd_jwt(
+        &issuer,
+        device.public_key_raw(),
+        Some(json!({
+            "status_list": {
+                "idx": 17,
+                "uri": "https://status.example/lists/pid-1"
+            }
+        })),
+    );
+
+    core.ingest_credential(
+        "dc+sd-jwt",
+        &credential,
+        &[ISSUER_CHAIN_LEAF.to_vec()],
+        "https://issuer.example",
+    )
+    .unwrap();
+
+    let export: serde_json::Value = serde_json::from_str(&core.export_json()).unwrap();
+    assert_eq!(
+        export["credential"]["status"]["uri"],
+        "https://status.example/lists/pid-1"
+    );
+    assert_eq!(export["credential"]["status"]["index"], 17);
+}
+
+#[test]
+fn non_integer_or_non_https_status_references_never_enter_storage() {
+    for reference in [
+        json!({"idx": "17", "uri": "https://status.example/lists/pid-1"}),
+        json!({"idx": 17, "uri": "http://status.example/lists/pid-1"}),
+        json!({"idx": 17, "uri": "https://status.example:bad/lists/pid-1"}),
+        json!({"idx": 17, "uri": "https://attacker@status.example/lists/pid-1"}),
+        json!({"idx": 17, "uri": "https://status.example/lists/pid-1#fragment"}),
+    ] {
+        let (mut core, device, issuer) = setup(true, false);
+        let credential = issued_sd_jwt(
+            &issuer,
+            device.public_key_raw(),
+            Some(json!({"status_list": reference})),
+        );
+        assert_eq!(
+            core.ingest_credential(
+                "dc+sd-jwt",
+                &credential,
+                &[ISSUER_CHAIN_LEAF.to_vec()],
+                "https://issuer.example",
+            ),
+            Err(CredentialIngestionError::UnsupportedStatusReference)
+        );
+        assert_eq!(core.held_credentials_json(), "[]");
+    }
 }

@@ -27,7 +27,9 @@ fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
     .to_string()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = operator.sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = operator
+        .sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
@@ -38,7 +40,11 @@ fn issue_pid(issuer: &SoftwareSigner) -> (String, BTreeMap<String, String>) {
         .iter()
         .enumerate()
     {
-        let raw = b64(serde_json::to_string(&json!([format!("s{i}"), name, value])).unwrap().as_bytes());
+        let raw = b64(
+            serde_json::to_string(&json!([format!("s{i}"), name, value]))
+                .unwrap()
+                .as_bytes(),
+        );
         sd.push(json!(b64(&AwsLc.sha256(raw.as_bytes()))));
         by_claim.insert((*name).to_string(), raw);
     }
@@ -49,12 +55,19 @@ fn issue_pid(issuer: &SoftwareSigner) -> (String, BTreeMap<String, String>) {
     .unwrap()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = issuer.sign(&KeyRef("i".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = issuer
+        .sign(&KeyRef("i".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     (format!("{si}.{}", b64(&sig)), by_claim)
 }
 
 /// A DCQL request for the PID's `age_over_18`, constrained to `allowed` values.
-fn sign_values_request(rp: &SoftwareSigner, nonce: u64, claim: &str, allowed: serde_json::Value) -> Vec<u8> {
+fn sign_values_request(
+    rp: &SoftwareSigner,
+    nonce: u64,
+    claim: &str,
+    allowed: serde_json::Value,
+) -> Vec<u8> {
     let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
     let payload = b64(serde_json::to_string(&json!({
         "client_id": "rp.example",
@@ -73,7 +86,9 @@ fn sign_values_request(rp: &SoftwareSigner, nonce: u64, claim: &str, allowed: se
     .unwrap()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = rp.sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = rp
+        .sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
@@ -83,9 +98,11 @@ fn ready_core(issuer: &SoftwareSigner, operator: &SoftwareSigner) -> Core {
     core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt,
         disclosures_by_claim: by_claim,
-        status_index: None,
+        status: None,
     });
-    core.handle_event(Event::SetClock { epoch: 1_790_000_000 });
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
     core.load_trust_list(&signed_trust_list(operator), operator.public_key_raw())
         .expect("trust list loads");
     core
@@ -108,7 +125,10 @@ fn a_matching_value_constraint_presents_the_credential() {
     let mut core = ready_core(&issuer, &operator);
 
     // The holder IS over 18; the RP requires age_over_18 ∈ [true] → satisfied.
-    drive_to_consent(&mut core, sign_values_request(&rp, NONCE, "age_over_18", json!([true])));
+    drive_to_consent(
+        &mut core,
+        sign_values_request(&rp, NONCE, "age_over_18", json!([true])),
+    );
     let fx = core.handle_event(Event::UserConsented);
     let signing_input = fx
         .iter()
@@ -118,7 +138,9 @@ fn a_matching_value_constraint_presents_the_credential() {
         })
         .expect("value constraint satisfied → the machine signs the KB-JWT");
     let fx = core.handle_event(Event::DeviceSignatureProduced {
-        signature: device.sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input).unwrap(),
+        signature: device
+            .sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input)
+            .unwrap(),
     });
     let body = fx
         .iter()
@@ -127,7 +149,10 @@ fn a_matching_value_constraint_presents_the_credential() {
             _ => None,
         })
         .expect("a vp_token is posted");
-    assert!(body.contains("%22pid%22"), "the PID is presented under its DCQL id: {body}");
+    assert!(
+        body.contains("%22pid%22"),
+        "the PID is presented under its DCQL id: {body}"
+    );
 }
 
 #[test]
@@ -138,10 +163,14 @@ fn an_unsatisfiable_value_constraint_presents_nothing() {
     let mut core = ready_core(&issuer, &operator);
 
     // The RP demands nationality ∈ ["DE"], but the holder's is "SE" → no credential qualifies.
-    drive_to_consent(&mut core, sign_values_request(&rp, NONCE, "nationality", json!(["DE"])));
+    drive_to_consent(
+        &mut core,
+        sign_values_request(&rp, NONCE, "nationality", json!(["DE"])),
+    );
     let fx = core.handle_event(Event::UserConsented);
     assert!(
-        !fx.iter().any(|e| matches!(e, Effect::Sign { .. } | Effect::Http { .. })),
+        !fx.iter()
+            .any(|e| matches!(e, Effect::Sign { .. } | Effect::Http { .. })),
         "an unsatisfiable value constraint discloses nothing: {fx:?}"
     );
     assert_eq!(

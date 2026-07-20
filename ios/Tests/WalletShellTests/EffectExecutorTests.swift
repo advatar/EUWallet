@@ -81,12 +81,30 @@ private final class FixedHttpClient: HttpClient {
     }
 }
 
+private final class FixedStatusListResolver: StatusListResolver {
+    enum Outcome {
+        case resolution(StatusListResolution)
+        case failure
+    }
+
+    private let outcome: Outcome
+    init(_ outcome: Outcome) { self.outcome = outcome }
+
+    func fetch(uri: String) async throws -> StatusListResolution {
+        switch outcome {
+        case .resolution(let resolution): return resolution
+        case .failure: throw ExpectedFailure.failure
+        }
+    }
+}
+
 final class EffectExecutorTests: XCTestCase {
     private func makeExecutor(
         engine: MockEngine = MockEngine(),
         signer: Signer = StubSigner(),
         http: HttpClient = StubHttpClient(),
         storage: SecureStorage = InMemoryStorage(),
+        statusLists: StatusListResolver? = nil,
         issuer: IssuerResponder? = nil,
         render: @escaping (ScreenDescription) -> Void = { _ in }
     ) -> EffectExecutor {
@@ -96,6 +114,7 @@ final class EffectExecutorTests: XCTestCase {
             http: http,
             storage: storage,
             trust: StubTrustResolver(certChain: [Data([1, 2, 3])]),
+            statusLists: statusLists,
             issuer: issuer,
             render: render)
     }
@@ -299,6 +318,43 @@ final class EffectExecutorTests: XCTestCase {
         } catch {
             XCTFail("untyped error: \(error)")
         }
+        assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+    }
+
+    func testStatusListFetchReturnsBodyStatusAndAuthenticatedSignerChain() async throws {
+        let engine = MockEngine { event in
+            if event.contains("\"statusListReceived\"") { return #"[{"type":"close"}]"# }
+            return #"[{"type":"fetchStatusList","uri":"https://status.example/list"}]"#
+        }
+        let resolver = FixedStatusListResolver(.resolution(StatusListResolution(
+            response: HttpResponse(statusCode: 200, body: Data([4, 5, 6])),
+            providerCertChain: [Data([7, 8, 9])]
+        )))
+        let executor = makeExecutor(engine: engine, statusLists: resolver)
+
+        try await executor.send(eventJson: "{}")
+
+        let event = try XCTUnwrap(engine.receivedEvents.last)
+        let data = try XCTUnwrap(event.data(using: .utf8))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["type"] as? String, "statusListReceived")
+        XCTAssertEqual(json["uri"] as? String, "https://status.example/list")
+        XCTAssertEqual(json["httpStatus"] as? Int, 200)
+        XCTAssertEqual(json["token"] as? [Int], [4, 5, 6])
+        XCTAssertEqual(json["providerCertChain"] as? [[Int]], [[7, 8, 9]])
+    }
+
+    func testMissingStatusTransportFeedsFailureToCoreAndNeverClaimsSuccess() async throws {
+        let engine = MockEngine { event in
+            if event.contains("\"statusListReceived\"") { return #"[{"type":"close"}]"# }
+            return #"[{"type":"fetchStatusList","uri":"https://status.example/list"}]"#
+        }
+        let executor = makeExecutor(engine: engine)
+
+        try await executor.send(eventJson: "{}")
+
+        let resultEvent = try XCTUnwrap(engine.receivedEvents.last)
+        XCTAssertTrue(resultEvent.contains("\"httpStatus\":0"))
         assertNoSemanticSuccessOrDecline(engine.receivedEvents)
     }
 }

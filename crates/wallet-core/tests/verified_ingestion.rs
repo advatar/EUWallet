@@ -2,6 +2,7 @@
 //! valid and still must not enter holdings unless issuer trust, signature, type policy, validity,
 //! mandatory claims and device binding all succeed.
 
+use base64ct::{Base64UrlUnpadded, Encoding};
 use crypto_backend::SoftwareSigner;
 use wallet_core::{Core, CredentialIngestionError, DemoWallet, IssuanceScenario, WalletEngine};
 
@@ -47,16 +48,19 @@ fn forged_signature_never_reaches_holdings() {
     let wallet = DemoWallet::new();
     let scenario = wallet.issuance_scenario();
     let mut core = ready_core(&scenario);
-    let mut forged = scenario.pid_credential_compact.into_bytes();
-    let signature_end = forged
-        .iter()
-        .position(|byte| *byte == b'~')
-        .expect("combined SD-JWT has a separator");
-    forged[signature_end - 1] = if forged[signature_end - 1] == b'A' {
-        b'B'
-    } else {
-        b'A'
-    };
+    let compact = scenario.pid_credential_compact;
+    let issuer_end = compact.find('~').expect("combined SD-JWT has a separator");
+    let mut parts = compact[..issuer_end].split('.');
+    let header = parts.next().unwrap();
+    let payload = parts.next().unwrap();
+    let mut signature = Base64UrlUnpadded::decode_vec(parts.next().unwrap()).unwrap();
+    signature[0] ^= 1;
+    let forged = format!(
+        "{header}.{payload}.{}{}",
+        Base64UrlUnpadded::encode_string(&signature),
+        &compact[issuer_end..]
+    )
+    .into_bytes();
 
     assert_eq!(
         core.ingest_credential(

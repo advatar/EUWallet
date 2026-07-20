@@ -67,6 +67,7 @@ public final class EffectExecutor {
     private let http: HttpClient
     private let storage: SecureStorage
     private let trust: TrustResolver
+    private let statusLists: StatusListResolver?
     private let issuer: IssuerResponder?
     private let render: (ScreenDescription) -> Void
 
@@ -76,6 +77,7 @@ public final class EffectExecutor {
         http: HttpClient,
         storage: SecureStorage,
         trust: TrustResolver,
+        statusLists: StatusListResolver? = nil,
         issuer: IssuerResponder? = nil,
         render: @escaping (ScreenDescription) -> Void
     ) {
@@ -84,6 +86,7 @@ public final class EffectExecutor {
         self.http = http
         self.storage = storage
         self.trust = trust
+        self.statusLists = statusLists
         self.issuer = issuer
         self.render = render
     }
@@ -166,6 +169,30 @@ public final class EffectExecutor {
                 return WalletEventJSON.credentialReceived(format: c.format, bytes: c.bytes)
             } catch {
                 throw EffectExecutorError.issuerFailed(String(describing: error))
+            }
+        case .fetchStatusList(let uri):
+            guard let statusLists else {
+                return WalletEventJSON.statusListReceived(
+                    uri: uri,
+                    httpStatus: 0,
+                    token: Data(),
+                    providerCertChain: [])
+            }
+            do {
+                let resolution = try await statusLists.fetch(uri: uri)
+                return WalletEventJSON.statusListReceived(
+                    uri: uri,
+                    httpStatus: resolution.response.statusCode,
+                    token: resolution.response.body,
+                    providerCertChain: resolution.providerCertChain)
+            } catch {
+                // Feed a deterministic failed result into Rust. It renders the status-unavailable
+                // error and closes; transport failure can never be interpreted as consent success.
+                return WalletEventJSON.statusListReceived(
+                    uri: uri,
+                    httpStatus: 0,
+                    token: Data(),
+                    providerCertChain: [])
             }
         case .pushPar:
             throw EffectExecutorError.unsupportedEffect("pushPar")

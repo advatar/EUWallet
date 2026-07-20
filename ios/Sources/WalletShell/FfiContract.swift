@@ -76,12 +76,15 @@ public enum WalletEffect: Decodable {
     case promptTxCode
     case requestToken
     case requestCredential(proofJwt: [UInt8])
+    // --- Credential status ---
+    case fetchStatusList(uri: String)
     // --- Wallet-to-wallet (TS09) ---
     case publishTransferOffer(offeredKey: [UInt8])
     case close
 
     private enum CodingKeys: String, CodingKey {
         case type, clientId, nonce, screen, keyRef, payload, url, body, proofJwt, offeredKey
+        case uri
     }
 
     private struct CoreErrorEnvelope: Decodable {
@@ -126,6 +129,8 @@ public enum WalletEffect: Decodable {
         case "requestToken": self = .requestToken
         case "requestCredential":
             self = .requestCredential(proofJwt: try c.decode([UInt8].self, forKey: .proofJwt))
+        case "fetchStatusList":
+            self = .fetchStatusList(uri: try c.decode(String.self, forKey: .uri))
         case "publishTransferOffer":
             self = .publishTransferOffer(offeredKey: try c.decode([UInt8].self, forKey: .offeredKey))
         case "close": self = .close
@@ -176,6 +181,15 @@ public enum WalletEventJSON {
     public static func credentialReceived(format: String, bytes: Data) -> String {
         #"{"type":"credentialReceived","format":\#(jsonString(format)),"bytes":\#(byteArray(bytes))}"#
     }
+    public static func statusListReceived(
+        uri: String,
+        httpStatus: UInt16,
+        token: Data,
+        providerCertChain: [Data]
+    ) -> String {
+        let chain = providerCertChain.map { byteArray($0) }.joined(separator: ",")
+        return #"{"type":"statusListReceived","uri":\#(jsonString(uri)),"httpStatus":\#(httpStatus),"token":\#(byteArray(token)),"providerCertChain":[\#(chain)]}"#
+    }
 
     private static func byteArray(_ data: Data) -> String {
         "[" + data.map { String($0) }.joined(separator: ",") + "]"
@@ -202,4 +216,20 @@ public protocol IssuerResponder {
 /// registration DECISION is made in the Rust core against the trusted list — not here.
 public protocol TrustResolver {
     func resolve(clientId: String) async -> (certChain: [Data], redirectUris: [String])
+}
+
+public struct StatusListResolution: Equatable {
+    public let response: HttpResponse
+    public let providerCertChain: [Data]
+
+    public init(response: HttpResponse, providerCertChain: [Data]) {
+        self.response = response
+        self.providerCertChain = providerCertChain
+    }
+}
+
+/// Fetches a Status List Token and resolves its signer's certificate path from authenticated EUDI
+/// trust metadata. Rust independently validates the path, exact URI binding, signature and age.
+public protocol StatusListResolver {
+    func fetch(uri: String) async throws -> StatusListResolution
 }

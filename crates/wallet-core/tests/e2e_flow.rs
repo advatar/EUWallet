@@ -102,7 +102,7 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
     core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt: issuer_jwt.clone(),
         disclosures_by_claim: by_claim,
-        status_index: None,
+        status: None,
     });
     core.handle_event(Event::SetClock {
         epoch: 1_790_000_000,

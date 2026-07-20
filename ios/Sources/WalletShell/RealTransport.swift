@@ -67,6 +67,46 @@ public final class URLSessionHttpClient: HttpClient {
     }
 }
 
+/// Resolves an EUDI-authorised status signer's certificate path for a specific list URI. The
+/// implementation is backed by trusted-list metadata, never by arbitrary certificates from HTTP.
+public protocol StatusProviderCertificateResolver {
+    func certificateChain(for uri: String) async throws -> [Data]
+}
+
+/// Production Status List transport: HTTPS GET with the registered media type, bounded response,
+/// plus an independently authenticated signer path for the Rust trust decision.
+public final class URLSessionStatusListResolver: StatusListResolver {
+    public static let maximumTokenBytes = 2 * 1024 * 1024
+
+    private let http: URLSessionHttpClient
+    private let certificates: StatusProviderCertificateResolver
+
+    public init(
+        http: URLSessionHttpClient = URLSessionHttpClient(),
+        certificates: StatusProviderCertificateResolver
+    ) {
+        self.http = http
+        self.certificates = certificates
+    }
+
+    public func fetch(uri: String) async throws -> StatusListResolution {
+        guard let url = URL(string: uri), url.scheme == "https", url.fragment == nil else {
+            throw HttpClientError.invalidUrl(uri)
+        }
+        let response = try await http.get(
+            url: uri,
+            headers: ["Accept": "application/statuslist+jwt"])
+        guard response.body.count <= Self.maximumTokenBytes else {
+            throw HttpClientError.transport("Status List Token exceeds the 2 MiB limit")
+        }
+        let chain = try await certificates.certificateChain(for: uri)
+        guard !chain.isEmpty else {
+            throw HttpClientError.transport("Status provider has no authenticated signer chain")
+        }
+        return StatusListResolution(response: response, providerCertChain: chain)
+    }
+}
+
 /// A scanned/opened QR payload or deep link, classified into the wallet action it triggers.
 /// Pure parsing — no I/O — so it is unit-testable on the host.
 public enum ScannedRequest: Equatable {

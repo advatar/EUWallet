@@ -38,18 +38,27 @@ fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
     .to_string()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = operator.sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = operator
+        .sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
 fn issue_pid(issuer: &SoftwareSigner) -> (String, BTreeMap<String, String>) {
     let mut by_claim = BTreeMap::new();
     let mut sd = Vec::new();
-    for (i, (name, value)) in [("family_name", json!("Andersson")), ("age_over_18", json!(true))]
-        .iter()
-        .enumerate()
+    for (i, (name, value)) in [
+        ("family_name", json!("Andersson")),
+        ("age_over_18", json!(true)),
+    ]
+    .iter()
+    .enumerate()
     {
-        let raw = b64(serde_json::to_string(&json!([format!("s{i}"), name, value])).unwrap().as_bytes());
+        let raw = b64(
+            serde_json::to_string(&json!([format!("s{i}"), name, value]))
+                .unwrap()
+                .as_bytes(),
+        );
         sd.push(json!(b64(&AwsLc.sha256(raw.as_bytes()))));
         by_claim.insert((*name).to_string(), raw);
     }
@@ -60,7 +69,9 @@ fn issue_pid(issuer: &SoftwareSigner) -> (String, BTreeMap<String, String>) {
     .unwrap()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = issuer.sign(&KeyRef("i".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = issuer
+        .sign(&KeyRef("i".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     (format!("{si}.{}", b64(&sig)), by_claim)
 }
 
@@ -101,20 +112,26 @@ fn sign_multi_request(rp: &SoftwareSigner, nonce: u64) -> Vec<u8> {
     .unwrap()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = rp.sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = rp
+        .sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
 fn map_get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     match v {
-        Value::Map(p) => p.iter().find(|(k, _)| *k == Value::Text(key.into())).map(|(_, x)| x),
+        Value::Map(p) => p
+            .iter()
+            .find(|(k, _)| *k == Value::Text(key.into()))
+            .map(|(_, x)| x),
         _ => None,
     }
 }
 
 fn field(body: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}=");
-    body.split('&').find_map(|kv| kv.strip_prefix(&prefix).map(percent_decode))
+    body.split('&')
+        .find_map(|kv| kv.strip_prefix(&prefix).map(percent_decode))
 }
 
 /// Feed a device signature and return the next Sign payload, or `None` if the flow finished.
@@ -164,18 +181,25 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
     core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt,
         disclosures_by_claim: by_claim,
-        status_index: None,
+        status: None,
     });
     core.load_unverified_mdoc_for_testing(MdocHolding {
         doctype: DOCTYPE.into(),
         issuer_signed,
     });
-    core.handle_event(Event::SetClock { epoch: 1_790_000_000 });
-    core.load_trust_list(&signed_trust_list(&trust_operator), trust_operator.public_key_raw())
-        .expect("trust list loads");
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    core.load_trust_list(
+        &signed_trust_list(&trust_operator),
+        trust_operator.public_key_raw(),
+    )
+    .expect("trust list loads");
 
     // Request → trust → consent.
-    core.handle_event(Event::AuthorizationRequestReceived { request: sign_multi_request(&rp, NONCE) });
+    core.handle_event(Event::AuthorizationRequestReceived {
+        request: sign_multi_request(&rp, NONCE),
+    });
     core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
         registered_redirect_uris: vec![RESPONSE_URI.into()],
@@ -185,7 +209,9 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
     let fx = core.handle_event(Event::UserConsented);
     let p1 = next_sign(&fx).expect("first Sign (credential #1)");
     let fx = core.handle_event(Event::DeviceSignatureProduced {
-        signature: device.sign(&KeyRef("device-key".into()), Alg::Es256, &p1).unwrap(),
+        signature: device
+            .sign(&KeyRef("device-key".into()), Alg::Es256, &p1)
+            .unwrap(),
     });
     let p2 = next_sign(&fx).expect("second Sign (credential #2) — the machine signs one at a time");
     assert!(
@@ -193,7 +219,9 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
         "nothing is posted until BOTH credentials are signed"
     );
     let fx = core.handle_event(Event::DeviceSignatureProduced {
-        signature: device.sign(&KeyRef("device-key".into()), Alg::Es256, &p2).unwrap(),
+        signature: device
+            .sign(&KeyRef("device-key".into()), Alg::Es256, &p2)
+            .unwrap(),
     });
     let body = fx
         .iter()
@@ -220,7 +248,10 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
         .verify_presentation(&AwsLc, &AwsLc, issuer.public_key_raw(), Alg::Es256, &kb)
         .expect("PID presentation verifies");
     assert_eq!(claims.get("age_over_18"), Some(&json!(true)));
-    assert!(claims.get("family_name").is_none(), "PID minimised to age_over_18");
+    assert!(
+        claims.get("family_name").is_none(),
+        "PID minimised to age_over_18"
+    );
 
     // 2) mDL (mdoc): the DeviceResponse device signature verifies over the SessionTranscript.
     let mgn = field(&body, "mdoc_generated_nonce").expect("mdoc_generated_nonce companion field");
@@ -230,9 +261,15 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
         Some(Value::Array(a)) => a,
         _ => panic!("documents"),
     };
-    assert_eq!(map_get(&docs[0], "docType"), Some(&Value::Text(DOCTYPE.into())));
-    let transcript = oid4vp_session_transcript(&AwsLc, "rp.example", RESPONSE_URI, &NONCE.to_string(), &mgn);
-    let expected = device_authentication_bytes(&transcript, DOCTYPE, &empty_device_namespaces_bytes()).unwrap();
+    assert_eq!(
+        map_get(&docs[0], "docType"),
+        Some(&Value::Text(DOCTYPE.into()))
+    );
+    let transcript =
+        oid4vp_session_transcript(&AwsLc, "rp.example", RESPONSE_URI, &NONCE.to_string(), &mgn);
+    let expected =
+        device_authentication_bytes(&transcript, DOCTYPE, &empty_device_namespaces_bytes())
+            .unwrap();
     let device_signature = map_get(map_get(&docs[0], "deviceSigned").unwrap(), "deviceAuth")
         .and_then(|da| map_get(da, "deviceSignature"))
         .unwrap();

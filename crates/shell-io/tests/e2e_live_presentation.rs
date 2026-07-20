@@ -32,7 +32,7 @@ fn plaintext_http_presentation_endpoint_is_rejected_before_disclosure() {
     core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt: s.issuer_jwt.clone(),
         disclosures_by_claim: serde_json::from_str(&s.disclosures_by_claim_json).unwrap(),
-        status_index: None,
+        status: None,
     });
     core.load_device_key(s.device_public_key.clone());
     core.handle_event(Event::SetClock { epoch: s.epoch });

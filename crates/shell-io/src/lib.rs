@@ -36,6 +36,32 @@ pub trait TrustFetcher {
     fn fetch(&self, client_id: &str) -> (Vec<Vec<u8>>, Vec<String>);
 }
 
+/// Authenticated result of fetching a Token Status List. The provider certificate chain identifies
+/// the JWS signer; the core validates it against StatusProvider trust anchors before using bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusResponse {
+    pub status_code: u16,
+    pub body: Vec<u8>,
+    pub provider_cert_chain: Vec<Vec<u8>>,
+}
+
+/// Fetches Token Status Lists. Platform shells implement this with URLSession/OkHttp and must cap
+/// the body while streaming; the core independently enforces its compact-token limit.
+pub trait StatusFetcher {
+    fn fetch(&self, uri: &str) -> Result<StatusResponse, String>;
+}
+
+/// Default for callers that have not configured status transport. It fails closed and feeds an
+/// explicit failed response back to the core; a status-bearing credential can never be disclosed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DisabledStatusFetcher;
+
+impl StatusFetcher for DisabledStatusFetcher {
+    fn fetch(&self, _uri: &str) -> Result<StatusResponse, String> {
+        Err("Token Status List transport is not configured".into())
+    }
+}
+
 /// The live issuer endpoints the shell POSTs to during OID4VCI issuance. The wire contract of the
 /// reference shell (a production shell speaks the full OAuth token endpoint over TLS):
 ///  * `token_url` — POST, response `{"bound": bool, "cNonce": u64}`;
@@ -54,6 +80,8 @@ pub struct Outcome {
     pub screens: Vec<ScreenDescription>,
     /// (url, status, response_body) for every real HTTP POST performed.
     pub http_posts: Vec<(String, u16, Vec<u8>)>,
+    /// (URI, HTTP status, body length) for status-list fetches.
+    pub status_fetches: Vec<(String, u16, usize)>,
     /// Nonces the core asked to persist.
     pub persisted_nonces: Vec<u64>,
     /// Whether the core closed the flow.
@@ -65,22 +93,38 @@ pub struct Outcome {
 }
 
 /// Drives the sans-IO core with real side effects until the effect cascade drains.
-pub struct ShellRunner<S: DeviceSigner, T: TrustFetcher> {
+pub struct ShellRunner<S: DeviceSigner, T: TrustFetcher, F: StatusFetcher = DisabledStatusFetcher> {
     pub core: Core,
     signer: S,
     trust: T,
+    status: F,
     issuer: Option<IssuerEndpoints>,
     last_screen: Option<ScreenDescription>,
 }
 
-impl<S: DeviceSigner, T: TrustFetcher> ShellRunner<S, T> {
+impl<S: DeviceSigner, T: TrustFetcher> ShellRunner<S, T, DisabledStatusFetcher> {
     pub fn new(core: Core, signer: S, trust: T) -> Self {
         ShellRunner {
             core,
             signer,
             trust,
+            status: DisabledStatusFetcher,
             issuer: None,
             last_screen: None,
+        }
+    }
+}
+
+impl<S: DeviceSigner, T: TrustFetcher, F: StatusFetcher> ShellRunner<S, T, F> {
+    /// Configure the authenticated Token Status List transport.
+    pub fn with_status_fetcher<N: StatusFetcher>(self, status: N) -> ShellRunner<S, T, N> {
+        ShellRunner {
+            core: self.core,
+            signer: self.signer,
+            trust: self.trust,
+            status,
+            issuer: self.issuer,
+            last_screen: self.last_screen,
         }
     }
 
@@ -223,6 +267,34 @@ impl<S: DeviceSigner, T: TrustFetcher> ShellRunner<S, T> {
                     }
                 }
             }
+            Effect::FetchStatusList { uri } => match self.status.fetch(&uri) {
+                Ok(response) => {
+                    outcome.status_fetches.push((
+                        uri.clone(),
+                        response.status_code,
+                        response.body.len(),
+                    ));
+                    Some(Event::StatusListReceived {
+                        uri,
+                        http_status: response.status_code,
+                        token: response.body,
+                        provider_cert_chain: response.provider_cert_chain,
+                    })
+                }
+                Err(error) => {
+                    outcome
+                        .errors
+                        .push(format!("status-list fetch from {uri} failed: {error}"));
+                    // A synthetic non-HTTP status drives the core's deterministic failure/close
+                    // transition instead of silently leaving consent pending.
+                    Some(Event::StatusListReceived {
+                        uri,
+                        http_status: 0,
+                        token: Vec::new(),
+                        provider_cert_chain: Vec::new(),
+                    })
+                }
+            },
             Effect::PublishTransferOffer { offered_key } => {
                 outcome.published_offer_key = Some(offered_key);
                 None

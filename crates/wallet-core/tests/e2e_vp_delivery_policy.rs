@@ -51,7 +51,7 @@ fn core() -> Core {
     core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt: "eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIn0.c2ln".into(),
         disclosures_by_claim: BTreeMap::from([("age_over_18".into(), disclosure)]),
-        status_index: None,
+        status: None,
     });
     core
 }
