@@ -113,7 +113,7 @@ operational solution needed to enter those processes.
         socket; URLSession and HttpsURLConnection currently perform their own second DNS lookup.
 - [ ] [#15](https://github.com/advatar/EUWallet/issues/15): make Android a first-class,
       independently shippable wallet client with the same core contract and assurance gates as iOS.
-  - [ ] Require hosted Android unit tests, lint and release assembly on every pull request.
+  - [x] Require hosted Android unit tests, lint and release assembly on every pull request.
   - [ ] Integrate generated UniFFI bindings plus production networking, trust, issuance and
         lifecycle adapters; demo/test doubles must not be reachable from release builds.
   - [ ] Add the production app, StrongBox/KeyMint capability policy, encrypted rollback-resistant
@@ -121,7 +121,12 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
-- [ ] Separate production and demo iOS targets; add encrypted persistence and lifecycle flows.
+- [ ] [#16](https://github.com/advatar/EUWallet/issues/16): implement versioned encrypted durable
+      wallet state and crash-safe lifecycle recovery across the Rust core, iOS and Android.
+  - [ ] Restore only bounded authenticated holdings, replay state and audit data through current
+        trust/WUA/device-key revalidation; never revive pending operations or protocol sessions.
+  - [ ] Add atomic, rollback-detecting, device-bound iOS and Android stores with backup exclusion,
+        corruption/migration/process-death tests and no release-build fallback to demo storage.
 - [ ] Build the Android client with equivalent StrongBox/KeyMint security behavior.
 - [ ] Implement German eID/eAT onboarding, live PID issuance, RP registration, trust, WIA/WUA,
       status and revocation integration.
