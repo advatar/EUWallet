@@ -155,6 +155,10 @@ operational solution needed to enter those processes.
   - [x] Add the iOS WalletShell encrypted dual-slot storage primitive with strict bounded envelopes,
         a Keychain generation/digest anchor, compare-and-swap commits, backup/file-protection policy
         and crash/tamper tests; Core serialization and lifecycle wiring remain separate work.
+  - [x] Add the Android WalletShell encrypted dual-slot storage primitive with a validated
+        StrongBox-first AndroidKeyStore AES key, authenticated generation/digest anchor,
+        compare-and-swap commits, no-backup/path-hardening policy and exhaustive JVM crash/tamper
+        tests; Core serialization and lifecycle wiring remain separate work.
   - [x] Restore only bounded authenticated holdings, replay state and audit data through current
         trust/WUA/device-key revalidation; never revive pending operations or protocol sessions.
     - [x] Add a migration-ready canonical CBOR checkpoint v1 with explicit magic, version and
@@ -173,7 +177,7 @@ operational solution needed to enter those processes.
         with backup exclusion, corruption/migration/process-death tests and no release-build
         fallback to demo storage.
     - [x] Add the bounded, authenticated and encrypted iOS storage primitive.
-    - [ ] Add the equivalent Android Keystore-backed storage primitive.
+    - [x] Add the equivalent Android Keystore-backed storage primitive.
     - [ ] Expose a bounded, secret-safe Core checkpoint contract through UniFFI and add native
           lifecycle coordinator seams that bootstrap the live clock, trust, device key and WUA
           before restore; gate each resulting effect batch on an exact compare-and-swap commit;
