@@ -76,6 +76,11 @@ durable outbox and does not provide exactly-once network, signing, storage or UI
 particular, process death after the checkpoint commit but before an external effect completes loses
 that pending effect by design.
 
+The non-dispatching checkpoint-v2 and delivery-ledger target is specified in
+[`DURABLE_EFFECT_DELIVERY.md`](DURABLE_EFFECT_DELIVERY.md). That target requires resumable Core
+aggregate state and adapter-specific ambiguity handling; a native-only queue is explicitly
+insufficient.
+
 ## Diagnostics and remaining integration
 
 FFI and coordinator failures are stable, low-cardinality codes without source errors, identifiers,

@@ -113,6 +113,7 @@ struct PendingOperation {
 
 uniffi::setup_scaffolding!();
 
+mod delivery;
 mod demo;
 pub use demo::{DemoScenario, DemoWallet, IssuanceScenario};
 

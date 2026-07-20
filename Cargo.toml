@@ -57,6 +57,7 @@ serde_json = { version = "1" }
 ciborium   = { version = "0.2" }          # profiled/canonical CBOR (mdoc/cose) — or replace with hand-rolled
 base64ct   = { version = "1", default-features = false, features = ["alloc"] }
 hex        = { version = "0.4", default-features = false, features = ["alloc"] }
+zeroize    = { version = "1", default-features = false, features = ["alloc"] }
 # Error ergonomics
 thiserror  = { version = "1" }
 # Cryptography — ONLY behind crypto-traits; never called directly by protocol crates.

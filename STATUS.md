@@ -204,6 +204,25 @@ operational solution needed to enter those processes.
       - [ ] Add a bounded durable effect outbox with stable effect identifiers and acknowledgements
             before claiming crash-safe external delivery; process death after checkpoint commit
             must neither lose nor duplicate browser, signing, network or attestation work.
+        - [ ] Define checkpoint schema v2 with a strict, bounded Core-owned delivery ledger:
+              at most 32 live entries and 4 MiB reserved delivery data; stable 32-byte effect IDs;
+              queued, dispatching, result-ready and ambiguous states; acknowledgement tombstones;
+              v1 migration to an idle aggregate with an empty ledger; and atomic capacity failure.
+          - [x] Add the dormant Core ledger state machine with exact count/byte/sequence admission,
+                domain-separated stable IDs, strict head-of-line claiming, one dispatch slot,
+                result-before-consume handling, explicit ambiguity, bounded tombstone rotation and
+                redacted diagnostics. It is intentionally not checkpointed or dispatch-enabled.
+          - [ ] Add the canonical v2 codec, hostile-state reconstruction and authenticated v1
+                idle/empty migration proof, then persist the ledger only with its owning aggregate.
+        - [ ] Persist and revalidate the complete resumable production aggregate, pending result
+              correlation and public key/nonce/attestation reservations. Never serialize private
+              keys, and never release a ledger entry whose result cannot be consumed after restore.
+        - [ ] Generalise both lifecycle coordinators to commit enqueue, claim, result recording,
+              result consumption and acknowledgement transitions before releasing the associated
+              action or outcome; exercise every crash/ambiguous-commit boundary after restart.
+        - [ ] Require stable-ID idempotency or reconciliation from each production adapter. Treat
+              an unknown browser, signing, HTTP, credential or attestation completion as ambiguous
+              and fail closed instead of blindly retrying or claiming generic exactly-once I/O.
 - [ ] Build the Android client with equivalent StrongBox/KeyMint security behavior.
 - [ ] [#18](https://github.com/advatar/EUWallet/issues/18): implement German eID/eAT onboarding and
       HAIP-compliant live PID issuance through an accepted German PID Provider.
