@@ -370,8 +370,10 @@ private enum DurableEnvelopeCodec {
 /// still required for that assurance claim.
 public final class AppleDurableStateStore: DurableStateStore {
     static let maximumEnvelopeBytes = 32 * 1024 * 1024
-    public static let maximumPlaintextBytes =
-        maximumEnvelopeBytes - DurableEnvelopeCodec.fixedOverhead
+    /// Shared Core/iOS/Android plaintext ceiling. Android's authenticated slot envelope has the
+    /// largest fixed overhead (120 bytes), so using its limit here keeps the lifecycle contract
+    /// identical on both platforms and leaves 64 bytes of additional headroom in Apple's envelope.
+    public static let maximumPlaintextBytes = 33_554_312
 
     private let applicationIdentifier: String
     private let metadata: any DurableSecureMetadataStore

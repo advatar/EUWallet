@@ -211,6 +211,7 @@ final class DurableStateStoreTests: XCTestCase {
 
     func testStrictEnvelopeRejectsTruncationTrailingBytesLengthsAndOversize() throws {
         XCTAssertEqual(AppleDurableStateStore.maximumEnvelopeBytes, 32 * 1024 * 1024)
+        XCTAssertEqual(AppleDurableStateStore.maximumPlaintextBytes, 33_554_312)
         XCTAssertLessThan(
             AppleDurableStateStore.maximumPlaintextBytes,
             AppleDurableStateStore.maximumEnvelopeBytes)
@@ -256,6 +257,34 @@ final class DurableStateStoreTests: XCTestCase {
                 .plaintextTooLarge(
                     actual: AppleDurableStateStore.maximumPlaintextBytes + 1,
                     maximum: AppleDurableStateStore.maximumPlaintextBytes))
+        }
+    }
+
+    func testSharedPlaintextCeilingAcceptsExactAndRejectsOneByteMore() throws {
+        let harness = try Harness()
+        let exact = Data(repeating: 0x5a, count: 33_554_312)
+
+        XCTAssertEqual(
+            try harness.store.commit(
+                expectedGeneration: 0,
+                nextGeneration: 1,
+                plaintext: exact,
+                context: harness.context),
+            DurableStateRecord(generation: 1, plaintext: exact))
+        XCTAssertEqual(
+            try harness.store.load(context: harness.context),
+            .record(DurableStateRecord(generation: 1, plaintext: exact)))
+
+        XCTAssertThrowsError(
+            try harness.store.commit(
+                expectedGeneration: 1,
+                nextGeneration: 2,
+                plaintext: Data(repeating: 0, count: exact.count + 1),
+                context: harness.context)
+        ) { error in
+            XCTAssertEqual(
+                error as? DurableStateStoreError,
+                .plaintextTooLarge(actual: 33_554_313, maximum: 33_554_312))
         }
     }
 

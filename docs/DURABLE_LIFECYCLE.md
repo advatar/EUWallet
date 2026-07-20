@@ -34,6 +34,12 @@ A Core error envelope is returned without advancing the generation. A malformed 
 poisons the coordinator before checkpoint export or commit. Generation mismatch and oversized state
 also fail closed and never release effects.
 
+Core and both native stores share a 33,554,312-byte checkpoint plaintext ceiling, derived from the
+32 MiB Android envelope and its 120-byte fixed overhead. Replay-set cardinality is admitted before
+each flow and again at the exact reservation transition; exhaustion resets the typed flow, clears
+its callbacks and leaves the prior durable checkpoint exportable. Credential count/evidence
+admission remains a separate required guard.
+
 ## Failure and retry semantics
 
 An export or commit failure retains the exact event and effect batch in process memory. A retry is
@@ -71,6 +77,6 @@ checkpoint wrappers have redacted string/debug representations and defensively c
 The coordinators are production-facing seams, but application composition is still open. The iOS
 app must make the coordinator the sole owner-facing Core event path. Android still needs generated
 Rust bindings, a durable-engine adapter and an application entry point. Both clients also need an
-explicit checkpoint-capacity admission policy, migration/recovery UX, physical-device evidence and
+explicit credential-evidence admission policy, migration/recovery UX, physical-device evidence and
 a provider monotonic receipt (or evaluated platform monotonic anchor) before stronger rollback or
 delivery claims are justified.

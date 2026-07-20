@@ -23,7 +23,11 @@ use crypto_traits::Digest;
 use super::*;
 
 /// Maximum authenticated plaintext checkpoint accepted from a platform store.
-pub const MAX_CHECKPOINT_BYTES: usize = 32 * 1024 * 1024;
+///
+/// The platform envelope itself is capped at 32 MiB. Android has the larger fixed envelope
+/// overhead (120 bytes), so this cross-platform plaintext contract leaves exactly enough room for
+/// either native store to authenticate and encrypt every checkpoint Core accepts.
+pub const MAX_CHECKPOINT_BYTES: usize = 32 * 1024 * 1024 - 120;
 /// Maximum number of authenticated production credentials in one checkpoint.
 pub const MAX_CREDENTIALS: usize = 128;
 /// Maximum encoded source credential size.
@@ -46,8 +50,8 @@ const MAX_SCHEMA_DEPTH: usize = 8;
 const MAX_CONTAINER_ITEMS: usize = MAX_REPLAY_VALUES;
 const MAX_MAP_PAIRS: usize = 16;
 const MAX_STRUCTURAL_NODES: usize = 1_000_000;
-// The structural scanner must accept every byte string that the domain budgets and 32 MiB
-// encoder can produce. Per-field and aggregate credential/log limits remain the tighter guards.
+// The structural scanner must accept every byte string that the domain budgets and shared native
+// plaintext ceiling can produce. Per-field and aggregate credential/log limits remain tighter.
 const MAX_DECODED_PAYLOAD_BYTES: usize = MAX_CHECKPOINT_BYTES;
 const CONTEXT_HASH_DOMAIN: &[u8] = b"eudi-wallet-checkpoint-context-v1";
 
@@ -1484,6 +1488,22 @@ mod tests {
         core
     }
 
+    fn assert_replay_capacity_effects(effects: &[Effect]) {
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Render {
+                screen: ScreenDescription::Error { code, .. }
+            } if code == "durable_replay_capacity_exhausted"
+        )));
+        assert!(effects.iter().any(|effect| matches!(effect, Effect::Close)));
+        assert!(effects.iter().all(|effect| matches!(
+            effect,
+            Effect::Render {
+                screen: ScreenDescription::Error { .. }
+            } | Effect::Close
+        )));
+    }
+
     fn append_history(core: &mut Core) {
         core.log
             .append(
@@ -2173,6 +2193,139 @@ mod tests {
     }
 
     #[test]
+    fn full_replay_sets_reject_each_valid_flow_before_mutation_and_remain_exportable() {
+        let wallet = DemoWallet::new();
+        let scenario = wallet.issuance_scenario();
+        let exact_values: Vec<u64> = (0..MAX_REPLAY_VALUES as u64).collect();
+
+        let mut presentation_core = configured_core(&scenario, "wallet.example", "device-key");
+        presentation_core.seen_nonces = exact_values.clone();
+        let before = presentation_core.export_durable_checkpoint(1).unwrap();
+        let effects = presentation_core.handle_event(Event::AuthorizationRequestReceived {
+            request: wallet.presentation_request(u64::MAX),
+        });
+        assert_replay_capacity_effects(&effects);
+        assert_eq!(presentation_core.seen_nonces, exact_values);
+        assert_eq!(
+            presentation_core.export_durable_checkpoint(1).unwrap(),
+            before
+        );
+        assert!(matches!(presentation_core.vp, State::Idle));
+
+        let mut payment_core = configured_core(&scenario, "wallet.example", "device-key");
+        payment_core.pay_seen_nonces = exact_values.clone();
+        let before = payment_core.export_durable_checkpoint(1).unwrap();
+        let effects = payment_core.handle_event(Event::PaymentAuthorizationRequestReceived {
+            request: wallet.payment_request(u64::MAX),
+        });
+        assert_replay_capacity_effects(&effects);
+        assert_eq!(payment_core.pay_seen_nonces, exact_values);
+        assert_eq!(payment_core.export_durable_checkpoint(1).unwrap(), before);
+        assert!(matches!(payment_core.payment, payment::State::Idle));
+
+        let mut issuance_core = configured_core(&scenario, "wallet.example", "device-key");
+        issuance_core.iss_seen_c_nonces = exact_values.clone();
+        let before = issuance_core.export_durable_checkpoint(1).unwrap();
+        let effects = issuance_core.handle_event(Event::CredentialOfferReceived {
+            offer: scenario.offer.clone(),
+            issuer_cert_chain: scenario.issuer_cert_chain.clone(),
+            issuer_id: scenario.issuer_id.clone(),
+        });
+        assert_replay_capacity_effects(&effects);
+        assert_eq!(issuance_core.iss_seen_c_nonces, exact_values);
+        assert_eq!(issuance_core.export_durable_checkpoint(1).unwrap(), before);
+        assert!(matches!(issuance_core.issuance, oid4vci::State::Idle));
+
+        let mut qes_core = configured_core(&scenario, "wallet.example", "device-key");
+        qes_core.qes_seen_nonces = exact_values.clone();
+        let before = qes_core.export_durable_checkpoint(1).unwrap();
+        let effects = qes_core.handle_event(Event::QesSignRequestReceived {
+            request: br#"{"document_name":"Contract.pdf","document_hash_hex":"deadbeef","qtsp_id":"qtsp.example","nonce":18446744073709551615}"#.to_vec(),
+        });
+        assert_replay_capacity_effects(&effects);
+        assert_eq!(qes_core.qes_seen_nonces, exact_values);
+        assert_eq!(qes_core.export_durable_checkpoint(1).unwrap(), before);
+        assert!(matches!(qes_core.qes, qes::QesState::Idle));
+    }
+
+    #[test]
+    fn final_available_replay_slot_is_admitted_and_exports_at_the_exact_count() {
+        let scenario = DemoWallet::new().issuance_scenario();
+        let mut core = configured_core(&scenario, "wallet.example", "device-key");
+        core.qes_seen_nonces = (0..(MAX_REPLAY_VALUES as u64 - 1)).collect();
+
+        let effects = core.handle_event(Event::QesSignRequestReceived {
+            request: br#"{"document_name":"Contract.pdf","document_hash_hex":"deadbeef","qtsp_id":"qtsp.example","nonce":18446744073709551615}"#.to_vec(),
+        });
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Render {
+                screen: ScreenDescription::SignConfirmation(_)
+            }
+        )));
+        assert_eq!(core.qes_seen_nonces.len(), MAX_REPLAY_VALUES);
+        assert!(core.qes_seen_nonces.contains(&u64::MAX));
+        let checkpoint = core.export_durable_checkpoint(2).unwrap();
+        assert_eq!(
+            decode_checkpoint(&checkpoint).unwrap().replay.qes.len(),
+            MAX_REPLAY_VALUES
+        );
+    }
+
+    #[test]
+    fn reservation_rejection_resets_the_active_flow_and_duplicate_output_never_pushes() {
+        let wallet = DemoWallet::new();
+        let scenario = wallet.issuance_scenario();
+        let mut core = configured_core(&scenario, "wallet.example", "device-key");
+        core.iss_seen_c_nonces = (0..(MAX_REPLAY_VALUES as u64 - 1)).collect();
+        let started = core.handle_event(Event::CredentialOfferReceived {
+            offer: scenario.offer.clone(),
+            issuer_cert_chain: scenario.issuer_cert_chain.clone(),
+            issuer_id: scenario.issuer_id.clone(),
+        });
+        assert!(started
+            .iter()
+            .any(|effect| matches!(effect, Effect::RequestToken)));
+        assert_eq!(core.active, ActiveFlow::Issuance);
+        assert!(matches!(
+            core.issuance,
+            oid4vci::State::RequestingToken { .. }
+        ));
+
+        core.iss_seen_c_nonces.push(MAX_REPLAY_VALUES as u64 - 1);
+        core.pending_operations.insert(
+            7,
+            PendingOperation {
+                flow: ActiveFlow::Issuance,
+                result: OperationResultKind::Token,
+                authorization_hash: None,
+            },
+        );
+        let before = core.export_durable_checkpoint(3).unwrap();
+        let rejected = core.handle_event(Event::TokenReceived {
+            bound: true,
+            c_nonce: u64::MAX,
+        });
+        assert_replay_capacity_effects(&rejected);
+        assert_eq!(core.active, ActiveFlow::None);
+        assert!(matches!(core.issuance, oid4vci::State::Idle));
+        assert!(!core.pending_operations.contains_key(&7));
+        assert_eq!(core.export_durable_checkpoint(3).unwrap(), before);
+
+        let mut presentation = configured_core(&scenario, "wallet.example", "device-key");
+        presentation.active = ActiveFlow::Presentation;
+        presentation.seen_nonces = vec![42];
+        let before = presentation.export_durable_checkpoint(4).unwrap();
+        let rejected = presentation.translate(oid4vp::Output::PersistNonce(42));
+        assert_replay_capacity_effects(&rejected);
+        assert_eq!(presentation.seen_nonces, vec![42]);
+        assert_eq!(presentation.active, ActiveFlow::None);
+        assert!(matches!(presentation.vp, State::Idle));
+        assert_eq!(presentation.export_durable_checkpoint(4).unwrap(), before);
+    }
+
+    #[test]
     fn transaction_head_chain_and_canonical_tombstones_are_checked_atomically() {
         let scenario = DemoWallet::new().issuance_scenario();
         let source = populated_core(&scenario);
@@ -2321,6 +2474,7 @@ mod tests {
 
     #[test]
     fn hostile_declared_lengths_and_depth_fail_before_allocation_and_are_atomic() {
+        assert_eq!(MAX_CHECKPOINT_BYTES, 33_554_312);
         let scenario = DemoWallet::new().issuance_scenario();
         let mut target = configured_core(&scenario, "wallet.example", "device-key");
         let cases = [

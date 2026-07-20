@@ -2114,6 +2114,44 @@ impl Core {
         ]
     }
 
+    fn durable_replay_value_can_be_reserved(values: &[u64], candidate: u64) -> bool {
+        !values.contains(&candidate) && values.len() < durable::MAX_REPLAY_VALUES
+    }
+
+    fn durable_replay_capacity_flow(&self, event: &Event) -> Option<ActiveFlow> {
+        match event {
+            Event::AuthorizationRequestReceived { .. }
+                if self.seen_nonces.len() >= durable::MAX_REPLAY_VALUES =>
+            {
+                Some(ActiveFlow::Presentation)
+            }
+            Event::PaymentAuthorizationRequestReceived { .. }
+                if self.pay_seen_nonces.len() >= durable::MAX_REPLAY_VALUES =>
+            {
+                Some(ActiveFlow::Payment)
+            }
+            Event::CredentialOfferReceived { .. }
+                if self.iss_seen_c_nonces.len() >= durable::MAX_REPLAY_VALUES =>
+            {
+                Some(ActiveFlow::Issuance)
+            }
+            Event::QesSignRequestReceived { .. }
+                if self.qes_seen_nonces.len() >= durable::MAX_REPLAY_VALUES =>
+            {
+                Some(ActiveFlow::Qes)
+            }
+            _ => None,
+        }
+    }
+
+    fn durable_replay_capacity_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
+        self.terminate_audited_flow(
+            flow,
+            "durable_replay_capacity_exhausted",
+            "The wallet cannot safely reserve another replay-protection value. No operation was started.",
+        )
+    }
+
     fn audited_flow_started_by(event: &Event) -> Option<ActiveFlow> {
         match event {
             Event::AuthorizationRequestReceived { .. } => Some(ActiveFlow::Presentation),
@@ -2191,6 +2229,13 @@ impl Core {
 
     /// The single entry point. Same state + same event ⇒ same effects (I/O is all in the shell).
     pub fn handle_event(&mut self, event: Event) -> Vec<Effect> {
+        // Durable replay sets never evict values. Reject a new flow before changing any protocol
+        // state or emitting trust, consent, signing or network work when its set is already full.
+        // The transition-local checks in each driver below also protect against an interleaved or
+        // otherwise inconsistent in-memory flow reaching the actual reservation point.
+        if let Some(flow) = self.durable_replay_capacity_flow(&event) {
+            return self.durable_replay_capacity_effects(flow);
+        }
         if let Some(flow) = Self::audited_flow_started_by(&event) {
             if !self.audit_log_available {
                 return self.audit_log_fault_effects(flow);
@@ -2838,6 +2883,14 @@ impl Core {
             };
             oid4vp::step(&self.vp, &input, &env)
         };
+        if let Some(nonce) = outputs.iter().find_map(|output| match output {
+            oid4vp::Output::PersistNonce(nonce) => Some(*nonce),
+            _ => None,
+        }) {
+            if !Self::durable_replay_value_can_be_reserved(&self.seen_nonces, nonce) {
+                return self.durable_replay_capacity_effects(ActiveFlow::Presentation);
+            }
+        }
         let was_done = matches!(self.vp, State::Done);
         let was_aborted = matches!(self.vp, State::Aborted(_));
         let newly_aborted = if was_aborted {
@@ -3298,6 +3351,13 @@ impl Core {
             };
             oid4vci::step(&self.issuance, &input, &env)
         };
+        if matches!(next, oid4vci::State::ProvingPossession { .. }) {
+            if let oid4vci::Input::TokenResponse { c_nonce, .. } = &input {
+                if !Self::durable_replay_value_can_be_reserved(&self.iss_seen_c_nonces, *c_nonce) {
+                    return self.durable_replay_capacity_effects(ActiveFlow::Issuance);
+                }
+            }
+        }
         let was_issued = matches!(self.issuance, oid4vci::State::CredentialIssued { .. });
         self.issuance = next;
 
@@ -3395,6 +3455,13 @@ impl Core {
             };
             payment::step(&self.payment, &input, &env)
         };
+        if matches!(next, payment::State::Authorized { .. }) {
+            if let Some((_, nonce)) = self.pay_pending {
+                if !Self::durable_replay_value_can_be_reserved(&self.pay_seen_nonces, nonce) {
+                    return self.durable_replay_capacity_effects(ActiveFlow::Payment);
+                }
+            }
+        }
         self.payment = next;
 
         // Capture the response endpoint + nonce when the confirmation screen is reached.
@@ -3511,6 +3578,11 @@ impl Core {
             };
             qes::step(&self.qes, &input, &env)
         };
+        if let qes::QesState::AwaitingAuthorization(request) = &next {
+            if !Self::durable_replay_value_can_be_reserved(&self.qes_seen_nonces, request.nonce) {
+                return self.durable_replay_capacity_effects(ActiveFlow::Qes);
+            }
+        }
         self.qes = next;
         // Record the request nonce once the confirmation is reached (replay protection).
         if let qes::QesState::AwaitingAuthorization(req) = &self.qes {
@@ -4302,6 +4374,12 @@ impl Core {
         match output {
             O::ResolveRpTrust { client_id } => vec![Effect::ResolveRpTrust { client_id }],
             O::PersistNonce(nonce) => {
+                // The transition driver reserves before installing its next state. Keep this
+                // final mutation boundary defensive so an impossible duplicate output can never
+                // corrupt the durable set or make its next checkpoint non-canonical.
+                if !Self::durable_replay_value_can_be_reserved(&self.seen_nonces, nonce) {
+                    return self.durable_replay_capacity_effects(ActiveFlow::Presentation);
+                }
                 self.seen_nonces.push(nonce);
                 vec![Effect::PersistNonce { nonce }]
             }

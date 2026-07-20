@@ -189,8 +189,11 @@ operational solution needed to enter those processes.
             event across executor replacement and retain the original typed failure category.
       - [ ] Make the lifecycle coordinator the only production event path; remove or isolate raw
             `WalletEngine` event driving so application composition cannot bypass persistence.
-      - [ ] Align Core checkpoint export admission with the native store capacity so a successful
-            state transition cannot wedge permanently at commit time; add exact boundary tests.
+      - [x] Align the Core/iOS/Android checkpoint plaintext ceiling at 33,554,312 bytes and reject
+            growth of every durable replay set before persistent mutation; reset the active flow
+            and preserve an exportable prior checkpoint at the exact boundary.
+      - [ ] Enforce durable credential count, per-component and aggregate evidence limits before
+            direct or issuance ingestion so no successful credential transition can wedge export.
       - [ ] Add a bounded durable effect outbox with stable effect identifiers and acknowledgements
             before claiming crash-safe external delivery; process death after checkpoint commit
             must neither lose nor duplicate browser, signing, network or attestation work.
