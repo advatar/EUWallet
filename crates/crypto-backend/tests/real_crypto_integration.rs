@@ -60,7 +60,11 @@ fn mdoc_issuer_signed_real_crypto() {
         ns,
         "org.iso.18013.5.1.mDL",
         Value::Null,
-        mdoc::ValidityInfo::default(),
+        mdoc::ValidityInfo {
+            signed: "2026-07-17T00:00:00Z".into(),
+            valid_from: "2026-07-17T00:00:00Z".into(),
+            valid_until: "2027-07-17T00:00:00Z".into(),
+        },
         &AwsLc,  // real SHA-256 digests
         &issuer, // real ES256 issuer signature
         &KeyRef("issuer".into()),
