@@ -14,6 +14,11 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use crypto_traits::{Alg, CryptoError, Verifier};
 use serde_json::Value as Json;
 
+const MAX_COMPACT_BYTES: usize = 1024 * 1024;
+const MAX_JWS_BYTES: usize = 512 * 1024;
+const MAX_DISCLOSURE_BYTES: usize = 64 * 1024;
+const MAX_DISCLOSURES: usize = 256;
+
 /// Pinned wire version. Isolate the codec behind this marker: SD-JWT VC is a moving draft, not
 /// an RFC (register change-watch). A silent bump must break the build (see the test).
 pub const SD_JWT_VC_DRAFT: &str = "draft-17";
@@ -29,6 +34,8 @@ pub enum SdJwtError {
     Malformed,
     /// A base64url segment did not decode.
     InvalidBase64,
+    /// An input exceeded the wallet's explicit parser budget.
+    TooLarge,
     /// A JSON segment did not parse, or was not the expected shape.
     InvalidJson,
     /// The JOSE header used `alg: none`, which is never acceptable.
@@ -43,6 +50,8 @@ pub enum SdJwtError {
     UnsupportedHashAlg,
     /// A presented disclosure's digest was not present in the SD-JWT's `_sd` array → tampering.
     UnknownDisclosure,
+    /// A claim name or disclosure digest appeared more than once.
+    DuplicateClaim,
     /// The key-binding JWT was missing, or its aud/nonce/sd_hash did not match expectations.
     KeyBindingMismatch,
     /// The signature did not verify.
@@ -81,6 +90,9 @@ pub struct Disclosure {
 impl Disclosure {
     /// Parse a single base64url disclosure string.
     pub fn parse(raw: &str) -> Result<Self, SdJwtError> {
+        if raw.len() > MAX_DISCLOSURE_BYTES {
+            return Err(SdJwtError::TooLarge);
+        }
         let bytes = Base64UrlUnpadded::decode_vec(raw).map_err(|_| SdJwtError::InvalidBase64)?;
         let json: Json = serde_json::from_slice(&bytes).map_err(|_| SdJwtError::InvalidJson)?;
         let arr = json.as_array().ok_or(SdJwtError::InvalidJson)?;
@@ -129,12 +141,18 @@ impl SdJwtVc {
     /// Split the combined serialization on `~`. Per draft-17 §4, the last element is the
     /// (possibly empty) key-binding JWT: a trailing `~` means "no KB-JWT".
     pub fn parse(compact: &str) -> Result<Self, SdJwtError> {
+        if compact.len() > MAX_COMPACT_BYTES {
+            return Err(SdJwtError::TooLarge);
+        }
         let mut parts: Vec<&str> = compact.split('~').collect();
         if parts.len() < 2 {
             // Must be at least "<jwt>~".
             return Err(SdJwtError::Malformed);
         }
         let issuer_jwt = parts.remove(0).to_string();
+        if issuer_jwt.len() > MAX_JWS_BYTES {
+            return Err(SdJwtError::TooLarge);
+        }
         if issuer_jwt.is_empty() || issuer_jwt.matches('.').count() != 2 {
             return Err(SdJwtError::Malformed);
         }
@@ -143,12 +161,20 @@ impl SdJwtVc {
         let key_binding_jwt = if kb.is_empty() {
             None
         } else {
+            if kb.len() > MAX_JWS_BYTES {
+                return Err(SdJwtError::TooLarge);
+            }
             if kb.matches('.').count() != 2 {
                 return Err(SdJwtError::Malformed);
             }
             Some(kb.to_string())
         };
         // Remaining parts are disclosures; none may be empty.
+        if parts.len() > MAX_DISCLOSURES
+            || parts.iter().any(|p| p.len() > MAX_DISCLOSURE_BYTES)
+        {
+            return Err(SdJwtError::TooLarge);
+        }
         if parts.iter().any(|p| p.is_empty()) {
             return Err(SdJwtError::Malformed);
         }
@@ -200,15 +226,26 @@ impl SdJwtVc {
         }
 
         // 4) Collect the set of digests the issuer committed to.
-        let sd_digests: Vec<String> = obj
-            .get(SD_CLAIM)
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let sd_digests: Vec<String> = match obj.get(SD_CLAIM) {
+            None => Vec::new(),
+            Some(Json::Array(values)) if values.len() <= MAX_DISCLOSURES => values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(String::from)
+                        .ok_or(SdJwtError::InvalidJson)
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err(SdJwtError::InvalidJson),
+        };
+        let mut unique_digests = std::collections::BTreeSet::new();
+        if !sd_digests
+            .iter()
+            .all(|digest| unique_digests.insert(digest.as_str()))
+        {
+            return Err(SdJwtError::DuplicateClaim);
+        }
 
         // 5) Start from the plain (non-selective) claims.
         let mut result = serde_json::Map::new();
@@ -225,8 +262,9 @@ impl SdJwtVc {
             if !sd_digests.contains(&dig) {
                 return Err(SdJwtError::UnknownDisclosure);
             }
-            if let Some(name) = d.name {
-                result.insert(name, d.value);
+            let name = d.name.ok_or(SdJwtError::InvalidJson)?;
+            if result.insert(name, d.value).is_some() {
+                return Err(SdJwtError::DuplicateClaim);
             }
         }
         Ok(result)
@@ -322,6 +360,9 @@ impl SdJwtVc {
 
 /// Split a compact JWS into (decoded header JSON, decoded payload bytes, signing input, signature).
 fn split_jws(jwt: &str) -> Result<(Json, Vec<u8>, String, Vec<u8>), SdJwtError> {
+    if jwt.len() > MAX_JWS_BYTES {
+        return Err(SdJwtError::TooLarge);
+    }
     let parts: Vec<&str> = jwt.split('.').collect();
     if parts.len() != 3 {
         return Err(SdJwtError::Malformed);

@@ -157,6 +157,51 @@ fn verify_rejects_forged_disclosure() {
 }
 
 #[test]
+fn verify_rejects_a_disclosure_that_overwrites_a_plain_claim() {
+    let raw = b64(serde_json::to_string(&json!(["salt", "family_name", "Mallory"]))
+        .unwrap()
+        .as_bytes());
+    let disclosure = Disclosure::parse(&raw).unwrap();
+    let header = b64(br#"{"alg":"ES256","typ":"dc+sd-jwt"}"#);
+    let payload = b64(
+        serde_json::to_string(&json!({
+            "iss": "https://issuer.example",
+            "vct": "urn:eudi:pid:1",
+            "family_name": "Alice",
+            "_sd": [disclosure.digest_b64(&RealDigest)]
+        }))
+        .unwrap()
+        .as_bytes(),
+    );
+    let signing_input = format!("{header}.{payload}");
+    let jwt = format!("{signing_input}.{}", b64(&fnv(signing_input.as_bytes())));
+    let sd = SdJwtVc::parse(&format!("{jwt}~{raw}~")).unwrap();
+
+    assert_eq!(
+        sd.verify_and_disclose(&StubCrypto, &RealDigest, b"pub", Alg::Es256),
+        Err(SdJwtError::DuplicateClaim)
+    );
+}
+
+#[test]
+fn parser_enforces_explicit_resource_budgets() {
+    assert_eq!(
+        SdJwtVc::parse(&"x".repeat(1024 * 1024 + 1)),
+        Err(SdJwtError::TooLarge)
+    );
+    assert_eq!(
+        Disclosure::parse(&"A".repeat(64 * 1024 + 1)),
+        Err(SdJwtError::TooLarge)
+    );
+    let jwt = "a.b.c";
+    let disclosures = std::iter::repeat_n("A", 257).collect::<Vec<_>>().join("~");
+    assert_eq!(
+        SdJwtVc::parse(&format!("{jwt}~{disclosures}~")),
+        Err(SdJwtError::TooLarge)
+    );
+}
+
+#[test]
 fn verify_rejects_bad_signature() {
     let (jwt, disclosures) = build(&[("family_name", json!("A"))]);
     // Corrupt the signature segment.
