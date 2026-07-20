@@ -178,7 +178,7 @@ operational solution needed to enter those processes.
           request-bound Wallet Attestation/PoP inputs at PAR and token; RFC 9207 issuer/redirect
           binding; token-only ES256 DPoP signing effects and nonce retry lifecycle; raw response
           validation; duplicate-aware bounded JSON; and replay/downgrade/secret-redaction tests.
-    - [ ] Add an isolated final Nonce/Credential Endpoint transport machine that consumes the
+    - [x] Add an isolated final Nonce/Credential Endpoint transport machine that consumes the
           sender-constrained authorization grant; obtains bounded `c_nonce`; requires exact
           request-bound key-attestation acquisition and ES256 credential-proof signing; sends an
           `ath`-bound DPoP request with a finite resource-server nonce retry; and accepts only one
