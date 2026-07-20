@@ -16,11 +16,15 @@ use zeroize::Zeroizing;
 
 pub(super) const MAX_LIVE_DELIVERIES: usize = 32;
 pub(super) const MAX_RESERVED_DELIVERY_BYTES: usize = 4 * 1024 * 1024;
+/// One request or result must remain within the durable checkpoint scanner's existing byte-string
+/// ceiling. The aggregate reservation remains four MiB across all live work.
+pub(super) const MAX_DELIVERY_BLOB_BYTES: usize = 2 * 1024 * 1024;
 pub(super) const MAX_DELIVERY_TOMBSTONES: usize = 64;
 pub(super) const MAX_DELIVERY_SEQUENCE: u64 = i64::MAX as u64;
 pub(super) const MAX_DELIVERY_ATTEMPTS: u8 = 3;
 
 const DELIVERY_ID_DOMAIN: &[u8] = b"euwallet.delivery-ledger.id.v1\0";
+const DELIVERY_LEDGER_DIGEST_DOMAIN: &[u8] = b"euwallet.delivery-ledger.digest.v1\0";
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct DeliveryId([u8; 32]);
@@ -28,6 +32,10 @@ pub(super) struct DeliveryId([u8; 32]);
 impl DeliveryId {
     pub(super) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    pub(super) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 }
 
@@ -56,7 +64,7 @@ pub(super) enum DeliveryKind {
 }
 
 impl DeliveryKind {
-    fn tag(self) -> u8 {
+    pub(super) fn tag(self) -> u8 {
         match self {
             Self::ResolveRpTrust => 1,
             Self::PersistNonce => 2,
@@ -72,6 +80,25 @@ impl DeliveryKind {
             Self::PublishTransferOffer => 12,
             Self::Close => 13,
         }
+    }
+
+    pub(super) fn from_tag(tag: u64) -> Option<Self> {
+        Some(match tag {
+            1 => Self::ResolveRpTrust,
+            2 => Self::PersistNonce,
+            3 => Self::Render,
+            4 => Self::Sign,
+            5 => Self::Http,
+            6 => Self::PushPar,
+            7 => Self::OpenAuthBrowser,
+            8 => Self::PromptTxCode,
+            9 => Self::RequestToken,
+            10 => Self::RequestCredential,
+            11 => Self::FetchStatusList,
+            12 => Self::PublishTransferOffer,
+            13 => Self::Close,
+            _ => return None,
+        })
     }
 
     /// Recovery is a Core-owned security decision, never a shell-provided parameter.
@@ -100,13 +127,23 @@ pub(super) enum RecoveryPolicy {
 }
 
 impl RecoveryPolicy {
-    fn tag(self) -> u8 {
+    pub(super) fn tag(self) -> u8 {
         match self {
             Self::ReplaySafe => 1,
             Self::ReconcileBeforeRetry => 2,
             Self::NeverReplay => 3,
             Self::AwaitCallback => 4,
         }
+    }
+
+    pub(super) fn from_tag(tag: u64) -> Option<Self> {
+        Some(match tag {
+            1 => Self::ReplaySafe,
+            2 => Self::ReconcileBeforeRetry,
+            3 => Self::NeverReplay,
+            4 => Self::AwaitCallback,
+            _ => return None,
+        })
     }
 }
 
@@ -118,25 +155,61 @@ pub(super) enum DeliveryState {
     Ambiguous,
 }
 
+impl DeliveryState {
+    pub(super) fn tag(self) -> u8 {
+        match self {
+            Self::Queued => 1,
+            Self::Dispatching => 2,
+            Self::ResultReady => 3,
+            Self::Ambiguous => 4,
+        }
+    }
+
+    pub(super) fn from_tag(tag: u64) -> Option<Self> {
+        Some(match tag {
+            1 => Self::Queued,
+            2 => Self::Dispatching,
+            3 => Self::ResultReady,
+            4 => Self::Ambiguous,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TombstoneDisposition {
+pub(super) enum TombstoneDisposition {
     ResultConsumed,
 }
 
+impl TombstoneDisposition {
+    pub(super) fn tag(self) -> u8 {
+        match self {
+            Self::ResultConsumed => 1,
+        }
+    }
+
+    pub(super) fn from_tag(tag: u64) -> Option<Self> {
+        match tag {
+            1 => Some(Self::ResultConsumed),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
-struct SensitiveBytes(Zeroizing<Vec<u8>>);
+pub(super) struct SensitiveBytes(Zeroizing<Vec<u8>>);
 
 impl SensitiveBytes {
     /// Callers wrap raw input before performing any fallible validation.
-    fn new(bytes: Vec<u8>) -> Self {
+    pub(super) fn new(bytes: Vec<u8>) -> Self {
         Self(Zeroizing::new(bytes))
     }
 
-    fn as_slice(&self) -> &[u8] {
+    pub(super) fn as_slice(&self) -> &[u8] {
         self.0.as_slice()
     }
 
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.0.len()
     }
 }
@@ -277,7 +350,7 @@ impl fmt::Debug for PreparedDeliveryBatch {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct DeliveryEntry {
+pub(super) struct DeliveryEntry {
     id: DeliveryId,
     sequence: u64,
     kind: DeliveryKind,
@@ -311,6 +384,54 @@ impl DeliveryEntry {
             attempt: self.attempt,
             adapter_contract: self.adapter_contract?,
         })
+    }
+
+    pub(super) fn id(&self) -> DeliveryId {
+        self.id
+    }
+
+    pub(super) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub(super) fn kind(&self) -> DeliveryKind {
+        self.kind
+    }
+
+    pub(super) fn recovery_policy(&self) -> RecoveryPolicy {
+        self.recovery_policy
+    }
+
+    pub(super) fn state(&self) -> DeliveryState {
+        self.state
+    }
+
+    pub(super) fn request(&self) -> &[u8] {
+        self.request.as_slice()
+    }
+
+    pub(super) fn request_hash(&self) -> &[u8; 32] {
+        &self.request_hash
+    }
+
+    pub(super) fn result_capacity(&self) -> usize {
+        self.result_capacity
+    }
+
+    pub(super) fn result(&self) -> Option<&[u8]> {
+        self.result.as_ref().map(SensitiveBytes::as_slice)
+    }
+
+    pub(super) fn result_hash(&self) -> Option<&[u8; 32]> {
+        self.result_hash.as_ref()
+    }
+
+    pub(super) fn attempt(&self) -> u8 {
+        self.attempt
+    }
+
+    pub(super) fn adapter_contract(&self) -> Option<u64> {
+        self.adapter_contract.map(NonZeroU64::get)
     }
 }
 
@@ -381,10 +502,13 @@ pub(super) struct ConsumeReadyOutcome {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct DeliveryTombstone {
+pub(super) struct DeliveryTombstone {
     id: DeliveryId,
     sequence: u64,
+    kind: DeliveryKind,
+    recovery_policy: RecoveryPolicy,
     request_hash: [u8; 32],
+    result_capacity: usize,
     attempt: u8,
     adapter_contract: NonZeroU64,
     result_hash: [u8; 32],
@@ -395,6 +519,163 @@ impl fmt::Debug for DeliveryTombstone {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("DeliveryTombstone")
+            .field("disposition", &self.disposition)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeliveryTombstone {
+    pub(super) fn id(&self) -> DeliveryId {
+        self.id
+    }
+
+    pub(super) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub(super) fn kind(&self) -> DeliveryKind {
+        self.kind
+    }
+
+    pub(super) fn recovery_policy(&self) -> RecoveryPolicy {
+        self.recovery_policy
+    }
+
+    pub(super) fn request_hash(&self) -> &[u8; 32] {
+        &self.request_hash
+    }
+
+    pub(super) fn result_capacity(&self) -> usize {
+        self.result_capacity
+    }
+
+    pub(super) fn attempt(&self) -> u8 {
+        self.attempt
+    }
+
+    pub(super) fn adapter_contract(&self) -> u64 {
+        self.adapter_contract.get()
+    }
+
+    pub(super) fn result_hash(&self) -> &[u8; 32] {
+        &self.result_hash
+    }
+
+    pub(super) fn disposition(&self) -> TombstoneDisposition {
+        self.disposition
+    }
+}
+
+/// Untrusted decoded live-entry material. Construction deliberately performs no validation; only
+/// [`DeliveryLedger::restore_checked`] may turn it into live ledger state.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct RestoredDelivery {
+    id: [u8; 32],
+    sequence: u64,
+    kind: DeliveryKind,
+    recovery_policy: RecoveryPolicy,
+    state: DeliveryState,
+    request: SensitiveBytes,
+    request_hash: [u8; 32],
+    result_capacity: usize,
+    result: Option<SensitiveBytes>,
+    result_hash: Option<[u8; 32]>,
+    attempt: u8,
+    adapter_contract: Option<u64>,
+}
+
+impl RestoredDelivery {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_sensitive_parts(
+        id: [u8; 32],
+        sequence: u64,
+        kind: DeliveryKind,
+        recovery_policy: RecoveryPolicy,
+        state: DeliveryState,
+        request: SensitiveBytes,
+        request_hash: [u8; 32],
+        result_capacity: usize,
+        result: Option<SensitiveBytes>,
+        result_hash: Option<[u8; 32]>,
+        attempt: u8,
+        adapter_contract: Option<u64>,
+    ) -> Self {
+        Self {
+            id,
+            sequence,
+            kind,
+            recovery_policy,
+            state,
+            request,
+            request_hash,
+            result_capacity,
+            result,
+            result_hash,
+            attempt,
+            adapter_contract,
+        }
+    }
+}
+
+impl fmt::Debug for RestoredDelivery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RestoredDelivery")
+            .field("kind", &self.kind)
+            .field("recovery_policy", &self.recovery_policy)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Untrusted decoded terminal material retained only for duplicate-result recognition.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct RestoredTombstone {
+    id: [u8; 32],
+    sequence: u64,
+    kind: DeliveryKind,
+    recovery_policy: RecoveryPolicy,
+    request_hash: [u8; 32],
+    result_capacity: usize,
+    attempt: u8,
+    adapter_contract: u64,
+    result_hash: [u8; 32],
+    disposition: TombstoneDisposition,
+}
+
+impl RestoredTombstone {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        id: [u8; 32],
+        sequence: u64,
+        kind: DeliveryKind,
+        recovery_policy: RecoveryPolicy,
+        request_hash: [u8; 32],
+        result_capacity: usize,
+        attempt: u8,
+        adapter_contract: u64,
+        result_hash: [u8; 32],
+        disposition: TombstoneDisposition,
+    ) -> Self {
+        Self {
+            id,
+            sequence,
+            kind,
+            recovery_policy,
+            request_hash,
+            result_capacity,
+            attempt,
+            adapter_contract,
+            result_hash,
+            disposition,
+        }
+    }
+}
+
+impl fmt::Debug for RestoredTombstone {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RestoredTombstone")
             .field("disposition", &self.disposition)
             .finish_non_exhaustive()
     }
@@ -429,6 +710,8 @@ pub(super) enum DeliveryLedgerError {
     },
     ResultTooLarge,
     ConflictingResult,
+    InvalidSnapshot,
+    SnapshotDigestMismatch,
 }
 
 #[derive(Clone)]
@@ -499,6 +782,276 @@ impl DeliveryLedger {
         self.reserved_bytes
     }
 
+    pub(super) fn is_pristine(&self) -> bool {
+        self.next_sequence == 1
+            && self.live.is_empty()
+            && self.tombstones.is_empty()
+            && self.reserved_bytes == 0
+    }
+
+    pub(super) fn live_entries(&self) -> impl ExactSizeIterator<Item = &DeliveryEntry> {
+        self.live.iter()
+    }
+
+    pub(super) fn tombstones(&self) -> impl ExactSizeIterator<Item = &DeliveryTombstone> {
+        self.tombstones.iter()
+    }
+
+    pub(super) fn digest(&self) -> [u8; 32] {
+        ledger_digest(self)
+    }
+
+    /// Reconstruct a complete ledger from hostile checkpoint material. Every derived value and
+    /// state-dependent invariant is checked before a validated temporary replaces any Core state.
+    pub(super) fn restore_checked(
+        namespace: Zeroizing<[u8; 32]>,
+        next_sequence: u64,
+        restored_live: Vec<RestoredDelivery>,
+        restored_tombstones: Vec<RestoredTombstone>,
+        expected_digest: [u8; 32],
+    ) -> Result<Self, DeliveryLedgerError> {
+        if restored_live.len() > MAX_LIVE_DELIVERIES
+            || restored_tombstones.len() > MAX_DELIVERY_TOMBSTONES
+            || next_sequence == 0
+            || next_sequence > MAX_DELIVERY_SEQUENCE + 1
+        {
+            return Err(DeliveryLedgerError::InvalidSnapshot);
+        }
+
+        let retained_count = restored_live
+            .len()
+            .checked_add(restored_tombstones.len())
+            .ok_or(DeliveryLedgerError::InvalidSnapshot)?;
+        if retained_count == 0 {
+            if next_sequence != 1 {
+                return Err(DeliveryLedgerError::InvalidSnapshot);
+            }
+        } else {
+            let retained_count =
+                u64::try_from(retained_count).map_err(|_| DeliveryLedgerError::InvalidSnapshot)?;
+            if next_sequence <= retained_count {
+                return Err(DeliveryLedgerError::InvalidSnapshot);
+            }
+        }
+        let mut expected_sequence = next_sequence
+            .checked_sub(
+                u64::try_from(retained_count).map_err(|_| DeliveryLedgerError::InvalidSnapshot)?,
+            )
+            .ok_or(DeliveryLedgerError::InvalidSnapshot)?;
+        let mut ids = std::collections::BTreeSet::new();
+        let mut tombstones = VecDeque::with_capacity(restored_tombstones.len());
+        for restored in restored_tombstones {
+            if restored.sequence != expected_sequence
+                || restored.sequence == 0
+                || restored.sequence > MAX_DELIVERY_SEQUENCE
+                || restored.recovery_policy != restored.kind.recovery_policy()
+                || restored.result_capacity > MAX_DELIVERY_BLOB_BYTES
+                || !(1..=MAX_DELIVERY_ATTEMPTS).contains(&restored.attempt)
+            {
+                return Err(DeliveryLedgerError::InvalidSnapshot);
+            }
+            let adapter_contract = NonZeroU64::new(restored.adapter_contract)
+                .ok_or(DeliveryLedgerError::InvalidSnapshot)?;
+            let expected_id = derive_id(
+                &namespace,
+                restored.sequence,
+                restored.kind,
+                restored.recovery_policy,
+                &restored.request_hash,
+                restored.result_capacity,
+            );
+            let id = DeliveryId::from_bytes(restored.id);
+            if id != expected_id || !ids.insert(restored.id) {
+                return Err(DeliveryLedgerError::InvalidSnapshot);
+            }
+            tombstones.push_back(DeliveryTombstone {
+                id,
+                sequence: restored.sequence,
+                kind: restored.kind,
+                recovery_policy: restored.recovery_policy,
+                request_hash: restored.request_hash,
+                result_capacity: restored.result_capacity,
+                attempt: restored.attempt,
+                adapter_contract,
+                result_hash: restored.result_hash,
+                disposition: restored.disposition,
+            });
+            expected_sequence += 1;
+        }
+
+        let mut live = Vec::with_capacity(restored_live.len());
+        let mut reserved_bytes = 0usize;
+        for (index, restored) in restored_live.into_iter().enumerate() {
+            if restored.sequence != expected_sequence
+                || restored.sequence == 0
+                || restored.sequence > MAX_DELIVERY_SEQUENCE
+                || restored.recovery_policy != restored.kind.recovery_policy()
+                || restored.request.len() > MAX_DELIVERY_BLOB_BYTES
+                || restored.result_capacity > MAX_DELIVERY_BLOB_BYTES
+            {
+                return Err(DeliveryLedgerError::InvalidSnapshot);
+            }
+            let reservation = reservation_size(restored.request.len(), restored.result_capacity)?;
+            ensure_budget(reserved_bytes, reservation)?;
+            reserved_bytes += reservation;
+
+            let request = restored.request;
+            if AwsLc.sha256(request.as_slice()) != restored.request_hash {
+                return Err(DeliveryLedgerError::InvalidSnapshot);
+            }
+            let expected_id = derive_id(
+                &namespace,
+                restored.sequence,
+                restored.kind,
+                restored.recovery_policy,
+                &restored.request_hash,
+                restored.result_capacity,
+            );
+            let id = DeliveryId::from_bytes(restored.id);
+            if id != expected_id || !ids.insert(restored.id) {
+                return Err(DeliveryLedgerError::InvalidSnapshot);
+            }
+
+            let adapter_contract = restored
+                .adapter_contract
+                .map(|value| NonZeroU64::new(value).ok_or(DeliveryLedgerError::InvalidSnapshot))
+                .transpose()?;
+            let result = restored.result;
+            if result
+                .as_ref()
+                .is_some_and(|value| value.len() > MAX_DELIVERY_BLOB_BYTES)
+                || result
+                    .as_ref()
+                    .is_some_and(|value| value.len() > restored.result_capacity)
+                || result.is_some() != restored.result_hash.is_some()
+            {
+                return Err(DeliveryLedgerError::InvalidSnapshot);
+            }
+            if let (Some(result), Some(result_hash)) = (&result, restored.result_hash) {
+                if AwsLc.sha256(result.as_slice()) != result_hash {
+                    return Err(DeliveryLedgerError::InvalidSnapshot);
+                }
+            }
+
+            let valid_state = match restored.state {
+                DeliveryState::Queued => {
+                    result.is_none()
+                        && restored.result_hash.is_none()
+                        && ((restored.attempt == 0 && adapter_contract.is_none())
+                            || ((1..MAX_DELIVERY_ATTEMPTS).contains(&restored.attempt)
+                                && adapter_contract.is_some()
+                                && matches!(
+                                    restored.recovery_policy,
+                                    RecoveryPolicy::ReplaySafe
+                                        | RecoveryPolicy::ReconcileBeforeRetry
+                                )))
+                }
+                DeliveryState::Dispatching | DeliveryState::Ambiguous => {
+                    (1..=MAX_DELIVERY_ATTEMPTS).contains(&restored.attempt)
+                        && adapter_contract.is_some()
+                        && result.is_none()
+                        && restored.result_hash.is_none()
+                }
+                DeliveryState::ResultReady => {
+                    (1..=MAX_DELIVERY_ATTEMPTS).contains(&restored.attempt)
+                        && adapter_contract.is_some()
+                        && result.is_some()
+                        && restored.result_hash.is_some()
+                }
+            };
+            let pristine_follower = index == 0
+                || (restored.state == DeliveryState::Queued
+                    && restored.attempt == 0
+                    && adapter_contract.is_none()
+                    && result.is_none()
+                    && restored.result_hash.is_none());
+            if !valid_state || !pristine_follower {
+                return Err(DeliveryLedgerError::InvalidSnapshot);
+            }
+
+            live.push(DeliveryEntry {
+                id,
+                sequence: restored.sequence,
+                kind: restored.kind,
+                recovery_policy: restored.recovery_policy,
+                state: restored.state,
+                request,
+                request_hash: restored.request_hash,
+                result_capacity: restored.result_capacity,
+                result,
+                result_hash: restored.result_hash,
+                attempt: restored.attempt,
+                adapter_contract,
+            });
+            expected_sequence += 1;
+        }
+        if expected_sequence != next_sequence {
+            return Err(DeliveryLedgerError::InvalidSnapshot);
+        }
+
+        let ledger = Self {
+            namespace,
+            next_sequence,
+            live,
+            tombstones,
+            reserved_bytes,
+        };
+        if ledger.digest() != expected_digest {
+            return Err(DeliveryLedgerError::SnapshotDigestMismatch);
+        }
+        Ok(ledger)
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_namespace_for_testing(namespace: [u8; 32]) -> Self {
+        Self {
+            namespace: Zeroizing::new(namespace),
+            next_sequence: 1,
+            live: Vec::new(),
+            tombstones: VecDeque::new(),
+            reserved_bytes: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn maximal_tombstone_ledger_for_testing() -> Self {
+        let namespace = Zeroizing::new([0x5a; 32]);
+        let first_sequence = MAX_DELIVERY_SEQUENCE - MAX_DELIVERY_TOMBSTONES as u64 + 1;
+        let tombstones = (first_sequence..=MAX_DELIVERY_SEQUENCE)
+            .map(|sequence| {
+                let kind = DeliveryKind::Http;
+                let recovery_policy = kind.recovery_policy();
+                let request_hash = AwsLc.sha256(&sequence.to_be_bytes());
+                DeliveryTombstone {
+                    id: derive_id(
+                        &namespace,
+                        sequence,
+                        kind,
+                        recovery_policy,
+                        &request_hash,
+                        MAX_DELIVERY_BLOB_BYTES,
+                    ),
+                    sequence,
+                    kind,
+                    recovery_policy,
+                    request_hash,
+                    result_capacity: MAX_DELIVERY_BLOB_BYTES,
+                    attempt: MAX_DELIVERY_ATTEMPTS,
+                    adapter_contract: NonZeroU64::new(u64::MAX).unwrap(),
+                    result_hash: AwsLc.sha256(&sequence.to_le_bytes()),
+                    disposition: TombstoneDisposition::ResultConsumed,
+                }
+            })
+            .collect();
+        Self {
+            namespace,
+            next_sequence: MAX_DELIVERY_SEQUENCE + 1,
+            live: Vec::new(),
+            tombstones,
+            reserved_bytes: 0,
+        }
+    }
+
     pub(super) fn state(&self, id: DeliveryId) -> Option<DeliveryState> {
         self.live
             .iter()
@@ -523,6 +1076,9 @@ impl DeliveryLedger {
         request: SensitiveBytes,
         result_capacity: usize,
     ) -> Result<PreparedDelivery, DeliveryLedgerError> {
+        if request.len() > MAX_DELIVERY_BLOB_BYTES || result_capacity > MAX_DELIVERY_BLOB_BYTES {
+            return Err(DeliveryLedgerError::ByteCapacity);
+        }
         if self.live.len() >= MAX_LIVE_DELIVERIES {
             return Err(DeliveryLedgerError::LiveCapacity);
         }
@@ -717,14 +1273,16 @@ impl DeliveryLedger {
         result: Vec<u8>,
     ) -> Result<RecordResultOutcome, DeliveryLedgerError> {
         let result = SensitiveBytes::new(result);
-        if result.len() > MAX_RESERVED_DELIVERY_BYTES {
+        if result.len() > MAX_DELIVERY_BLOB_BYTES {
             return Err(DeliveryLedgerError::ResultTooLarge);
         }
         let location = self.correlated_location(correlation)?;
-        if let CorrelatedLocation::Live(index) = location {
-            if result.len() > self.live[index].result_capacity {
-                return Err(DeliveryLedgerError::ResultTooLarge);
-            }
+        let result_capacity = match location {
+            CorrelatedLocation::Live(index) => self.live[index].result_capacity,
+            CorrelatedLocation::Tombstone(index) => self.tombstones[index].result_capacity,
+        };
+        if result.len() > result_capacity {
+            return Err(DeliveryLedgerError::ResultTooLarge);
         }
         let result_hash = AwsLc.sha256(result.as_slice());
         match location {
@@ -854,7 +1412,10 @@ impl DeliveryLedger {
         self.tombstones.push_back(DeliveryTombstone {
             id: entry.id,
             sequence: entry.sequence,
+            kind: entry.kind,
+            recovery_policy: entry.recovery_policy,
             request_hash: entry.request_hash,
+            result_capacity: entry.result_capacity,
             attempt: entry.attempt,
             adapter_contract: entry
                 .adapter_contract
@@ -979,6 +1540,62 @@ fn derive_id(
     input.extend_from_slice(request_hash);
     input.extend_from_slice(&(result_capacity as u64).to_be_bytes());
     DeliveryId(AwsLc.sha256(&input))
+}
+
+fn ledger_digest(ledger: &DeliveryLedger) -> [u8; 32] {
+    // Raw request/result bytes are already bound by hashes that restore_checked recomputes. Keeping
+    // the transcript metadata-only avoids a second non-zeroizing copy of up to four MiB of secrets.
+    let mut input = Zeroizing::new(Vec::with_capacity(
+        DELIVERY_LEDGER_DIGEST_DOMAIN.len()
+            + 32
+            + 8
+            + 8
+            + ledger.live.len() * 160
+            + ledger.tombstones.len() * 160,
+    ));
+    input.extend_from_slice(DELIVERY_LEDGER_DIGEST_DOMAIN);
+    input.extend_from_slice(ledger.namespace.as_slice());
+    input.extend_from_slice(&ledger.next_sequence.to_be_bytes());
+    input.extend_from_slice(&(ledger.reserved_bytes as u64).to_be_bytes());
+    input.extend_from_slice(&(ledger.live.len() as u64).to_be_bytes());
+    for entry in &ledger.live {
+        input.extend_from_slice(entry.id.as_bytes());
+        input.extend_from_slice(&entry.sequence.to_be_bytes());
+        input.push(entry.kind.tag());
+        input.push(entry.recovery_policy.tag());
+        input.push(entry.state.tag());
+        input.extend_from_slice(&entry.request_hash);
+        input.extend_from_slice(&(entry.result_capacity as u64).to_be_bytes());
+        match entry.result_hash {
+            Some(hash) => {
+                input.push(1);
+                input.extend_from_slice(&hash);
+            }
+            None => input.push(0),
+        }
+        input.push(entry.attempt);
+        match entry.adapter_contract {
+            Some(contract) => {
+                input.push(1);
+                input.extend_from_slice(&contract.get().to_be_bytes());
+            }
+            None => input.push(0),
+        }
+    }
+    input.extend_from_slice(&(ledger.tombstones.len() as u64).to_be_bytes());
+    for tombstone in &ledger.tombstones {
+        input.extend_from_slice(tombstone.id.as_bytes());
+        input.extend_from_slice(&tombstone.sequence.to_be_bytes());
+        input.push(tombstone.kind.tag());
+        input.push(tombstone.recovery_policy.tag());
+        input.extend_from_slice(&tombstone.request_hash);
+        input.extend_from_slice(&(tombstone.result_capacity as u64).to_be_bytes());
+        input.push(tombstone.attempt);
+        input.extend_from_slice(&tombstone.adapter_contract.get().to_be_bytes());
+        input.extend_from_slice(&tombstone.result_hash);
+        input.push(tombstone.disposition.tag());
+    }
+    AwsLc.sha256(&input)
 }
 
 fn count_bucket(count: usize) -> &'static str {
@@ -1395,12 +2012,12 @@ mod tests {
         let mut ledger = ledger();
         let batch = ledger
             .prepare_batch(vec![
-                DeliverySpec::new(DeliveryKind::PersistNonce, vec![1], 1),
                 DeliverySpec::new(
-                    DeliveryKind::Http,
-                    vec![2; MAX_RESERVED_DELIVERY_BYTES - 3],
-                    1,
+                    DeliveryKind::PersistNonce,
+                    vec![1; MAX_DELIVERY_BLOB_BYTES],
+                    0,
                 ),
+                DeliverySpec::new(DeliveryKind::Http, vec![2; MAX_DELIVERY_BLOB_BYTES], 0),
             ])
             .unwrap();
         let ids = ledger.enqueue_batch(batch).unwrap();
@@ -1415,12 +2032,8 @@ mod tests {
         let before = ledger.clone();
         assert!(matches!(
             ledger.prepare_batch(vec![
-                DeliverySpec::new(
-                    DeliveryKind::Http,
-                    vec![1; MAX_RESERVED_DELIVERY_BYTES - 1],
-                    0,
-                ),
-                DeliverySpec::new(DeliveryKind::Close, vec![2, 3], 0),
+                DeliverySpec::new(DeliveryKind::Http, vec![1; MAX_DELIVERY_BLOB_BYTES], 0,),
+                DeliverySpec::new(DeliveryKind::Close, vec![2; MAX_DELIVERY_BLOB_BYTES], 1,),
             ]),
             Err(DeliveryLedgerError::ByteCapacity)
         ));
@@ -1448,7 +2061,7 @@ mod tests {
         let correlation = claim(&mut ledger).correlation().clone();
         let before = ledger.clone();
         assert!(matches!(
-            ledger.record_result(&correlation, vec![0; MAX_RESERVED_DELIVERY_BYTES + 1],),
+            ledger.record_result(&correlation, vec![0; MAX_DELIVERY_BLOB_BYTES + 1],),
             Err(DeliveryLedgerError::ResultTooLarge)
         ));
         assert_eq!(ledger, before);
@@ -1460,7 +2073,7 @@ mod tests {
             adapter_contract: NonZeroU64::new(CONTRACT).unwrap(),
         };
         assert!(matches!(
-            ledger.record_result(&unknown, vec![0; MAX_RESERVED_DELIVERY_BYTES + 1]),
+            ledger.record_result(&unknown, vec![0; MAX_DELIVERY_BLOB_BYTES + 1]),
             Err(DeliveryLedgerError::ResultTooLarge)
         ));
         assert_eq!(ledger, before);
@@ -1468,11 +2081,43 @@ mod tests {
         ledger.record_result(&correlation, Vec::new()).unwrap();
         ledger.consume_ready(&correlation).unwrap();
         let consumed = ledger.clone();
+        assert_eq!(
+            ledger.record_result(&correlation, vec![1]),
+            Err(DeliveryLedgerError::ResultTooLarge),
+            "a consumed callback remains bounded by its original result reservation"
+        );
+        assert_eq!(ledger, consumed);
         assert!(matches!(
-            ledger.record_result(&correlation, vec![0; MAX_RESERVED_DELIVERY_BYTES + 1],),
+            ledger.record_result(&correlation, vec![0; MAX_DELIVERY_BLOB_BYTES + 1],),
             Err(DeliveryLedgerError::ResultTooLarge)
         ));
         assert_eq!(ledger, consumed);
+    }
+
+    #[test]
+    fn request_and_result_blob_boundaries_are_exact_and_atomic() {
+        let mut request = ledger();
+        enqueue_http(&mut request, &vec![7; MAX_DELIVERY_BLOB_BYTES], 0);
+        let before = request.clone();
+        assert_eq!(
+            request.prepare(DeliveryKind::Http, vec![8; MAX_DELIVERY_BLOB_BYTES + 1], 0,),
+            Err(DeliveryLedgerError::ByteCapacity)
+        );
+        assert_eq!(request, before);
+
+        let mut result = ledger();
+        enqueue_http(&mut result, b"request", MAX_DELIVERY_BLOB_BYTES);
+        let correlation = claim(&mut result).correlation().clone();
+        assert_eq!(
+            result.record_result(&correlation, vec![9; MAX_DELIVERY_BLOB_BYTES]),
+            Ok(RecordResultOutcome::Recorded)
+        );
+
+        let pristine = ledger();
+        assert_eq!(
+            pristine.prepare(DeliveryKind::Http, Vec::new(), MAX_DELIVERY_BLOB_BYTES + 1,),
+            Err(DeliveryLedgerError::ByteCapacity)
+        );
     }
 
     #[test]
@@ -1569,5 +2214,232 @@ mod tests {
         let debug = format!("{ledger:?}");
         assert!(!debug.contains("result-super-secret"));
         assert!(!debug.contains("request-super-secret"));
+    }
+
+    struct RestoredSnapshot {
+        namespace: Zeroizing<[u8; 32]>,
+        next_sequence: u64,
+        live: Vec<RestoredDelivery>,
+        tombstones: Vec<RestoredTombstone>,
+        digest: [u8; 32],
+    }
+
+    impl RestoredSnapshot {
+        fn restore(self) -> Result<DeliveryLedger, DeliveryLedgerError> {
+            DeliveryLedger::restore_checked(
+                self.namespace,
+                self.next_sequence,
+                self.live,
+                self.tombstones,
+                self.digest,
+            )
+        }
+    }
+
+    fn restored_snapshot(ledger: &DeliveryLedger) -> RestoredSnapshot {
+        let live = ledger
+            .live
+            .iter()
+            .map(|entry| RestoredDelivery {
+                id: entry.id.0,
+                sequence: entry.sequence,
+                kind: entry.kind,
+                recovery_policy: entry.recovery_policy,
+                state: entry.state,
+                request: entry.request.clone(),
+                request_hash: entry.request_hash,
+                result_capacity: entry.result_capacity,
+                result: entry.result.clone(),
+                result_hash: entry.result_hash,
+                attempt: entry.attempt,
+                adapter_contract: entry.adapter_contract.map(NonZeroU64::get),
+            })
+            .collect();
+        let tombstones = ledger
+            .tombstones
+            .iter()
+            .map(|tombstone| RestoredTombstone {
+                id: tombstone.id.0,
+                sequence: tombstone.sequence,
+                kind: tombstone.kind,
+                recovery_policy: tombstone.recovery_policy,
+                request_hash: tombstone.request_hash,
+                result_capacity: tombstone.result_capacity,
+                attempt: tombstone.attempt,
+                adapter_contract: tombstone.adapter_contract.get(),
+                result_hash: tombstone.result_hash,
+                disposition: tombstone.disposition,
+            })
+            .collect();
+        RestoredSnapshot {
+            namespace: ledger.namespace.clone(),
+            next_sequence: ledger.next_sequence,
+            live,
+            tombstones,
+            digest: ledger.digest(),
+        }
+    }
+
+    fn restore_snapshot(ledger: &DeliveryLedger) -> Result<DeliveryLedger, DeliveryLedgerError> {
+        restored_snapshot(ledger).restore()
+    }
+
+    #[test]
+    fn hostile_restore_round_trips_every_reachable_live_state_and_tombstones() {
+        let mut queued = ledger();
+        enqueue_http(&mut queued, b"queued", 8);
+
+        let mut dispatching = ledger();
+        enqueue_http(&mut dispatching, b"dispatching", 8);
+        claim(&mut dispatching);
+
+        let mut ambiguous = ledger();
+        ambiguous_http(&mut ambiguous);
+
+        let mut retry_queued = ambiguous.clone();
+        let correlation = retry_queued.live[0].correlation().unwrap();
+        retry_queued.resolve_not_performed(&correlation).unwrap();
+
+        let mut ready = ledger();
+        enqueue_http(&mut ready, b"ready", 8);
+        let ready_correlation = claim(&mut ready).correlation().clone();
+        ready
+            .record_result(&ready_correlation, b"result".to_vec())
+            .unwrap();
+
+        let mut terminal = ready.clone();
+        terminal.consume_ready(&ready_correlation).unwrap();
+
+        let mut restored_terminal = restore_snapshot(&terminal).unwrap();
+        assert_eq!(
+            restored_terminal.record_result(&ready_correlation, b"result".to_vec()),
+            Ok(RecordResultOutcome::AlreadyRecorded)
+        );
+        assert_eq!(
+            restored_terminal.record_result(&ready_correlation, b"other!".to_vec()),
+            Err(DeliveryLedgerError::ConflictingResult)
+        );
+
+        for candidate in [
+            queued,
+            dispatching,
+            ambiguous,
+            retry_queued,
+            ready,
+            terminal,
+        ] {
+            assert_eq!(restore_snapshot(&candidate), Ok(candidate));
+        }
+    }
+
+    #[test]
+    fn hostile_restore_recomputes_ids_hashes_policy_order_and_state_invariants() {
+        let mut source = ledger();
+        enqueue_http(&mut source, b"first", 8);
+        enqueue_http(&mut source, b"second", 8);
+        let mut snapshot = restored_snapshot(&source);
+        snapshot.live[0].request.0[0] ^= 1;
+        assert_eq!(
+            snapshot.restore(),
+            Err(DeliveryLedgerError::InvalidSnapshot)
+        );
+
+        let mut snapshot = restored_snapshot(&source);
+        snapshot.live[0].recovery_policy = RecoveryPolicy::NeverReplay;
+        assert_eq!(
+            snapshot.restore(),
+            Err(DeliveryLedgerError::InvalidSnapshot)
+        );
+
+        let mut snapshot = restored_snapshot(&source);
+        snapshot.live[1].sequence += 1;
+        assert_eq!(
+            snapshot.restore(),
+            Err(DeliveryLedgerError::InvalidSnapshot)
+        );
+
+        let mut snapshot = restored_snapshot(&source);
+        snapshot.live[1].id = snapshot.live[0].id;
+        assert_eq!(
+            snapshot.restore(),
+            Err(DeliveryLedgerError::InvalidSnapshot)
+        );
+
+        let mut ready = ledger();
+        enqueue_http(&mut ready, b"ready", 8);
+        let correlation = claim(&mut ready).correlation().clone();
+        ready
+            .record_result(&correlation, b"result".to_vec())
+            .unwrap();
+        let mut snapshot = restored_snapshot(&ready);
+        snapshot.live[0].result_hash.as_mut().unwrap()[0] ^= 1;
+        assert_eq!(
+            snapshot.restore(),
+            Err(DeliveryLedgerError::InvalidSnapshot)
+        );
+
+        let mut never_replay = ledger();
+        enqueue_kind(&mut never_replay, DeliveryKind::Sign, b"sign", 0);
+        let correlation = claim(&mut never_replay).correlation().clone();
+        never_replay.mark_ambiguous(&correlation).unwrap();
+        let mut snapshot = restored_snapshot(&never_replay);
+        snapshot.live[0].state = DeliveryState::Queued;
+        assert_eq!(
+            snapshot.restore(),
+            Err(DeliveryLedgerError::InvalidSnapshot)
+        );
+
+        let mut snapshot = restored_snapshot(&source);
+        snapshot.live[1].attempt = 1;
+        snapshot.live[1].adapter_contract = Some(CONTRACT);
+        assert_eq!(
+            snapshot.restore(),
+            Err(DeliveryLedgerError::InvalidSnapshot)
+        );
+    }
+
+    #[test]
+    fn hostile_restore_checks_digest_bounds_and_exhausted_sequence_sentinel() {
+        let maximal = DeliveryLedger::maximal_tombstone_ledger_for_testing();
+        assert_eq!(restore_snapshot(&maximal), Ok(maximal.clone()));
+        assert_eq!(maximal.next_sequence, MAX_DELIVERY_SEQUENCE + 1);
+
+        let mut tombstone_overflow = restored_snapshot(&maximal);
+        tombstone_overflow
+            .tombstones
+            .push(tombstone_overflow.tombstones[0].clone());
+        assert_eq!(
+            tombstone_overflow.restore(),
+            Err(DeliveryLedgerError::InvalidSnapshot)
+        );
+
+        let mut snapshot = restored_snapshot(&maximal);
+        snapshot.digest[0] ^= 1;
+        assert_eq!(
+            snapshot.restore(),
+            Err(DeliveryLedgerError::SnapshotDigestMismatch)
+        );
+
+        let mut snapshot = {
+            let mut bounded = ledger();
+            enqueue_http(&mut bounded, b"request", 0);
+            restored_snapshot(&bounded)
+        };
+        let live_overflow = RestoredSnapshot {
+            namespace: snapshot.namespace.clone(),
+            next_sequence: snapshot.next_sequence,
+            live: vec![snapshot.live[0].clone(); MAX_LIVE_DELIVERIES + 1],
+            tombstones: Vec::new(),
+            digest: snapshot.digest,
+        };
+        assert_eq!(
+            live_overflow.restore(),
+            Err(DeliveryLedgerError::InvalidSnapshot)
+        );
+        snapshot.live[0].request = SensitiveBytes::new(vec![0; MAX_DELIVERY_BLOB_BYTES + 1]);
+        assert_eq!(
+            snapshot.restore(),
+            Err(DeliveryLedgerError::InvalidSnapshot)
+        );
     }
 }

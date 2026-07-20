@@ -1,7 +1,9 @@
 # Durable effect delivery contract
 
-Status: the bounded ledger state machine is implemented but deliberately dormant; checkpoint-v2,
-aggregate continuity, FFI/coordinator integration and adapter enablement remain design targets.
+Status: the bounded ledger state machine and a canonical, hostile-input-tested v2 codec foundation
+are implemented but deliberately dormant. Production import/export remains schema v1; aggregate
+continuity, authenticated migration, FFI/coordinator integration and adapter enablement remain
+design targets.
 
 This document defines the crash-safety boundary required before the wallet may describe native
 effect delivery as durable. It supplements `DURABLE_LIFECYCLE.md`; it does not change that
@@ -69,28 +71,37 @@ The exact wire schema MUST use fixed numeric tags, canonical ordering and checke
 conversions. Decoders MUST reject duplicate map keys, unknown mandatory variants, trailing data,
 non-canonical encodings and lengths above their declared bounds before allocating those lengths.
 
+The dormant codec reserves top-level key `9` for a continuation map containing a typed aggregate
+envelope and delivery ledger. It currently defines only `Idle`; `Idle` rejects every live entry.
+Ledger reconstruction recomputes live request/result hashes, effect identifiers, policy bindings,
+reservation totals and the retained consecutive sequence suffix before returning validated state.
+The public Core boundary rejects schema v2 in this phase so it cannot import v2 and later emit a v1
+downgrade or mislabel an active legacy machine as Idle.
+
 The following limits are hard admission limits:
 
 - at most 32 live entries across all effects and flows;
 - exactly 32 bytes per effect identifier;
 - at most 64 tombstones;
+- at most 2 MiB (`2 * 1024 * 1024` bytes) for any one request or result blob;
 - at most 4 MiB (`4 * 1024 * 1024` bytes) across live request payloads plus their reserved maximum
   result capacities; and
 - the existing 33,554,312-byte authenticated checkpoint plaintext ceiling.
 
-The v2 codec MUST additionally set and test an exact encoded-continuation bound covering aggregate
-state, entry metadata, tombstones and CBOR overhead. That bound has not been selected by the dormant
-ledger model and MUST fit, together with the 4 MiB delivery reservation and all other state, under
-the unchanged checkpoint ceiling. Admission of credentials, evidence, replay values, transaction
-history, aggregate transitions, effects and results MUST pre-encode or exactly project the complete
-checkpoint. If any live-count, tombstone, reservation, encoded-section, field or total bound would
-overflow, Core returns a typed capacity error without changing the aggregate, ledger, audit log,
-callback correlation, generation or next effect identifier. Partial live-entry eviction is not an
-acceptable recovery action.
+The dormant `Idle`/zero-live grammar has an exact 9,054-byte encoded continuation ceiling, including
+64 maximum-width tombstones and canonical CBOR framing. Exact and one-over vectors enforce it before
+continuation DTO allocation. Future non-Idle aggregate variants require a reviewed bound before
+activation.
+Admission of credentials, evidence, replay values, transaction history, aggregate transitions,
+effects and results MUST eventually pre-encode or exactly project the complete checkpoint. If any
+live-count, tombstone, reservation, encoded-section, field or total bound would overflow, Core
+returns a typed capacity error without changing the aggregate, ledger, audit log, callback
+correlation, generation or next effect identifier. Partial live-entry eviction is not acceptable.
 
-Tombstones contain only the effect identifier, terminal disposition, terminal sequence and bounded
-digests needed to recognize duplicate callbacks; they do not retain full payloads or results. When
-the 65th terminal record is committed, Core deterministically evicts the oldest tombstone by
+Tombstones omit full payloads and results, but retain the bounded kind, recovery policy, result
+capacity, attempt and adapter-contract metadata needed to rederive the effect identifier, plus the
+terminal disposition, sequence and request/result digests needed to recognize duplicate callbacks.
+When the 65th terminal record is committed, Core deterministically evicts the oldest tombstone by
 terminal sequence in that same mutation. A callback for an identifier older than the retained
 window is rejected as unknown and cannot mutate the aggregate.
 
@@ -251,6 +262,11 @@ V1 has no evidence that an omitted flow or callback did not exist. An arbitrary 
 NOT be interpreted as a resumable empty v2 aggregate merely because restore initializes those
 fields to empty.
 
+The current public boundary therefore continues to emit and accept v1 only. V1 restore rotates a
+fresh pristine dormant-ledger namespace after all validation succeeds, but that internal reset is
+not a migration proof and grants no v2 or dispatch capability. A non-pristine dormant ledger makes
+both v1 export and v1 restore fail closed rather than silently omitting or wiping ledger state.
+
 Migration is allowed only at a proven idle-and-empty boundary: no active protocol aggregate, no
 pending operation/callback, no retained native batch and no live effect. The proof must be written
 under the existing authenticated CAS boundary by a migration-capable release, or the wallet must be
@@ -282,10 +298,10 @@ reversible. Those require separate platform, provider, operational and certifica
 
 ## Phased rollout
 
-1. **Model and codec, non-dispatching:** add v2 types, canonical codecs, limits, transition tests and
-   read-only projections behind a disabled capability. Production effects continue to have the
-   documented v1 semantics. The initial code slice MUST NOT enqueue, claim or dispatch a production
-   effect and MUST NOT advertise crash-safe delivery.
+1. **Model and codec, non-dispatching — foundation implemented:** v2 types, canonical codecs,
+   reconstruction limits and transition tests exist behind a disabled capability. Production
+   effects continue to have the documented v1 semantics; no production effect is enqueued, claimed
+   or dispatched through the ledger and crash-safe delivery is not advertised.
 2. **Aggregate continuity:** serialize and restore the production aggregate for each supported flow,
    prove callback correlation and atomic failure, enforce the continuation reserve, and implement
    the idle-and-empty migration gate. Durable delivery remains disabled for any incomplete flow.

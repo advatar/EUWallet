@@ -211,9 +211,15 @@ operational solution needed to enter those processes.
           - [x] Add the dormant Core ledger state machine with exact count/byte/sequence admission,
                 domain-separated stable IDs, strict head-of-line claiming, one dispatch slot,
                 result-before-consume handling, explicit ambiguity, bounded tombstone rotation and
-                redacted diagnostics. It is intentionally not checkpointed or dispatch-enabled.
-          - [ ] Add the canonical v2 codec, hostile-state reconstruction and authenticated v1
-                idle/empty migration proof, then persist the ledger only with its owning aggregate.
+                redacted diagnostics. It is intentionally not production-checkpointed or
+                dispatch-enabled.
+          - [x] Add a dormant canonical v2 codec and hostile-state reconstruction with fixed tags,
+                v1/v2 golden vectors, exact 2 MiB request/result fields, a 4 MiB live reservation,
+                strict hash/ID/state/sequence validation and an exact 9,054-byte Idle continuation
+                ceiling. Idle rejects live work; public export/restore remains byte-for-byte v1 and
+                rejects non-pristine dormant ledgers, so no dispatch capability was activated.
+          - [ ] Prove the authenticated v1 idle/empty migration boundary, persist every resumable
+                aggregate variant, then activate public v2 import/export without a downgrade path.
         - [ ] Persist and revalidate the complete resumable production aggregate, pending result
               correlation and public key/nonce/attestation reservations. Never serialize private
               keys, and never release a ledger entry whose result cannot be consumed after restore.

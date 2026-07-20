@@ -1373,6 +1373,9 @@ pub struct Core {
     next_operation_id: u64,
     /// Operations emitted over the production JSON boundary and still awaiting their exact result.
     pending_operations: BTreeMap<u64, PendingOperation>,
+    /// Dormant checkpoint-v2 delivery foundation. No production event, FFI or native path can
+    /// enqueue or dispatch this ledger until resumable aggregate persistence is complete.
+    delivery_ledger: delivery::DeliveryLedger,
     // Trust: the verified trusted list, used to decide RP registration in-core (not shell-supplied).
     trust_store: TrustStore,
     // Issuance (OID4VCI) flow.
@@ -1437,6 +1440,7 @@ impl Core {
             active: ActiveFlow::None,
             next_operation_id: operation_id_seed(),
             pending_operations: BTreeMap::new(),
+            delivery_ledger: delivery::DeliveryLedger::new(),
             trust_store: TrustStore::new(),
             issuance: oid4vci::State::Idle,
             iss_seen_c_nonces: Vec::new(),
@@ -4756,6 +4760,10 @@ impl From<durable::DurableCheckpointError> for DurableFfiError {
         match error {
             Error::ResourceLimit { .. } | Error::SizeOverflow => Self::ResourceLimit,
             Error::Truncated | Error::NonCanonical | Error::Malformed => Self::MalformedCheckpoint,
+            Error::DormantDeliveryLedgerNotPristine => Self::InvalidLifecycleState,
+            Error::IdleAggregateHasLiveDeliveries | Error::InvalidDeliveryLedger => {
+                Self::MalformedCheckpoint
+            }
             Error::UnsupportedVersion(_) => Self::UnsupportedCheckpointVersion,
             Error::InvalidGeneration | Error::GenerationMismatch { .. } => Self::InvalidGeneration,
             Error::ContextMismatch(_) => Self::ContextRejected,
