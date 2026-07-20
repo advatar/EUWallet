@@ -1,0 +1,59 @@
+[ root_ca ]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[ root_zero ]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[ root_no_keycert ]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[ intermediate_ca ]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[ ca_no_keycert ]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[ ca_missing_basic_constraints ]
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[ leaf ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[ leaf_no_digital_signature ]
+basicConstraints = critical,CA:false
+keyUsage = critical,keyEncipherment
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[ leaf_unknown_critical ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+1.2.3.4 = critical,DER:05:00
+
+[ loop_ca ]
+basicConstraints = critical,CA:true,pathlen:3
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always

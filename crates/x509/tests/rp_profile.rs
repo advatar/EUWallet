@@ -97,12 +97,12 @@ fn ambiguous_credential_issuer_identity_is_rejected() {
 }
 
 #[test]
-fn ca_certificate_cannot_be_a_credential_issuer_leaf() {
+fn trust_anchor_cannot_be_reused_as_a_supplied_credential_issuer() {
     let err = check_credential_issuer(&[CA.to_vec()], &anchors(), NOW, &AcceptingVerifier)
-        .expect_err("a CA certificate cannot be used as a credential issuer leaf");
+        .expect_err("a peer-supplied root cannot become a credential issuer leaf");
     assert_eq!(
         err,
-        X509Error::ProfileViolation("credential issuer leaf must be an end-entity")
+        X509Error::PathInvalid("trust anchor must not be supplied in the certificate chain")
     );
 }
 

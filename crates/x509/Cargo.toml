@@ -16,6 +16,7 @@ x509-cert = "0.2"
 
 [dev-dependencies]
 base64ct = { workspace = true }
+crypto-backend = { path = "../crypto-backend" }
 
 [lints]
 workspace = true
