@@ -344,6 +344,9 @@ operational solution needed to enter those processes.
 - [ ] Replace keyword traceability with reviewed applicability and behavior-level evidence.
 - [ ] Bind formal oracle tests to production state machines.
 - [ ] Complete the TOE, threat model, DPIA, key lifecycle, algorithm profile and KAT evidence.
+  - [ ] Add hybrid-PQ only to ARF-preserving internal/explicitly negotiated paths;
+        complete KATs, downgrade tests, device coverage and CAB/profile approval
+        before enabling any production claim (`docs/certification-evidence/hybrid-pq-boundary.md`).
   - [ ] Run and submit OpenID Foundation self-certification for every shipped
         OpenID4VP/OpenID4VCI + HAIP profile; archive signed, release-matched
         suite configuration/results and renewal triggers in
