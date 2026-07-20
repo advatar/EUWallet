@@ -677,6 +677,7 @@ name = "oid4vci"
 version = "0.0.1"
 dependencies = [
  "base64ct",
+ "crypto-backend",
  "crypto-traits",
  "mdoc",
  "sdjwt",

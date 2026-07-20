@@ -13,6 +13,7 @@
 use base64ct::{Base64UrlUnpadded, Encoding};
 use serde_json::Value as Json;
 
+pub mod authorization;
 pub mod bounded_json;
 pub mod foundation;
 
