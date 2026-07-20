@@ -39,6 +39,7 @@ class EffectExecutor(
     private val issuerResponder: IssuerResponder? = null,
     private val statusListResolver: StatusListResolver? = null,
     private val transferOfferPublisher: TransferOfferPublisher? = null,
+    private val presentationRedirectHandler: OpenId4VpRedirectHandler? = null,
 ) {
     fun send(eventJson: String): EffectCascadeOutcome {
         val queue = ArrayDeque(invokeCore(eventJson))
@@ -144,21 +145,63 @@ class EffectExecutor(
             }
         }
         is WalletEffect.Http -> try {
-            val response =
-                httpClient.post(effect.url, effect.body)
-            if (response.statusCode !in 200..299) {
+            if (effect.profile.resultType != effect.resultType) {
                 WalletEventJson.operationFailed(
                     effect.operationId,
-                    WalletOperationFailure.HTTP_STATUS,
+                    WalletOperationFailure.UNSUPPORTED,
+                )
+            } else if (
+                effect.profile == HttpDeliveryProfile.OPENID4VP_DIRECT_POST &&
+                !OpenId4VpDirectPostResponse.isUtf8(effect.body)
+            ) {
+                WalletEventJson.operationFailed(
+                    effect.operationId,
+                    WalletOperationFailure.TRANSPORT,
                 )
             } else {
-                when (effect.resultType) {
-                    HttpResultType.PRESENTATION_DELIVERED ->
-                        WalletEventJson.presentationDelivered(effect.operationId)
-                    HttpResultType.PAYMENT_AUTHORIZATION_DELIVERED ->
+                val response = httpClient.post(effect.url, effect.body, effect.profile)
+                when (effect.profile) {
+                    HttpDeliveryProfile.OPENID4VP_DIRECT_POST -> {
+                        if (response.statusCode != 200) {
+                            WalletEventJson.operationFailed(
+                                effect.operationId,
+                                WalletOperationFailure.HTTP_STATUS,
+                            )
+                        } else {
+                            val parsed = OpenId4VpDirectPostResponse.parse(response)
+                            val redirectUri = parsed.redirectUri
+                            val handler = presentationRedirectHandler
+                            if (redirectUri != null && handler == null) {
+                                WalletEventJson.operationFailed(
+                                    effect.operationId,
+                                    WalletOperationFailure.MISSING_DEPENDENCY,
+                                )
+                            } else {
+                                if (redirectUri != null) handler?.handle(redirectUri)
+                                WalletEventJson.presentationDelivered(effect.operationId)
+                            }
+                        }
+                    }
+                    HttpDeliveryProfile.PAYMENT_AUTHORIZATION -> if (
+                        response.statusCode in 200..299
+                    ) {
                         WalletEventJson.paymentAuthorizationDelivered(effect.operationId)
-                    HttpResultType.QES_AUTHORIZATION_DELIVERED ->
+                    } else {
+                        WalletEventJson.operationFailed(
+                            effect.operationId,
+                            WalletOperationFailure.HTTP_STATUS,
+                        )
+                    }
+                    HttpDeliveryProfile.QES_AUTHORIZATION -> if (
+                        response.statusCode in 200..299
+                    ) {
                         WalletEventJson.qesAuthorizationDelivered(effect.operationId)
+                    } else {
+                        WalletEventJson.operationFailed(
+                            effect.operationId,
+                            WalletOperationFailure.HTTP_STATUS,
+                        )
+                    }
                 }
             }
         } catch (error: Exception) {

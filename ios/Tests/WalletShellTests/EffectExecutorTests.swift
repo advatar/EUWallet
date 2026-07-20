@@ -28,7 +28,7 @@ final class MockEngine: WalletEngineDriving {
             return #"[{"type":"sign","operationId":4,"resultType":"deviceSignatureProduced","keyRef":"device-key","payload":[1,2,3]}]"#
         }
         if eventJson.contains("\"deviceSignatureProduced\"") {
-            return #"[{"type":"http","operationId":5,"resultType":"presentationDelivered","url":"https://rp.example/response","body":[9,9,9]}]"#
+            return #"[{"type":"http","operationId":5,"resultType":"presentationDelivered","profile":"openid4vpDirectPost","url":"https://rp.example/response","body":[9,9,9]}]"#
         }
         if eventJson.contains("\"presentationDelivered\"") {
             return #"[{"type":"close"}]"#
@@ -86,7 +86,14 @@ private final class FixedHttpClient: HttpClient {
     private let outcome: Outcome
     init(_ outcome: Outcome) { self.outcome = outcome }
 
-    func post(url: String, body: Data) async throws -> HttpResponse {
+    private(set) var postedProfiles: [HttpDeliveryProfile] = []
+
+    func post(
+        url: String,
+        body: Data,
+        profile: HttpDeliveryProfile
+    ) async throws -> HttpResponse {
+        postedProfiles.append(profile)
         switch outcome {
         case .response(let response): return response
         case .failure(let error): throw error
@@ -119,6 +126,23 @@ private final class RecordingTransferOfferPublisher: TransferOfferPublisher {
     }
 }
 
+private final class RecordingRedirectHandler: OpenID4VPRedirectHandler {
+    private let shouldFail: Bool
+    private let onHandle: () -> Void
+    private(set) var redirects: [URL] = []
+
+    init(shouldFail: Bool = false, onHandle: @escaping () -> Void = {}) {
+        self.shouldFail = shouldFail
+        self.onHandle = onHandle
+    }
+
+    func handle(redirectUri: URL) async throws {
+        onHandle()
+        if shouldFail { throw ExpectedFailure.failure }
+        redirects.append(redirectUri)
+    }
+}
+
 final class EffectExecutorTests: XCTestCase {
     private static let authorizationHash = Data(repeating: 0, count: 32)
 
@@ -130,6 +154,7 @@ final class EffectExecutorTests: XCTestCase {
         statusLists: StatusListResolver? = nil,
         issuer: IssuerResponder? = nil,
         transferOffers: TransferOfferPublisher? = nil,
+        presentationRedirectHandler: OpenID4VPRedirectHandler? = nil,
         render: @escaping (UInt64?, Data?, ScreenDescription) throws -> Void = { _, _, _ in }
     ) -> EffectExecutor {
         EffectExecutor(
@@ -141,6 +166,7 @@ final class EffectExecutorTests: XCTestCase {
             statusLists: statusLists,
             issuer: issuer,
             transferOffers: transferOffers,
+            presentationRedirectHandler: presentationRedirectHandler,
             render: render)
     }
 
@@ -197,6 +223,7 @@ final class EffectExecutorTests: XCTestCase {
         XCTAssertEqual(http.posted.count, 1)
         XCTAssertEqual(http.posted.first?.0, "https://rp.example/response")
         XCTAssertEqual(http.posted.first?.1, Data([9, 9, 9]))
+        XCTAssertEqual(http.posted.first?.2, .openid4vpDirectPost)
         XCTAssertEqual(outcome, .succeeded)
     }
 
@@ -221,7 +248,7 @@ final class EffectExecutorTests: XCTestCase {
                 return #"[{"type":"sign","operationId":11,"resultType":"deviceSignatureProduced","keyRef":"device-key","payload":[7,7,7]}]"#
             }
             if event.contains("\"deviceSignatureProduced\"") {
-                return #"[{"type":"http","operationId":12,"resultType":"paymentAuthorizationDelivered","url":"https://psp.example/authorize","body":[8,8,8]}]"#
+                return #"[{"type":"http","operationId":12,"resultType":"paymentAuthorizationDelivered","profile":"paymentAuthorization","url":"https://psp.example/authorize","body":[8,8,8]}]"#
             }
             if event.contains("\"paymentAuthorizationDelivered\"") {
                 return #"[{"type":"close"}]"#
@@ -248,6 +275,7 @@ final class EffectExecutorTests: XCTestCase {
                 authorizationHash: Self.authorizationHash))
         XCTAssertEqual(signer.signedPayloads.first, Data([7, 7, 7]))
         XCTAssertEqual(http.posted.first?.0, "https://psp.example/authorize")
+        XCTAssertEqual(http.posted.first?.2, .paymentAuthorization)
         XCTAssertTrue(engine.receivedEvents.contains {
             $0.contains("\"type\":\"paymentAuthorizationDelivered\"")
                 && $0.contains("\"operationId\":12")
@@ -261,6 +289,18 @@ final class EffectExecutorTests: XCTestCase {
         let shortHash = #"[{"type":"render","operationId":1,"authorizationHash":[0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[]}}]"#
         for output in [missingId, shortHash] {
             XCTAssertThrowsError(try WalletEffect.decodeCoreOutput(output))
+        }
+    }
+
+    func testHttpDecoderRejectsUnknownOrMismatchedDeliveryProfiles() {
+        let outputs = [
+            #"[{"type":"http","operationId":1,"resultType":"presentationDelivered","url":"https://rp.example","body":[]}]"#,
+            #"[{"type":"http","operationId":1,"resultType":"presentationDelivered","profile":"futureProfile","url":"https://rp.example","body":[]}]"#,
+            #"[{"type":"http","operationId":1,"resultType":"presentationDelivered","profile":"paymentAuthorization","url":"https://rp.example","body":[]}]"#,
+            #"[{"type":"http","operationId":1,"resultType":"qesAuthorizationDelivered","profile":"openid4vpDirectPost","url":"https://rp.example","body":[]}]"#,
+        ]
+        for output in outputs {
+            XCTAssertThrowsError(try WalletEffect.decodeCoreOutput(output), output)
         }
     }
 
@@ -513,6 +553,170 @@ final class EffectExecutorTests: XCTestCase {
             outcome,
             .aborted(.coreError(code: "operation_failed", message: "Operation failed")))
         XCTAssertTrue(engine.receivedEvents.contains { $0.contains("\"failure\":\"httpStatus\"") })
+        assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+    }
+
+    func testOpenId4VpResponseRequiresExactStatusMimeObjectUtf8AndBounds() async throws {
+        let invalidResponses: [(String, HttpResponse)] = [
+            ("201", HttpResponse(
+                statusCode: 201,
+                body: Data("{}".utf8),
+                contentType: "application/json")),
+            ("204", HttpResponse(
+                statusCode: 204,
+                body: Data("{}".utf8),
+                contentType: "application/json")),
+            ("missing MIME", HttpResponse(statusCode: 200, body: Data("{}".utf8))),
+            ("wrong MIME", HttpResponse(
+                statusCode: 200,
+                body: Data("{}".utf8),
+                contentType: "text/html")),
+            ("ambiguous MIME", HttpResponse(
+                statusCode: 200,
+                body: Data("{}".utf8),
+                contentType: "application/json, text/html")),
+            ("array", HttpResponse(
+                statusCode: 200,
+                body: Data("[]".utf8),
+                contentType: "application/json")),
+            ("scalar", HttpResponse(
+                statusCode: 200,
+                body: Data("true".utf8),
+                contentType: "application/json")),
+            ("invalid JSON", HttpResponse(
+                statusCode: 200,
+                body: Data("{".utf8),
+                contentType: "application/json")),
+            ("non-UTF8", HttpResponse(
+                statusCode: 200,
+                body: Data([0xff]),
+                contentType: "application/json")),
+            ("oversize", HttpResponse(
+                statusCode: 200,
+                body: Data(
+                    repeating: UInt8(ascii: " "),
+                    count: OpenID4VPDirectPostResponse.maximumResponseBytes + 1),
+                contentType: "application/json")),
+        ]
+
+        for (name, response) in invalidResponses {
+            let engine = MockEngine()
+            let executor = makeExecutor(
+                engine: engine,
+                http: FixedHttpClient(.response(response)))
+            let outcome = try await executor.send(
+                eventJson: WalletEventJSON.userConsented(
+                    operationId: 3,
+                    authorizationHash: Self.authorizationHash))
+
+            XCTAssertEqual(
+                outcome,
+                .aborted(.coreError(code: "operation_failed", message: "Operation failed")),
+                name)
+            assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+        }
+    }
+
+    func testOpenId4VpRedirectUriRejectsAmbiguousAndMalformedValues() async throws {
+        let oversized = "wallet:" + String(
+            repeating: "a",
+            count: OpenID4VPDirectPostResponse.maximumRedirectUriBytes)
+        let invalidBodies = [
+            #"{"redirect_uri":7}"#,
+            #"{"redirect_uri":"relative/path"}"#,
+            #"{"redirect_uri":"https://client.example/%zz"}"#,
+            try XCTUnwrap(
+                String(data: try JSONEncoder().encode(["redirect_uri": oversized]), encoding: .utf8)),
+            #"{"redirect_uri":"https://one.example","redirect_uri":"https://two.example"}"#,
+            #"{"redirect_uri":"https://one.example","\u0072edirect_uri":"https://two.example"}"#,
+        ]
+
+        for body in invalidBodies {
+            let engine = MockEngine()
+            let response = HttpResponse(
+                statusCode: 200,
+                body: Data(body.utf8),
+                contentType: "application/json")
+            let executor = makeExecutor(
+                engine: engine,
+                http: FixedHttpClient(.response(response)),
+                presentationRedirectHandler: RecordingRedirectHandler())
+
+            _ = try await executor.send(
+                eventJson: WalletEventJSON.userConsented(
+                    operationId: 3,
+                    authorizationHash: Self.authorizationHash))
+            assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+        }
+    }
+
+    func testOpenId4VpUnknownMembersAreIgnoredAndOpaqueRedirectUsesOnlyInjectedHandler() async throws {
+        let engine = MockEngine()
+        var acknowledgedBeforeHandler = false
+        let redirectHandler = RecordingRedirectHandler {
+            acknowledgedBeforeHandler = engine.receivedEvents.contains {
+                $0.contains("presentationDelivered")
+            }
+        }
+        let response = HttpResponse(
+            statusCode: 200,
+            body: Data(
+                #"{"future":{"nested":[1,2,3]},"redirect_uri":"wallet:continue?response_code=abc"}"#.utf8),
+            contentType: "Application/JSON; charset=UTF-8")
+        let executor = makeExecutor(
+            engine: engine,
+            http: FixedHttpClient(.response(response)),
+            presentationRedirectHandler: redirectHandler)
+
+        let outcome = try await executor.send(
+            eventJson: WalletEventJSON.userConsented(
+                operationId: 3,
+                authorizationHash: Self.authorizationHash))
+
+        XCTAssertEqual(outcome, .succeeded)
+        XCTAssertFalse(acknowledgedBeforeHandler)
+        XCTAssertEqual(redirectHandler.redirects.map(\.absoluteString), [
+            "wallet:continue?response_code=abc",
+        ])
+    }
+
+    func testOpenId4VpRedirectRequiresAHandlerAndRefusalNeverAcknowledges() async throws {
+        let response = HttpResponse(
+            statusCode: 200,
+            body: Data(#"{"redirect_uri":"https://client.example/cb#code=abc"}"#.utf8),
+            contentType: "application/json")
+        for handler in [nil, RecordingRedirectHandler(shouldFail: true)] as [
+            OpenID4VPRedirectHandler?
+        ] {
+            let engine = MockEngine()
+            let executor = makeExecutor(
+                engine: engine,
+                http: FixedHttpClient(.response(response)),
+                presentationRedirectHandler: handler)
+
+            _ = try await executor.send(
+                eventJson: WalletEventJSON.userConsented(
+                    operationId: 3,
+                    authorizationHash: Self.authorizationHash))
+            assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+        }
+    }
+
+    func testOpenId4VpRequestBodyMustBeUtf8BeforeTransport() async throws {
+        let engine = MockEngine { event in
+            if event.contains("operationFailed") {
+                return #"[{"type":"render","screen":{"screen":"error","code":"operation_failed","message":"Operation failed"}},{"type":"close"}]"#
+            }
+            return #"[{"type":"http","operationId":31,"resultType":"presentationDelivered","profile":"openid4vpDirectPost","url":"https://rp.example/response","body":[255]}]"#
+        }
+        let http = FixedHttpClient(.response(HttpResponse(
+            statusCode: 200,
+            body: Data("{}".utf8),
+            contentType: "application/json")))
+
+        _ = try await makeExecutor(engine: engine, http: http).send(eventJson: "{}")
+
+        XCTAssertTrue(http.postedProfiles.isEmpty)
         assertNoSemanticSuccessOrDecline(engine.receivedEvents)
     }
 

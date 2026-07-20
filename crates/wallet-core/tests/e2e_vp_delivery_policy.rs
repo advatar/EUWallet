@@ -273,7 +273,8 @@ fn registered_https_direct_post_emits_only_the_bound_endpoint() {
     });
     assert!(matches!(
         effects.as_slice(),
-        [Effect::Http { url, body }]
-            if url == RESPONSE_URI && body.starts_with(b"vp_token=")
+        [Effect::Http { profile, url, body }]
+            if *profile == wallet_core::HttpDeliveryProfile::Openid4vpDirectPost
+                && url == RESPONSE_URI && body.starts_with(b"vp_token=")
     ));
 }

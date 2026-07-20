@@ -10,8 +10,15 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Refuse absurd response headers/bodies (this is a test/reference client, not a browser).
 const MAX_RESPONSE: usize = 4 * 1024 * 1024;
 
-/// POST `body` to an `http://host[:port]/path` URL. Returns `(status, response_body)`.
-pub fn post(url: &str, body: &[u8]) -> Result<(u16, Vec<u8>), String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub body: Vec<u8>,
+}
+
+/// POST `body` to an `http://host[:port]/path` URL.
+pub fn post(url: &str, body: &[u8]) -> Result<HttpResponse, String> {
     let (host, port, path) = parse_http_url(url)?;
     let mut stream = TcpStream::connect((host.as_str(), port))
         .map_err(|e| format!("connect {host}:{port}: {e}"))?;
@@ -19,7 +26,7 @@ pub fn post(url: &str, body: &[u8]) -> Result<(u16, Vec<u8>), String> {
     stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
 
     let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/x-www-form-urlencoded\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream
@@ -65,7 +72,7 @@ fn parse_http_url(url: &str) -> Result<(String, u16, String), String> {
 }
 
 /// Parse `HTTP/1.x <status> ...\r\n<headers>\r\n\r\n<body>`.
-fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
+fn parse_response(raw: &[u8]) -> Result<HttpResponse, String> {
     let header_end = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -77,7 +84,30 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .ok_or("malformed status line")?;
-    Ok((status, raw[header_end + 4..].to_vec()))
+    let mut content_type = None;
+    for line in head.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            return Err("malformed response header".into());
+        };
+        if name.eq_ignore_ascii_case("content-type") {
+            if content_type.is_some() || value.contains(',') {
+                return Err("ambiguous content-type header".into());
+            }
+            let base = value
+                .split(';')
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_ascii_lowercase)
+                .ok_or("empty content-type header")?;
+            content_type = Some(base);
+        }
+    }
+    Ok(HttpResponse {
+        status,
+        content_type,
+        body: raw[header_end + 4..].to_vec(),
+    })
 }
 
 #[cfg(test)]
@@ -105,13 +135,20 @@ mod tests {
 
     #[test]
     fn response_parsing() {
-        let (status, body) =
-            parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, b"ok");
-        let (status, body) = parse_response(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap();
-        assert_eq!(status, 404);
-        assert!(body.is_empty());
+        let response = parse_response(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=UTF-8\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type.as_deref(), Some("application/json"));
+        assert_eq!(response.body, b"{}");
+        let response = parse_response(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap();
+        assert_eq!(response.status, 404);
+        assert!(response.body.is_empty());
+        assert!(parse_response(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\ncontent-type: text/html\r\n\r\n{}"
+        )
+        .is_err());
         assert!(parse_response(b"garbage").is_err());
     }
 }
