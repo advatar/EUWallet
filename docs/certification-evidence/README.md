@@ -26,8 +26,10 @@ module reaches its definition-of-done (plan Section 12).
 
 Our in-repo `tools/evidence/generate.sh` covers Tiers 0–3 (traceability, implementation tests,
 machine-checked proofs, symbolic protocol analysis). Full conformance/certification is run against
-these EXTERNAL, official suites — the wallet is designed to be driven against them (the sans-IO
-core + `shell-io` reference shell already complete real OpenID4VP/OID4VCI round-trips over TCP):
+these EXTERNAL, official suites. The sans-IO core and `shell-io` exercise the local OpenID4VP
+socket path, but the issuance harness still uses a synthetic token/credential contract. It is not
+an OpenID4VCI 1.0 or HAIP 1.0 conformance adapter; that production work is tracked in
+[#18](https://github.com/advatar/EUWallet/issues/18):
 
 | Suite | Covers | Access | Maps to our crates |
 |---|---|---|---|
