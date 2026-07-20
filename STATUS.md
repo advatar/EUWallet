@@ -196,6 +196,20 @@ operational solution needed to enter those processes.
   - [ ] Implement authorization-code issuance with PAR, PKCE S256, RFC 9207 issuer binding, exact
         redirect/state correlation, DPoP and DPoP-Nonce, final token/nonce/proofs/credentials wire
         models and typed native effects.
+    - [ ] Integrate the reviewed sans-I/O authorization/credential transport only after its P1
+          conformance, device-binding, replay and privacy defects are closed; green isolated tests
+          are not sufficient to mark either transport complete.
+      - [ ] Implement the pinned Wallet Attestation challenge protocol and construct/verify local,
+            WSCD-key-bound client-attestation PoP instead of accepting two opaque remote JWTs.
+      - [ ] Accept RFC 9449 header-only and mixed DPoP nonce challenges, case-insensitive token
+            types and conforming cache headers; add bounded `invalid_nonce` recovery with atomic,
+            durable nonce reservation before credential-proof signing.
+      - [ ] Enforce distinct DPoP and credential keys, minimise the key-attestation backend request,
+            and remove the incorrect SD-JWT `iss == credential_issuer` transport gate in favour of
+            verified-ingestion `x5c`/issuer-path authorization.
+      - [ ] Require native adapters to enforce streaming body/header/decompression limits before
+            allocation, exact final URL/method correlation, disabled redirects, deadlines,
+            cancellation and secret-safe logging; add the missing hostile/conformance vectors.
   - [ ] Replace the custom WUA gate with TS3 1.5.2 WIA + KA transport, Wallet Provider trust,
         one-use/privacy rules, WSCD key binding and client/key-storage status maintenance.
   - [ ] Add and test a secret-safe native `GermanEidClient` seam; then integrate the official
