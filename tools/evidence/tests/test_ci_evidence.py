@@ -66,28 +66,23 @@ class CiEvidenceConfigurationTests(unittest.TestCase):
         self.assertIn('rust-version = "1.93"', CRYPTO_TRAITS_MANIFEST)
         self.assertNotIn("--ignore-rust-version", WORKFLOW)
 
-    def test_swift_runner_and_tamarin_trust_are_scoped(self):
+    def test_swift_runner_and_tamarin_release_are_pinned(self):
         ios_job = WORKFLOW.split("  ios-shell:", 1)[1].split("  traceability:", 1)[0]
         self.assertIn("runs-on: macos-15", ios_job)
         self.assertIn("Verify Swift 6 toolchain", ios_job)
         self.assertIn("grep -Eq 'Swift version", ios_job)
 
         tamarin_job = WORKFLOW.split("  tier3-tamarin:", 1)[1].split("  ios-shell:", 1)[0]
-        self.assertIn("brew tap tamarin-prover/tap", tamarin_job)
-        self.assertIn("brew install tamarin-prover/tap/tamarin-prover", tamarin_job)
-        trust_commands = [
-            line.strip()
-            for line in tamarin_job.splitlines()
-            if line.strip().startswith("brew trust")
-        ]
-        self.assertEqual(
-            [
-                "brew trust --formula tamarin-prover/tap/tamarin-prover",
-                "brew trust --formula tamarin-prover/tap/maude",
-                "brew trust --formula tamarin-prover/tap/libbuddy",
-            ],
-            trust_commands,
+        self.assertIn("runs-on: ubuntu-latest", tamarin_job)
+        self.assertIn("graphviz maude", tamarin_job)
+        self.assertIn("tamarin-prover-1.12.0-linux64-ubuntu.tar.gz", tamarin_job)
+        self.assertIn(
+            "201be06f469e47cff554df6ca93db8366fc2c69d70c61fcbd1370a1074b469c6",
+            tamarin_job,
         )
+        self.assertIn("sha256sum --check --strict", tamarin_job)
+        self.assertIn("tamarin-prover --version", tamarin_job)
+        self.assertNotIn("brew trust", WORKFLOW)
         self.assertNotIn("HOMEBREW_NO_REQUIRE_TAP_TRUST", WORKFLOW)
 
     def test_evidence_script_is_syntax_valid_and_fail_closed(self):

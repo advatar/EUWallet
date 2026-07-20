@@ -109,16 +109,23 @@ jobs:
 
   tier3-tamarin:
     name: Tier 3 (Tamarin symbolic proofs)
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Tamarin
+      - name: Install pinned Tamarin runtime
         run: |
-          brew tap tamarin-prover/tap
-          brew trust --formula tamarin-prover/tap/tamarin-prover
-          brew trust --formula tamarin-prover/tap/maude
-          brew trust --formula tamarin-prover/tap/libbuddy
-          brew install tamarin-prover/tap/tamarin-prover
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes graphviz maude
+          archive="$RUNNER_TEMP/tamarin-prover-1.12.0-linux64-ubuntu.tar.gz"
+          curl --fail --location --silent --show-error \
+            https://github.com/tamarin-prover/tamarin-prover/releases/download/1.12.0/tamarin-prover-1.12.0-linux64-ubuntu.tar.gz \
+            --output "$archive"
+          echo "201be06f469e47cff554df6ca93db8366fc2c69d70c61fcbd1370a1074b469c6  $archive" \
+            | sha256sum --check --strict
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
+          sudo install --mode 0755 "$RUNNER_TEMP/tamarin-prover" /usr/local/bin/tamarin-prover
+          tamarin-prover --version
       - name: Prove every Tamarin model
         run: |
           set -euo pipefail
