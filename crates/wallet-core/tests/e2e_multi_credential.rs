@@ -447,7 +447,7 @@ fn an_incomplete_multi_query_aborts_atomically_before_consent_or_signing() {
 }
 
 #[test]
-fn credential_sets_choose_a_complete_fallback_and_a_satisfiable_optional_set() {
+fn credential_sets_choose_a_complete_fallback_and_omit_a_satisfiable_optional_set() {
     let (mut core, device) = wallet_with_holdings(true);
     let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
     let request = sign_dcql_request(
@@ -481,7 +481,7 @@ fn credential_sets_choose_a_complete_fallback_and_a_satisfiable_optional_set() {
     let vp = field(&body, "vp_token").unwrap();
     let object: serde_json::Value = serde_json::from_str(&vp).unwrap();
     assert!(object.get("pid").is_some());
-    assert!(object.get("mdl").is_some());
+    assert!(object.get("mdl").is_none());
     assert!(object.get("diploma").is_none());
 }
 
