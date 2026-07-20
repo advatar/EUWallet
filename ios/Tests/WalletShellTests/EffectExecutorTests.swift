@@ -54,6 +54,16 @@ private final class FailingStorage: SecureStorage {
     func get(key: String) throws -> Data? { throw ExpectedFailure.failure }
 }
 
+private final class FailingIssuer: IssuerResponder {
+    func token() async throws -> (bound: Bool, cNonce: UInt64) {
+        throw ExpectedFailure.failure
+    }
+
+    func credential(proofJwt: Data) async throws -> (format: String, bytes: Data) {
+        throw ExpectedFailure.failure
+    }
+}
+
 private final class FixedHttpClient: HttpClient {
     enum Outcome {
         case response(HttpResponse)
@@ -77,6 +87,7 @@ final class EffectExecutorTests: XCTestCase {
         signer: Signer = StubSigner(),
         http: HttpClient = StubHttpClient(),
         storage: SecureStorage = InMemoryStorage(),
+        issuer: IssuerResponder? = nil,
         render: @escaping (ScreenDescription) -> Void = { _ in }
     ) -> EffectExecutor {
         EffectExecutor(
@@ -85,6 +96,7 @@ final class EffectExecutorTests: XCTestCase {
             http: http,
             storage: storage,
             trust: StubTrustResolver(certChain: [Data([1, 2, 3])]),
+            issuer: issuer,
             render: render)
     }
 
@@ -239,6 +251,51 @@ final class EffectExecutorTests: XCTestCase {
             XCTFail("expected transport failure")
         } catch let error as EffectExecutorError {
             XCTAssertEqual(error, .transportFailed(.transport("offline")))
+        } catch {
+            XCTFail("untyped error: \(error)")
+        }
+        assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+    }
+
+    func testMissingIssuerStopsIssuanceInsteadOfSilentlyDraining() async {
+        let engine = MockEngine { _ in #"[{"type":"requestToken"}]"# }
+        let executor = makeExecutor(engine: engine)
+
+        do {
+            try await executor.send(eventJson: "{}")
+            XCTFail("expected the missing issuer to fail")
+        } catch let error as EffectExecutorError {
+            XCTAssertEqual(error, .missingDependency("issuer"))
+        } catch {
+            XCTFail("untyped error: \(error)")
+        }
+        assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+    }
+
+    func testIssuerTransportFailureStopsIssuance() async {
+        let engine = MockEngine { _ in #"[{"type":"requestToken"}]"# }
+        let executor = makeExecutor(engine: engine, issuer: FailingIssuer())
+
+        do {
+            try await executor.send(eventJson: "{}")
+            XCTFail("expected issuer failure")
+        } catch let error as EffectExecutorError {
+            guard case .issuerFailed = error else { return XCTFail("unexpected error: \(error)") }
+        } catch {
+            XCTFail("untyped error: \(error)")
+        }
+        assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+    }
+
+    func testUnimplementedProtocolEffectFailsExplicitly() async {
+        let engine = MockEngine { _ in #"[{"type":"pushPar"}]"# }
+        let executor = makeExecutor(engine: engine)
+
+        do {
+            try await executor.send(eventJson: "{}")
+            XCTFail("expected unsupported effect failure")
+        } catch let error as EffectExecutorError {
+            XCTAssertEqual(error, .unsupportedEffect("pushPar"))
         } catch {
             XCTFail("untyped error: \(error)")
         }

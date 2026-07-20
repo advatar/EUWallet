@@ -34,6 +34,9 @@ public enum EffectExecutorError: Error, Equatable {
     case storageFailed(String)
     case transportFailed(HttpClientError)
     case httpStatusFailed(statusCode: UInt16, body: Data)
+    case missingDependency(String)
+    case issuerFailed(String)
+    case unsupportedEffect(String)
 }
 
 extension EffectExecutorError: LocalizedError {
@@ -45,6 +48,11 @@ extension EffectExecutorError: LocalizedError {
         case .transportFailed(let error): return error.localizedDescription
         case .httpStatusFailed(let statusCode, _):
             return "Wallet delivery failed with HTTP status \(statusCode)"
+        case .missingDependency(let dependency):
+            return "Wallet flow is missing required dependency: \(dependency)"
+        case .issuerFailed(let reason): return "Credential issuer request failed: \(reason)"
+        case .unsupportedEffect(let effect):
+            return "Wallet shell does not implement required effect: \(effect)"
         }
     }
 }
@@ -144,15 +152,29 @@ public final class EffectExecutor {
         // --- Issuance (OpenID4VCI). The demo's pre-authorized flow uses only token + credential;
         //     PAR / browser / tx-code are unreachable here and safely no-op. ---
         case .requestToken:
-            guard let issuer else { return nil }
-            let t = await issuer.token()
-            return WalletEventJSON.tokenReceived(bound: t.bound, cNonce: t.cNonce)
+            guard let issuer else { throw EffectExecutorError.missingDependency("issuer") }
+            do {
+                let t = try await issuer.token()
+                return WalletEventJSON.tokenReceived(bound: t.bound, cNonce: t.cNonce)
+            } catch {
+                throw EffectExecutorError.issuerFailed(String(describing: error))
+            }
         case .requestCredential(let proofJwt):
-            guard let issuer else { return nil }
-            let c = await issuer.credential(proofJwt: Data(proofJwt))
-            return WalletEventJSON.credentialReceived(format: c.format, bytes: c.bytes)
-        case .pushPar, .openAuthBrowser, .promptTxCode, .publishTransferOffer:
-            return nil
+            guard let issuer else { throw EffectExecutorError.missingDependency("issuer") }
+            do {
+                let c = try await issuer.credential(proofJwt: Data(proofJwt))
+                return WalletEventJSON.credentialReceived(format: c.format, bytes: c.bytes)
+            } catch {
+                throw EffectExecutorError.issuerFailed(String(describing: error))
+            }
+        case .pushPar:
+            throw EffectExecutorError.unsupportedEffect("pushPar")
+        case .openAuthBrowser:
+            throw EffectExecutorError.unsupportedEffect("openAuthBrowser")
+        case .promptTxCode:
+            throw EffectExecutorError.unsupportedEffect("promptTxCode")
+        case .publishTransferOffer:
+            throw EffectExecutorError.unsupportedEffect("publishTransferOffer")
         case .close:
             return nil
         }

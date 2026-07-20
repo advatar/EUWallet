@@ -193,9 +193,9 @@ public enum WalletEventJSON {
 /// credential in-process. The core still runs the whole issuance machine either way.
 public protocol IssuerResponder {
     /// The `/token` response: whether the token is sender-bound, and a fresh `c_nonce`.
-    func token() async -> (bound: Bool, cNonce: UInt64)
+    func token() async throws -> (bound: Bool, cNonce: UInt64)
     /// The `/credential` response for the assembled proof: the format + credential bytes.
-    func credential(proofJwt: Data) async -> (format: String, bytes: Data)
+    func credential(proofJwt: Data) async throws -> (format: String, bytes: Data)
 }
 
 /// Fetches an RP's certificate chain (network I/O; injected so it can be stubbed in tests). The
