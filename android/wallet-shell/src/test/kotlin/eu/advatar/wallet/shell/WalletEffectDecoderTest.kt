@@ -15,7 +15,7 @@ class WalletEffectDecoderTest {
                 {"type":"persistNonce","operationId":2,"nonce":18446744073709551615},
                 {"type":"render","operationId":3,"authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":["age_over_18"]}},
                 {"type":"sign","operationId":4,"keyRef":"device","payload":[0,127,255]},
-                {"type":"http","operationId":5,"resultType":"presentationDelivered","url":"https://rp.example/cb","body":[1]},
+                {"type":"http","operationId":5,"resultType":"presentationDelivered","profile":"openid4vpDirectPost","url":"https://rp.example/cb","body":[1]},
                 {"type":"pushPar","operationId":6},
                 {"type":"openAuthBrowser","operationId":7},
                 {"type":"promptTxCode","operationId":8},
@@ -100,6 +100,8 @@ class WalletEffectDecoderTest {
             "[{\"type\":\"sign\",\"keyRef\":\"k\",\"payload\":[1.0]}]",
             "[{\"type\":\"sign\",\"operationId\":9223372036854775808,\"keyRef\":\"k\",\"payload\":[1]}]",
             "[{\"type\":\"http\",\"operationId\":1,\"resultType\":\"wrong\",\"url\":\"https://rp\",\"body\":[]}]",
+            "[{\"type\":\"http\",\"operationId\":1,\"resultType\":\"presentationDelivered\",\"profile\":\"paymentAuthorization\",\"url\":\"https://rp\",\"body\":[]}]",
+            "[{\"type\":\"http\",\"operationId\":1,\"resultType\":\"presentationDelivered\",\"profile\":\"futureProfile\",\"url\":\"https://rp\",\"body\":[]}]",
             "[{\"type\":\"render\",\"operationId\":1,\"screen\":{\"screen\":\"consent\",\"rpDisplayName\":\"RP\",\"purpose\":\"Age\",\"requestedClaims\":[]}}]",
         ).forEach { output ->
             assertThrows(WalletShellException.MalformedCoreOutput::class.java) {

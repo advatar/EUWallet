@@ -49,7 +49,11 @@ fn payment_sca_through_wallet_core() {
     let (url, body) = fx
         .iter()
         .find_map(|e| match e {
-            Effect::Http { url, body } => Some((url.clone(), body.clone())),
+            Effect::Http { profile, url, body }
+                if *profile == wallet_core::HttpDeliveryProfile::PaymentAuthorization =>
+            {
+                Some((url.clone(), body.clone()))
+            }
             _ => None,
         })
         .expect("expected the auth code to be posted");

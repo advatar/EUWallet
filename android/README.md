@@ -25,8 +25,10 @@ an Android UI, a generated UniFFI/JNI bridge, or approved national-wallet servic
   security levels, extractable keys, mismatched authorization, and known emulators are rejected.
 - `EmulatorOnlyTestSigner`, a software P-256 signer that exists only in the debug source set and
   refuses to run unless its detector identifies an emulator. It is absent from release artifacts.
-- A blocking, redirect-disabled, HTTPS-only `UrlConnectionHttpClient` with finite timeouts and a
-  one-MiB response limit. Run the executor on a worker thread.
+- A blocking, redirect-disabled, HTTPS-only `UrlConnectionHttpClient` with finite timeouts and
+  bounded responses. OpenID4VP `direct_post` uses an explicit form/JSON profile and a narrow,
+  injected redirect handler; the shared client rejects payment/QES delivery until dedicated
+  PSP/CSC adapters are integrated. Run the executor on a worker thread.
 - A pure `WalletIngressParser` for bounded OpenID4VCI offer and OpenID4VP by-reference QR/deep-link
   inputs. Registered schemes require the exact empty-authority/path form; HTTPS links require an
   explicitly configured canonical origin; duplicate, conflicting, unsupported, malformed and
@@ -66,7 +68,7 @@ This foundation does not make the Android wallet launch-ready. The host applicat
 - the generated Rust bridge and lifecycle-safe engine adapter;
 - approved durable anti-replay storage (there is intentionally no in-memory production fallback);
 - RP/issuer trust resolution, OpenID4VCI endpoint adapters, PAR/browser/transaction-code handling,
-  and wallet-to-wallet transport;
+  dedicated payment PSP and QES CSC/QTSP delivery adapters, and wallet-to-wallet transport;
 - national-wallet key enrollment/attestation and device-integrity policy in addition to local
   `KeyInfo` checks;
 - biometric/device-credential UX, Android UI and accessibility, deep-link Activity and verified

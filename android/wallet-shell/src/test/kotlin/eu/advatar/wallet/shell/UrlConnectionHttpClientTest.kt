@@ -188,7 +188,11 @@ class UrlConnectionHttpClientTest {
         )
 
         assertThrows(WalletHttpClientException.UnsafeDestination::class.java) {
-            client.post("https://127.0.0.1/submit", ByteArray(0))
+            client.post(
+                "https://127.0.0.1/submit",
+                ByteArray(0),
+                HttpDeliveryProfile.OPENID4VP_DIRECT_POST,
+            )
         }
         assertThrows(WalletHttpClientException.UnsafeDestination::class.java) {
             client.fetchCredentialOffer("https://single-label/offer")
@@ -204,15 +208,22 @@ class UrlConnectionHttpClientTest {
             responseBody = "ok".encodeToByteArray(),
         )
         val client = client(fake)
-        val requestBody = "  {\"vp_token\":\"value\"}".encodeToByteArray()
+        val requestBody = "vp_token=value&state=abc".encodeToByteArray()
 
-        val response = client.post("https://wallet.example/submit", requestBody)
+        val response = client.post(
+            "https://wallet.example/submit",
+            requestBody,
+            HttpDeliveryProfile.OPENID4VP_DIRECT_POST,
+        )
 
         assertEquals(200, response.statusCode)
         assertArrayEquals("ok".encodeToByteArray(), response.body)
         assertEquals("POST", fake.requestMethod)
-        assertEquals("*/*", fake.getRequestProperty("Accept"))
-        assertEquals("application/json", fake.getRequestProperty("Content-Type"))
+        assertEquals("application/json", fake.getRequestProperty("Accept"))
+        assertEquals(
+            "application/x-www-form-urlencoded",
+            fake.getRequestProperty("Content-Type"),
+        )
         assertArrayEquals(requestBody, fake.requestBody.toByteArray())
         assertFalse(fake.instanceFollowRedirects)
         assertFalse(fake.useCaches)
@@ -223,29 +234,62 @@ class UrlConnectionHttpClientTest {
     }
 
     @Test
-    fun postLeavesMixedProtocolResponseMimeUntypedAndAllowsBodylessNoContent() {
+    fun openId4VpPostRejectsWrongOrMissingResponseMimeAndInvalidUtf8() {
         val represented = FakeHttpsURLConnection(
             URL("https://wallet.example/token"),
             responseContentType = "text/html",
             responseBody = "error".encodeToByteArray(),
         )
-        val representedResponse =
-            client(represented).post("https://wallet.example/token", ByteArray(0))
-        assertArrayEquals("error".encodeToByteArray(), representedResponse.body)
-        assertTrue(represented.inputRequested)
+        assertThrows(WalletHttpClientException.UnacceptableContentType::class.java) {
+            client(represented).post(
+                "https://wallet.example/token",
+                ByteArray(0),
+                HttpDeliveryProfile.OPENID4VP_DIRECT_POST,
+            )
+        }
+        assertFalse(represented.inputRequested)
 
         val noContent = FakeHttpsURLConnection(
             URL("https://wallet.example/notification"),
             responseCodeValue = 204,
         )
-        val response = client(noContent).post(
-            "https://wallet.example/notification",
-            "{}".encodeToByteArray(),
-        )
-        assertEquals(204, response.statusCode)
-        assertEquals(0, response.body.size)
+        assertThrows(WalletHttpClientException.UnacceptableContentType::class.java) {
+            client(noContent).post(
+                "https://wallet.example/notification",
+                ByteArray(0),
+                HttpDeliveryProfile.OPENID4VP_DIRECT_POST,
+            )
+        }
         assertFalse(noContent.inputRequested)
         assertTrue(noContent.disconnected)
+
+        assertThrows(WalletHttpClientException.InvalidProtocolBody::class.java) {
+            client(noContent).post(
+                "https://wallet.example/notification",
+                byteArrayOf(0xc3.toByte(), 0x28),
+                HttpDeliveryProfile.OPENID4VP_DIRECT_POST,
+            )
+        }
+    }
+
+    @Test
+    fun sharedProductionPostRejectsPaymentAndQesBeforeNetworkAccess() {
+        var opened = 0
+        val client = client(
+            connectionFactory = HttpsConnectionFactory {
+                opened += 1
+                FakeHttpsURLConnection(it.toURL())
+            },
+        )
+        listOf(
+            HttpDeliveryProfile.PAYMENT_AUTHORIZATION,
+            HttpDeliveryProfile.QES_AUTHORIZATION,
+        ).forEach { profile ->
+            assertThrows(WalletHttpClientException.UnsupportedDeliveryProfile::class.java) {
+                client.post("https://wallet.example/authorize", byteArrayOf(1), profile)
+            }
+        }
+        assertEquals(0, opened)
     }
 
     @Test
@@ -377,7 +421,13 @@ class UrlConnectionHttpClientTest {
     @Test
     fun explicitlyRejectsRedirectsForPostAndGetWithoutReadingResponse() {
         val operations = listOf<(UrlConnectionHttpClient) -> Unit>(
-            { client -> client.post("https://wallet.example/submit", ByteArray(0)) },
+            { client ->
+                client.post(
+                    "https://wallet.example/submit",
+                    ByteArray(0),
+                    HttpDeliveryProfile.OPENID4VP_DIRECT_POST,
+                )
+            },
             { client -> client.fetchStatusList("https://wallet.example/status") },
         )
 

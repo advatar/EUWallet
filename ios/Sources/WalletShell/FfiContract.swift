@@ -119,7 +119,12 @@ public enum WalletEffect: Decodable {
     case persistNonce(operationId: UInt64, nonce: UInt64)
     case render(operationId: UInt64?, authorizationHash: [UInt8]?, screen: ScreenDescription)
     case sign(operationId: UInt64, keyRef: String, payload: [UInt8])
-    case http(operationId: UInt64, resultType: HttpResultType, url: String, body: [UInt8])
+    case http(
+        operationId: UInt64,
+        resultType: HttpResultType,
+        profile: HttpDeliveryProfile,
+        url: String,
+        body: [UInt8])
     // --- Issuance (OpenID4VCI) ---
     case pushPar(operationId: UInt64)
     case openAuthBrowser(operationId: UInt64)
@@ -134,7 +139,7 @@ public enum WalletEffect: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case type, clientId, nonce, screen, keyRef, payload, url, body, proofJwt, offeredKey
-        case uri, operationId, resultType, authorizationHash
+        case uri, operationId, resultType, profile, authorizationHash
     }
 
     private struct CoreErrorEnvelope: Decodable {
@@ -196,9 +201,18 @@ public enum WalletEffect: Decodable {
                 keyRef: try c.decode(String.self, forKey: .keyRef),
                 payload: try c.decode([UInt8].self, forKey: .payload))
         case "http":
+            let resultType = try c.decode(HttpResultType.self, forKey: .resultType)
+            let profile = try c.decode(HttpDeliveryProfile.self, forKey: .profile)
+            guard profile.resultType == resultType else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .profile,
+                    in: c,
+                    debugDescription: "HTTP delivery profile does not match resultType")
+            }
             self = .http(
                 operationId: try c.decode(UInt64.self, forKey: .operationId),
-                resultType: try c.decode(HttpResultType.self, forKey: .resultType),
+                resultType: resultType,
+                profile: profile,
                 url: try c.decode(String.self, forKey: .url),
                 body: try c.decode([UInt8].self, forKey: .body))
         case "pushPar":
@@ -235,6 +249,22 @@ public enum HttpResultType: String, Decodable, Equatable {
     case presentationDelivered
     case paymentAuthorizationDelivered
     case qesAuthorizationDelivered
+}
+
+/// Closed protocol-delivery discriminator emitted by the Rust core. It prevents opaque POST bytes
+/// from being interpreted under a different protocol's success contract.
+public enum HttpDeliveryProfile: String, Decodable, Equatable, Sendable {
+    case openid4vpDirectPost
+    case paymentAuthorization
+    case qesAuthorization
+
+    public var resultType: HttpResultType {
+        switch self {
+        case .openid4vpDirectPost: return .presentationDelivered
+        case .paymentAuthorization: return .paymentAuthorizationDelivered
+        case .qesAuthorization: return .qesAuthorizationDelivered
+        }
+    }
 }
 
 public enum WalletOperationFailure: String {

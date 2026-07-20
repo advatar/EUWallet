@@ -32,6 +32,15 @@ sealed class WalletHttpClientException(message: String, cause: Throwable? = null
     class ResponseTooLarge(limit: Int) :
         WalletHttpClientException("HTTP response exceeded $limit bytes")
 
+    class InvalidProtocolBody(message: String) : WalletHttpClientException(message)
+
+    class InvalidProtocolResponse(message: String) : WalletHttpClientException(message)
+
+    class UnsupportedDeliveryProfile(profile: HttpDeliveryProfile) :
+        WalletHttpClientException(
+            "No production HTTP adapter is configured for ${profile.wireValue}",
+        )
+
     class Transport(cause: Throwable) : WalletHttpClientException("HTTP transport failed", cause)
 
 }
@@ -382,20 +391,33 @@ class UrlConnectionHttpClient internal constructor(
         require(maximumResponseBytes > 0) { "maximumResponseBytes must be positive" }
     }
 
-    /**
-     * Posts a core-owned payload. The current effect contract mixes OID4VP, payment, and QES
-     * deliveries and carries no response-media profile, so this generic boundary does not parse or
-     * assert a response MIME. Destination, redirect, timeout, and body-size policy still apply.
-     */
-    override fun post(url: String, body: ByteArray): HttpResponse =
-        execute(
+    /** OpenID4VP has a shared transport contract; PSP/CSC delivery needs a dedicated adapter. */
+    override fun post(
+        url: String,
+        body: ByteArray,
+        profile: HttpDeliveryProfile,
+    ): HttpResponse {
+        if (profile != HttpDeliveryProfile.OPENID4VP_DIRECT_POST) {
+            throw WalletHttpClientException.UnsupportedDeliveryProfile(profile)
+        }
+        if (!OpenId4VpDirectPostResponse.isUtf8(body)) {
+            throw WalletHttpClientException.InvalidProtocolBody(
+                "OpenID4VP direct_post parameters must be UTF-8",
+            )
+        }
+        return execute(
             url = url,
             method = "POST",
             body = body,
-            accept = ACCEPT_ANY_MEDIA_TYPE,
-            expectedContentTypes = null,
-            responseLimit = maximumResponseBytes,
+            accept = JSON_MEDIA_TYPE,
+            requestContentType = FORM_MEDIA_TYPE,
+            expectedContentTypes = setOf(JSON_MEDIA_TYPE),
+            responseLimit = minOf(
+                maximumResponseBytes,
+                OpenId4VpDirectPostResponse.MAXIMUM_RESPONSE_BYTES,
+            ),
         )
+    }
 
     /** Derives and fetches an OpenID4VCI issuer's unsigned JSON metadata endpoint. */
     fun fetchIssuerMetadata(issuer: String): HttpResponse {
@@ -445,6 +467,7 @@ class UrlConnectionHttpClient internal constructor(
         method = "GET",
         body = null,
         accept = acceptedContentTypes.sorted().joinToString(", "),
+        requestContentType = null,
         expectedContentTypes = acceptedContentTypes,
         responseLimit = minOf(maximumResponseBytes, protocolLimit),
     )
@@ -454,6 +477,7 @@ class UrlConnectionHttpClient internal constructor(
         method: String,
         body: ByteArray?,
         accept: String,
+        requestContentType: String?,
         expectedContentTypes: Set<String>?,
         responseLimit: Int,
     ): HttpResponse {
@@ -475,7 +499,11 @@ class UrlConnectionHttpClient internal constructor(
             connection.useCaches = false
             connection.setRequestProperty("Accept", accept)
             if (body != null) {
-                connection.setRequestProperty("Content-Type", contentType(body))
+                val contentType = requestContentType
+                    ?: throw WalletHttpClientException.InvalidProtocolBody(
+                        "POST body has no explicit protocol media type",
+                    )
+                connection.setRequestProperty("Content-Type", contentType)
                 connection.setFixedLengthStreamingMode(body.size)
                 connection.outputStream.use { output -> output.write(body) }
             }
@@ -491,9 +519,9 @@ class UrlConnectionHttpClient internal constructor(
                 throw WalletHttpClientException.ResponseTooLarge(responseLimit)
             }
             val responseHasNoContent = statusCode == 204 || statusCode == 205
+            val rawContentType = responseContentType(connection)
+            val actualContentType = baseMediaType(rawContentType)
             if (expectedContentTypes != null) {
-                val rawContentType = responseContentType(connection)
-                val actualContentType = baseMediaType(rawContentType)
                 if (actualContentType !in expectedContentTypes) {
                     throw WalletHttpClientException.UnacceptableContentType(
                         expectedContentTypes.sorted().joinToString(", "),
@@ -508,7 +536,7 @@ class UrlConnectionHttpClient internal constructor(
             } else {
                 connection.errorStream
             }
-            HttpResponse(statusCode, readBody(stream, responseLimit))
+            HttpResponse(statusCode, readBody(stream, responseLimit), actualContentType)
         } catch (error: WalletHttpClientException) {
             throw error
         } catch (error: Exception) {
@@ -555,20 +583,6 @@ class UrlConnectionHttpClient internal constructor(
         }
     }
 
-    private fun contentType(body: ByteArray): String {
-        val first = body.firstOrNull { byte ->
-            byte != ' '.code.toByte() &&
-                byte != '\t'.code.toByte() &&
-                byte != '\r'.code.toByte() &&
-                byte != '\n'.code.toByte()
-        }
-        return if (first == '{'.code.toByte() || first == '['.code.toByte()) {
-            JSON_MEDIA_TYPE
-        } else {
-            FORM_MEDIA_TYPE
-        }
-    }
-
     companion object {
         const val DEFAULT_TIMEOUT_MILLISECONDS = 30_000
         const val DEFAULT_MAXIMUM_RESPONSE_BYTES = 1_048_576
@@ -583,7 +597,6 @@ class UrlConnectionHttpClient internal constructor(
         const val REQUEST_OBJECT_MEDIA_TYPE = "application/oauth-authz-req+jwt"
         val REQUEST_OBJECT_MEDIA_TYPES: Set<String> =
             setOf(JWT_MEDIA_TYPE, REQUEST_OBJECT_MEDIA_TYPE)
-        private const val ACCEPT_ANY_MEDIA_TYPE = "*/*"
-        private const val FORM_MEDIA_TYPE = "application/x-www-form-urlencoded"
+        const val FORM_MEDIA_TYPE = "application/x-www-form-urlencoded"
     }
 }
