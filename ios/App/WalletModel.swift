@@ -97,6 +97,11 @@ final class WalletModel: ObservableObject {
     private let redirectUris: [String]
     /// The executor bound to `engine` for the current flow (rebuilt per flow; same engine).
     private var executor: EffectExecutor?
+    /// Correlation id attached by Rust to the currently rendered confirmation. A decision without
+    /// this exact id is rejected as stale at the production JSON boundary.
+    private var decisionOperationId: UInt64?
+    private var decisionAuthorizationHash: Data?
+    private var decisionKind: WalletDecisionKind?
     /// Monotonic nonce source: a persistent engine records used nonces (replay protection), so each
     /// presentation/payment/issuance must carry a fresh one.
     private var nonceCounter: UInt64 = 1
@@ -136,7 +141,7 @@ final class WalletModel: ObservableObject {
     /// `render` maps the core's screens to the live UI (or a no-op for silent seeding).
     private func makeExecutor(
         issuer: IssuerResponder?,
-        render: @escaping (ScreenDescription) -> Void
+        render: @escaping (UInt64?, Data?, ScreenDescription) -> Void
     ) -> EffectExecutor {
         EffectExecutor(
             engine: engine,
@@ -149,8 +154,19 @@ final class WalletModel: ObservableObject {
     }
 
     private func liveExecutor() -> EffectExecutor {
-        let ex = makeExecutor(issuer: nil) { [weak self] screen in
-            Task { @MainActor in self?.phase = .screen(screen) }
+        clearDecision()
+        let ex = makeExecutor(issuer: nil) { [weak self] operationId, authorizationHash, screen in
+            Task { @MainActor in
+                guard let self else { return }
+                if let kind = WalletDecisionKind(screen: screen) {
+                    self.decisionOperationId = operationId
+                    self.decisionAuthorizationHash = authorizationHash
+                    self.decisionKind = kind
+                } else {
+                    self.clearDecision()
+                }
+                self.phase = .screen(screen)
+            }
         }
         self.executor = ex
         return ex
@@ -162,6 +178,12 @@ final class WalletModel: ObservableObject {
     }
 
     private func note(_ line: String) { log.append(line) }
+
+    private func clearDecision() {
+        decisionOperationId = nil
+        decisionAuthorizationHash = nil
+        decisionKind = nil
+    }
 
     private enum RequiredCascadeOutcome: String {
         case awaitingInput
@@ -290,7 +312,7 @@ final class WalletModel: ObservableObject {
             credentialCompact: Data(compact.utf8),
             cNonce: nextNonce(),
             format: type.issuanceFormat)
-        let ex = makeExecutor(issuer: issuer, render: { _ in })
+        let ex = makeExecutor(issuer: issuer, render: { _, _, _ in })
         return await run(ex, eventJson: WalletEventJSON.credentialOfferReceived(
             offer: offer,
             issuerCertChain: issuance.issuerCertChain,
@@ -353,46 +375,61 @@ final class WalletModel: ObservableObject {
     /// User approved the on-screen consent/payment: device signs (demo key), core assembles and
     /// the shell "delivers" the vp_token / SCA auth code. Drains to `Close`.
     func approve() {
-        let wasPayment: Bool
-        if case .screen(.paymentConfirmation) = phase { wasPayment = true } else { wasPayment = false }
+        let operationId = decisionOperationId
+        let authorizationHash = decisionAuthorizationHash
+        let kind = decisionKind
+        clearDecision()
         phase = .running
+        guard let executor else {
+            phase = .failed("Wallet executor is unavailable")
+            return
+        }
+        guard let operationId, let authorizationHash, let kind else {
+            phase = .failed("Wallet confirmation is no longer active")
+            return
+        }
         Task {
-            guard let executor else {
-                phase = .failed("Wallet executor is unavailable")
-                return
-            }
-            if wasPayment {
-                guard await run(
-                    executor,
-                    eventJson: WalletEventJSON.paymentApproved(),
-                    requiring: .succeeded
-                ) else { return }
-                note("Device signed the dynamic-linking binding; auth code posted to the PSP.")
-                reloadHistory()
-                phase = .done("Payment authorised — SCA auth code delivered.")
-            } else {
-                guard await run(
-                    executor,
-                    eventJson: WalletEventJSON.userConsented(),
-                    requiring: .succeeded
-                ) else { return }
+            guard await run(
+                executor,
+                eventJson: kind.approvalEvent(
+                    operationId: operationId,
+                    authorizationHash: authorizationHash),
+                requiring: .succeeded
+            ) else { return }
+            switch kind {
+            case .presentation:
                 note("Device signed the key-binding JWT; vp_token posted to the RP.")
                 reloadHistory()
                 phase = .done("Presentation delivered — only the requested claim was shared.")
+            case .payment:
+                note("Device signed the dynamic-linking binding; auth code posted to the PSP.")
+                reloadHistory()
+                phase = .done("Payment authorised — SCA auth code delivered.")
+            case .qes:
+                note("Device authorized the exact document hash; the response was acknowledged by the QTSP.")
+                reloadHistory()
+                phase = .done("Qualified signature authorised and delivered.")
             }
         }
     }
 
     func decline() {
+        let operationId = decisionOperationId
+        let kind = decisionKind
+        clearDecision()
         phase = .running
+        guard let executor else {
+            phase = .failed("Wallet executor is unavailable")
+            return
+        }
+        guard let operationId, let kind else {
+            phase = .failed("Wallet confirmation is no longer active")
+            return
+        }
         Task {
-            guard let executor else {
-                phase = .failed("Wallet executor is unavailable")
-                return
-            }
             guard await run(
                 executor,
-                eventJson: WalletEventJSON.userDeclined(),
+                eventJson: kind.declineEvent(operationId: operationId),
                 requiring: .declined
             ) else { return }
             phase = .done("Declined — nothing was shared.")
@@ -401,6 +438,7 @@ final class WalletModel: ObservableObject {
 
     func reset() {
         executor = nil
+        clearDecision()
         phase = .home
         log = []
     }
@@ -412,24 +450,37 @@ final class WalletModel: ObservableObject {
     func seedHistoryForDemo(redactFirst: Bool = false, thenExport: Bool = false) {
         Task {
             guard await issue(.pid) else { return }
-            let ex = makeExecutor(issuer: nil, render: { _ in })
+            var seededOperationId: UInt64?
+            var seededAuthorizationHash: Data?
+            let ex = makeExecutor(issuer: nil) { operationId, authorizationHash, _ in
+                seededOperationId = operationId
+                seededAuthorizationHash = authorizationHash
+            }
             guard await run(
                 ex,
                 eventJson: WalletEventJSON.authorizationRequestReceived(
                     demo.presentationRequest(nonce: nextNonce())),
                 requiring: .awaitingInput) else { return }
+            guard let presentationOperationId = seededOperationId else { return }
+            guard let presentationAuthorizationHash = seededAuthorizationHash else { return }
             guard await run(
                 ex,
-                eventJson: WalletEventJSON.userConsented(),
+                eventJson: WalletEventJSON.userConsented(
+                    operationId: presentationOperationId,
+                    authorizationHash: presentationAuthorizationHash),
                 requiring: .succeeded) else { return }
             guard await run(
                 ex,
                 eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(
                     demo.paymentRequest(nonce: nextNonce())),
                 requiring: .awaitingInput) else { return }
+            guard let paymentOperationId = seededOperationId else { return }
+            guard let paymentAuthorizationHash = seededAuthorizationHash else { return }
             guard await run(
                 ex,
-                eventJson: WalletEventJSON.paymentApproved(),
+                eventJson: WalletEventJSON.paymentApproved(
+                    operationId: paymentOperationId,
+                    authorizationHash: paymentAuthorizationHash),
                 requiring: .succeeded) else { return }
             if redactFirst {
                 _ = engine.redactTransaction(seq: 0)

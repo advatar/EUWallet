@@ -19,6 +19,11 @@ private class RecordingEngine(
 }
 
 private class ExpectedFailure : RuntimeException()
+private val AUTHORIZATION_HASH = ByteArray(32)
+private const val AUTHORIZATION_HASH_JSON =
+    "[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]"
+private const val ERROR_CLOSE =
+    "[{\"type\":\"render\",\"screen\":{\"screen\":\"error\",\"code\":\"operation_failed\",\"message\":\"Operation failed\"}},{\"type\":\"close\"}]"
 
 class EffectExecutorTest {
     @Test
@@ -26,9 +31,9 @@ class EffectExecutorTest {
         val engine = RecordingEngine { event ->
             when {
                 event.contains("userConsented") ->
-                    "[{\"type\":\"sign\",\"keyRef\":\"device\",\"payload\":[1,2]}]"
+                    "[{\"type\":\"sign\",\"operationId\":2,\"keyRef\":\"device\",\"payload\":[1,2]}]"
                 event.contains("deviceSignatureProduced") ->
-                    "[{\"type\":\"http\",\"url\":\"https://rp.example/cb\",\"body\":[3]}]"
+                    "[{\"type\":\"http\",\"operationId\":3,\"resultType\":\"presentationDelivered\",\"url\":\"https://rp.example/cb\",\"body\":[3]}]"
                 event.contains("presentationDelivered") -> "[{\"type\":\"close\"}]"
                 else -> "[]"
             }
@@ -47,7 +52,7 @@ class EffectExecutorTest {
             },
         )
 
-        val outcome = executor.send(WalletEventJson.userConsented())
+        val outcome = executor.send(WalletEventJson.userConsented(1, AUTHORIZATION_HASH))
 
         assertEquals(1, signed.size)
         assertArrayEquals(byteArrayOf(1, 2), signed.single())
@@ -58,17 +63,37 @@ class EffectExecutorTest {
     }
 
     @Test
+    fun httpSuccessUsesTheProtocolSpecificCompletionEvent() {
+        val engine = RecordingEngine { event ->
+            if (event.contains("paymentAuthorizationDelivered")) {
+                "[{\"type\":\"close\"}]"
+            } else {
+                "[{\"type\":\"http\",\"operationId\":13,\"resultType\":\"paymentAuthorizationDelivered\",\"url\":\"https://psp.example\",\"body\":[]}]"
+            }
+        }
+
+        val outcome = makeExecutor(engine = engine).send("{\"type\":\"paymentApproved\"}")
+
+        assertEquals(EffectCascadeOutcome.Succeeded, outcome)
+        assertTrue(engine.events.any {
+            it.contains("\"type\":\"paymentAuthorizationDelivered\"") &&
+                it.contains("\"operationId\":13")
+        })
+        assertFalse(engine.events.any { it.contains("presentationDelivered") })
+    }
+
+    @Test
     fun emptyCloseOnlyAndErrorFlowsAreNeverSuccess() {
         val empty = makeExecutor(engine = RecordingEngine { "[]" })
         assertEquals(
             EffectCascadeOutcome.Aborted(EffectAbortReason.MissingTerminalOutcome),
-            empty.send(WalletEventJson.userConsented()),
+            empty.send(WalletEventJson.userConsented(1, AUTHORIZATION_HASH)),
         )
 
         val closeOnly = makeExecutor(engine = RecordingEngine { "[{\"type\":\"close\"}]" })
         assertEquals(
             EffectCascadeOutcome.Aborted(EffectAbortReason.ClosedWithoutSuccess),
-            closeOnly.send(WalletEventJson.userConsented()),
+            closeOnly.send(WalletEventJson.userConsented(1, AUTHORIZATION_HASH)),
         )
 
         val coreError = makeExecutor(
@@ -80,7 +105,7 @@ class EffectExecutorTest {
             EffectCascadeOutcome.Aborted(
                 EffectAbortReason.CoreError("STATUS_UNAVAILABLE", "Status unavailable"),
             ),
-            coreError.send(WalletEventJson.userConsented()),
+            coreError.send(WalletEventJson.userConsented(1, AUTHORIZATION_HASH)),
         )
     }
 
@@ -89,7 +114,7 @@ class EffectExecutorTest {
         val decline = makeExecutor(engine = RecordingEngine { "[{\"type\":\"close\"}]" })
         assertEquals(
             EffectCascadeOutcome.Declined,
-            decline.send(WalletEventJson.userDeclined()),
+            decline.send(WalletEventJson.userDeclined(1)),
         )
 
         val prompt = makeExecutor(
@@ -104,49 +129,143 @@ class EffectExecutorTest {
     }
 
     @Test
+    fun interactiveRenderCarriesDecisionIdAndAuthorizationHash() {
+        var operationId: Long? = null
+        var authorizationHash: ByteArray? = null
+        val executor = makeExecutor(
+            engine = RecordingEngine {
+                "[{\"type\":\"render\",\"operationId\":44,\"authorizationHash\":$AUTHORIZATION_HASH_JSON,\"screen\":{\"screen\":\"consent\",\"rpDisplayName\":\"RP\",\"purpose\":\"Age\",\"requestedClaims\":[]}}]"
+            },
+            renderer = ScreenRenderer { id, hash, _ ->
+                operationId = id
+                authorizationHash = hash
+            },
+        )
+
+        assertEquals(
+            EffectCascadeOutcome.AwaitingInput,
+            executor.send("{\"type\":\"authorizationRequestReceived\"}"),
+        )
+        assertEquals(44L, operationId)
+        assertArrayEquals(AUTHORIZATION_HASH, requireNotNull(authorizationHash))
+    }
+
+    @Test
+    fun publishedTransferOfferWaitsForPeerInput() {
+        val published = mutableListOf<ByteArray>()
+        val engine = RecordingEngine { event ->
+            if (event.contains("operationSucceeded")) {
+                "[]"
+            } else {
+                "[{\"type\":\"publishTransferOffer\",\"operationId\":45,\"offeredKey\":[1,2,3]}]"
+            }
+        }
+        val executor = makeExecutor(
+            engine = engine,
+            transferOffers = TransferOfferPublisher { published += it },
+        )
+
+        val outcome = executor.send("{}")
+
+        assertEquals(1, published.size)
+        assertArrayEquals(byteArrayOf(1, 2, 3), published.single())
+        assertTrue(engine.events.any {
+            it.contains("\"type\":\"operationSucceeded\"") &&
+                it.contains("\"operationId\":45")
+        })
+        assertEquals(EffectCascadeOutcome.AwaitingInput, outcome)
+    }
+
+    @Test
+    fun staleDecisionCoreRejectionCannotBecomeSuccess() {
+        val executor = makeExecutor(
+            engine = RecordingEngine { "{\"error\":\"stale or unknown operationId 7\"}" },
+        )
+        val error = assertThrows(WalletShellException.CoreRejected::class.java) {
+            executor.send(WalletEventJson.userConsented(7, AUTHORIZATION_HASH))
+        }
+        assertTrue(error.detail.contains("stale or unknown"))
+    }
+
+    @Test
     fun effectAfterCloseAbortsWithoutRenderingIt() {
         var rendered = false
         val executor = makeExecutor(
             engine = RecordingEngine {
                 """[{"type":"close"},{"type":"render","screen":{"screen":"loading"}}]"""
             },
-            renderer = ScreenRenderer { rendered = true },
+            renderer = ScreenRenderer { _, _, _ -> rendered = true },
         )
 
         assertEquals(
             EffectCascadeOutcome.Aborted(EffectAbortReason.EffectAfterClose),
-            executor.send(WalletEventJson.userConsented()),
+            executor.send(WalletEventJson.userConsented(1, AUTHORIZATION_HASH)),
         )
         assertFalse(rendered)
     }
 
     @Test
-    fun storageFailureStopsWithoutSemanticSuccessOrDecline() {
-        val engine = RecordingEngine { "[{\"type\":\"persistNonce\",\"nonce\":42}]" }
+    fun storageFailureIsReportedToCoreAndResetsCascade() {
+        val engine = RecordingEngine { event ->
+            if (event.contains("operationFailed")) ERROR_CLOSE else
+                "[{\"type\":\"persistNonce\",\"operationId\":4,\"nonce\":42}]"
+        }
         val executor = makeExecutor(
             engine = engine,
             storage = WalletStorage { _, _ -> throw ExpectedFailure() },
         )
 
-        assertThrows(WalletShellException.StorageFailure::class.java) {
-            executor.send("{\"type\":\"start\"}")
-        }
+        assertEquals(
+            EffectCascadeOutcome.Aborted(
+                EffectAbortReason.CoreError("operation_failed", "Operation failed"),
+            ),
+            executor.send("{\"type\":\"start\"}"),
+        )
+        assertTrue(engine.events.any { it.contains("\"failure\":\"storage\"") })
         assertNoFabricatedOutcome(engine)
     }
 
     @Test
     fun signingFailureStopsWithoutSemanticSuccessOrDecline() {
-        val engine = RecordingEngine {
-            "[{\"type\":\"sign\",\"keyRef\":\"device\",\"payload\":[1]}]"
+        val engine = RecordingEngine { event ->
+            if (event.contains("operationFailed")) ERROR_CLOSE else
+                "[{\"type\":\"sign\",\"operationId\":5,\"keyRef\":\"device\",\"payload\":[1]}]"
         }
         val executor = makeExecutor(
             engine = engine,
             signer = WalletSigner { _, _ -> throw ExpectedFailure() },
         )
 
-        assertThrows(WalletShellException.SigningFailure::class.java) {
-            executor.send(WalletEventJson.userConsented())
+        assertEquals(
+            EffectCascadeOutcome.Aborted(
+                EffectAbortReason.CoreError("operation_failed", "Operation failed"),
+            ),
+            executor.send(WalletEventJson.userConsented(1, AUTHORIZATION_HASH)),
+        )
+        assertTrue(engine.events.any { it.contains("\"failure\":\"signing\"") })
+        assertNoFabricatedOutcome(engine)
+    }
+
+    @Test
+    fun signingCancellationUsesTheTypedCorrelatedCancellationEvent() {
+        val engine = RecordingEngine { event ->
+            if (event.contains("operationCancelled")) ERROR_CLOSE else
+                "[{\"type\":\"sign\",\"operationId\":55,\"keyRef\":\"device\",\"payload\":[1]}]"
         }
+        val executor = makeExecutor(
+            engine = engine,
+            signer = WalletSigner { _, _ ->
+                throw java.util.concurrent.CancellationException("cancelled")
+            },
+        )
+
+        val outcome = executor.send("{}")
+
+        assertTrue(outcome is EffectCascadeOutcome.Aborted)
+        assertTrue(engine.events.any {
+            it.contains("\"type\":\"operationCancelled\"") &&
+                it.contains("\"operationId\":55")
+        })
         assertNoFabricatedOutcome(engine)
     }
 
@@ -156,26 +275,28 @@ class EffectExecutorTest {
             WalletHttpClient { _, _ -> throw ExpectedFailure() },
             WalletHttpClient { _, _ -> HttpResponse(503, "unavailable".encodeToByteArray()) },
         ).forEach { client ->
-            val engine = RecordingEngine {
-                "[{\"type\":\"http\",\"url\":\"https://rp.example\",\"body\":[]}]"
+            val engine = RecordingEngine { event ->
+                if (event.contains("operationFailed")) ERROR_CLOSE else
+                    "[{\"type\":\"http\",\"operationId\":6,\"resultType\":\"presentationDelivered\",\"url\":\"https://rp.example\",\"body\":[]}]"
             }
             val executor = makeExecutor(engine = engine, http = client)
 
-            val error = assertThrows(WalletShellException::class.java) {
-                executor.send("{\"type\":\"start\"}")
-            }
-            assertTrue(
-                error is WalletShellException.TransportFailure ||
-                    error is WalletShellException.HttpStatusFailure,
+            assertEquals(
+                EffectCascadeOutcome.Aborted(
+                    EffectAbortReason.CoreError("operation_failed", "Operation failed"),
+                ),
+                executor.send("{\"type\":\"start\"}"),
             )
+            assertTrue(engine.events.any { it.contains("\"type\":\"operationFailed\"") })
             assertNoFabricatedOutcome(engine)
         }
     }
 
     @Test
-    fun non2xxPreservesStatusAndResponseBody() {
-        val engine = RecordingEngine {
-            "[{\"type\":\"http\",\"url\":\"https://rp.example\",\"body\":[]}]"
+    fun non2xxIsTypedBeforeItCrossesBackIntoCore() {
+        val engine = RecordingEngine { event ->
+            if (event.contains("operationFailed")) ERROR_CLOSE else
+                "[{\"type\":\"http\",\"operationId\":7,\"resultType\":\"presentationDelivered\",\"url\":\"https://rp.example\",\"body\":[]}]"
         }
         val body = "unavailable".encodeToByteArray()
         val executor = makeExecutor(
@@ -183,11 +304,8 @@ class EffectExecutorTest {
             http = WalletHttpClient { _, _ -> HttpResponse(503, body) },
         )
 
-        val error = assertThrows(WalletShellException.HttpStatusFailure::class.java) {
-            executor.send("{\"type\":\"start\"}")
-        }
-        assertEquals(503, error.statusCode)
-        assertArrayEquals(body, error.responseBody)
+        executor.send("{\"type\":\"start\"}")
+        assertTrue(engine.events.any { it.contains("\"failure\":\"httpStatus\"") })
         assertNoFabricatedOutcome(engine)
     }
 
@@ -217,18 +335,20 @@ class EffectExecutorTest {
     @Test
     fun missingAndUnsupportedDependenciesFailClosed() {
         val missingIssuer = makeExecutor(
-            engine = RecordingEngine { "[{\"type\":\"requestToken\"}]" },
+            engine = RecordingEngine { event ->
+                if (event.contains("operationFailed")) ERROR_CLOSE else
+                    "[{\"type\":\"requestToken\",\"operationId\":8}]"
+            },
         )
-        assertThrows(WalletShellException.MissingDependency::class.java) {
-            missingIssuer.send("{}")
-        }
+        assertTrue(missingIssuer.send("{}") is EffectCascadeOutcome.Aborted)
 
         val unsupported = makeExecutor(
-            engine = RecordingEngine { "[{\"type\":\"openAuthBrowser\"}]" },
+            engine = RecordingEngine { event ->
+                if (event.contains("operationFailed")) ERROR_CLOSE else
+                    "[{\"type\":\"openAuthBrowser\",\"operationId\":9}]"
+            },
         )
-        assertThrows(WalletShellException.UnsupportedEffect::class.java) {
-            unsupported.send("{}")
-        }
+        assertTrue(unsupported.send("{}") is EffectCascadeOutcome.Aborted)
     }
 
     @Test
@@ -237,21 +357,20 @@ class EffectExecutorTest {
             engine = RecordingEngine {
                 "[{\"type\":\"render\",\"screen\":{\"screen\":\"loading\"}}]"
             },
-            renderer = ScreenRenderer { throw ExpectedFailure() },
+            renderer = ScreenRenderer { _, _, _ -> throw ExpectedFailure() },
         )
         assertThrows(WalletShellException.RenderingFailure::class.java) {
             renderExecutor.send("{}")
         }
 
         val trustExecutor = makeExecutor(
-            engine = RecordingEngine {
-                "[{\"type\":\"resolveRpTrust\",\"clientId\":\"rp\"}]"
+            engine = RecordingEngine { event ->
+                if (event.contains("operationFailed")) ERROR_CLOSE else
+                    "[{\"type\":\"resolveRpTrust\",\"operationId\":10,\"clientId\":\"rp\"}]"
             },
             trust = TrustResolver { throw ExpectedFailure() },
         )
-        assertThrows(WalletShellException.TrustResolutionFailure::class.java) {
-            trustExecutor.send("{}")
-        }
+        assertTrue(trustExecutor.send("{}") is EffectCascadeOutcome.Aborted)
     }
 
     @Test
@@ -260,7 +379,7 @@ class EffectExecutorTest {
             if (event.contains("statusListReceived")) {
                 "[{\"type\":\"close\"}]"
             } else {
-                "[{\"type\":\"fetchStatusList\",\"uri\":\"https://status.example/list\"}]"
+                "[{\"type\":\"fetchStatusList\",\"operationId\":11,\"uri\":\"https://status.example/list\"}]"
             }
         }
         val resolver = StatusListResolver { uri ->
@@ -274,6 +393,7 @@ class EffectExecutorTest {
         makeExecutor(engine = engine, statusLists = resolver).send("{\"type\":\"start\"}")
 
         val event = engine.events.single { it.contains("statusListReceived") }
+        assertTrue(event.contains("\"operationId\":11"))
         assertTrue(event.contains("\"httpStatus\":200"))
         assertTrue(event.contains("\"token\":[1,2,3]"))
         assertTrue(event.contains("\"providerCertChain\":[[4,5]]"))
@@ -300,19 +420,21 @@ class EffectExecutorTest {
 
         resolvers.forEach { resolver ->
             val engine = RecordingEngine { event ->
-                if (event.contains("statusListReceived")) {
-                    "[{\"type\":\"close\"}]"
+                if (event.contains("operationFailed")) {
+                    ERROR_CLOSE
                 } else {
-                    "[{\"type\":\"fetchStatusList\",\"uri\":\"https://status.example/list\"}]"
+                    "[{\"type\":\"fetchStatusList\",\"operationId\":12,\"uri\":\"https://status.example/list\"}]"
                 }
             }
 
-            makeExecutor(engine = engine, statusLists = resolver).send("{\"type\":\"start\"}")
+            val outcome = makeExecutor(
+                engine = engine,
+                statusLists = resolver,
+            ).send("{\"type\":\"start\"}")
 
-            val event = engine.events.single { it.contains("statusListReceived") }
-            assertTrue(event.contains("\"httpStatus\":0"))
-            assertTrue(event.contains("\"token\":[]"))
-            assertTrue(event.contains("\"providerCertChain\":[]"))
+            val event = engine.events.single { it.contains("operationFailed") }
+            assertTrue(event.contains("\"failure\":\"status\""))
+            assertTrue(outcome is EffectCascadeOutcome.Aborted)
             assertNoFabricatedOutcome(engine)
         }
     }
@@ -323,8 +445,9 @@ class EffectExecutorTest {
         http: WalletHttpClient = WalletHttpClient { _, _ -> HttpResponse(204, ByteArray(0)) },
         storage: WalletStorage = WalletStorage { _, _ -> },
         trust: TrustResolver = TrustResolver { TrustResolution(emptyList(), emptyList()) },
-        renderer: ScreenRenderer = ScreenRenderer { },
+        renderer: ScreenRenderer = ScreenRenderer { _, _, _ -> },
         statusLists: StatusListResolver? = null,
+        transferOffers: TransferOfferPublisher? = null,
     ): EffectExecutor = EffectExecutor(
         engine = engine,
         signer = signer,
@@ -333,6 +456,7 @@ class EffectExecutorTest {
         trustResolver = trust,
         renderer = renderer,
         statusListResolver = statusLists,
+        transferOfferPublisher = transferOffers,
     )
 
     private fun assertNoFabricatedOutcome(engine: RecordingEngine) {

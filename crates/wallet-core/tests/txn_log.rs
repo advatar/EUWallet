@@ -56,6 +56,8 @@ fn presentation_and_payment_are_logged_without_values() {
     core.handle_event(Event::DeviceSignatureProduced {
         signature: wallet.sign_device(binding),
     });
+    // Producing an auth code is not completion; log only after the PSP acknowledges delivery.
+    core.handle_event(Event::PaymentAuthorizationDelivered);
 
     // --- The log must hold exactly two tamper-evident entries. ---
     let log = core.transaction_log();

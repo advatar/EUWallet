@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use catalogue::IssuerTrustDomain;
 use crypto_backend::AwsLc;
-use crypto_traits::{Alg, Digest};
+use crypto_traits::{Alg, Digest, Random};
 use oid4vp::{AbortReason, Env, Input, ResolvedTrust, SelectedCredential, State};
 use presenter::{minimum_claim_set, ConsentScreen, PaymentScreen, ScreenDescription, SignScreen};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,84 @@ enum ActiveFlow {
     Issuance,
     Qes,
     WalletTransfer,
+}
+
+/// Failure classes the native shells can report for a correlated operation. Values are deliberately
+/// stable and low-cardinality: implementation details remain in device-local diagnostics rather
+/// than crossing the core boundary or being rendered to the holder.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum OperationFailure {
+    Trust,
+    Storage,
+    Signing,
+    Transport,
+    HttpStatus,
+    Issuer,
+    Status,
+    Rendering,
+    MissingDependency,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OperationResultKind {
+    RpCertChain,
+    Persisted,
+    Signature,
+    PresentationDelivery,
+    PaymentDelivery,
+    QesDelivery,
+    Par,
+    AuthorizationCode,
+    TransactionCode,
+    Token,
+    Credential,
+    StatusList { uri: String },
+    TransferOfferPublished,
+    PresentationDecision,
+    PaymentDecision,
+    QesDecision,
+}
+
+impl OperationResultKind {
+    fn result_type(&self) -> &'static str {
+        match self {
+            Self::RpCertChain => "rpCertChainResolved",
+            Self::Persisted | Self::TransferOfferPublished => "operationSucceeded",
+            Self::Signature => "deviceSignatureProduced",
+            Self::PresentationDelivery => "presentationDelivered",
+            Self::PaymentDelivery => "paymentAuthorizationDelivered",
+            Self::QesDelivery => "qesAuthorizationDelivered",
+            Self::Par => "parPushed",
+            Self::AuthorizationCode => "authorizationCodeReturned",
+            Self::TransactionCode => "transactionCodeEntered",
+            Self::Token => "tokenReceived",
+            Self::Credential => "credentialReceived",
+            Self::StatusList { .. } => "statusListReceived",
+            Self::PresentationDecision => "presentationDecision",
+            Self::PaymentDecision => "paymentDecision",
+            Self::QesDecision => "qesDecision",
+        }
+    }
+
+    fn accepts_event(&self, event_type: &str) -> bool {
+        match self {
+            Self::PresentationDecision => matches!(event_type, "userConsented" | "userDeclined"),
+            Self::PaymentDecision => {
+                matches!(event_type, "paymentApproved" | "paymentDeclined")
+            }
+            Self::QesDecision => matches!(event_type, "qesAuthorized" | "qesDeclined"),
+            _ => self.result_type() == event_type,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingOperation {
+    flow: ActiveFlow,
+    result: OperationResultKind,
+    authorization_hash: Option<[u8; 32]>,
 }
 
 uniffi::setup_scaffolding!();
@@ -73,6 +151,14 @@ fn format_name(f: oid4vci::CredentialFormat) -> &'static str {
         oid4vci::CredentialFormat::MsoMdoc => "mso_mdoc",
         oid4vci::CredentialFormat::DcSdJwt => "dc+sd-jwt",
     }
+}
+
+fn operation_id_seed() -> u64 {
+    let mut random = [0u8; 8];
+    AwsLc.fill(&mut random);
+    // Start uniformly in 1..=2^62. This gives every process a ~62-bit restart namespace while
+    // reserving at least ~2^62 signed-range values for monotonic increments.
+    (u64::from_be_bytes(random) & ((1u64 << 62) - 1)) + 1
 }
 
 /// Convert an already authenticated SD-JWT VC into the wallet's presentation holding.
@@ -1098,6 +1184,21 @@ pub enum Event {
     DeviceSignatureProduced { signature: Vec<u8> },
     /// The shell confirmed the vp_token reached the response_uri.
     PresentationDelivered,
+    /// The payment service acknowledged the dynamically linked authorization code.
+    PaymentAuthorizationDelivered,
+    /// The QTSP acknowledged the QES authorization response.
+    QesAuthorizationDelivered,
+    /// A correlated operation without a protocol-specific payload completed (currently durable
+    /// nonce persistence and peer-offer publication).
+    OperationSucceeded { operation_id: u64 },
+    /// A correlated native operation failed. The JSON boundary validates `operation_id` before
+    /// this transition can reset the owning flow.
+    OperationFailed {
+        operation_id: u64,
+        failure: OperationFailure,
+    },
+    /// The OS or holder cancelled a correlated native operation.
+    OperationCancelled { operation_id: u64 },
     /// A payment authorization request (PSD2/TS12) arrived.
     PaymentAuthorizationRequestReceived { request: Vec<u8> },
     /// The user approved the payment confirmation screen.
@@ -1201,6 +1302,7 @@ pub enum Effect {
 
 const MAX_CACHED_STATUS_LISTS: usize = 8;
 const MAX_STATUS_LISTS_PER_PRESENTATION: usize = 8;
+const MAX_PENDING_OPERATIONS: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum StatusGate {
@@ -1238,6 +1340,11 @@ pub struct Core {
     pay_seen_nonces: Vec<u64>,
     pay_pending: Option<(String, u64)>, // (response_uri, nonce) of the in-flight payment
     active: ActiveFlow,
+    /// Monotonic, process-local correlation sequence. IDs are never reused, even after a flow is
+    /// cancelled, so a delayed native callback cannot target a later operation.
+    next_operation_id: u64,
+    /// Operations emitted over the production JSON boundary and still awaiting their exact result.
+    pending_operations: BTreeMap<u64, PendingOperation>,
     // Trust: the verified trusted list, used to decide RP registration in-core (not shell-supplied).
     trust_store: TrustStore,
     // Issuance (OID4VCI) flow.
@@ -1295,6 +1402,8 @@ impl Core {
             pay_seen_nonces: Vec::new(),
             pay_pending: None,
             active: ActiveFlow::None,
+            next_operation_id: operation_id_seed(),
+            pending_operations: BTreeMap::new(),
             trust_store: TrustStore::new(),
             issuance: oid4vci::State::Idle,
             iss_seen_c_nonces: Vec::new(),
@@ -1829,6 +1938,151 @@ impl Core {
         format!("[{}]", items.join(","))
     }
 
+    fn clear_pending_operations(&mut self, flow: ActiveFlow) {
+        self.pending_operations
+            .retain(|_, pending| pending.flow != flow);
+    }
+
+    /// Reset only ephemeral state. Replay sets, stored credentials, the trusted clock and audit
+    /// log intentionally survive cancellation/failure.
+    fn reset_flow(&mut self, flow: ActiveFlow) {
+        self.clear_pending_operations(flow);
+        match flow {
+            ActiveFlow::Presentation => {
+                self.vp = State::Idle;
+                self.session = None;
+                self.pending_rp_provenance = None;
+                self.pending_status_references.clear();
+            }
+            ActiveFlow::Payment => {
+                self.payment = payment::State::Idle;
+                self.pay_pending = None;
+                self.pay_summary = None;
+                self.pay_consent_hash = [0u8; 32];
+            }
+            ActiveFlow::Issuance => {
+                self.issuance = oid4vci::State::Idle;
+                self.issuer_trusted_current = false;
+                self.issuer_id_current.clear();
+                self.issuer_cert_chain_current.clear();
+                self.issuer_candidates_current.clear();
+                self.pending_verified_credential = None;
+            }
+            ActiveFlow::Qes => {
+                self.qes = qes::QesState::Idle;
+                self.qes_consent_hash = [0u8; 32];
+            }
+            ActiveFlow::WalletTransfer => {
+                self.w2w = w2w::State::Idle;
+            }
+            ActiveFlow::None => {}
+        }
+        if self.active == flow {
+            self.active = ActiveFlow::None;
+        }
+    }
+
+    fn begin_flow(&mut self, flow: ActiveFlow) {
+        if self.active != ActiveFlow::None {
+            self.reset_flow(self.active);
+        }
+        // Also reset a terminal machine whose active marker was already cleared.
+        self.reset_flow(flow);
+        self.active = flow;
+    }
+
+    /// Complete a successful exchange without erasing the protocol machine's exact terminal
+    /// state. This preserves observable `Done`/`Authorized`/`Signed` outcomes for diagnostics and
+    /// direct-core callers while scrubbing ephemeral context and making the next flow reusable.
+    fn finish_flow(&mut self, flow: ActiveFlow) {
+        self.clear_pending_operations(flow);
+        match flow {
+            ActiveFlow::Presentation => {
+                self.session = None;
+                self.pending_rp_provenance = None;
+                self.pending_status_references.clear();
+            }
+            ActiveFlow::Payment => {
+                self.pay_pending = None;
+                self.pay_summary = None;
+                self.pay_consent_hash = [0u8; 32];
+            }
+            ActiveFlow::Issuance => {
+                self.issuer_trusted_current = false;
+                self.issuer_id_current.clear();
+                self.issuer_cert_chain_current.clear();
+                self.issuer_candidates_current.clear();
+                self.pending_verified_credential = None;
+            }
+            ActiveFlow::Qes => {
+                self.qes_consent_hash = [0u8; 32];
+            }
+            ActiveFlow::WalletTransfer | ActiveFlow::None => {}
+        }
+        if self.active == flow {
+            self.active = ActiveFlow::None;
+        }
+    }
+
+    fn operation_terminal_effects(
+        &mut self,
+        pending: PendingOperation,
+        failure: Option<OperationFailure>,
+    ) -> Vec<Effect> {
+        self.reset_flow(pending.flow);
+        let (code, message) = match failure {
+            None => (
+                "operation_cancelled",
+                "The wallet operation was cancelled before it completed.",
+            ),
+            Some(OperationFailure::Trust) => (
+                "operation_trust_failed",
+                "Current authenticated trust information could not be resolved.",
+            ),
+            Some(OperationFailure::Storage) => (
+                "operation_storage_failed",
+                "Required wallet state could not be stored securely.",
+            ),
+            Some(OperationFailure::Signing) => (
+                "operation_signing_failed",
+                "The protected device key could not complete the operation.",
+            ),
+            Some(OperationFailure::Transport | OperationFailure::HttpStatus) => (
+                "operation_delivery_failed",
+                "The remote service did not acknowledge the wallet operation.",
+            ),
+            Some(OperationFailure::Issuer) => (
+                "operation_issuer_failed",
+                "The credential issuer operation failed.",
+            ),
+            Some(OperationFailure::Status) => (
+                "operation_status_failed",
+                "Current authenticated credential status could not be obtained.",
+            ),
+            Some(OperationFailure::Rendering) => (
+                "operation_rendering_failed",
+                "The wallet could not show the confirmation securely.",
+            ),
+            Some(OperationFailure::MissingDependency) => (
+                "operation_dependency_missing",
+                "A required wallet service is not available.",
+            ),
+            Some(OperationFailure::Unsupported) => (
+                "operation_unsupported",
+                "This wallet operation is not supported by the native client.",
+            ),
+        };
+        vec![
+            Effect::Render {
+                screen: ScreenDescription::Error {
+                    code: code.into(),
+                    message: message.into(),
+                },
+            },
+            Effect::Close,
+        ]
+    }
+
     /// The single entry point. Same state + same event ⇒ same effects (I/O is all in the shell).
     pub fn handle_event(&mut self, event: Event) -> Vec<Effect> {
         match event {
@@ -1848,9 +2102,7 @@ impl Core {
                 Vec::new()
             }
             Event::AuthorizationRequestReceived { request } => {
-                self.active = ActiveFlow::Presentation;
-                self.pending_rp_provenance = None;
-                self.pending_status_references.clear();
+                self.begin_flow(ActiveFlow::Presentation);
                 self.drive(Input::AuthorizationRequest(request))
             }
             Event::RpCertChainResolved {
@@ -1901,7 +2153,11 @@ impl Core {
             }
             Event::UserDeclined => {
                 self.pending_status_references.clear();
-                self.drive(Input::ConsentDeclined)
+                let effects = self.drive(Input::ConsentDeclined);
+                if matches!(self.vp, State::Aborted(AbortReason::UserDeclined)) {
+                    self.reset_flow(ActiveFlow::Presentation);
+                }
+                effects
             }
             Event::DeviceSignatureProduced { signature } => match self.active {
                 // Route the device signature to whichever flow requested it.
@@ -1923,21 +2179,63 @@ impl Core {
                 }
                 _ => self.drive(Input::DeviceSignatureProduced(signature)),
             },
-            Event::PresentationDelivered => self.drive(Input::PresentationDelivered),
+            Event::PresentationDelivered => {
+                let effects = self.drive(Input::PresentationDelivered);
+                if matches!(self.vp, State::Done) {
+                    self.finish_flow(ActiveFlow::Presentation);
+                }
+                effects
+            }
+            Event::PaymentAuthorizationDelivered => {
+                if self.active != ActiveFlow::Payment
+                    || !matches!(self.payment, payment::State::Authorized { .. })
+                {
+                    return Vec::new();
+                }
+                self.record_payment();
+                self.finish_flow(ActiveFlow::Payment);
+                vec![Effect::Close]
+            }
+            Event::QesAuthorizationDelivered => {
+                if self.active != ActiveFlow::Qes
+                    || !matches!(self.qes, qes::QesState::Signed { .. })
+                {
+                    return Vec::new();
+                }
+                self.finish_flow(ActiveFlow::Qes);
+                vec![Effect::Close]
+            }
+            Event::OperationSucceeded { operation_id } => {
+                self.pending_operations.remove(&operation_id);
+                Vec::new()
+            }
+            Event::OperationFailed {
+                operation_id,
+                failure,
+            } => self
+                .pending_operations
+                .remove(&operation_id)
+                .map(|pending| self.operation_terminal_effects(pending, Some(failure)))
+                .unwrap_or_default(),
+            Event::OperationCancelled { operation_id } => self
+                .pending_operations
+                .remove(&operation_id)
+                .map(|pending| self.operation_terminal_effects(pending, None))
+                .unwrap_or_default(),
             Event::PaymentAuthorizationRequestReceived { request } => {
-                self.active = ActiveFlow::Payment;
+                self.begin_flow(ActiveFlow::Payment);
                 self.drive_payment(payment::Input::PaymentAuthorizationRequest(request))
             }
             Event::PaymentApproved => self.drive_payment(payment::Input::UserApproved),
             Event::PaymentDeclined => self.drive_payment(payment::Input::UserDeclined),
             Event::QesSignRequestReceived { request } => {
-                self.active = ActiveFlow::Qes;
+                self.begin_flow(ActiveFlow::Qes);
                 self.drive_qes(qes::Input::SignatureRequest(request))
             }
             Event::QesAuthorized => self.drive_qes(qes::Input::UserAuthorized),
             Event::QesDeclined => self.drive_qes(qes::Input::UserDeclined),
             Event::WalletTransferOfferCreated => {
-                self.active = ActiveFlow::WalletTransfer;
+                self.begin_flow(ActiveFlow::WalletTransfer);
                 self.drive_w2w(w2w::Input::CreateOffer)
             }
             Event::WalletTransferReceived {
@@ -1973,7 +2271,7 @@ impl Core {
                 issuer_cert_chain,
                 issuer_id,
             } => {
-                self.active = ActiveFlow::Issuance;
+                self.begin_flow(ActiveFlow::Issuance);
                 // A new offer begins a FRESH OpenID4VCI session: reset the (one-shot) issuance
                 // machine to Idle so a wallet can be issued several credentials in one lifetime.
                 // Replay protection (`iss_seen_c_nonces`) deliberately persists across sessions.
@@ -2100,9 +2398,278 @@ impl Core {
 
     /// FFI-friendly wrapper: takes a JSON `Event`, returns a JSON array of `Effect`s.
     pub fn handle_event_json(&mut self, event_json: &str) -> Result<String, String> {
-        let event: Event = serde_json::from_str(event_json).map_err(|e| e.to_string())?;
+        let value: serde_json::Value =
+            serde_json::from_str(event_json).map_err(|e| e.to_string())?;
+        let event_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "event type must be a string".to_string())?;
+        let event: Event = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+
+        if Self::is_operation_result_event(event_type) {
+            let operation_id = value
+                .get("operationId")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| format!("missing or invalid operationId for {event_type}"))?;
+            let pending = self
+                .pending_operations
+                .get(&operation_id)
+                .cloned()
+                .ok_or_else(|| format!("stale or unknown operationId {operation_id}"))?;
+            if pending.flow != self.active {
+                return Err(format!(
+                    "operationId {operation_id} belongs to an inactive wallet flow"
+                ));
+            }
+
+            let is_terminal = matches!(
+                &event,
+                Event::OperationFailed { .. } | Event::OperationCancelled { .. }
+            );
+            if !is_terminal && !pending.result.accepts_event(event_type) {
+                return Err(format!(
+                    "operationId {operation_id} expects {}, got {event_type}",
+                    pending.result.result_type()
+                ));
+            }
+            if matches!(
+                event_type,
+                "userConsented" | "paymentApproved" | "qesAuthorized"
+            ) {
+                let expected_hash = pending.authorization_hash.ok_or_else(|| {
+                    format!("operationId {operation_id} has no authorization hash")
+                })?;
+                let actual_hash = Self::wire_authorization_hash(&value, event_type)?;
+                if actual_hash != expected_hash {
+                    return Err(format!(
+                        "operationId {operation_id} authorizationHash does not match the rendered screen"
+                    ));
+                }
+            }
+            if !is_terminal && !self.operation_result_state_is_valid(event_type) {
+                return Err(format!(
+                    "operationId {operation_id} result {event_type} is invalid in the current state"
+                ));
+            }
+            if let (
+                OperationResultKind::StatusList { uri: expected },
+                Event::StatusListReceived { uri: actual, .. },
+            ) = (&pending.result, &event)
+            {
+                if expected != actual {
+                    return Err(format!(
+                        "operationId {operation_id} is bound to a different status resource"
+                    ));
+                }
+            }
+
+            // Generic terminal events remove/reset through `handle_event`; exact protocol results
+            // are consumed here before the state transition so duplicates are immediately stale.
+            if !matches!(
+                &event,
+                Event::OperationSucceeded { .. }
+                    | Event::OperationFailed { .. }
+                    | Event::OperationCancelled { .. }
+            ) {
+                self.pending_operations.remove(&operation_id);
+            }
+        }
+
         let effects = self.handle_event(event);
-        serde_json::to_string(&effects).map_err(|e| e.to_string())
+        match self.serialize_wire_effects(effects) {
+            Ok(json) => Ok(json),
+            Err(error) => {
+                // `handle_event` may already have advanced a protocol machine. If its resulting
+                // effects cannot be represented atomically on the native wire, no shell callback
+                // can ever complete that state. Tear down the ephemeral flow and every pending
+                // callback so the next request starts cleanly instead of inheriting a zombie.
+                let active = self.active;
+                if active != ActiveFlow::None {
+                    self.reset_flow(active);
+                }
+                self.pending_operations.clear();
+                Err(error)
+            }
+        }
+    }
+
+    fn is_operation_result_event(event_type: &str) -> bool {
+        matches!(
+            event_type,
+            "rpCertChainResolved"
+                | "deviceSignatureProduced"
+                | "presentationDelivered"
+                | "paymentAuthorizationDelivered"
+                | "qesAuthorizationDelivered"
+                | "parPushed"
+                | "authorizationCodeReturned"
+                | "transactionCodeEntered"
+                | "tokenReceived"
+                | "credentialReceived"
+                | "statusListReceived"
+                | "userConsented"
+                | "userDeclined"
+                | "paymentApproved"
+                | "paymentDeclined"
+                | "qesAuthorized"
+                | "qesDeclined"
+                | "operationSucceeded"
+                | "operationFailed"
+                | "operationCancelled"
+        )
+    }
+
+    fn operation_result_state_is_valid(&self, event_type: &str) -> bool {
+        match event_type {
+            "presentationDelivered" => matches!(self.vp, State::Presenting),
+            "paymentAuthorizationDelivered" => {
+                matches!(self.payment, payment::State::Authorized { .. })
+            }
+            "qesAuthorizationDelivered" => matches!(self.qes, qes::QesState::Signed { .. }),
+            _ => true,
+        }
+    }
+
+    fn wire_authorization_hash(
+        value: &serde_json::Value,
+        event_type: &str,
+    ) -> Result<[u8; 32], String> {
+        let bytes = value
+            .get("authorizationHash")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("missing or invalid authorizationHash for {event_type}"))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "missing or invalid authorizationHash for {event_type}"
+            ));
+        }
+        let mut hash = [0u8; 32];
+        for (index, byte) in bytes.iter().enumerate() {
+            let byte = byte
+                .as_u64()
+                .filter(|value| *value <= u8::MAX as u64)
+                .ok_or_else(|| format!("authorizationHash[{index}] must be an unsigned byte"))?;
+            hash[index] = byte as u8;
+        }
+        Ok(hash)
+    }
+
+    fn operation_result_for_effect(
+        &self,
+        effect: &Effect,
+    ) -> Result<Option<PendingOperation>, String> {
+        let mut authorization_hash = None;
+        let result = match effect {
+            Effect::ResolveRpTrust { .. } => OperationResultKind::RpCertChain,
+            Effect::PersistNonce { .. } => OperationResultKind::Persisted,
+            Effect::Sign { .. } => OperationResultKind::Signature,
+            Effect::Http { .. } => match self.active {
+                ActiveFlow::Presentation => OperationResultKind::PresentationDelivery,
+                ActiveFlow::Payment => OperationResultKind::PaymentDelivery,
+                ActiveFlow::Qes => OperationResultKind::QesDelivery,
+                flow => return Err(format!("HTTP effect emitted for unsupported flow {flow:?}")),
+            },
+            Effect::PushPar => OperationResultKind::Par,
+            Effect::OpenAuthBrowser => OperationResultKind::AuthorizationCode,
+            Effect::PromptTxCode => OperationResultKind::TransactionCode,
+            Effect::RequestToken => OperationResultKind::Token,
+            Effect::RequestCredential { .. } => OperationResultKind::Credential,
+            Effect::FetchStatusList { uri } => OperationResultKind::StatusList { uri: uri.clone() },
+            Effect::PublishTransferOffer { .. } => OperationResultKind::TransferOfferPublished,
+            Effect::Render { screen } => {
+                let (result, stored_hash) = match screen {
+                    ScreenDescription::Consent(_) => (
+                        OperationResultKind::PresentationDecision,
+                        self.session.as_ref().map(|session| session.consent_hash),
+                    ),
+                    ScreenDescription::PaymentConfirmation(_) => (
+                        OperationResultKind::PaymentDecision,
+                        Some(self.pay_consent_hash),
+                    ),
+                    ScreenDescription::SignConfirmation(_) => (
+                        OperationResultKind::QesDecision,
+                        Some(self.qes_consent_hash),
+                    ),
+                    _ => return Ok(None),
+                };
+                let computed_hash = presenter::consent_hash(&AwsLc, screen);
+                let stored_hash = stored_hash.ok_or_else(|| {
+                    "interactive render has no core authorization hash".to_string()
+                })?;
+                if stored_hash != computed_hash {
+                    return Err("interactive render authorization hash is inconsistent".into());
+                }
+                authorization_hash = Some(stored_hash);
+                result
+            }
+            Effect::Close => return Ok(None),
+        };
+        Ok(Some(PendingOperation {
+            flow: self.active,
+            result,
+            authorization_hash,
+        }))
+    }
+
+    fn serialize_wire_effects(&mut self, effects: Vec<Effect>) -> Result<String, String> {
+        let prepared: Vec<(Effect, Option<PendingOperation>)> = effects
+            .into_iter()
+            .map(|effect| {
+                let pending = self.operation_result_for_effect(&effect)?;
+                Ok((effect, pending))
+            })
+            .collect::<Result<_, String>>()?;
+        let operation_count = prepared
+            .iter()
+            .filter(|(_, pending)| pending.is_some())
+            .count();
+        if self.pending_operations.len() + operation_count > MAX_PENDING_OPERATIONS {
+            return Err("too many pending wallet operations".into());
+        }
+
+        // Android's public contract uses a signed Long. Never emit an ID outside that common
+        // Swift/Kotlin range, and preflight the complete batch before mutating the sequence/map.
+        let operation_count_u64 =
+            u64::try_from(operation_count).map_err(|_| "too many wallet operations")?;
+        let next_after_batch = self
+            .next_operation_id
+            .checked_add(operation_count_u64)
+            .ok_or_else(|| "wallet operationId space exhausted".to_string())?;
+        if operation_count > 0 && next_after_batch - 1 > i64::MAX as u64 {
+            return Err("wallet operationId space exhausted".into());
+        }
+
+        let mut next_id = self.next_operation_id;
+        let mut values = Vec::with_capacity(prepared.len());
+        let mut staged = Vec::with_capacity(operation_count);
+        for (effect, pending) in prepared {
+            let mut value = serde_json::to_value(effect).map_err(|e| e.to_string())?;
+            if let Some(pending) = pending {
+                let operation_id = next_id;
+                next_id += 1;
+                let result_type = pending.result.result_type();
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| "effect did not serialize as an object".to_string())?;
+                object.insert("operationId".into(), operation_id.into());
+                object.insert(
+                    "resultType".into(),
+                    serde_json::Value::String(result_type.into()),
+                );
+                if let Some(hash) = pending.authorization_hash {
+                    object.insert(
+                        "authorizationHash".into(),
+                        serde_json::to_value(hash).map_err(|e| e.to_string())?,
+                    );
+                }
+                staged.push((operation_id, pending));
+            }
+            values.push(value);
+        }
+        let json = serde_json::to_string(&values).map_err(|e| e.to_string())?;
+        self.next_operation_id = next_after_batch;
+        self.pending_operations.extend(staged);
+        Ok(json)
     }
 
     fn drive(&mut self, input: Input) -> Vec<Effect> {
@@ -2254,6 +2821,7 @@ impl Core {
         self.session = None;
         self.pending_rp_provenance = None;
         self.pending_status_references.clear();
+        self.clear_pending_operations(ActiveFlow::Presentation);
         self.active = ActiveFlow::None;
         Self::presentation_error_effects(reason).unwrap_or_default()
     }
@@ -2634,7 +3202,6 @@ impl Core {
             };
             payment::step(&self.payment, &input, &env)
         };
-        let was_authorized = matches!(self.payment, payment::State::Authorized { .. });
         self.payment = next;
 
         // Capture the response endpoint + nonce when the confirmation screen is reached.
@@ -2650,14 +3217,27 @@ impl Core {
             }
         }
 
-        let effects: Vec<Effect> = outputs
+        let mut effects: Vec<Effect> = outputs
             .into_iter()
             .flat_map(|o| self.translate_payment(o))
             .collect();
 
-        // Record a completed payment the moment the machine reaches Authorized (once).
-        if !was_authorized && matches!(self.payment, payment::State::Authorized { .. }) {
-            self.record_payment();
+        // `Authorized` means the device produced a dynamically linked code; completion requires a
+        // distinct payment-service acknowledgement. Validation/user-decline aborts are terminal
+        // locally and must leave the reusable machine recoverable.
+        if let payment::State::Aborted(reason) = &self.payment {
+            if !effects.iter().any(|effect| matches!(effect, Effect::Close)) {
+                if *reason != payment::AbortReason::UserDeclined {
+                    effects.push(Effect::Render {
+                        screen: ScreenDescription::Error {
+                            code: "payment_aborted".into(),
+                            message: "The payment authorization could not be completed.".into(),
+                        },
+                    });
+                }
+                effects.push(Effect::Close);
+            }
+            self.reset_flow(ActiveFlow::Payment);
         }
         effects
     }
@@ -2701,6 +3281,9 @@ impl Core {
                     .unwrap_or_default();
                 vec![Effect::Http { url, body: code }]
             }
+            // The pure payment machine closes after producing the authorization. The facade waits
+            // for `PaymentAuthorizationDelivered`; a decline still closes immediately.
+            PO::Close if matches!(self.payment, payment::State::Authorized { .. }) => Vec::new(),
             PO::Close => vec![Effect::Close],
         }
     }
@@ -2724,10 +3307,26 @@ impl Core {
                 self.qes_seen_nonces.push(req.nonce);
             }
         }
-        outputs
+        let mut effects: Vec<Effect> = outputs
             .into_iter()
             .flat_map(|o| self.translate_qes(o))
-            .collect()
+            .collect();
+        if let qes::QesState::Aborted(reason) = &self.qes {
+            if *reason != qes::AbortReason::UserDeclined {
+                effects.push(Effect::Render {
+                    screen: ScreenDescription::Error {
+                        code: "qes_aborted".into(),
+                        message: "The qualified-signature authorization could not be completed."
+                            .into(),
+                    },
+                });
+            }
+            if !effects.iter().any(|effect| matches!(effect, Effect::Close)) {
+                effects.push(Effect::Close);
+            }
+            self.reset_flow(ActiveFlow::Qes);
+        }
+        effects
     }
 
     fn translate_qes(&mut self, output: qes::Output) -> Vec<Effect> {
@@ -2759,6 +3358,8 @@ impl Core {
                 url: String::new(),
                 body,
             }],
+            // A produced QES authorization is not completion until the QTSP acknowledges it.
+            QO::Close if matches!(self.qes, qes::QesState::Signed { .. }) => Vec::new(),
             QO::Close => vec![Effect::Close],
         }
     }
@@ -3794,70 +4395,489 @@ mod structured_sdjwt_tests {
         }
     }
 
-    #[test]
-    fn exact_paths_select_only_parent_dependencies_and_never_array_siblings() {
-        use sdjwt::ClaimPathElement::{Index, Name};
+    mod operation_contract_tests {
+        use super::*;
 
-        let selection = select_authenticated_sdjwt_disclosures_for_paths(
-            &holding(),
-            &[
-                vec![Name("address".into()), Name("street".into())],
-                vec![Name("contacts".into()), Index(1), Name("kind".into())],
-            ],
-        );
-        assert_eq!(
-            selection.disclosures,
-            vec!["address-raw", "street-raw", "contact-1-raw"]
-        );
-        for visible in [
-            "family_name",
-            "address.country",
-            "address.street",
-            "contacts[1].kind",
-            "contacts[1].value",
-        ] {
-            assert!(selection.revealed_claims.contains(&visible.to_string()));
+        fn operation_id(output: &str) -> u64 {
+            serde_json::from_str::<serde_json::Value>(output).unwrap()[0]["operationId"]
+                .as_u64()
+                .unwrap()
         }
-        assert!(!selection
-            .revealed_claims
-            .contains(&"address.locality".to_string()));
-        assert!(!selection
-            .revealed_claims
-            .contains(&"contacts[0].value".to_string()));
-        assert!(!selection
-            .revealed_claims
-            .contains(&"contacts[2].value".to_string()));
-    }
 
-    #[test]
-    fn no_requested_disclosure_keeps_only_unavoidable_permanent_pii_visible() {
-        let selection = select_authenticated_sdjwt_disclosures_for_paths(&holding(), &[]);
-        assert!(selection.disclosures.is_empty());
-        assert_eq!(selection.revealed_claims, vec!["family_name"]);
-    }
+        fn emit(core: &mut Core, flow: ActiveFlow, effect: Effect) -> u64 {
+            core.active = flow;
+            let output = core.serialize_wire_effects(vec![effect]).unwrap();
+            operation_id(&output)
+        }
 
-    #[test]
-    fn canonical_path_rendering_cannot_confuse_literal_and_nested_claim_names() {
-        use sdjwt::ClaimPathElement::Name;
+        fn fail(core: &mut Core, operation_id: u64) -> String {
+            core.handle_event_json(&format!(
+                r#"{{"type":"operationFailed","operationId":{operation_id},"failure":"transport"}}"#
+            ))
+            .unwrap()
+        }
 
-        let literal = sdjwt_path_string(&[Name("a.b".into())]);
-        let nested = sdjwt_path_string(&[Name("a".into()), Name("b".into())]);
-        assert_eq!(literal, r#"["a.b"]"#);
-        assert_eq!(nested, "a.b");
-        assert_ne!(literal, nested);
-        assert_ne!(
-            sdjwt_path_string(&[Name("items[0]".into())]),
-            sdjwt_path_string(&[Name("items".into()), sdjwt::ClaimPathElement::Index(0)])
-        );
-    }
+        #[test]
+        fn missing_mismatched_and_stale_callbacks_are_rejected() {
+            let mut core = Core::new("wallet.example", "device-key");
+            let sign_id = emit(
+                &mut core,
+                ActiveFlow::Presentation,
+                Effect::Sign {
+                    key_ref: "device-key".into(),
+                    payload: vec![1],
+                },
+            );
 
-    #[test]
-    fn mdoc_paths_require_exact_namespace_and_element_components() {
-        assert_eq!(
-            requested_mdoc_path(&[json!("namespace"), json!("element")]),
-            Some(("namespace".into(), "element".into()))
-        );
-        assert!(requested_mdoc_path(&[json!("namespace"), json!({}), json!("element")]).is_none());
-        assert!(requested_mdoc_path(&[json!("namespace"), json!("")]).is_none());
+            assert!(core
+                .handle_event_json(r#"{"type":"deviceSignatureProduced","signature":[1]}"#)
+                .unwrap_err()
+                .contains("missing or invalid operationId"));
+            assert!(core
+                .handle_event_json(&format!(
+                    r#"{{"type":"presentationDelivered","operationId":{sign_id}}}"#
+                ))
+                .unwrap_err()
+                .contains("expects deviceSignatureProduced"));
+            assert!(fail(&mut core, sign_id).contains("operation_delivery_failed"));
+            assert!(core
+            .handle_event_json(&format!(
+                r#"{{"type":"deviceSignatureProduced","operationId":{sign_id},"signature":[1]}}"#
+            ))
+            .unwrap_err()
+            .contains("stale or unknown operationId"));
+        }
+
+        #[test]
+        fn stale_http_status_and_credential_callbacks_are_rejected_after_recovery() {
+            let cases = [
+            (
+                ActiveFlow::Presentation,
+                Effect::Http {
+                    url: "https://rp.example/cb".into(),
+                    body: vec![],
+                },
+                "presentationDelivered",
+                String::new(),
+            ),
+            (
+                ActiveFlow::Presentation,
+                Effect::FetchStatusList {
+                    uri: "https://status.example/list".into(),
+                },
+                "statusListReceived",
+                r#","uri":"https://status.example/list","httpStatus":200,"token":[],"providerCertChain":[]"#.into(),
+            ),
+            (
+                ActiveFlow::Issuance,
+                Effect::RequestCredential { proof_jwt: vec![1] },
+                "credentialReceived",
+                r#","format":"dc+sd-jwt","bytes":[]"#.into(),
+            ),
+        ];
+
+            for (flow, effect, event_type, fields) in cases {
+                let mut core = Core::new("wallet.example", "device-key");
+                let operation_id = emit(&mut core, flow, effect);
+                fail(&mut core, operation_id);
+                let error = core
+                    .handle_event_json(&format!(
+                        r#"{{"type":"{event_type}","operationId":{operation_id}{fields}}}"#
+                    ))
+                    .unwrap_err();
+                assert!(error.contains("stale or unknown operationId"), "{error}");
+            }
+        }
+
+        #[test]
+        fn exact_paths_select_only_parent_dependencies_and_never_array_siblings() {
+            use sdjwt::ClaimPathElement::{Index, Name};
+
+            let selection = select_authenticated_sdjwt_disclosures_for_paths(
+                &holding(),
+                &[
+                    vec![Name("address".into()), Name("street".into())],
+                    vec![Name("contacts".into()), Index(1), Name("kind".into())],
+                ],
+            );
+            assert_eq!(
+                selection.disclosures,
+                vec!["address-raw", "street-raw", "contact-1-raw"]
+            );
+            for visible in [
+                "family_name",
+                "address.country",
+                "address.street",
+                "contacts[1].kind",
+                "contacts[1].value",
+            ] {
+                assert!(selection.revealed_claims.contains(&visible.to_string()));
+            }
+            assert!(!selection
+                .revealed_claims
+                .contains(&"address.locality".to_string()));
+            assert!(!selection
+                .revealed_claims
+                .contains(&"contacts[0].value".to_string()));
+            assert!(!selection
+                .revealed_claims
+                .contains(&"contacts[2].value".to_string()));
+        }
+
+        #[test]
+        fn no_requested_disclosure_keeps_only_unavoidable_permanent_pii_visible() {
+            let selection = select_authenticated_sdjwt_disclosures_for_paths(&holding(), &[]);
+            assert!(selection.disclosures.is_empty());
+            assert_eq!(selection.revealed_claims, vec!["family_name"]);
+        }
+
+        #[test]
+        fn canonical_path_rendering_cannot_confuse_literal_and_nested_claim_names() {
+            use sdjwt::ClaimPathElement::Name;
+
+            let literal = sdjwt_path_string(&[Name("a.b".into())]);
+            let nested = sdjwt_path_string(&[Name("a".into()), Name("b".into())]);
+            assert_eq!(literal, r#"["a.b"]"#);
+            assert_eq!(nested, "a.b");
+            assert_ne!(literal, nested);
+            assert_ne!(
+                sdjwt_path_string(&[Name("items[0]".into())]),
+                sdjwt_path_string(&[Name("items".into()), sdjwt::ClaimPathElement::Index(0)])
+            );
+        }
+
+        #[test]
+        fn mdoc_paths_require_exact_namespace_and_element_components() {
+            assert_eq!(
+                requested_mdoc_path(&[json!("namespace"), json!("element")]),
+                Some(("namespace".into(), "element".into()))
+            );
+            assert!(
+                requested_mdoc_path(&[json!("namespace"), json!({}), json!("element")]).is_none()
+            );
+            assert!(requested_mdoc_path(&[json!("namespace"), json!("")]).is_none());
+        }
+
+        #[test]
+        fn status_operation_is_bound_to_the_exact_resource() {
+            let mut core = Core::new("wallet.example", "device-key");
+            let operation_id = emit(
+                &mut core,
+                ActiveFlow::Presentation,
+                Effect::FetchStatusList {
+                    uri: "https://status.example/one".into(),
+                },
+            );
+            let error = core
+            .handle_event_json(&format!(
+                r#"{{"type":"statusListReceived","operationId":{operation_id},"uri":"https://status.example/two","httpStatus":200,"token":[],"providerCertChain":[]}}"#
+            ))
+            .unwrap_err();
+            assert!(error.contains("different status resource"));
+            assert!(core.pending_operations.contains_key(&operation_id));
+        }
+
+        #[test]
+        fn callback_is_rejected_when_its_owning_flow_is_not_active() {
+            let mut core = Core::new("wallet.example", "device-key");
+            let operation_id = emit(
+                &mut core,
+                ActiveFlow::Presentation,
+                Effect::Sign {
+                    key_ref: "device-key".into(),
+                    payload: vec![1],
+                },
+            );
+            // Model a corrupted/raced active marker without clearing the map. The JSON boundary must
+            // verify both possession of the operation id and ownership by the currently active flow.
+            core.active = ActiveFlow::Payment;
+
+            let error = core
+            .handle_event_json(&format!(
+                r#"{{"type":"deviceSignatureProduced","operationId":{operation_id},"signature":[1]}}"#
+            ))
+            .unwrap_err();
+
+            assert!(error.contains("inactive wallet flow"));
+            assert!(core.pending_operations.contains_key(&operation_id));
+        }
+
+        #[test]
+        fn delivery_acknowledgements_are_rejected_before_the_protocol_is_ready() {
+            let cases = [
+                (ActiveFlow::Presentation, "presentationDelivered"),
+                (ActiveFlow::Payment, "paymentAuthorizationDelivered"),
+                (ActiveFlow::Qes, "qesAuthorizationDelivered"),
+            ];
+
+            for (flow, event_type) in cases {
+                let mut core = Core::new("wallet.example", "device-key");
+                let operation_id = emit(
+                    &mut core,
+                    flow,
+                    Effect::Http {
+                        url: "https://service.example/callback".into(),
+                        body: vec![],
+                    },
+                );
+
+                let error = core
+                    .handle_event_json(&format!(
+                        r#"{{"type":"{event_type}","operationId":{operation_id}}}"#
+                    ))
+                    .unwrap_err();
+
+                assert!(error.contains("invalid in the current state"), "{error}");
+                assert!(core.pending_operations.contains_key(&operation_id));
+            }
+        }
+
+        #[test]
+        fn old_consent_cannot_authorize_a_newer_flow() {
+            let consent = || Effect::Render {
+                screen: ScreenDescription::Consent(ConsentScreen {
+                    rp_display_name: "RP".into(),
+                    purpose: "age".into(),
+                    requested_claims: vec!["age_over_18".into()],
+                }),
+            };
+            let mut core = Core::new("wallet.example", "device-key");
+            core.begin_flow(ActiveFlow::Presentation);
+            let old_effect = consent();
+            let Effect::Render { screen: old_screen } = &old_effect else {
+                unreachable!()
+            };
+            core.session = Some(SessionInfo {
+                consent_hash: presenter::consent_hash(&AwsLc, old_screen),
+                ..SessionInfo::default()
+            });
+            let old_id = operation_id(&core.serialize_wire_effects(vec![old_effect]).unwrap());
+            core.begin_flow(ActiveFlow::Presentation);
+            let current_effect = consent();
+            let Effect::Render {
+                screen: current_screen,
+            } = &current_effect
+            else {
+                unreachable!()
+            };
+            core.session = Some(SessionInfo {
+                consent_hash: presenter::consent_hash(&AwsLc, current_screen),
+                ..SessionInfo::default()
+            });
+            let current_id =
+                operation_id(&core.serialize_wire_effects(vec![current_effect]).unwrap());
+
+            let error = core
+                .handle_event_json(&format!(
+                    r#"{{"type":"userConsented","operationId":{old_id}}}"#
+                ))
+                .unwrap_err();
+            assert!(error.contains("stale or unknown operationId"));
+            assert!(core.pending_operations.contains_key(&current_id));
+            assert!(core
+                .handle_event_json(&format!(
+                    r#"{{"type":"operationCancelled","operationId":{current_id}}}"#
+                ))
+                .unwrap()
+                .contains("operation_cancelled"));
+        }
+
+        #[test]
+        fn approval_requires_the_exact_rendered_authorization_hash() {
+            let screen = ScreenDescription::Consent(ConsentScreen {
+                rp_display_name: "RP".into(),
+                purpose: "age".into(),
+                requested_claims: vec!["age_over_18".into()],
+            });
+            let expected_hash = presenter::consent_hash(&AwsLc, &screen);
+            let mut core = Core::new("wallet.example", "device-key");
+            core.active = ActiveFlow::Presentation;
+            core.session = Some(SessionInfo {
+                consent_hash: expected_hash,
+                ..SessionInfo::default()
+            });
+            let output = core
+                .serialize_wire_effects(vec![Effect::Render { screen }])
+                .unwrap();
+            let operation_id = operation_id(&output);
+            let wire_hash = serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]
+                ["authorizationHash"]
+                .clone();
+            assert_eq!(wire_hash, serde_json::to_value(expected_hash).unwrap());
+
+            let missing = core
+                .handle_event_json(&format!(
+                    r#"{{"type":"userConsented","operationId":{operation_id}}}"#
+                ))
+                .unwrap_err();
+            assert!(missing.contains("missing or invalid authorizationHash"));
+            let wrong_hash = serde_json::to_string(&[0u8; 32]).unwrap();
+            let mismatch = core
+            .handle_event_json(&format!(
+                r#"{{"type":"userConsented","operationId":{operation_id},"authorizationHash":{wrong_hash}}}"#
+            ))
+            .unwrap_err();
+            assert!(mismatch.contains("does not match the rendered screen"));
+            assert!(core.pending_operations.contains_key(&operation_id));
+
+            let different_screen = ScreenDescription::Consent(ConsentScreen {
+                rp_display_name: "Other RP".into(),
+                purpose: "different".into(),
+                requested_claims: vec!["family_name".into()],
+            });
+            let cross_screen_hash =
+                serde_json::to_string(&presenter::consent_hash(&AwsLc, &different_screen)).unwrap();
+            let cross_screen = core
+            .handle_event_json(&format!(
+                r#"{{"type":"userConsented","operationId":{operation_id},"authorizationHash":{cross_screen_hash}}}"#
+            ))
+            .unwrap_err();
+            assert!(cross_screen.contains("does not match the rendered screen"));
+        }
+
+        #[test]
+        fn infrastructure_failure_resets_each_reusable_machine() {
+            let mut presentation = Core::new("wallet.example", "device-key");
+            presentation.vp = State::Aborted(AbortReason::MalformedRequest);
+            let id = emit(
+                &mut presentation,
+                ActiveFlow::Presentation,
+                Effect::Sign {
+                    key_ref: "key".into(),
+                    payload: vec![],
+                },
+            );
+            fail(&mut presentation, id);
+            assert!(matches!(presentation.vp, State::Idle));
+
+            let mut payment = Core::new("wallet.example", "device-key");
+            payment.payment = payment::State::Aborted(payment::AbortReason::MalformedRequest);
+            let id = emit(
+                &mut payment,
+                ActiveFlow::Payment,
+                Effect::Sign {
+                    key_ref: "key".into(),
+                    payload: vec![],
+                },
+            );
+            fail(&mut payment, id);
+            assert!(matches!(payment.payment, payment::State::Idle));
+
+            let mut issuance = Core::new("wallet.example", "device-key");
+            issuance.issuance = oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid);
+            let id = emit(&mut issuance, ActiveFlow::Issuance, Effect::RequestToken);
+            fail(&mut issuance, id);
+            assert!(matches!(issuance.issuance, oid4vci::State::Idle));
+
+            let mut qes = Core::new("wallet.example", "device-key");
+            qes.qes = qes::QesState::Aborted(qes::AbortReason::MalformedRequest);
+            let id = emit(
+                &mut qes,
+                ActiveFlow::Qes,
+                Effect::Sign {
+                    key_ref: "key".into(),
+                    payload: vec![],
+                },
+            );
+            fail(&mut qes, id);
+            assert!(matches!(qes.qes, qes::QesState::Idle));
+        }
+
+        #[test]
+        fn wire_effect_batch_is_atomic_at_id_exhaustion() {
+            let mut core = Core::new("wallet.example", "device-key");
+            core.active = ActiveFlow::Presentation;
+            core.next_operation_id = i64::MAX as u64;
+            let error = core
+                .serialize_wire_effects(vec![
+                    Effect::ResolveRpTrust {
+                        client_id: "rp.example".into(),
+                    },
+                    Effect::PersistNonce { nonce: 1 },
+                ])
+                .unwrap_err();
+            assert!(error.contains("operationId space exhausted"));
+            assert!(core.pending_operations.is_empty());
+            assert_eq!(core.next_operation_id, i64::MAX as u64);
+        }
+
+        #[test]
+        fn wire_id_exhaustion_resets_progressed_flow_before_returning_error() {
+            let mut core = Core::new("wallet.example", "device-key");
+            core.next_operation_id = i64::MAX as u64 + 1;
+
+            let error = core
+                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+                .unwrap_err();
+
+            assert!(error.contains("operationId space exhausted"));
+            assert_eq!(core.active, ActiveFlow::None);
+            assert!(matches!(core.w2w, w2w::State::Idle));
+            assert!(core.pending_operations.is_empty());
+
+            // Exhaustion is practically unreachable and intentionally does not wrap/reuse IDs. Reset
+            // the injected boundary value to prove the protocol machine itself is cleanly reusable.
+            core.next_operation_id = 1;
+            let output = core
+                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]["type"],
+                "publishTransferOffer"
+            );
+            assert_eq!(core.active, ActiveFlow::WalletTransfer);
+            assert!(matches!(core.w2w, w2w::State::AwaitingTransfer));
+        }
+
+        #[test]
+        fn pending_cap_failure_clears_all_callbacks_and_allows_a_new_flow() {
+            let mut core = Core::new("wallet.example", "device-key");
+            for operation_id in 1..=MAX_PENDING_OPERATIONS as u64 {
+                core.pending_operations.insert(
+                    operation_id,
+                    PendingOperation {
+                        flow: ActiveFlow::Presentation,
+                        result: OperationResultKind::Persisted,
+                        authorization_hash: None,
+                    },
+                );
+            }
+
+            let error = core
+                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+                .unwrap_err();
+
+            assert!(error.contains("too many pending wallet operations"));
+            assert_eq!(core.active, ActiveFlow::None);
+            assert!(matches!(core.w2w, w2w::State::Idle));
+            assert!(core.pending_operations.is_empty());
+
+            let output = core
+                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]["type"],
+                "publishTransferOffer"
+            );
+            assert_eq!(core.active, ActiveFlow::WalletTransfer);
+        }
+
+        #[test]
+        fn operation_ids_are_positive_signed_range_and_monotonic() {
+            let mut core = Core::new("wallet.example", "device-key");
+            assert!((1..=(1u64 << 62)).contains(&core.next_operation_id));
+            let first = emit(
+                &mut core,
+                ActiveFlow::Presentation,
+                Effect::PersistNonce { nonce: 1 },
+            );
+            let second = emit(
+                &mut core,
+                ActiveFlow::Presentation,
+                Effect::PersistNonce { nonce: 2 },
+            );
+            assert!((1..=i64::MAX as u64).contains(&first));
+            assert_eq!(second, first + 1);
+        }
     }
 }
