@@ -178,6 +178,11 @@ operational solution needed to enter those processes.
         fallback to demo storage.
     - [x] Add the bounded, authenticated and encrypted iOS storage primitive.
     - [x] Add the equivalent Android Keystore-backed storage primitive.
+    - [x] Expose a bounded, secret-safe Core checkpoint contract through UniFFI and add native
+          lifecycle coordinator seams that bootstrap the live clock, trust, device key and WUA
+          before restore; gate each resulting effect batch on an exact compare-and-swap commit;
+          retry a failed commit without re-handling the event; and discard in-flight protocol work
+          across process death.
     - [ ] Wire both stores to the Core checkpoint boundary and prove crash-safe effect delivery.
       - [ ] Make the lifecycle coordinator the only production event path; reject every new event
             while an exact checkpoint/effect batch awaits commit, predecode and validate the full

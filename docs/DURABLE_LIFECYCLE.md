@@ -1,0 +1,70 @@
+# Durable Core lifecycle contract
+
+This document describes the crash boundary implemented by the Rust Core checkpoint API and the
+native `DurableLifecycleCoordinator` seams. It is a local persistence contract, not a claim of
+exactly-once protocol delivery or complete national-wallet lifecycle integration.
+
+## Bootstrap and restore order
+
+A new process must construct a fresh Core and coordinator, then:
+
+1. obtain the current trusted clock, signed trust list, device public key and high-assurance WUA
+   independently of the saved checkpoint;
+2. call the one-shot durable environment preparation API, which stages and validates all four
+   inputs atomically;
+3. load the authenticated platform-store record; and
+4. if a non-zero generation exists, restore that exact generation into Core.
+
+Checkpoint bytes are never used to supply or weaken the current environment. A preparation, load
+or restore failure poisons that coordinator; callers must create a fresh Core/coordinator and must
+not continue with a partially initialized wallet.
+
+## Event commit boundary
+
+The coordinator serializes Core events. For every successful JSON effect-array response it:
+
+1. reserves `current generation + 1` with checked arithmetic;
+2. handles the event exactly once in Core;
+3. exports a non-empty, bounded checkpoint embedding that exact next generation;
+4. compare-and-swap commits the bytes from the current to the next platform-store generation; and
+5. returns the retained effect array only after the store returns the exact generation and bytes.
+
+A Core error envelope is returned without advancing the generation. Malformed output, generation
+mismatch and oversized state fail closed and never release effects.
+
+## Failure and retry semantics
+
+An export or commit failure retains the exact event and effect batch in process memory. A retry is
+accepted only for byte-for-byte identical event JSON. Export may be retried when no checkpoint was
+produced; once produced, the exact checkpoint is reused. Core is never called a second time.
+
+After an ambiguous commit error, retry first repeats the exact compare-and-swap. If that fails, the
+coordinator loads the store and accepts success only when both the next generation and plaintext
+match the retained checkpoint. The old generation remains retryable; every other generation is a
+divergence. Effects are released once and the retained batch is then discarded, so another retry
+cannot duplicate their execution through the coordinator.
+
+## Process death
+
+Pending event, checkpoint and effect values are memory-only. Process death discards them. Restart
+restores only the last authenticated platform-store generation, while Core deliberately leaves all
+protocol machines, sessions, callbacks, pending operations and effect batches empty. An event whose
+commit did not anchor must therefore be initiated again by the user or protocol after restart.
+
+This provides **at-most-once effect release after local checkpoint persistence**. It is not a
+durable outbox and does not provide exactly-once network, signing, storage or UI delivery. In
+particular, process death after the checkpoint commit but before an external effect completes loses
+that pending effect by design.
+
+## Diagnostics and remaining integration
+
+FFI and coordinator failures are stable, low-cardinality codes without source errors, identifiers,
+generations, events, effects, credential material or checkpoint bytes. Native environment and
+checkpoint wrappers have redacted string/debug representations and defensively copy byte arrays.
+
+The coordinators are production-facing seams, but application composition is still open. The iOS
+app must make the coordinator the sole owner-facing Core event path. Android still needs generated
+Rust bindings, a durable-engine adapter and an application entry point. Both clients also need an
+explicit checkpoint-capacity admission policy, migration/recovery UX, physical-device evidence and
+a provider monotonic receipt (or evaluated platform monotonic anchor) before stronger rollback or
+delivery claims are justified.

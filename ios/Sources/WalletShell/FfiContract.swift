@@ -5,7 +5,7 @@ import Foundation
 /// protocol as-is; a mock conforms for on-host tests. See docs/IMPLEMENTATION_PLAN.md Section 3.
 public protocol WalletEngineDriving: AnyObject {
     /// Drive one event (JSON) → a JSON array of effects (or a `{"error":...}` object).
-    func handleEventJson(eventJson: String) -> String
+    func handleEventJson(eventJson: String) throws -> String
 }
 
 /// Failures at the JSON boundary with the Rust core. A core error object and malformed output are
