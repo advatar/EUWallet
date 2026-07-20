@@ -129,8 +129,11 @@ operational solution needed to enter those processes.
           HTTPS origins and by-reference OpenID4VCI/OpenID4VP inputs, with hostile ambiguity tests.
     - [x] Expose a narrow Android `Intent` adapter without inventing an Activity or app manifest;
           the AAR host remains responsible for verified-link declarations and platform routing.
-  - [ ] Split the generic POST effect into typed protocol response contracts before enforcing MIME;
-        the shared OpenID4VP/payment/QES effect intentionally advertises `*/*` today.
+  - [ ] Replace the generic POST effect with an explicit delivery profile and reject every
+        result/profile mismatch across the Rust wire contract, Swift shell and Android shell.
+    - [ ] Enforce the bounded OpenID4VP 1.0 `direct_post` form/JSON/redirect contract end to end.
+    - [ ] Keep payment and QES delivery distinguishable but fail closed in the shared transport
+          until dedicated, explicitly contracted PSP and CSC adapters are integrated.
   - [ ] Eliminate DNS validation-to-connect TOCTOU by binding the validated address to the TLS
         socket; URLSession and HttpsURLConnection currently perform their own second DNS lookup.
 - [ ] [#15](https://github.com/advatar/EUWallet/issues/15): make Android a first-class,
