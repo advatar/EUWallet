@@ -177,7 +177,7 @@ operational solution needed to enter those processes.
         with backup exclusion, corruption/migration/process-death tests and no release-build
         fallback to demo storage.
     - [x] Add the bounded, authenticated and encrypted iOS storage primitive.
-    - [ ] Add the equivalent Android Keystore-backed storage primitive.
+    - [x] Add the equivalent Android Keystore-backed storage primitive.
     - [ ] Wire both stores to the Core checkpoint boundary and prove crash-safe effect delivery.
 - [ ] Build the Android client with equivalent StrongBox/KeyMint security behavior.
 - [ ] [#18](https://github.com/advatar/EUWallet/issues/18): implement German eID/eAT onboarding and
@@ -201,12 +201,16 @@ operational solution needed to enter those processes.
   - [ ] Add and test a secret-safe native `GermanEidClient` seam; then integrate the official
         AusweisApp SDK on iOS and Android against the accepted PID Provider's authenticated TcToken
         and secure-return contract, with identity attributes available only at the provider backend.
-    - [ ] Define matching Swift/Kotlin native-only contracts and deterministic fakes for API-level
+    - [x] Define matching Swift/Kotlin native-only contracts and deterministic fakes for API-level
           negotiation, one RUN_AUTH session, access-right minimisation, service-certificate consent,
-          PIN/CAN/PUK handling and final result/refresh URL; keep TcToken/auth headers and card
-          secrets redacted, clearable and absent from Rust JSON, persistence and diagnostics.
+          exact provider-certificate/transaction/auxiliary binding, session/interaction correlation,
+          explicitly attested integrated-reader PIN/CAN/PUK handling with orthogonal SDK card facts,
+          and final result/refresh URL; keep TcToken and card secrets redacted, clearable and absent
+          from Rust JSON, persistence and diagnostics, and reject RUN_AUTH custom headers because
+          their RefreshAddress recipient cannot be validated before use.
     - [ ] Implement the official SDK adapters and physical-device/simulator evidence after the PID
-          Provider supplies its authenticated TcToken, header and secure-return contract.
+          Provider supplies its authenticated TcToken and secure-return contract; any custom-header
+          requirement must be removed or separately proven safe before this boundary can permit it.
   - [ ] Authenticate and ingest both `eu.europa.ec.eudi.pid.1` mdoc and `urn:eudi:pid:1` SD-JWT VC;
         explicitly reject deferred/batch/encrypted/notification modes until separately implemented.
   - [ ] Pass hostile local vectors, fake-provider end-to-end tests, official AusweisApp simulator and
