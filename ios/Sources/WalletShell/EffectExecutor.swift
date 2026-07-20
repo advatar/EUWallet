@@ -3,16 +3,22 @@ import Foundation
 public struct HttpResponse: Equatable {
     public let statusCode: UInt16
     public let body: Data
+    public let contentType: String?
 
-    public init(statusCode: UInt16, body: Data) {
+    public init(statusCode: UInt16, body: Data, contentType: String? = nil) {
         self.statusCode = statusCode
         self.body = body
+        self.contentType = contentType
     }
 }
 
 public enum HttpClientError: Error, Equatable {
     case invalidUrl(String)
+    case unsafeDestination(String)
     case nonHttpResponse
+    case responseTooLarge(limit: Int)
+    case redirectRejected(location: String?)
+    case unacceptableContentType(expected: [String], actual: String?)
     case transport(String)
 }
 
@@ -20,7 +26,14 @@ extension HttpClientError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .invalidUrl(let url): return "Invalid HTTP URL: \(url)"
+        case .unsafeDestination(let host): return "Unsafe network destination: \(host)"
         case .nonHttpResponse: return "Transport returned a non-HTTP response"
+        case .responseTooLarge(let limit):
+            return "HTTP response exceeded the \(limit)-byte limit"
+        case .redirectRejected(let location):
+            return "HTTP redirect was rejected\(location.map { ": \($0)" } ?? "")"
+        case .unacceptableContentType(let expected, let actual):
+            return "Unexpected HTTP content type \(actual ?? "<missing>"); expected \(expected.joined(separator: ", "))"
         case .transport(let message): return "HTTP transport failed: \(message)"
         }
     }
