@@ -24,7 +24,12 @@ operational solution needed to enter those processes.
 - [x] Route OpenID4VCI-issued credentials through verified ingestion and reject untrusted,
       expired, wrongly typed, unbound, malformed, or revoked credentials.
 - [x] Remove or test-gate unchecked credential-loading APIs from production FFI.
-- [ ] Bind the rendered consent contract to holder authorization across core and FFI.
+- [ ] Bind the rendered consent/payment/QES contract to holder authorization across core and FFI
+      ([#12](https://github.com/advatar/EUWallet/issues/12)).
+  - [ ] Attach the core-computed canonical authorization hash to each interactive render and
+        require the exact operation ID and hash on approval before signing or disclosure.
+  - [ ] Mirror the closed contract in Swift and Android with stale, mismatched and cross-screen
+        negative tests while preserving the same hash in audit/signing bindings.
 - [x] Make credential status per-credential, issuer/list-bound, fresh, and resource-bounded.
 - [x] [#5](https://github.com/advatar/EUWallet/issues/5): freeze and revalidate selected credential
       provenance/validity plus RP, issuer and status trust before consent, signing and delivery;
