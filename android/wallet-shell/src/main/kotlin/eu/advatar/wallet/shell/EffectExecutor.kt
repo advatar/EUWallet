@@ -1,6 +1,29 @@
 package eu.advatar.wallet.shell
 
 import java.util.ArrayDeque
+import org.json.JSONObject
+
+sealed interface EffectAbortReason {
+    data class CoreError(val code: String, val message: String) : EffectAbortReason
+
+    data object ClosedWithoutSuccess : EffectAbortReason
+
+    data object MissingTerminalOutcome : EffectAbortReason
+
+    data object EffectAfterClose : EffectAbortReason
+}
+
+sealed interface EffectCascadeOutcome {
+    data object Idle : EffectCascadeOutcome
+
+    data object AwaitingInput : EffectCascadeOutcome
+
+    data object Succeeded : EffectCascadeOutcome
+
+    data object Declined : EffectCascadeOutcome
+
+    data class Aborted(val reason: EffectAbortReason) : EffectCascadeOutcome
+}
 
 /**
  * Drains the sans-I/O core's effect cascade. Infrastructure failures stop the cascade and are
@@ -16,18 +39,56 @@ class EffectExecutor(
     private val issuerResponder: IssuerResponder? = null,
     private val statusListResolver: StatusListResolver? = null,
 ) {
-    fun send(eventJson: String) {
+    fun send(eventJson: String): EffectCascadeOutcome {
         val queue = ArrayDeque(invokeCore(eventJson))
+        val initialEventType = eventType(eventJson)
         var executedEffects = 0
+        var acknowledged = false
+        var renderedInput = false
+        var abortReason: EffectAbortReason? = null
+        var closed = false
 
         while (queue.isNotEmpty()) {
             executedEffects += 1
             if (executedEffects > MAX_EFFECTS_PER_CASCADE) {
                 throw WalletShellException.EffectCascadeLimitExceeded(MAX_EFFECTS_PER_CASCADE)
             }
-            val followUp = execute(queue.removeFirst()) ?: continue
+            val effect = queue.removeFirst()
+            if (closed) {
+                return EffectCascadeOutcome.Aborted(EffectAbortReason.EffectAfterClose)
+            }
+            when (effect) {
+                is WalletEffect.Render -> when (val screen = effect.screen) {
+                    is WalletScreen.Error -> {
+                        abortReason = EffectAbortReason.CoreError(screen.code, screen.message)
+                    }
+                    else -> renderedInput = true
+                }
+                WalletEffect.Close -> closed = true
+                else -> Unit
+            }
+            val followUp = execute(effect) ?: continue
+            if (effect is WalletEffect.Http || effect is WalletEffect.RequestCredential) {
+                acknowledged = true
+            }
             queue.addAll(invokeCore(followUp))
         }
+
+        return when {
+            abortReason != null -> EffectCascadeOutcome.Aborted(abortReason)
+            closed && initialEventType in DECLINE_EVENT_TYPES -> EffectCascadeOutcome.Declined
+            closed && acknowledged -> EffectCascadeOutcome.Succeeded
+            closed -> EffectCascadeOutcome.Aborted(EffectAbortReason.ClosedWithoutSuccess)
+            renderedInput -> EffectCascadeOutcome.AwaitingInput
+            initialEventType in IDLE_EVENT_TYPES -> EffectCascadeOutcome.Idle
+            else -> EffectCascadeOutcome.Aborted(EffectAbortReason.MissingTerminalOutcome)
+        }
+    }
+
+    private fun eventType(eventJson: String): String? = try {
+        JSONObject(eventJson).optString("type").takeIf(String::isNotEmpty)
+    } catch (_: Exception) {
+        null
     }
 
     private fun invokeCore(eventJson: String): List<WalletEffect> {
@@ -159,5 +220,7 @@ class EffectExecutor(
     private companion object {
         const val MAX_EFFECTS_PER_CASCADE = 1_024
         const val MAX_STATUS_LIST_TOKEN_BYTES = 2 * 1_024 * 1_024
+        val DECLINE_EVENT_TYPES = setOf("userDeclined", "paymentDeclined", "qesDeclined")
+        val IDLE_EVENT_TYPES = setOf("setClock")
     }
 }

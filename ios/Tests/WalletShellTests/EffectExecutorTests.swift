@@ -33,6 +33,9 @@ final class MockEngine: WalletEngineDriving {
         if eventJson.contains("\"presentationDelivered\"") {
             return #"[{"type":"close"}]"#
         }
+        if eventJson.contains("\"userDeclined\"") {
+            return #"[{"type":"close"}]"#
+        }
         if eventJson.contains("\"paymentAuthorizationRequestReceived\"") {
             return #"[{"type":"render","screen":{"screen":"paymentConfirmation","creditorName":"Acme Store","creditorAccount":"DE89","amountMinor":1299,"currency":"EUR"}}]"#
         }
@@ -138,7 +141,7 @@ final class EffectExecutorTests: XCTestCase {
         var rendered: [ScreenDescription] = []
         let executor = makeExecutor { rendered.append($0) }
 
-        try await executor.send(
+        let outcome = try await executor.send(
             eventJson: WalletEventJSON.authorizationRequestReceived(Data([1, 2, 3])))
 
         guard case .consent(let rp, _, let claims)? = rendered.last else {
@@ -146,6 +149,7 @@ final class EffectExecutorTests: XCTestCase {
         }
         XCTAssertEqual(rp, "Example RP")
         XCTAssertEqual(claims, ["age_over_18"])
+        XCTAssertEqual(outcome, .awaitingInput)
     }
 
     func testConsentTriggersSignThenSuccessfulHttpPost() async throws {
@@ -153,29 +157,48 @@ final class EffectExecutorTests: XCTestCase {
         let http = StubHttpClient()
         let executor = makeExecutor(signer: signer, http: http)
 
-        try await executor.send(eventJson: WalletEventJSON.userConsented())
+        let outcome = try await executor.send(eventJson: WalletEventJSON.userConsented())
 
         XCTAssertEqual(signer.signedPayloads.count, 1)
         XCTAssertEqual(signer.signedPayloads.first, Data([1, 2, 3]))
         XCTAssertEqual(http.posted.count, 1)
         XCTAssertEqual(http.posted.first?.0, "https://rp.example/response")
         XCTAssertEqual(http.posted.first?.1, Data([9, 9, 9]))
+        XCTAssertEqual(outcome, .succeeded)
     }
 
     func testExplicitDeclineRendersNothingUnexpected() async throws {
         var rendered: [ScreenDescription] = []
         let executor = makeExecutor { rendered.append($0) }
-        try await executor.send(eventJson: WalletEventJSON.userDeclined())
+        let outcome = try await executor.send(eventJson: WalletEventJSON.userDeclined())
         XCTAssertTrue(rendered.isEmpty)
+        XCTAssertEqual(outcome, .declined)
     }
 
     func testPaymentRendersConfirmationThenSignsAuthCode() async throws {
         var rendered: [ScreenDescription] = []
         let signer = StubSigner()
         let http = StubHttpClient()
-        let executor = makeExecutor(signer: signer, http: http) { rendered.append($0) }
+        let engine = MockEngine { event in
+            if event.contains("\"paymentAuthorizationRequestReceived\"") {
+                return #"[{"type":"render","screen":{"screen":"paymentConfirmation","creditorName":"Acme Store","creditorAccount":"DE89","amountMinor":1299,"currency":"EUR"}}]"#
+            }
+            if event.contains("\"paymentApproved\"") {
+                return #"[{"type":"sign","keyRef":"device-key","payload":[7,7,7]}]"#
+            }
+            if event.contains("\"deviceSignatureProduced\"") {
+                return #"[{"type":"http","url":"https://psp.example/authorize","body":[8,8,8]}]"#
+            }
+            if event.contains("\"presentationDelivered\"") {
+                return #"[{"type":"close"}]"#
+            }
+            return "[]"
+        }
+        let executor = makeExecutor(engine: engine, signer: signer, http: http) {
+            rendered.append($0)
+        }
 
-        try await executor.send(
+        let requestOutcome = try await executor.send(
             eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(Data([1])))
         guard case .paymentConfirmation(let payee, _, let amount, let currency)? = rendered.last else {
             return XCTFail("expected a payment confirmation screen, got \(String(describing: rendered.last))")
@@ -183,10 +206,38 @@ final class EffectExecutorTests: XCTestCase {
         XCTAssertEqual(payee, "Acme Store")
         XCTAssertEqual(amount, 1299)
         XCTAssertEqual(currency, "EUR")
+        XCTAssertEqual(requestOutcome, .awaitingInput)
 
-        try await executor.send(eventJson: WalletEventJSON.paymentApproved())
+        let approvalOutcome = try await executor.send(eventJson: WalletEventJSON.paymentApproved())
         XCTAssertEqual(signer.signedPayloads.first, Data([7, 7, 7]))
         XCTAssertEqual(http.posted.first?.0, "https://psp.example/authorize")
+        XCTAssertEqual(approvalOutcome, .succeeded)
+    }
+
+    func testEmptyQueueAndCloseOnlyAreNeverSuccess() async throws {
+        let empty = makeExecutor(engine: MockEngine { _ in "[]" })
+        let emptyOutcome = try await empty.send(eventJson: WalletEventJSON.userConsented())
+        XCTAssertEqual(emptyOutcome, .aborted(.missingTerminalOutcome))
+
+        let closeOnly = makeExecutor(engine: MockEngine { _ in #"[{"type":"close"}]"# })
+        let closeOutcome = try await closeOnly.send(eventJson: WalletEventJSON.userConsented())
+        XCTAssertEqual(closeOutcome, .aborted(.closedWithoutSuccess))
+    }
+
+    func testErrorScreenAndEffectsAfterCloseAbort() async throws {
+        let coreError = makeExecutor(engine: MockEngine { _ in
+            #"[{"type":"render","screen":{"screen":"error","code":"STATUS_UNAVAILABLE","message":"Status unavailable"}},{"type":"close"}]"#
+        })
+        let errorOutcome = try await coreError.send(eventJson: WalletEventJSON.userConsented())
+        XCTAssertEqual(
+            errorOutcome,
+            .aborted(.coreError(code: "STATUS_UNAVAILABLE", message: "Status unavailable")))
+
+        let afterClose = makeExecutor(engine: MockEngine { _ in
+            #"[{"type":"close"},{"type":"render","screen":{"screen":"loading"}}]"#
+        })
+        let afterCloseOutcome = try await afterClose.send(eventJson: WalletEventJSON.userConsented())
+        XCTAssertEqual(afterCloseOutcome, .aborted(.effectAfterClose))
     }
 
     func testMalformedCoreOutputThrowsTypedError() async {

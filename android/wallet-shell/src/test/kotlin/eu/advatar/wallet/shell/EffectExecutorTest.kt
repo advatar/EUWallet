@@ -47,13 +47,77 @@ class EffectExecutorTest {
             },
         )
 
-        executor.send(WalletEventJson.userConsented())
+        val outcome = executor.send(WalletEventJson.userConsented())
 
         assertEquals(1, signed.size)
         assertArrayEquals(byteArrayOf(1, 2), signed.single())
         assertEquals("https://rp.example/cb", posted.single().first)
         assertArrayEquals(byteArrayOf(3), posted.single().second)
         assertEquals(3, engine.events.size)
+        assertEquals(EffectCascadeOutcome.Succeeded, outcome)
+    }
+
+    @Test
+    fun emptyCloseOnlyAndErrorFlowsAreNeverSuccess() {
+        val empty = makeExecutor(engine = RecordingEngine { "[]" })
+        assertEquals(
+            EffectCascadeOutcome.Aborted(EffectAbortReason.MissingTerminalOutcome),
+            empty.send(WalletEventJson.userConsented()),
+        )
+
+        val closeOnly = makeExecutor(engine = RecordingEngine { "[{\"type\":\"close\"}]" })
+        assertEquals(
+            EffectCascadeOutcome.Aborted(EffectAbortReason.ClosedWithoutSuccess),
+            closeOnly.send(WalletEventJson.userConsented()),
+        )
+
+        val coreError = makeExecutor(
+            engine = RecordingEngine {
+                """[{"type":"render","screen":{"screen":"error","code":"STATUS_UNAVAILABLE","message":"Status unavailable"}},{"type":"close"}]"""
+            },
+        )
+        assertEquals(
+            EffectCascadeOutcome.Aborted(
+                EffectAbortReason.CoreError("STATUS_UNAVAILABLE", "Status unavailable"),
+            ),
+            coreError.send(WalletEventJson.userConsented()),
+        )
+    }
+
+    @Test
+    fun explicitDeclineAndRenderedPromptHaveDistinctOutcomes() {
+        val decline = makeExecutor(engine = RecordingEngine { "[{\"type\":\"close\"}]" })
+        assertEquals(
+            EffectCascadeOutcome.Declined,
+            decline.send(WalletEventJson.userDeclined()),
+        )
+
+        val prompt = makeExecutor(
+            engine = RecordingEngine {
+                "[{\"type\":\"render\",\"screen\":{\"screen\":\"loading\"}}]"
+            },
+        )
+        assertEquals(
+            EffectCascadeOutcome.AwaitingInput,
+            prompt.send("{\"type\":\"authorizationRequestReceived\"}"),
+        )
+    }
+
+    @Test
+    fun effectAfterCloseAbortsWithoutRenderingIt() {
+        var rendered = false
+        val executor = makeExecutor(
+            engine = RecordingEngine {
+                """[{"type":"close"},{"type":"render","screen":{"screen":"loading"}}]"""
+            },
+            renderer = ScreenRenderer { rendered = true },
+        )
+
+        assertEquals(
+            EffectCascadeOutcome.Aborted(EffectAbortReason.EffectAfterClose),
+            executor.send(WalletEventJson.userConsented()),
+        )
+        assertFalse(rendered)
     }
 
     @Test

@@ -37,6 +37,7 @@ public enum EffectExecutorError: Error, Equatable {
     case missingDependency(String)
     case issuerFailed(String)
     case unsupportedEffect(String)
+    case effectCascadeLimitExceeded(Int)
 }
 
 extension EffectExecutorError: LocalizedError {
@@ -53,8 +54,38 @@ extension EffectExecutorError: LocalizedError {
         case .issuerFailed(let reason): return "Credential issuer request failed: \(reason)"
         case .unsupportedEffect(let effect):
             return "Wallet shell does not implement required effect: \(effect)"
+        case .effectCascadeLimitExceeded(let limit):
+            return "Wallet core effect cascade exceeded the \(limit)-effect safety limit"
         }
     }
+}
+
+public enum EffectAbortReason: Equatable {
+    case coreError(code: String, message: String)
+    case closedWithoutSuccess
+    case missingTerminalOutcome
+    case effectAfterClose
+
+    public var message: String {
+        switch self {
+        case .coreError(_, let message): return message
+        case .closedWithoutSuccess:
+            return "Wallet flow closed without a protocol acknowledgement"
+        case .missingTerminalOutcome:
+            return "Wallet flow produced no terminal outcome"
+        case .effectAfterClose:
+            return "Wallet core emitted an effect after closing the flow"
+        }
+    }
+}
+
+/// Semantic result of one fully drained effect cascade. Queue exhaustion itself is never success.
+public enum EffectCascadeOutcome: Equatable {
+    case idle
+    case awaitingInput
+    case succeeded
+    case declined
+    case aborted(EffectAbortReason)
 }
 
 /// Drives the sans-IO Rust core: feed it a JSON event, decode the JSON effects it returns,
@@ -92,14 +123,70 @@ public final class EffectExecutor {
     }
 
     /// Send one JSON event and fully drain the resulting effect cascade.
-    public func send(eventJson: String) async throws {
+    @discardableResult
+    public func send(eventJson: String) async throws -> EffectCascadeOutcome {
         var queue = try decode(engine.handleEventJson(eventJson: eventJson))
+        let initialEventType = Self.eventType(eventJson)
+        var acknowledged = false
+        var renderedInput = false
+        var abortReason: EffectAbortReason?
+        var closed = false
+        var executedEffects = 0
+
         while !queue.isEmpty {
+            executedEffects += 1
+            guard executedEffects <= Self.maximumEffectsPerCascade else {
+                throw EffectExecutorError.effectCascadeLimitExceeded(
+                    Self.maximumEffectsPerCascade)
+            }
             let effect = queue.removeFirst()
+            if closed {
+                return .aborted(.effectAfterClose)
+            }
+            switch effect {
+            case .render(.error(let code, let message)):
+                abortReason = .coreError(code: code, message: message)
+            case .render:
+                renderedInput = true
+            case .close:
+                closed = true
+            default:
+                break
+            }
             if let followUp = try await execute(effect) {
+                switch effect {
+                case .http, .requestCredential:
+                    acknowledged = true
+                default:
+                    break
+                }
                 queue.append(contentsOf: try decode(engine.handleEventJson(eventJson: followUp)))
             }
         }
+
+        if let abortReason {
+            return .aborted(abortReason)
+        }
+        if closed {
+            if Self.declineEventTypes.contains(initialEventType ?? "") {
+                return .declined
+            }
+            return acknowledged ? .succeeded : .aborted(.closedWithoutSuccess)
+        }
+        if renderedInput {
+            return .awaitingInput
+        }
+        if Self.idleEventTypes.contains(initialEventType ?? "") {
+            return .idle
+        }
+        return .aborted(.missingTerminalOutcome)
+    }
+
+    private static func eventType(_ json: String) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)),
+              let dictionary = object as? [String: Any]
+        else { return nil }
+        return dictionary["type"] as? String
     }
 
     private func decode(_ json: String) throws -> [WalletEffect] {
@@ -206,6 +293,12 @@ public final class EffectExecutor {
             return nil
         }
     }
+
+    private static let maximumEffectsPerCascade = 1_024
+    private static let declineEventTypes: Set<String> = [
+        "userDeclined", "paymentDeclined", "qesDeclined",
+    ]
+    private static let idleEventTypes: Set<String> = ["setClock"]
 }
 
 public protocol HttpClient {

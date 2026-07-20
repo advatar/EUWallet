@@ -16,6 +16,8 @@ an Android UI, a generated UniFFI/JNI bridge, or approved national-wallet servic
   follow-up events. Core invocation/decoding, trust, rendering, storage, signing, transport,
   non-2xx status, missing adapters, and unsupported effects are terminal typed failures. No
   infrastructure failure becomes `userDeclined` or `presentationDelivered`.
+- Explicit cascade outcomes distinguish idle work, input prompts, acknowledged success, user
+  decline and abort. Empty queues, close-only responses and effects after close are never success.
 - `AndroidKeystoreP256Signer`, which generates signing-only P-256 keys, checks the resulting
   `KeyInfo`, and returns 64-byte JOSE ES256 signatures. StrongBox is preferred and required by
   default. TEE use requires `HardwareKeyPolicy(allowTrustedEnvironment = true)` and is still

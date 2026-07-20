@@ -163,12 +163,42 @@ final class WalletModel: ObservableObject {
 
     private func note(_ line: String) { log.append(line) }
 
+    private enum RequiredCascadeOutcome: String {
+        case awaitingInput
+        case succeeded
+        case declined
+
+        func matches(_ outcome: EffectCascadeOutcome) -> Bool {
+            switch (self, outcome) {
+            case (.awaitingInput, .awaitingInput), (.succeeded, .succeeded), (.declined, .declined):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
     /// Run one shell cascade and surface infrastructure/core-contract failures as a terminal app
     /// failure. A failed cascade must never let a caller publish a success message.
     @discardableResult
-    private func run(_ executor: EffectExecutor, eventJson: String) async -> Bool {
+    private func run(
+        _ executor: EffectExecutor,
+        eventJson: String,
+        requiring required: RequiredCascadeOutcome
+    ) async -> Bool {
         do {
-            try await executor.send(eventJson: eventJson)
+            let outcome = try await executor.send(eventJson: eventJson)
+            guard required.matches(outcome) else {
+                let message: String
+                if case .aborted(let reason) = outcome {
+                    message = reason.message
+                } else {
+                    message = "Wallet flow returned \(outcome) while \(required.rawValue) was required"
+                }
+                note("Wallet operation failed: \(message)")
+                phase = .failed(message)
+                return false
+            }
             return true
         } catch {
             let message = error.localizedDescription
@@ -264,7 +294,7 @@ final class WalletModel: ObservableObject {
         return await run(ex, eventJson: WalletEventJSON.credentialOfferReceived(
             offer: offer,
             issuerCertChain: issuance.issuerCertChain,
-            issuerId: issuance.issuerId))
+            issuerId: issuance.issuerId), requiring: .succeeded)
     }
 
     // MARK: - Flows (presentation / payment) on the persistent engine
@@ -279,7 +309,8 @@ final class WalletModel: ObservableObject {
         Task {
             guard await run(
                 ex,
-                eventJson: WalletEventJSON.authorizationRequestReceived(request)
+                eventJson: WalletEventJSON.authorizationRequestReceived(request),
+                requiring: .awaitingInput
             ) else { return }
             note("Core resolved RP trust in-core and computed the minimised consent screen.")
         }
@@ -296,7 +327,8 @@ final class WalletModel: ObservableObject {
         Task {
             guard await run(
                 ex,
-                eventJson: WalletEventJSON.authorizationRequestReceived(request)
+                eventJson: WalletEventJSON.authorizationRequestReceived(request),
+                requiring: .awaitingInput
             ) else { return }
             note("Core selected the mDL by doctype and will emit a signed DeviceResponse vp_token.")
         }
@@ -311,7 +343,8 @@ final class WalletModel: ObservableObject {
         Task {
             guard await run(
                 ex,
-                eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(request)
+                eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(request),
+                requiring: .awaitingInput
             ) else { return }
             note("Core produced the payment confirmation screen (amount + payee bound in-core).")
         }
@@ -329,12 +362,20 @@ final class WalletModel: ObservableObject {
                 return
             }
             if wasPayment {
-                guard await run(executor, eventJson: WalletEventJSON.paymentApproved()) else { return }
+                guard await run(
+                    executor,
+                    eventJson: WalletEventJSON.paymentApproved(),
+                    requiring: .succeeded
+                ) else { return }
                 note("Device signed the dynamic-linking binding; auth code posted to the PSP.")
                 reloadHistory()
                 phase = .done("Payment authorised — SCA auth code delivered.")
             } else {
-                guard await run(executor, eventJson: WalletEventJSON.userConsented()) else { return }
+                guard await run(
+                    executor,
+                    eventJson: WalletEventJSON.userConsented(),
+                    requiring: .succeeded
+                ) else { return }
                 note("Device signed the key-binding JWT; vp_token posted to the RP.")
                 reloadHistory()
                 phase = .done("Presentation delivered — only the requested claim was shared.")
@@ -349,7 +390,11 @@ final class WalletModel: ObservableObject {
                 phase = .failed("Wallet executor is unavailable")
                 return
             }
-            guard await run(executor, eventJson: WalletEventJSON.userDeclined()) else { return }
+            guard await run(
+                executor,
+                eventJson: WalletEventJSON.userDeclined(),
+                requiring: .declined
+            ) else { return }
             phase = .done("Declined — nothing was shared.")
         }
     }
@@ -371,13 +416,21 @@ final class WalletModel: ObservableObject {
             guard await run(
                 ex,
                 eventJson: WalletEventJSON.authorizationRequestReceived(
-                    demo.presentationRequest(nonce: nextNonce()))) else { return }
-            guard await run(ex, eventJson: WalletEventJSON.userConsented()) else { return }
+                    demo.presentationRequest(nonce: nextNonce())),
+                requiring: .awaitingInput) else { return }
+            guard await run(
+                ex,
+                eventJson: WalletEventJSON.userConsented(),
+                requiring: .succeeded) else { return }
             guard await run(
                 ex,
                 eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(
-                    demo.paymentRequest(nonce: nextNonce()))) else { return }
-            guard await run(ex, eventJson: WalletEventJSON.paymentApproved()) else { return }
+                    demo.paymentRequest(nonce: nextNonce())),
+                requiring: .awaitingInput) else { return }
+            guard await run(
+                ex,
+                eventJson: WalletEventJSON.paymentApproved(),
+                requiring: .succeeded) else { return }
             if redactFirst {
                 _ = engine.redactTransaction(seq: 0)
             }
