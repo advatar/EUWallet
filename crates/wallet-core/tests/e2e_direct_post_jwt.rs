@@ -101,7 +101,7 @@ fn encrypted_response_leaves_the_device_as_a_jwe_only_the_verifier_can_open() {
 
     let (issuer_jwt, by_claim) = issue_pid(&issuer);
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(HeldCredential {
+    core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt,
         disclosures_by_claim: by_claim,
         status_index: None,

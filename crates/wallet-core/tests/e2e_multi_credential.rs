@@ -160,12 +160,12 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
     .expect("issue mDL");
 
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(HeldCredential {
+    core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt,
         disclosures_by_claim: by_claim,
         status_index: None,
     });
-    core.load_mdoc_credential(MdocHolding {
+    core.load_unverified_mdoc_for_testing(MdocHolding {
         doctype: DOCTYPE.into(),
         issuer_signed,
     });

@@ -157,6 +157,17 @@ pub fn default_catalogue() -> Catalogue {
         trusted_issuers: vec!["https://issuer.example".into()],
     });
     c.register(AttestationType {
+        id: "org.iso.18013.5.1.mDL".into(),
+        display_name: "Mobile Driving Licence (mdoc)".into(),
+        format: "mso_mdoc".into(),
+        claims: vec![
+            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
+            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
+            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+        ],
+        trusted_issuers: vec!["https://issuer.example".into()],
+    });
+    c.register(AttestationType {
         // ICAO 9303 / eMRTD electronic passport, modelled as an SD-JWT VC for the demo.
         id: "urn:eudi:passport:1".into(),
         display_name: "Passport".into(),
@@ -243,6 +254,7 @@ mod tests {
             vec![
                 "urn:eudi:pid:1",
                 "urn:eudi:mdl:1",
+                "org.iso.18013.5.1.mDL",
                 "urn:eudi:passport:1",
                 "urn:eudi:nid:1",
                 "urn:eudi:pid:de:1"
@@ -264,6 +276,7 @@ mod tests {
             vec![
                 "urn:eudi:pid:1",
                 "urn:eudi:mdl:1",
+                "org.iso.18013.5.1.mDL",
                 "urn:eudi:passport:1",
                 "urn:eudi:nid:1",
                 "urn:eudi:pid:de:1"
@@ -287,6 +300,7 @@ mod tests {
         // Issuer policy.
         assert!(c.issuer_allowed("urn:eudi:pid:1", "https://issuer.example"));
         assert!(c.issuer_allowed("urn:eudi:mdl:1", "https://issuer.example"));
+        assert!(c.issuer_allowed("org.iso.18013.5.1.mDL", "https://issuer.example"));
         assert!(c.issuer_allowed("urn:eudi:passport:1", "https://issuer.example"));
         assert!(c.issuer_allowed("urn:eudi:pid:de:1", "https://issuer.example"));
         assert!(!c.issuer_allowed("urn:eudi:pid:1", "https://evil.example"));

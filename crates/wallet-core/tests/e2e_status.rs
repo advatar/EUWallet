@@ -93,7 +93,7 @@ fn drive_to_consent(status_index: Option<u64>, load_status: bool) -> Vec<Effect>
         )
         .unwrap();
     }
-    core.load_credential(HeldCredential {
+    core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt: issued(&issuer),
         disclosures_by_claim: Default::default(),
         status_index,

@@ -14,12 +14,11 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
 
-use base64ct::{Base64UrlUnpadded, Encoding};
 use crypto_backend::AwsLc;
 use crypto_traits::Alg;
 use presenter::ScreenDescription;
 use shell_io::{DeviceSigner, IssuerEndpoints, ShellRunner, TrustFetcher};
-use wallet_core::{Core, DemoWallet, Event, HeldCredential};
+use wallet_core::{Core, DemoWallet, Event};
 
 struct DemoSigner<'a>(&'a DemoWallet);
 impl DeviceSigner for DemoSigner<'_> {
@@ -118,38 +117,11 @@ fn respond_json(stream: &mut std::net::TcpStream, body: &str) {
     stream.write_all(resp.as_bytes()).expect("respond");
 }
 
-/// Rebuild the wallet's stored credential FROM THE WIRE FORMAT (jwt~disclosure~…~): the issuer JWT
-/// plus each disclosure keyed by the claim name inside it ([salt, name, value]).
-fn held_credential_from_wire(compact: &str) -> HeldCredential {
-    let mut parts = compact.split('~');
-    let issuer_jwt = parts.next().expect("issuer jwt").to_string();
-    let mut disclosures_by_claim = std::collections::BTreeMap::new();
-    for d in parts.filter(|p| !p.is_empty()) {
-        let decoded = Base64UrlUnpadded::decode_vec(d).expect("disclosure b64");
-        let arr: serde_json::Value = serde_json::from_slice(&decoded).expect("disclosure JSON");
-        let name = arr[1].as_str().expect("claim name").to_string();
-        disclosures_by_claim.insert(name, d.to_string());
-    }
-    HeldCredential {
-        issuer_jwt,
-        disclosures_by_claim,
-        status_index: None,
-    }
-}
-
 #[test]
 fn full_lifecycle_issue_then_present_over_live_tcp() {
     let wallet = DemoWallet::new();
-    // What the live issuer will hand out: the SD-JWT issuance compact serialization
-    // (issuer JWT + both disclosures), exactly as a real issuer responds.
-    let s0 = wallet.scenario();
-    let disclosures: std::collections::BTreeMap<String, String> =
-        serde_json::from_str(&s0.disclosures_by_claim_json).unwrap();
-    let issuance_compact = format!(
-        "{}~{}~",
-        s0.issuer_jwt,
-        disclosures.values().cloned().collect::<Vec<_>>().join("~")
-    );
+    // The live issuer returns the device-bound PID fixture with every mandatory type claim.
+    let issuance_compact = wallet.issuance_scenario().pid_credential_compact;
 
     let (port, proof_rx, vp_rx) = spawn_issuer_and_rp(issuance_compact.clone());
     let s = wallet.scenario_with_response_uri(&format!("http://127.0.0.1:{port}/response"));
@@ -198,14 +170,11 @@ fn full_lifecycle_issue_then_present_over_live_tcp() {
     assert_eq!(fmt, "dc+sd-jwt");
     assert_eq!(wire_bytes, issuance_compact.as_bytes());
 
-    // The wallet stores what it received (issuer JWT + disclosures parsed from the wire).
-    let held = held_credential_from_wire(core_str(&wire_bytes));
-    assert_eq!(
-        held.disclosures_by_claim.len(),
-        2,
-        "both disclosures travelled"
-    );
-    shell.core.load_credential(held);
+    // The authenticated response crossed the verified storage boundary without an out-of-band
+    // loader, and all mandatory claims travelled even though only one will be presented.
+    let held = shell.core.held_credentials_json();
+    assert!(held.contains("urn:eudi:pid:1"), "issued PID is held: {held}");
+    assert!(held.contains("birthdate"), "mandatory claims travelled: {held}");
 
     // ---- PRESENTATION, live: DCQL request → consent → KB-JWT → /response → RP verifies. ----
     let outcome = shell.handle(Event::AuthorizationRequestReceived {
@@ -246,10 +215,6 @@ fn full_lifecycle_issue_then_present_over_live_tcp() {
         claims.get("family_name").is_none(),
         "family_name was issued over the wire but never disclosed"
     );
-}
-
-fn core_str(bytes: &[u8]) -> &str {
-    core::str::from_utf8(bytes).expect("utf8 credential")
 }
 
 /// Extract the SD-JWT presentation from an OpenID4VP 1.0 `direct_post` form body (DCQL id "pid").

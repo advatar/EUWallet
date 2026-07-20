@@ -7,7 +7,7 @@
 //! from an issuer over OID4VCI, its device key from the Secure Enclave, and its trusted list from
 //! the scheme operator. The demo generates equivalents in-process so the exact same core flow is
 //! exercisable offline on the simulator, where the Secure Enclave is unavailable. The keys are
-//! ephemeral (regenerated per `DemoWallet`), so nothing here is a credential of value.
+//! demo-only or fixed conformance keys, so nothing here is a credential of value.
 //!
 //! The device key lives in Rust ([`DemoWallet::sign_device`]) precisely so the shell's `Sign`
 //! effect resolves to a real ES256 signature over the key the core validates against — the
@@ -132,7 +132,9 @@ impl DemoWallet {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             device: SoftwareSigner::generate_p256().expect("device keygen"),
-            issuer: SoftwareSigner::generate_p256().expect("issuer keygen"),
+            // The issuer must sign with the key authenticated by `RP_DER`; a random unrelated key
+            // would make the demo credential structurally parseable but cryptographically false.
+            issuer: SoftwareSigner::from_pkcs8_der(RP_PKCS8).expect("issuer key"),
             operator: SoftwareSigner::generate_p256().expect("operator keygen"),
             rp: SoftwareSigner::from_pkcs8_der(RP_PKCS8).expect("rp key"),
             wallet_provider: SoftwareSigner::generate_p256().expect("wp keygen"),
@@ -478,6 +480,16 @@ impl DemoWallet {
         ])
     }
 
+    /// RFC 7800 confirmation JWK for an uncompressed P-256 public point.
+    fn confirmation_jwk(pubkey: &[u8]) -> serde_json::Value {
+        json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": b64(&pubkey[1..33]),
+            "y": b64(&pubkey[33..65]),
+        })
+    }
+
     /// Issue an SD-JWT VC of type `vct`; return (issuer_jwt, disclosures_by_claim). Mirrors the
     /// issuance the wallet-core e2e tests perform, so the credential is byte-compatible with the
     /// core.
@@ -500,9 +512,12 @@ impl DemoWallet {
         let header = b64(br#"{"alg":"ES256","typ":"dc+sd-jwt"}"#);
         let payload = b64(serde_json::to_string(&json!({
             "iss": "https://issuer.example",
+            "iat": DEMO_EPOCH,
+            "exp": 4_000_000_000i64,
             "vct": vct,
             "_sd_alg": "sha-256",
             "_sd": sd,
+            "cnf": { "jwk": Self::confirmation_jwk(self.device.public_key_raw()) },
         }))
         .expect("serialize issuer payload")
         .as_bytes());

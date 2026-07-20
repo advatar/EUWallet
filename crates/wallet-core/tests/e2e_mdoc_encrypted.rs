@@ -127,7 +127,7 @@ fn haip_mdoc_profile_encrypted_device_response_round_trips() {
     .expect("issue mDL");
 
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_mdoc_credential(MdocHolding {
+    core.load_unverified_mdoc_for_testing(MdocHolding {
         doctype: DOCTYPE.into(),
         issuer_signed,
     });

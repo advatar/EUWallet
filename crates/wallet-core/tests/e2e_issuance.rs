@@ -2,15 +2,16 @@
 //! computed IN-CORE (trust+x509 for the issuer chain; a verified WUA bound to the device key) —
 //! not shell booleans. Real aws-lc-rs crypto throughout.
 use base64ct::{Base64UrlUnpadded, Encoding};
-use crypto_backend::SoftwareSigner;
-use crypto_traits::{Alg, KeyRef, Signer};
+use crypto_backend::{AwsLc, SoftwareSigner};
+use crypto_traits::{Alg, Digest, KeyRef, Signer};
 use serde_json::json;
-use wallet_core::{Core, Effect, Event};
+use wallet_core::{Core, CredentialIngestionError, Effect, Event};
 
 // The issuer chain reuses the real openssl leaf (rp.der) chaining to the trusted CA (ca.der);
 // issuer trust is chain validity to a trusted PID anchor, independent of the EKU profile.
 const CA_DER: &[u8] = include_bytes!("../../x509/tests/vectors/ca.der");
 const ISSUER_CHAIN_LEAF: &[u8] = include_bytes!("../../x509/tests/vectors/rp.der");
+const ISSUER_PKCS8: &[u8] = include_bytes!("../../x509/tests/vectors/rp.pkcs8.der");
 const NOW: i64 = 1_790_000_000;
 
 fn b64(b: &[u8]) -> String {
@@ -47,11 +48,37 @@ fn issue_wua(provider: &SoftwareSigner, device_pub: &[u8]) -> Vec<u8> {
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
-/// A minimal issuer-signed SD-JWT VC (no disclosures) that parses as a credential.
-fn issued_sd_jwt(issuer: &SoftwareSigner) -> Vec<u8> {
+/// An issuer-authenticated, device-bound PID with every mandatory catalogue claim.
+fn issued_sd_jwt(issuer: &SoftwareSigner, device_pub: &[u8]) -> Vec<u8> {
+    let disclosures: Vec<String> = [
+        ("family_name", json!("Andersson")),
+        ("given_name", json!("Astrid")),
+        ("birthdate", json!("1988-04-12")),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (name, value))| b64(json!([format!("salt-{i}"), name, value]).to_string().as_bytes()))
+    .collect();
+    let digests: Vec<String> = disclosures
+        .iter()
+        .map(|raw| b64(&AwsLc.sha256(raw.as_bytes())))
+        .collect();
     let header = b64(br#"{"alg":"ES256","typ":"dc+sd-jwt"}"#);
     let payload = b64(
-        json!({"iss":"https://issuer.example","vct":"urn:eudi:pid:1"})
+        json!({
+            "iss":"https://issuer.example",
+            "iat": NOW,
+            "exp": 4_000_000_000i64,
+            "vct":"urn:eudi:pid:1",
+            "_sd_alg": "sha-256",
+            "_sd": digests,
+            "cnf": { "jwk": {
+                "kty": "EC",
+                "crv": "P-256",
+                "x": b64(&device_pub[1..33]),
+                "y": b64(&device_pub[33..65]),
+            }}
+        })
             .to_string()
             .as_bytes(),
     );
@@ -59,14 +86,14 @@ fn issued_sd_jwt(issuer: &SoftwareSigner) -> Vec<u8> {
     let sig = issuer
         .sign(&KeyRef("i".into()), Alg::Es256, si.as_bytes())
         .unwrap();
-    format!("{si}.{}~", b64(&sig)).into_bytes()
+    format!("{si}.{}~{}~", b64(&sig), disclosures.join("~")).into_bytes()
 }
 
 const OFFER: &[u8] = br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#;
 
 fn setup(load_trust: bool, load_wua: bool) -> (Core, SoftwareSigner, SoftwareSigner) {
     let device = SoftwareSigner::generate_p256().unwrap();
-    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let issuer = SoftwareSigner::from_pkcs8_der(ISSUER_PKCS8).unwrap();
     let trust_op = SoftwareSigner::generate_p256().unwrap();
     let wp = SoftwareSigner::generate_p256().unwrap();
 
@@ -131,7 +158,7 @@ fn full_issuance_with_in_core_trust_and_attestation() {
         .any(|e| matches!(e, Effect::RequestCredential { .. })));
 
     // Credential returned → issued.
-    let cred = issued_sd_jwt(&issuer);
+    let cred = issued_sd_jwt(&issuer, device.public_key_raw());
     core.handle_event(Event::CredentialReceived {
         format: "dc+sd-jwt".into(),
         bytes: cred.clone(),
@@ -164,5 +191,45 @@ fn unattested_proof_key_is_rejected_in_core() {
     assert!(
         !fx.iter().any(|e| matches!(e, Effect::Sign { .. })),
         "without a valid WUA the proof key is not attested → no signing"
+    );
+}
+
+#[test]
+fn forged_credential_response_aborts_and_is_not_stored() {
+    let (mut core, device, _issuer) = setup(true, true);
+    let attacker = SoftwareSigner::generate_p256().unwrap();
+    assert!(core.handle_event(offer_event()).contains(&Effect::RequestToken));
+    let fx = core.handle_event(Event::TokenReceived {
+        bound: true,
+        c_nonce: 333,
+    });
+    let signing_input = fx
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Sign { payload, .. } => Some(payload.clone()),
+            _ => None,
+        })
+        .expect("proof signature requested");
+    let proof_signature = device
+        .sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input)
+        .unwrap();
+    core.handle_event(Event::DeviceSignatureProduced {
+        signature: proof_signature,
+    });
+
+    // The response is well-formed and device-bound, but the signer is not the key from the
+    // validated issuer certificate path.
+    let forged = issued_sd_jwt(&attacker, device.public_key_raw());
+    let effects = core.handle_event(Event::CredentialReceived {
+        format: "dc+sd-jwt".into(),
+        bytes: forged,
+    });
+
+    assert_eq!(effects, vec![Effect::Close]);
+    assert!(core.issued_credential().is_none());
+    assert_eq!(core.held_credentials_json(), "[]");
+    assert_eq!(
+        core.last_credential_ingestion_error(),
+        Some(&CredentialIngestionError::SignatureInvalid)
     );
 }

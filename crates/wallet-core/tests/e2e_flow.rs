@@ -98,7 +98,7 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
         ],
     );
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(HeldCredential {
+    core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt: issuer_jwt.clone(),
         disclosures_by_claim: by_claim,
         status_index: None,

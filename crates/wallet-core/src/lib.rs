@@ -74,40 +74,231 @@ fn format_name(f: oid4vci::CredentialFormat) -> &'static str {
     }
 }
 
-/// Parse a `dc+sd-jwt` compact serialization (`<issuer-jwt>~<disclosure>~…~`) into a held
-/// credential: the issuer JWT plus each named disclosure keyed by its claim name. Returns `None`
-/// if the compact is malformed. This is how an issued credential (received over the wire) becomes
-/// a stored holding — the same shape the shell loads a credential in.
-fn held_credential_from_compact(bytes: &[u8]) -> Option<HeldCredential> {
-    let compact = core::str::from_utf8(bytes).ok()?;
-    let sd = sdjwt::SdJwtVc::parse(compact).ok()?;
+/// Convert an already authenticated SD-JWT VC into the wallet's presentation holding.
+fn held_credential_from_verified_sd(
+    sd: &sdjwt::SdJwtVc,
+    status_index: Option<u64>,
+) -> Result<HeldCredential, CredentialIngestionError> {
     let mut disclosures_by_claim = BTreeMap::new();
     for raw in &sd.disclosures {
-        let d = sdjwt::Disclosure::parse(raw).ok()?;
+        let d = sdjwt::Disclosure::parse(raw)
+            .map_err(|_| CredentialIngestionError::MalformedCredential)?;
         // Object-member disclosures ([salt, name, value]) are the claims a wallet holds.
         if let Some(name) = d.name {
-            disclosures_by_claim.insert(name, raw.clone());
+            if disclosures_by_claim.insert(name, raw.clone()).is_some() {
+                return Err(CredentialIngestionError::DuplicateClaim);
+            }
         }
     }
-    Some(HeldCredential {
-        issuer_jwt: sd.issuer_jwt,
+    Ok(HeldCredential {
+        issuer_jwt: sd.issuer_jwt.clone(),
         disclosures_by_claim,
-        status_index: None,
+        status_index,
     })
 }
 
-/// Parse an issued `mso_mdoc` credential into a holding. OpenID4VCI delivers it as a base64url
-/// string of the `IssuerSigned` CBOR; we decode, parse, and read its doctype from the MSO.
-fn mdoc_holding_from_credential(bytes: &[u8]) -> Option<MdocHolding> {
+/// Decode the OpenID4VCI representation of an mdoc (`base64url(IssuerSigned CBOR)`).
+fn decode_mdoc_credential(
+    bytes: &[u8],
+) -> Result<mdoc::IssuerSigned, CredentialIngestionError> {
     use base64ct::{Base64UrlUnpadded, Encoding};
-    let compact = core::str::from_utf8(bytes).ok()?;
-    let cbor = Base64UrlUnpadded::decode_vec(compact.trim()).ok()?;
-    let issuer_signed = mdoc::IssuerSigned::parse(&cbor).ok()?;
-    let doctype = issuer_signed.doc_type().ok()?;
-    Some(MdocHolding {
-        doctype,
-        issuer_signed,
-    })
+    let compact = core::str::from_utf8(bytes)
+        .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+    let cbor = Base64UrlUnpadded::decode_vec(compact.trim())
+        .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+    mdoc::IssuerSigned::parse(&cbor)
+        .map_err(|_| CredentialIngestionError::MalformedCredential)
+}
+
+fn json_epoch_claim(
+    claims: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> Result<Option<i64>, CredentialIngestionError> {
+    match claims.get(name) {
+        None => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .map(Some)
+            .ok_or(CredentialIngestionError::MalformedCredential),
+    }
+}
+
+fn validate_json_validity(
+    claims: &serde_json::Map<String, serde_json::Value>,
+    now: i64,
+) -> Result<(), CredentialIngestionError> {
+    // Permit a small positive skew for issuer clocks, but never accept a future `nbf` or an
+    // expired credential. The SD-JWT VC claims are optional at the format layer; when present they
+    // are security inputs and therefore must have the exact integer type.
+    const IAT_CLOCK_SKEW_SECONDS: i64 = 300;
+    if json_epoch_claim(claims, "iat")?.is_some_and(|iat| iat > now + IAT_CLOCK_SKEW_SECONDS) {
+        return Err(CredentialIngestionError::CredentialNotYetValid);
+    }
+    if json_epoch_claim(claims, "nbf")?.is_some_and(|nbf| nbf > now) {
+        return Err(CredentialIngestionError::CredentialNotYetValid);
+    }
+    if json_epoch_claim(claims, "exp")?.is_some_and(|exp| exp <= now) {
+        return Err(CredentialIngestionError::CredentialExpired);
+    }
+    Ok(())
+}
+
+fn sdjwt_device_binding_matches(claims: &serde_json::Map<String, serde_json::Value>, key: &[u8]) -> bool {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+
+    if key.len() != 65 || key.first() != Some(&0x04) {
+        return false;
+    }
+    let Some(jwk) = claims
+        .get("cnf")
+        .and_then(|v| v.get("jwk"))
+        .and_then(|v| v.as_object())
+    else {
+        return false;
+    };
+    // Only a local public EC key is accepted. In particular, never follow an issuer-controlled
+    // URL from a confirmation method and never accept private key material in a credential.
+    if jwk.get("kty").and_then(|v| v.as_str()) != Some("EC")
+        || jwk.get("crv").and_then(|v| v.as_str()) != Some("P-256")
+        || jwk.contains_key("d")
+        || jwk.contains_key("jku")
+        || jwk.contains_key("x5u")
+    {
+        return false;
+    }
+    let (Some(x), Some(y)) = (
+        jwk.get("x")
+            .and_then(|v| v.as_str())
+            .and_then(|v| Base64UrlUnpadded::decode_vec(v).ok()),
+        jwk.get("y")
+            .and_then(|v| v.as_str())
+            .and_then(|v| Base64UrlUnpadded::decode_vec(v).ok()),
+    ) else {
+        return false;
+    };
+    x.len() == 32 && y.len() == 32 && key[1..33] == x && key[33..65] == y
+}
+
+fn status_index_from_claims(
+    claims: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<u64>, CredentialIngestionError> {
+    let Some(status) = claims.get("status") else {
+        return Ok(None);
+    };
+    let Some(reference) = status.get("status_list").and_then(|v| v.as_object()) else {
+        return Err(CredentialIngestionError::UnsupportedStatusReference);
+    };
+    let Some(uri) = reference.get("uri").and_then(|v| v.as_str()) else {
+        return Err(CredentialIngestionError::UnsupportedStatusReference);
+    };
+    if !uri.starts_with("https://") {
+        return Err(CredentialIngestionError::UnsupportedStatusReference);
+    }
+    let index = reference
+        .get("idx")
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+        })
+        .ok_or(CredentialIngestionError::UnsupportedStatusReference)?;
+    Ok(Some(index))
+}
+
+fn mdoc_device_binding_matches(device_key: &cose::cbor::Value, key: &[u8]) -> bool {
+    use cose::cbor::Value;
+
+    if key.len() != 65 || key.first() != Some(&0x04) {
+        return false;
+    }
+    let Value::Map(pairs) = device_key else {
+        return false;
+    };
+    let get = |label: &Value| {
+        pairs
+            .iter()
+            .find(|(candidate, _)| candidate == label)
+            .map(|(_, value)| value)
+    };
+    let public_only = !pairs.iter().any(|(label, _)| *label == Value::Nint(3)); // -4 / `d`
+    let x = get(&Value::Nint(1)); // -2
+    let y = get(&Value::Nint(2)); // -3
+    public_only
+        && get(&Value::Uint(1)) == Some(&Value::Uint(2)) // kty: EC2
+        && get(&Value::Nint(0)) == Some(&Value::Uint(1)) // crv: P-256
+        && matches!(x, Some(Value::Bytes(bytes)) if bytes.as_slice() == &key[1..33])
+        && matches!(y, Some(Value::Bytes(bytes)) if bytes.as_slice() == &key[33..65])
+}
+
+/// Parse the simplified mdoc profile's canonical UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`).
+fn mdoc_datetime_epoch(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
+        return None;
+    }
+    let number = |start: usize, end: usize| -> Option<i64> {
+        bytes[start..end]
+            .iter()
+            .try_fold(0i64, |n, b| b.is_ascii_digit().then_some(n * 10 + i64::from(b - b'0')))
+    };
+    let (year, month, day, hour, minute, second) = (
+        number(0, 4)?,
+        number(5, 7)?,
+        number(8, 10)?,
+        number(11, 13)?,
+        number(14, 16)?,
+        number(17, 19)?,
+    );
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if !(1970..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || day < 1
+        || day > month_days[(month - 1) as usize]
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    // Howard Hinnant's civil-date conversion, with the supported years constrained to positive
+    // values above. The constant makes 1970-01-01 day zero.
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year / 400;
+    let year_of_era = adjusted_year - era * 400;
+    let shifted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+fn validate_mdoc_validity(
+    validity: &mdoc::ValidityInfo,
+    now: i64,
+) -> Result<(), CredentialIngestionError> {
+    let signed = mdoc_datetime_epoch(&validity.signed)
+        .ok_or(CredentialIngestionError::MalformedCredential)?;
+    let valid_from = mdoc_datetime_epoch(&validity.valid_from)
+        .ok_or(CredentialIngestionError::MalformedCredential)?;
+    let valid_until = mdoc_datetime_epoch(&validity.valid_until)
+        .ok_or(CredentialIngestionError::MalformedCredential)?;
+    if signed > now + 300 || valid_from > now {
+        return Err(CredentialIngestionError::CredentialNotYetValid);
+    }
+    if valid_until <= now {
+        return Err(CredentialIngestionError::CredentialExpired);
+    }
+    if signed > valid_until || valid_from > valid_until {
+        return Err(CredentialIngestionError::MalformedCredential);
+    }
+    Ok(())
 }
 
 /// A human-readable rendering of an mdoc element value for the card display (UI hint only).
@@ -266,6 +457,44 @@ pub struct HeldCredential {
 pub struct MdocHolding {
     pub doctype: String,
     pub issuer_signed: mdoc::IssuerSigned,
+}
+
+/// Why a credential was refused before it could enter wallet storage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CredentialIngestionError {
+    ClockNotSet,
+    UnsupportedFormat,
+    UntrustedIssuer,
+    MalformedCredential,
+    UnsupportedAlgorithm,
+    SignatureInvalid,
+    IssuerMismatch,
+    UnknownCredentialType,
+    CredentialTypeFormatMismatch,
+    IssuerNotAllowedForType,
+    MandatoryClaimsMissing,
+    CredentialNotYetValid,
+    CredentialExpired,
+    DeviceBindingMissing,
+    DeviceBindingMismatch,
+    DuplicateClaim,
+    UnsupportedStatusReference,
+}
+
+/// The only values allowed across the authentication-to-storage boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VerifiedCredential {
+    SdJwt(HeldCredential),
+    Mdoc(MdocHolding),
+}
+
+impl VerifiedCredential {
+    fn format(&self) -> oid4vci::CredentialFormat {
+        match self {
+            Self::SdJwt(_) => oid4vci::CredentialFormat::DcSdJwt,
+            Self::Mdoc(_) => oid4vci::CredentialFormat::MsoMdoc,
+        }
+    }
 }
 
 /// Static wallet configuration.
@@ -449,6 +678,11 @@ pub struct Core {
     wua: Option<wua::WalletUnitAttestation>,
     issuer_trusted_current: bool,
     issuer_id_current: String,
+    /// Public key from the leaf of the currently validated issuer path.
+    issuer_public_key_current: Vec<u8>,
+    /// Parsed credential that crossed the authentication/policy boundary for this response.
+    pending_verified_credential: Option<VerifiedCredential>,
+    last_credential_ingestion_error: Option<CredentialIngestionError>,
     // Revocation: the current verified Token Status List, checked before presenting.
     status_list: Option<status::StatusList>,
     // Transaction (audit) log: privacy-preserving, tamper-evident record of completed flows (TS06).
@@ -491,6 +725,9 @@ impl Core {
             wua: None,
             issuer_trusted_current: false,
             issuer_id_current: String::new(),
+            issuer_public_key_current: Vec::new(),
+            pending_verified_credential: None,
+            last_credential_ingestion_error: None,
             status_list: None,
             log: txnlog::TransactionLog::new(),
             pay_summary: None,
@@ -709,19 +946,61 @@ impl Core {
         }
     }
 
-    /// Add a credential to the wallet's holdings (e.g. a PID or mDL obtained via issuance).
-    /// Idempotent: loading a byte-identical credential twice does not duplicate it.
-    pub fn load_credential(&mut self, credential: HeldCredential) {
+    /// Install an unverified SD-JWT holding in a test fixture.
+    ///
+    /// Production callers must use issuance or [`Self::ingest_credential`]. Keeping the bypass
+    /// loudly named prevents test setup from becoming an accidental storage API.
+    #[doc(hidden)]
+    pub fn load_unverified_credential_for_testing(&mut self, credential: HeldCredential) {
         if !self.credentials.contains(&credential) {
             self.credentials.push(credential);
         }
     }
 
-    /// Add an mdoc holding (e.g. an mso_mdoc mDL obtained via issuance). Idempotent.
-    pub fn load_mdoc_credential(&mut self, holding: MdocHolding) {
+    /// Install an unverified mdoc holding in a test fixture. Never exposed over FFI.
+    #[doc(hidden)]
+    pub fn load_unverified_mdoc_for_testing(&mut self, holding: MdocHolding) {
         if !self.mdoc_holdings.contains(&holding) {
             self.mdoc_holdings.push(holding);
         }
+    }
+
+    fn store_verified_credential(&mut self, credential: VerifiedCredential) {
+        match credential {
+            VerifiedCredential::SdJwt(holding) => {
+                if !self.credentials.contains(&holding) {
+                    self.credentials.push(holding);
+                }
+            }
+            VerifiedCredential::Mdoc(holding) => {
+                if !self.mdoc_holdings.contains(&holding) {
+                    self.mdoc_holdings.push(holding);
+                }
+            }
+        }
+    }
+
+    /// Authenticate, validate and store a credential obtained outside the active issuance
+    /// session (for example during a verified restore). This is the production storage boundary.
+    pub fn ingest_credential(
+        &mut self,
+        format: &str,
+        bytes: &[u8],
+        issuer_cert_chain: &[Vec<u8>],
+        issuer_id: &str,
+    ) -> Result<(), CredentialIngestionError> {
+        let format = parse_format(format).ok_or(CredentialIngestionError::UnsupportedFormat)?;
+        let issuer_key = self
+            .resolve_issuer_key(issuer_cert_chain)
+            .ok_or(CredentialIngestionError::UntrustedIssuer)?;
+        let verified = self.verify_received_credential(format, bytes, &issuer_key, issuer_id)?;
+        self.store_verified_credential(verified);
+        self.last_credential_ingestion_error = None;
+        Ok(())
+    }
+
+    pub fn last_credential_ingestion_error(&self) -> Option<&CredentialIngestionError> {
+        self.last_credential_ingestion_error.as_ref()
     }
 
     /// The credentials the wallet holds, as a JSON array the UI renders as cards. Each entry gives
@@ -875,8 +1154,13 @@ impl Core {
                 // Replay protection (`iss_seen_c_nonces`) deliberately persists across sessions.
                 self.issuance = oid4vci::State::Idle;
                 // Issuer trust is decided in-core against the trusted list (PID/attestation CAs).
-                self.issuer_trusted_current = self.resolve_issuer(&issuer_cert_chain);
+                self.issuer_public_key_current = self
+                    .resolve_issuer_key(&issuer_cert_chain)
+                    .unwrap_or_default();
+                self.issuer_trusted_current = !self.issuer_public_key_current.is_empty();
                 self.issuer_id_current = issuer_id;
+                self.pending_verified_credential = None;
+                self.last_credential_ingestion_error = None;
                 self.drive_issuance(oid4vci::Input::CredentialOffer(offer))
             }
             Event::ParPushed { pkce_s256 } => {
@@ -899,10 +1183,37 @@ impl Core {
                 effects
             }
             Event::CredentialReceived { format, bytes } => match parse_format(&format) {
-                Some(f) => {
-                    self.drive_issuance(oid4vci::Input::CredentialResponse { format: f, bytes })
+                Some(f) => match self.verify_received_credential(
+                    f,
+                    &bytes,
+                    &self.issuer_public_key_current,
+                    &self.issuer_id_current,
+                ) {
+                    Ok(verified) => {
+                        self.pending_verified_credential = Some(verified);
+                        self.last_credential_ingestion_error = None;
+                        self.drive_issuance(oid4vci::Input::CredentialResponse {
+                            format: f,
+                            bytes,
+                            issuer_authenticated: true,
+                        })
+                    }
+                    Err(error) => {
+                        self.pending_verified_credential = None;
+                        self.last_credential_ingestion_error = Some(error);
+                        self.drive_issuance(oid4vci::Input::CredentialResponse {
+                            format: f,
+                            bytes,
+                            issuer_authenticated: false,
+                        })
+                    }
+                },
+                None => {
+                    self.pending_verified_credential = None;
+                    self.last_credential_ingestion_error =
+                        Some(CredentialIngestionError::UnsupportedFormat);
+                    self.drive_issuance(oid4vci::Input::CredentialResponseRejected)
                 }
-                None => Vec::new(),
             },
         }
     }
@@ -964,14 +1275,173 @@ impl Core {
         effects
     }
 
-    /// Is the issuer chain trusted? Validated in-core against the PID/attestation CAs in the list.
-    fn resolve_issuer(&self, chain: &[Vec<u8>]) -> bool {
+    /// Validate the issuer path against PID/attestation anchors and return only the authenticated
+    /// leaf key. A caller cannot accidentally use a key from an unvalidated chain.
+    fn resolve_issuer_key(&self, chain: &[Vec<u8>]) -> Option<Vec<u8>> {
         let mut anchors = self.trust_store.parsed_anchors(ServiceType::PidProvider);
         anchors.extend(
             self.trust_store
                 .parsed_anchors(ServiceType::AttestationProvider),
         );
-        !anchors.is_empty() && x509::validate_path(chain, &anchors, self.now_epoch, &AwsLc).is_ok()
+        if anchors.is_empty() {
+            return None;
+        }
+        x509::validate_path(chain, &anchors, self.now_epoch, &AwsLc)
+            .ok()
+            .and_then(|path| path.first().map(|leaf| leaf.public_key_raw.clone()))
+    }
+
+    fn verify_received_credential(
+        &self,
+        format: oid4vci::CredentialFormat,
+        bytes: &[u8],
+        issuer_public_key: &[u8],
+        issuer_id: &str,
+    ) -> Result<VerifiedCredential, CredentialIngestionError> {
+        if self.now_epoch <= 0 {
+            return Err(CredentialIngestionError::ClockNotSet);
+        }
+        if issuer_public_key.is_empty() {
+            return Err(CredentialIngestionError::UntrustedIssuer);
+        }
+        if self.device_public_key.is_empty() {
+            return Err(CredentialIngestionError::DeviceBindingMissing);
+        }
+        match format {
+            oid4vci::CredentialFormat::DcSdJwt => {
+                self.verify_sdjwt_credential(bytes, issuer_public_key, issuer_id)
+            }
+            oid4vci::CredentialFormat::MsoMdoc => {
+                self.verify_mdoc_credential(bytes, issuer_public_key, issuer_id)
+            }
+        }
+    }
+
+    fn verify_sdjwt_credential(
+        &self,
+        bytes: &[u8],
+        issuer_public_key: &[u8],
+        issuer_id: &str,
+    ) -> Result<VerifiedCredential, CredentialIngestionError> {
+        let compact = core::str::from_utf8(bytes)
+            .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+        let sd = sdjwt::SdJwtVc::parse(compact)
+            .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+        let alg = sd
+            .issuer_algorithm()
+            .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+        // The current EUDI crypto profile and the certificate vectors use P-256. Do not silently
+        // accept algorithms merely because a backend happens to implement them.
+        if alg != Alg::Es256 {
+            return Err(CredentialIngestionError::UnsupportedAlgorithm);
+        }
+        let claims = sd
+            .verify_and_disclose(&AwsLc, &AwsLc, issuer_public_key, alg)
+            .map_err(|_| CredentialIngestionError::SignatureInvalid)?;
+        let issuer_payload = sd
+            .issuer_payload()
+            .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+        // These are protocol control claims, not holder-selectable attributes. Keeping them in the
+        // signed base payload ensures type selection, issuer policy and key binding still work on
+        // a data-minimised presentation that omits unrelated disclosures.
+        if !["iss", "vct", "cnf"]
+            .iter()
+            .all(|name| issuer_payload.contains_key(*name))
+            || (claims.contains_key("status") && !issuer_payload.contains_key("status"))
+        {
+            return Err(CredentialIngestionError::MalformedCredential);
+        }
+
+        let issuer = claims
+            .get("iss")
+            .and_then(|v| v.as_str())
+            .ok_or(CredentialIngestionError::MalformedCredential)?;
+        if issuer.is_empty() || issuer != issuer_id {
+            return Err(CredentialIngestionError::IssuerMismatch);
+        }
+        let vct = claims
+            .get("vct")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .ok_or(CredentialIngestionError::UnknownCredentialType)?;
+        let credential_type = self
+            .catalogue
+            .get(vct)
+            .ok_or(CredentialIngestionError::UnknownCredentialType)?;
+        if credential_type.format != "dc+sd-jwt" {
+            return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
+        }
+        if !self.catalogue.issuer_allowed(vct, issuer) {
+            return Err(CredentialIngestionError::IssuerNotAllowedForType);
+        }
+        let held_claims: Vec<String> = claims.keys().cloned().collect();
+        if !self.catalogue.satisfies_mandatory(vct, &held_claims) {
+            return Err(CredentialIngestionError::MandatoryClaimsMissing);
+        }
+        validate_json_validity(&claims, self.now_epoch)?;
+        if !claims.contains_key("cnf") {
+            return Err(CredentialIngestionError::DeviceBindingMissing);
+        }
+        if !sdjwt_device_binding_matches(&claims, &self.device_public_key) {
+            return Err(CredentialIngestionError::DeviceBindingMismatch);
+        }
+        let status_index = status_index_from_claims(&claims)?;
+        let holding = held_credential_from_verified_sd(&sd, status_index)?;
+        Ok(VerifiedCredential::SdJwt(holding))
+    }
+
+    fn verify_mdoc_credential(
+        &self,
+        bytes: &[u8],
+        issuer_public_key: &[u8],
+        issuer_id: &str,
+    ) -> Result<VerifiedCredential, CredentialIngestionError> {
+        let issuer_signed = decode_mdoc_credential(bytes)?;
+        let mso = mdoc::verify_issuer_signed(
+            &issuer_signed,
+            &AwsLc,
+            &AwsLc,
+            issuer_public_key,
+            Alg::Es256,
+        )
+        .map_err(|_| CredentialIngestionError::SignatureInvalid)?;
+        if mso.version != "1.0" || mso.digest_algorithm != "SHA-256" || mso.doc_type.is_empty() {
+            return Err(CredentialIngestionError::MalformedCredential);
+        }
+        let credential_type = self
+            .catalogue
+            .get(&mso.doc_type)
+            .ok_or(CredentialIngestionError::UnknownCredentialType)?;
+        if credential_type.format != "mso_mdoc" {
+            return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
+        }
+        if !self.catalogue.issuer_allowed(&mso.doc_type, issuer_id) {
+            return Err(CredentialIngestionError::IssuerNotAllowedForType);
+        }
+        let mut held_claims = Vec::new();
+        for (namespace, items) in &issuer_signed.name_spaces {
+            for item in items {
+                held_claims.push(item.element_id.clone());
+                held_claims.push(format!("{namespace}.{}", item.element_id));
+            }
+        }
+        if !self
+            .catalogue
+            .satisfies_mandatory(&mso.doc_type, &held_claims)
+        {
+            return Err(CredentialIngestionError::MandatoryClaimsMissing);
+        }
+        validate_mdoc_validity(&mso.validity_info, self.now_epoch)?;
+        if matches!(mso.device_key, cose::cbor::Value::Null) {
+            return Err(CredentialIngestionError::DeviceBindingMissing);
+        }
+        if !mdoc_device_binding_matches(&mso.device_key, &self.device_public_key) {
+            return Err(CredentialIngestionError::DeviceBindingMismatch);
+        }
+        Ok(VerifiedCredential::Mdoc(MdocHolding {
+            doctype: mso.doc_type,
+            issuer_signed,
+        }))
     }
 
     fn drive_issuance(&mut self, input: oid4vci::Input) -> Vec<Effect> {
@@ -1002,25 +1472,27 @@ impl Core {
             .map(|o| self.translate_issuance(o))
             .collect();
 
-        // The moment the credential is issued (once): store it as a holding so it can be presented
-        // and shown on the wallet home, and record the completed issuance in the audit log.
+        // The moment the credential is issued (once), consume the value that already crossed the
+        // authentication/policy boundary. Raw response bytes are never parsed into storage here.
         if !was_issued {
-            if let oid4vci::State::CredentialIssued { format, credential } = &self.issuance {
-                let fmt = format_name(*format).to_string();
-                match *format {
-                    oid4vci::CredentialFormat::DcSdJwt => {
-                        if let Some(held) = held_credential_from_compact(credential) {
-                            self.load_credential(held);
-                        }
+            if let oid4vci::State::CredentialIssued { format, .. } = &self.issuance {
+                let issued_format = *format;
+                let fmt = format_name(issued_format).to_string();
+                match self.pending_verified_credential.take() {
+                    Some(verified) if verified.format() == issued_format => {
+                        self.store_verified_credential(verified);
+                        self.record_issuance(fmt);
                     }
-                    // mso_mdoc credential response = base64url(IssuerSigned CBOR); store it parsed.
-                    oid4vci::CredentialFormat::MsoMdoc => {
-                        if let Some(holding) = mdoc_holding_from_credential(credential) {
-                            self.load_mdoc_credential(holding);
-                        }
+                    _ => {
+                        // Defensive invariant: the OID4VCI machine must never reach its success
+                        // state without a corresponding authenticated value to store.
+                        self.issuance = oid4vci::State::Aborted(
+                            oid4vci::AbortReason::CredentialInvalid,
+                        );
+                        self.last_credential_ingestion_error =
+                            Some(CredentialIngestionError::MalformedCredential);
                     }
                 }
-                self.record_issuance(fmt);
             }
         }
         effects
@@ -1423,14 +1895,7 @@ impl Core {
         credential: &[u8],
         issuer_chain: &[Vec<u8>],
     ) -> bool {
-        if !self.resolve_issuer(issuer_chain) {
-            return false;
-        }
-        let Some(issuer_key) = issuer_chain
-            .first()
-            .and_then(|der| x509::parse_cert(der).ok())
-            .map(|c| c.public_key_raw)
-        else {
+        let Some(issuer_key) = self.resolve_issuer_key(issuer_chain) else {
             return false;
         };
         core::str::from_utf8(credential)
@@ -1652,23 +2117,37 @@ impl WalletEngine {
         }
     }
 
-    /// Load a held credential: the issuer JWT plus a JSON object mapping claim name -> disclosure.
+    /// Authenticate and store a credential against the current trusted list. Returns an empty
+    /// string on success or a stable debug code on refusal.
+    pub fn ingest_credential(
+        &self,
+        format: String,
+        credential: Vec<u8>,
+        issuer_cert_chain: Vec<Vec<u8>>,
+        issuer_id: String,
+    ) -> String {
+        match self.inner.lock().expect("poisoned").ingest_credential(
+            &format,
+            &credential,
+            &issuer_cert_chain,
+            &issuer_id,
+        ) {
+            Ok(()) => String::new(),
+            Err(error) => format!("{error:?}"),
+        }
+    }
+
+    /// Deprecated compatibility entry point. Unauthenticated credential injection is disabled;
+    /// callers must use [`Self::ingest_credential`] or the OID4VCI event flow.
     pub fn load_credential(
         &self,
         issuer_jwt: String,
         disclosures_by_claim_json: String,
         status_index: Option<u64>,
     ) {
-        let disclosures_by_claim: BTreeMap<String, String> =
-            serde_json::from_str(&disclosures_by_claim_json).unwrap_or_default();
-        self.inner
-            .lock()
-            .expect("poisoned")
-            .load_credential(HeldCredential {
-                issuer_jwt,
-                disclosures_by_claim,
-                status_index,
-            });
+        // Consume inputs so generated bindings remain link-compatible during migration, while no
+        // untrusted value can cross into holdings.
+        drop((issuer_jwt, disclosures_by_claim_json, status_index));
     }
 
     /// The transaction (audit) log as JSON — completed presentations, payments, issuances. Records

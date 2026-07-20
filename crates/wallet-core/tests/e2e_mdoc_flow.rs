@@ -144,7 +144,7 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
     .expect("issuer signs the mDL");
 
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_mdoc_credential(MdocHolding {
+    core.load_unverified_mdoc_for_testing(MdocHolding {
         doctype: DOCTYPE.into(),
         issuer_signed: issuer_signed.clone(),
     });

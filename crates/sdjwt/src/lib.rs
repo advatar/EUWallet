@@ -35,6 +35,8 @@ pub enum SdJwtError {
     AlgNone,
     /// The JOSE header `alg` was missing or not one we support.
     UnsupportedAlg,
+    /// The JOSE `typ` header was not the required `dc+sd-jwt` media type.
+    InvalidType,
     /// A `crit` header member we do not understand → fail closed.
     UnknownCriticalParam,
     /// `_sd_alg` named a hash we do not implement.
@@ -169,10 +171,15 @@ impl SdJwtVc {
     ) -> Result<serde_json::Map<String, Json>, SdJwtError> {
         let (header, payload_bytes, signing_input, signature) = split_jws(&self.issuer_jwt)?;
 
-        // 1) Header: reject alg:none / unknown alg / unknown crit; enforce the expected alg.
+        // 1) Header: reject alg:none / unknown alg / unknown crit; enforce the expected alg and
+        // the SD-JWT VC media type. `typ: dc+sd-jwt` is mandatory in draft-17 and prevents a JWT
+        // minted for another protocol from being confused for a credential.
         let hdr_alg = parse_jose_alg(&header)?;
         if hdr_alg != expected_alg {
             return Err(SdJwtError::UnsupportedAlg);
+        }
+        if header.get("typ").and_then(|v| v.as_str()) != Some("dc+sd-jwt") {
+            return Err(SdJwtError::InvalidType);
         }
 
         // 2) Verify the signature over ASCII(header_b64 "." payload_b64).
@@ -223,6 +230,31 @@ impl SdJwtVc {
             }
         }
         Ok(result)
+    }
+
+    /// Parse and validate the issuer JWT's JOSE header and return its signing algorithm.
+    ///
+    /// Holders use this before signature verification so algorithm selection comes from the
+    /// protected header and is still constrained by their local algorithm policy.
+    pub fn issuer_algorithm(&self) -> Result<Alg, SdJwtError> {
+        let (header, _, _, _) = split_jws(&self.issuer_jwt)?;
+        if header.get("typ").and_then(|v| v.as_str()) != Some("dc+sd-jwt") {
+            return Err(SdJwtError::InvalidType);
+        }
+        parse_jose_alg(&header)
+    }
+
+    /// Decode the issuer-signed payload without applying disclosures.
+    ///
+    /// Callers use this only after signature verification to enforce that protocol control claims
+    /// such as `vct` and `cnf` were not made selectively disclosable.
+    pub fn issuer_payload(&self) -> Result<serde_json::Map<String, Json>, SdJwtError> {
+        let (_, payload, _, _) = split_jws(&self.issuer_jwt)?;
+        serde_json::from_slice::<Json>(&payload)
+            .map_err(|_| SdJwtError::InvalidJson)?
+            .as_object()
+            .cloned()
+            .ok_or(SdJwtError::InvalidJson)
     }
 }
 

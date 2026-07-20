@@ -90,7 +90,7 @@ fn full_presentation_over_live_tcp() {
     let s = wallet.scenario_with_response_uri(&format!("http://127.0.0.1:{port}/response"));
 
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(HeldCredential {
+    core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt: s.issuer_jwt.clone(),
         disclosures_by_claim: serde_json::from_str(&s.disclosures_by_claim_json).unwrap(),
         status_index: None,

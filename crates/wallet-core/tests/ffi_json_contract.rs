@@ -21,7 +21,7 @@ fn presentation_json_contract_is_camel_case() {
     let wallet = DemoWallet::new();
     let s = wallet.scenario();
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(wallet_core::HeldCredential {
+    core.load_unverified_credential_for_testing(wallet_core::HeldCredential {
         issuer_jwt: s.issuer_jwt.clone(),
         disclosures_by_claim: serde_json::from_str(&s.disclosures_by_claim_json).unwrap(),
         status_index: None,

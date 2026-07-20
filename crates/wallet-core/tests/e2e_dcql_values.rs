@@ -79,7 +79,7 @@ fn sign_values_request(rp: &SoftwareSigner, nonce: u64, claim: &str, allowed: se
 fn ready_core(issuer: &SoftwareSigner, operator: &SoftwareSigner) -> Core {
     let (issuer_jwt, by_claim) = issue_pid(issuer);
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(HeldCredential {
+    core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt,
         disclosures_by_claim: by_claim,
         status_index: None,

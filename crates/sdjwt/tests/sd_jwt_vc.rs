@@ -109,6 +109,11 @@ fn verify_and_disclose_returns_disclosed_claims() {
     ]);
     let compact = format!("{jwt}~{}~{}~", disclosures[0], disclosures[1]);
     let sd = SdJwtVc::parse(&compact).unwrap();
+    assert_eq!(sd.issuer_algorithm(), Ok(Alg::Es256));
+    assert_eq!(
+        sd.issuer_payload().unwrap().get("vct"),
+        Some(&json!("urn:eudi:pid:1"))
+    );
 
     let claims = sd
         .verify_and_disclose(&StubCrypto, &RealDigest, b"issuer-pub", Alg::Es256)
@@ -119,6 +124,21 @@ fn verify_and_disclose_returns_disclosed_claims() {
     // The _sd machinery must not leak into the disclosed claims.
     assert!(claims.get("_sd").is_none());
     assert!(claims.get("_sd_alg").is_none());
+}
+
+#[test]
+fn verify_rejects_a_jwt_from_another_media_type() {
+    let header = b64(br#"{"alg":"ES256","typ":"JWT"}"#);
+    let payload = b64(br#"{"iss":"https://issuer.example","vct":"urn:eudi:pid:1"}"#);
+    let signing_input = format!("{header}.{payload}");
+    let jwt = format!("{signing_input}.{}", b64(&fnv(signing_input.as_bytes())));
+    let sd = SdJwtVc::parse(&format!("{jwt}~")).unwrap();
+
+    assert_eq!(sd.issuer_algorithm(), Err(SdJwtError::InvalidType));
+    assert_eq!(
+        sd.verify_and_disclose(&StubCrypto, &RealDigest, b"pub", Alg::Es256),
+        Err(SdJwtError::InvalidType)
+    );
 }
 
 #[test]

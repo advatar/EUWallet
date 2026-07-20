@@ -11,7 +11,7 @@ fn demo_presentation_drives_to_done() {
     let s = wallet.scenario();
 
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(HeldCredential {
+    core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt: s.issuer_jwt.clone(),
         disclosures_by_claim: serde_json::from_str(&s.disclosures_by_claim_json).unwrap(),
         status_index: None,
