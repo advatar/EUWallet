@@ -73,11 +73,11 @@ operational solution needed to enter those processes.
       transaction binding semantics without over-disclosure or partial responses.
   - [x] Replace opaque `claim_sets` and `credential_sets` with bounded OpenID4VP 1.0 types; ignore
         bounded unknown extensions; select the first satisfiable claim option; and integrate atomic
-        required/optional Credential Set planning, minimised consent and per-query VP arrays for
-        supported SD-JWT VC and mdoc holdings.
-  - [ ] Add holder-driven choice when several Credential Set options are satisfiable; implement
-        authenticated `trusted_authorities`, `multiple=true`, mdoc retention intent and typed
-        `transaction_data`. These modifiers remain rejected until each is bound end to end.
+        required Credential Set planning, minimised consent and per-query VP arrays for supported
+        SD-JWT VC and mdoc holdings. Optional sets are omitted without holder opt-in.
+  - [ ] Add holder-driven opt-in for optional Credential Sets and choice when several options are
+        satisfiable; implement authenticated `trusted_authorities`, `multiple=true`, mdoc retention
+        intent and typed `transaction_data`. These modifiers remain rejected until bound end to end.
 - [x] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths
       ([#6](https://github.com/advatar/EUWallet/issues/6)).
   - [x] Require and emit canonical CBOR tag-0 RFC 3339 `tdate` validity values, with malformed
