@@ -461,7 +461,7 @@ impl DemoWallet {
         ];
         let mut name_spaces = BTreeMap::new();
         name_spaces.insert("org.iso.18013.5.1".to_string(), items);
-        let issued = build_and_sign(
+        let mut issued = build_and_sign(
             name_spaces,
             "org.iso.18013.5.1.mDL",
             Self::cose_key(self.device.public_key_raw()),
@@ -476,6 +476,8 @@ impl DemoWallet {
             Alg::Es256,
         )
         .expect("issue demo mdoc");
+        issued.issuer_auth.unprotected.x5chain =
+            Some(Box::new(cose::X5Chain::Single(issuer_certificate_der())));
         Base64UrlUnpadded::encode_string(&issued.to_value().to_canonical())
     }
 

@@ -163,7 +163,7 @@ fn issued_mdoc(issuer: &SoftwareSigner, device_public_key: &[u8]) -> Vec<u8> {
             },
         ],
     );
-    let credential = build_and_sign(
+    let mut credential = build_and_sign(
         name_spaces,
         MDOC_TYPE,
         cose_key(device_public_key),
@@ -178,6 +178,8 @@ fn issued_mdoc(issuer: &SoftwareSigner, device_public_key: &[u8]) -> Vec<u8> {
         Alg::Es256,
     )
     .unwrap();
+    credential.issuer_auth.unprotected.x5chain =
+        Some(Box::new(cose::X5Chain::Single(issuer_der())));
     b64(&credential.to_value().to_canonical()).into_bytes()
 }
 

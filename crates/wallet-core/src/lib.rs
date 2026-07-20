@@ -108,6 +108,24 @@ fn decode_mdoc_credential(bytes: &[u8]) -> Result<mdoc::IssuerSigned, Credential
     mdoc::IssuerSigned::parse(&cbor).map_err(|_| CredentialIngestionError::MalformedCredential)
 }
 
+/// Extract bounded RFC 9360 issuer-certificate evidence from the credential itself. The COSE
+/// parser has already rejected malformed, colliding and over-budget header values; this function
+/// deliberately does not fall back to a path supplied alongside the credential.
+fn embedded_mdoc_issuer_chain(
+    issuer_signed: &mdoc::IssuerSigned,
+) -> Result<Vec<Vec<u8>>, CredentialIngestionError> {
+    let chain = issuer_signed
+        .issuer_auth
+        .x5chain()
+        .map_err(|_| CredentialIngestionError::MalformedCredential)?
+        .ok_or(CredentialIngestionError::UntrustedIssuer)?;
+    Ok(chain
+        .certificates()
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect())
+}
+
 fn json_epoch_claim(
     claims: &serde_json::Map<String, serde_json::Value>,
     name: &str,
@@ -1311,9 +1329,35 @@ impl Core {
         issuer_cert_chain: &[Vec<u8>],
         issuer_id_assertion: &str,
     ) -> Result<AuthenticatedCredential, CredentialIngestionError> {
-        let issuers = self.resolve_credential_issuers(issuer_cert_chain);
-        let (credential, issuer) =
-            self.verify_received_credential(format, bytes, &issuers, issuer_id_assertion)?;
+        if self.now_epoch <= 0 {
+            return Err(CredentialIngestionError::ClockNotSet);
+        }
+        if self.device_public_key.is_empty() {
+            return Err(CredentialIngestionError::DeviceBindingMissing);
+        }
+
+        let (credential, issuer) = match format {
+            oid4vci::CredentialFormat::DcSdJwt => {
+                // SD-JWT VC has no COSE issuerAuth header, so its authenticated transport/restore
+                // boundary still supplies the issuer certificate bundle explicitly.
+                let issuers = self.resolve_credential_issuers(issuer_cert_chain);
+                if !Self::issuer_candidates_are_consistent(&issuers) {
+                    return Err(CredentialIngestionError::UntrustedIssuer);
+                }
+                self.verify_sdjwt_credential(bytes, &issuers, issuer_id_assertion)?
+            }
+            oid4vci::CredentialFormat::MsoMdoc => {
+                // For mdoc, the credential's own bounded x5chain is the sole certificate evidence
+                // used to authenticate issuerAuth. A caller path can neither rescue nor replace it.
+                let issuer_signed = decode_mdoc_credential(bytes)?;
+                let embedded_chain = embedded_mdoc_issuer_chain(&issuer_signed)?;
+                let issuers = self.resolve_credential_issuers(&embedded_chain);
+                if !Self::issuer_candidates_are_consistent(&issuers) {
+                    return Err(CredentialIngestionError::UntrustedIssuer);
+                }
+                self.verify_mdoc_credential(issuer_signed, &issuers, issuer_id_assertion)?
+            }
+        };
         Ok(AuthenticatedCredential {
             credential,
             provenance: CredentialProvenance {
@@ -1326,6 +1370,8 @@ impl Core {
 
     /// Authenticate, validate and store a credential obtained outside the active issuance
     /// session (for example during a verified restore). This is the production storage boundary.
+    /// `issuer_cert_chain` authenticates SD-JWT VC inputs; an mdoc is authenticated exclusively
+    /// with the bounded `x5chain` embedded in its `issuerAuth` COSE header.
     pub fn ingest_credential(
         &mut self,
         format: &str,
@@ -1921,9 +1967,9 @@ impl Core {
             .ok_or(CredentialIngestionError::IssuerServiceMismatch)
     }
 
-    /// Every service candidate comes from the same supplied leaf-first path. Reject any ambiguity
-    /// before a credential verifier is allowed to use one candidate's key and another candidate's
-    /// policy domain.
+    /// Every service candidate comes from the same bounded certificate bundle. Reject any
+    /// ambiguity before a credential verifier is allowed to use one candidate's key and another
+    /// candidate's policy domain.
     fn issuer_candidates_are_consistent(issuers: &[CredentialIssuerEvidence]) -> bool {
         let Some(first) = issuers.first() else {
             return false;
@@ -1955,32 +2001,6 @@ impl Core {
                     .filter(|leaf| !leaf.is_ca)
                     .map(|leaf| leaf.public_key_raw.clone())
             })
-    }
-
-    fn verify_received_credential(
-        &self,
-        format: oid4vci::CredentialFormat,
-        bytes: &[u8],
-        issuers: &[CredentialIssuerEvidence],
-        issuer_id_assertion: &str,
-    ) -> Result<(VerifiedCredential, CredentialIssuerEvidence), CredentialIngestionError> {
-        if self.now_epoch <= 0 {
-            return Err(CredentialIngestionError::ClockNotSet);
-        }
-        if !Self::issuer_candidates_are_consistent(issuers) {
-            return Err(CredentialIngestionError::UntrustedIssuer);
-        }
-        if self.device_public_key.is_empty() {
-            return Err(CredentialIngestionError::DeviceBindingMissing);
-        }
-        match format {
-            oid4vci::CredentialFormat::DcSdJwt => {
-                self.verify_sdjwt_credential(bytes, issuers, issuer_id_assertion)
-            }
-            oid4vci::CredentialFormat::MsoMdoc => {
-                self.verify_mdoc_credential(bytes, issuers, issuer_id_assertion)
-            }
-        }
     }
 
     fn verify_sdjwt_credential(
@@ -2068,11 +2088,10 @@ impl Core {
 
     fn verify_mdoc_credential(
         &self,
-        bytes: &[u8],
+        issuer_signed: mdoc::IssuerSigned,
         issuers: &[CredentialIssuerEvidence],
         issuer_id_assertion: &str,
     ) -> Result<(VerifiedCredential, CredentialIssuerEvidence), CredentialIngestionError> {
-        let issuer_signed = decode_mdoc_credential(bytes)?;
         let mso = mdoc::verify_issuer_signed(
             &issuer_signed,
             &AwsLc,
