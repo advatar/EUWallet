@@ -178,7 +178,7 @@ operational solution needed to enter those processes.
         fallback to demo storage.
     - [x] Add the bounded, authenticated and encrypted iOS storage primitive.
     - [x] Add the equivalent Android Keystore-backed storage primitive.
-    - [ ] Expose a bounded, secret-safe Core checkpoint contract through UniFFI and add native
+    - [x] Expose a bounded, secret-safe Core checkpoint contract through UniFFI and add native
           lifecycle coordinator seams that bootstrap the live clock, trust, device key and WUA
           before restore; gate each resulting effect batch on an exact compare-and-swap commit;
           retry a failed commit without re-handling the event; and discard in-flight protocol work

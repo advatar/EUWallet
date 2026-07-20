@@ -41,9 +41,36 @@ class EffectExecutor(
     private val transferOfferPublisher: TransferOfferPublisher? = null,
     private val presentationRedirectHandler: OpenId4VpRedirectHandler? = null,
 ) {
+    private var pendingDurableEventJson: String? = null
+
     fun send(eventJson: String): EffectCascadeOutcome {
-        val queue = ArrayDeque(invokeCore(eventJson))
-        val initialEventType = eventType(eventJson)
+        val effects = invokeCore(eventJson)
+        return drain(effects, eventType(eventJson))
+    }
+
+    /**
+     * Commit and resume the exact transition blocked by durable persistence. The coordinator
+     * returns its retained effects without invoking Core again.
+     */
+    fun retryPendingDurableCommit(): EffectCascadeOutcome {
+        val eventJson = pendingDurableEventJson
+            ?: throw WalletShellException.NoPendingDurableCommit()
+        val retrying = engine as? DurableLifecycleRetrying
+            ?: throw WalletShellException.DurableRetryUnavailable()
+        val output = try {
+            retrying.retryPendingEvent(eventJson)
+        } catch (error: Exception) {
+            throw WalletShellException.CoreInvocationFailure(error)
+        }
+        pendingDurableEventJson = null
+        return drain(WalletEffectDecoder.decodeCoreOutput(output), eventType(eventJson))
+    }
+
+    private fun drain(
+        initialEffects: List<WalletEffect>,
+        initialEventType: String?,
+    ): EffectCascadeOutcome {
+        val queue = ArrayDeque(initialEffects)
         var executedEffects = 0
         var acknowledged = false
         var renderedInput = false
@@ -101,11 +128,13 @@ class EffectExecutor(
     }
 
     private fun invokeCore(eventJson: String): List<WalletEffect> {
+        pendingDurableEventJson = eventJson
         val output = try {
             engine.handleEventJson(eventJson)
         } catch (error: Exception) {
             throw WalletShellException.CoreInvocationFailure(error)
         }
+        pendingDurableEventJson = null
         return WalletEffectDecoder.decodeCoreOutput(output)
     }
 

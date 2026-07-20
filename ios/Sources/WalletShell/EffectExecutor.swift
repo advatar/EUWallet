@@ -286,6 +286,9 @@ extension HttpClientError: LocalizedError {
 /// events such as `userDeclined` or `presentationDelivered`.
 public enum EffectExecutorError: Error, Equatable {
     case ffi(FfiContractError)
+    case coreInvocationFailed
+    case noPendingDurableCommit
+    case durableRetryUnavailable
     case signingFailed(String)
     case storageFailed(String)
     case transportFailed(HttpClientError)
@@ -301,6 +304,9 @@ extension EffectExecutorError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .ffi(let error): return error.localizedDescription
+        case .coreInvocationFailed: return "Wallet core invocation failed"
+        case .noPendingDurableCommit: return "No durable wallet transition is awaiting retry"
+        case .durableRetryUnavailable: return "The wallet engine has no durable retry seam"
         case .signingFailed(let reason): return "Device signing failed: \(reason)"
         case .storageFailed(let reason): return "Secure storage failed: \(reason)"
         case .transportFailed(let error): return error.localizedDescription
@@ -361,6 +367,7 @@ public final class EffectExecutor {
     private let transferOffers: TransferOfferPublisher?
     private let presentationRedirectHandler: OpenID4VPRedirectHandler?
     private let render: (UInt64?, Data?, ScreenDescription) throws -> Void
+    private var pendingDurableEventJson: String?
 
     public init(
         engine: WalletEngineDriving,
@@ -389,8 +396,40 @@ public final class EffectExecutor {
     /// Send one JSON event and fully drain the resulting effect cascade.
     @discardableResult
     public func send(eventJson: String) async throws -> EffectCascadeOutcome {
-        var queue = try decode(engine.handleEventJson(eventJson: eventJson))
-        let initialEventType = Self.eventType(eventJson)
+        let output = try invokeCore(eventJson)
+        return try await drain(
+            initialCoreOutput: output,
+            initialEventType: Self.eventType(eventJson))
+    }
+
+    /// Retry the exact Core transition whose durable commit blocked this executor. The lifecycle
+    /// coordinator commits its retained checkpoint and returns its retained effect batch without
+    /// invoking Core again; draining then continues from that batch.
+    @discardableResult
+    public func retryPendingDurableCommit() async throws -> EffectCascadeOutcome {
+        guard let eventJson = pendingDurableEventJson else {
+            throw EffectExecutorError.noPendingDurableCommit
+        }
+        guard let retrying = engine as? any DurableLifecycleRetrying else {
+            throw EffectExecutorError.durableRetryUnavailable
+        }
+        let output: String
+        do {
+            output = try retrying.retryPendingEvent(eventJson: eventJson)
+        } catch {
+            throw EffectExecutorError.coreInvocationFailed
+        }
+        pendingDurableEventJson = nil
+        return try await drain(
+            initialCoreOutput: output,
+            initialEventType: Self.eventType(eventJson))
+    }
+
+    private func drain(
+        initialCoreOutput: String,
+        initialEventType: String?
+    ) async throws -> EffectCascadeOutcome {
+        var queue = try decode(initialCoreOutput)
         var acknowledged = false
         var renderedInput = false
         var awaitingExternalInput = false
@@ -431,7 +470,7 @@ public final class EffectExecutor {
                    followUpType == "operationSucceeded" {
                     awaitingExternalInput = true
                 }
-                queue.append(contentsOf: try decode(engine.handleEventJson(eventJson: followUp)))
+                queue.append(contentsOf: try decode(invokeCore(followUp)))
             }
         }
 
@@ -451,6 +490,20 @@ public final class EffectExecutor {
             return .idle
         }
         return .aborted(.missingTerminalOutcome)
+    }
+
+    private func invokeCore(_ eventJson: String) throws -> String {
+        pendingDurableEventJson = eventJson
+        do {
+            let output = try engine.handleEventJson(eventJson: eventJson)
+            pendingDurableEventJson = nil
+            return output
+        } catch {
+            // Retain only the exact event in process memory so the durable coordinator can retry
+            // its already-computed checkpoint/effects. Never attach the event or source error to a
+            // diagnostic value.
+            throw EffectExecutorError.coreInvocationFailed
+        }
     }
 
     private static func eventType(_ json: String) -> String? {
