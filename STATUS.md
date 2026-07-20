@@ -155,7 +155,7 @@ operational solution needed to enter those processes.
   - [x] Add the iOS WalletShell encrypted dual-slot storage primitive with strict bounded envelopes,
         a Keychain generation/digest anchor, compare-and-swap commits, backup/file-protection policy
         and crash/tamper tests; Core serialization and lifecycle wiring remain separate work.
-  - [ ] Add the Android WalletShell encrypted dual-slot storage primitive with a validated
+  - [x] Add the Android WalletShell encrypted dual-slot storage primitive with a validated
         StrongBox-first AndroidKeyStore AES key, authenticated generation/digest anchor,
         compare-and-swap commits, no-backup/path-hardening policy and exhaustive JVM crash/tamper
         tests; Core serialization and lifecycle wiring remain separate work.
