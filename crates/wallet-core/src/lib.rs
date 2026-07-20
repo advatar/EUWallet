@@ -1135,8 +1135,9 @@ struct SessionInfo {
     response_mode: String,
     /// The verifier's response-encryption key (uncompressed P-256), present iff `direct_post.jwt`.
     response_encryption_key: Option<Vec<u8>>,
-    /// The full DCQL query when present. Its set planner selects the complete required/optional
-    /// subset, with at most one held credential per supported query until `multiple=true` lands.
+    /// The full DCQL query when present. Its set planner selects the complete required subset and
+    /// omits optional sets without holder opt-in, with at most one held credential per supported
+    /// query until `multiple=true` lands.
     dcql: Option<oid4vp::dcql::DcqlQuery>,
     /// Exact credentials selected before consent. Later phases revalidate these values instead of
     /// silently switching to a different holding after the user approved the screen.
@@ -3514,9 +3515,9 @@ impl Core {
 
         let prepared = match &session.dcql {
             Some(dcql) if !dcql.credentials.is_empty() => {
-                // Evaluate every query without mutating session state, then select Credential Set
-                // options atomically. Optional unsatisfied sets therefore cannot poison an
-                // otherwise valid plan, while a required unsatisfied set cannot leak a partial
+                // Evaluate every query without mutating session state, then select required
+                // Credential Set options atomically. Optional sets are omitted until the holder
+                // explicitly opts in, while a required unsatisfied set cannot leak a partial
                 // credential through consent, signing or response assembly.
                 let mut candidates = Vec::with_capacity(dcql.credentials.len());
                 let mut errors = Vec::with_capacity(dcql.credentials.len());

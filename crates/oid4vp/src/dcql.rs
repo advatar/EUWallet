@@ -58,7 +58,8 @@ where
 }
 
 /// A full DCQL query. Without `credential_sets` every Credential Query is required; with them,
-/// required and optional combinations determine the presented subset.
+/// required combinations determine the default presented subset and optional combinations await
+/// explicit holder opt-in.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DcqlQuery {
     #[serde(deserialize_with = "deserialize_non_empty_credentials")]
@@ -336,9 +337,10 @@ impl DcqlQuery {
     /// Compute a deterministic, atomic Credential Query plan from candidate availability.
     ///
     /// Without `credential_sets`, every Credential Query is required. With sets, the first
-    /// satisfiable option of each set is selected; an unavailable optional set is skipped, while
-    /// an unavailable required set rejects the complete plan. The returned indices always follow
-    /// original `credentials` order, so signing, consent and response assembly remain stable.
+    /// satisfiable option of each required set is selected and any unavailable required set
+    /// rejects the complete plan. Optional sets are omitted until an explicit holder opt-in
+    /// contract exists. The returned indices always follow original `credentials` order, so
+    /// signing, consent and response assembly remain stable.
     pub fn credential_selection_plan(&self, satisfiable: &[bool]) -> Option<Vec<usize>> {
         if satisfiable.len() != self.credentials.len() {
             return None;
@@ -352,6 +354,12 @@ impl DcqlQuery {
 
         let mut selected = vec![false; self.credentials.len()];
         for credential_set in credential_sets {
+            // `required=false` permits the wallet to return the set; it does not justify automatic
+            // extra disclosure. A future holder-choice contract can explicitly opt into one of
+            // these options. Until then, data minimisation requires omitting it unconditionally.
+            if !credential_set.required {
+                continue;
+            }
             let option = credential_set.options.iter().find(|option| {
                 option.0.iter().all(|id| {
                     self.credentials
@@ -360,12 +368,7 @@ impl DcqlQuery {
                         .is_some_and(|index| satisfiable[index])
                 })
             });
-            let Some(option) = option else {
-                if credential_set.required {
-                    return None;
-                }
-                continue;
-            };
+            let option = option?;
             for id in &option.0 {
                 let index = self
                     .credentials
@@ -784,29 +787,33 @@ mod tests {
             "credentials": [
                 {"id":"a", "format":"dc+sd-jwt", "meta":{"vct_values":["a"]}},
                 {"id":"b", "format":"dc+sd-jwt", "meta":{"vct_values":["b"]}},
-                {"id":"c", "format":"dc+sd-jwt", "meta":{"vct_values":["c"]}}
+                {"id":"c", "format":"dc+sd-jwt", "meta":{"vct_values":["c"]}},
+                {"id":"d", "format":"dc+sd-jwt", "meta":{"vct_values":["d"]}}
             ],
             "credential_sets": [
-                {"options": [["a", "b"], ["c"]]},
-                {"required": false, "options": [["b"]]}
+                {"options": [["b", "a"], ["c"]]},
+                {"options": [["c", "a"]]},
+                {"required": false, "options": [["d"]]}
             ]
         }))
         .unwrap();
 
-        // The first required option is incomplete, so the complete second option wins. The
-        // unavailable optional set is skipped rather than becoming an implicit requirement.
+        // The first required option is incomplete, so its complete fallback wins; the second
+        // required set adds `a`. Their union is de-duplicated in original Credential Query order.
+        // Satisfiable optional `d` remains omitted without explicit holder opt-in.
         assert_eq!(
-            query.credential_selection_plan(&[true, false, true]),
-            Some(vec![2])
+            query.credential_selection_plan(&[true, false, true, true]),
+            Some(vec![0, 2])
         );
-        // When the preferred required and optional options are both satisfiable, their union is
-        // returned once and in original Credential Query order.
+        // Both preferred required options are complete. Their stable union omits optional `d`.
         assert_eq!(
-            query.credential_selection_plan(&[true, true, true]),
-            Some(vec![0, 1])
+            query.credential_selection_plan(&[true, true, true, true]),
+            Some(vec![0, 1, 2])
         );
+        // The first required set could use `c`, but the second required set is incomplete: the
+        // entire plan fails instead of returning the first set as a partial response.
         assert_eq!(
-            query.credential_selection_plan(&[false, false, false]),
+            query.credential_selection_plan(&[false, false, true, true]),
             None
         );
         assert_eq!(query.credential_selection_plan(&[true, true]), None);
@@ -820,6 +827,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             optional_only.credential_selection_plan(&[false]),
+            Some(vec![])
+        );
+        assert_eq!(
+            optional_only.credential_selection_plan(&[true]),
             Some(vec![])
         );
     }
