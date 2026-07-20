@@ -235,7 +235,7 @@ fn dcql_vct_constraint_selects_the_requested_type() {
     add_credential(&mut core, &wallet, &scn, 502, &scn.pid_credential_compact);
 
     // scenario_with_response_uri carries a real DCQL query for age_over_18 constrained to the PID.
-    let s = wallet.scenario_with_response_uri("http://127.0.0.1:1/response");
+    let s = wallet.scenario_with_response_uri("https://rp.example/response");
     core.handle_event(Event::AuthorizationRequestReceived {
         request: s.presentation_request.clone(),
     });

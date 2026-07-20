@@ -61,6 +61,7 @@ fn sign_values_request(rp: &SoftwareSigner, nonce: u64, claim: &str, allowed: se
         "nonce": nonce,
         "aud": "wallet.example",
         "response_uri": "https://rp.example/response",
+        "response_mode": "direct_post",
         "purpose": "Check a constrained claim",
         "dcql_query": { "credentials": [{
             "id": "pid",
@@ -94,7 +95,7 @@ fn drive_to_consent(core: &mut Core, request: Vec<u8>) {
     core.handle_event(Event::AuthorizationRequestReceived { request });
     core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec!["https://rp.example/response".into()],
     });
 }
 

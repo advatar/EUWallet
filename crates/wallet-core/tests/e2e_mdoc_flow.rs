@@ -67,6 +67,7 @@ fn sign_mdoc_request(rp: &SoftwareSigner, nonce: u64) -> Vec<u8> {
         "nonce": nonce,
         "aud": "wallet.example",
         "response_uri": RESPONSE_URI,
+        "response_mode": "direct_post",
         "purpose": "Prove you are over 18",
         "dcql_query": {
             "credentials": [{
@@ -168,7 +169,7 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
     // ---- 2) Shell supplies the RP cert chain; core validates against the trusted list → consent. ----
     let fx = core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec![RESPONSE_URI.into()],
     });
     let screen = fx.iter().find_map(|e| match e {
         Effect::Render { screen } => Some(screen.clone()),

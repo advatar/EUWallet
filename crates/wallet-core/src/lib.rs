@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use crypto_backend::AwsLc;
 use crypto_traits::{Alg, Digest};
-use oid4vp::{Env, Input, ResolvedTrust, SelectedCredential, State};
+use oid4vp::{AbortReason, Env, Input, ResolvedTrust, SelectedCredential, State};
 use presenter::{minimum_claim_set, ConsentScreen, PaymentScreen, ScreenDescription, SignScreen};
 use serde::{Deserialize, Serialize};
 use trust::{ServiceType, TrustStore};
@@ -550,6 +550,8 @@ pub enum Event {
     /// Whether the RP is *registered* is decided IN-CORE against the trusted list — not here.
     RpCertChainResolved {
         rp_cert_chain: Vec<Vec<u8>>,
+        /// Authenticated RP delivery endpoints. The legacy redirect-oriented name is retained in
+        /// the FFI contract; presentation `response_uri` values are matched against this list too.
         registered_redirect_uris: Vec<String>,
     },
     /// The user approved the consent screen.
@@ -1244,6 +1246,14 @@ impl Core {
             oid4vp::step(&self.vp, &input, &env)
         };
         let was_done = matches!(self.vp, State::Done);
+        let was_aborted = matches!(self.vp, State::Aborted(_));
+        let newly_aborted = if was_aborted {
+            None
+        } else if let State::Aborted(reason) = &next {
+            Some(*reason)
+        } else {
+            None
+        };
         self.vp = next;
 
         // Capture session details the moment the request is validated (needed later for the
@@ -1263,16 +1273,66 @@ impl Core {
             });
         }
 
-        let effects: Vec<Effect> = outputs
+        let mut effects: Vec<Effect> = outputs
             .into_iter()
             .flat_map(|o| self.translate(o))
             .collect();
+
+        // Delivery-policy failures happen before consent and therefore have no protocol output of
+        // their own. Surface a stable error screen + close effect instead of silently stalling.
+        if let Some(reason) = newly_aborted {
+            if let Some(error_effects) = Self::presentation_delivery_error_effects(reason) {
+                self.session = None;
+                effects.extend(error_effects);
+            }
+        }
 
         // Record a completed presentation the moment the machine reaches Done (once).
         if !was_done && matches!(self.vp, State::Done) {
             self.record_presentation();
         }
         effects
+    }
+
+    fn presentation_delivery_error_effects(reason: AbortReason) -> Option<Vec<Effect>> {
+        let (code, message) = match reason {
+            AbortReason::ResponseModeUnsupported => (
+                "presentation_response_mode_unsupported",
+                "The relying party requested an unsupported response mode.",
+            ),
+            AbortReason::ResponseUriInvalid => (
+                "presentation_response_uri_invalid",
+                "The relying party did not provide a valid HTTPS response endpoint.",
+            ),
+            AbortReason::ResponseUriNotRegistered => (
+                "presentation_response_uri_not_registered",
+                "The response endpoint is not registered for this relying party.",
+            ),
+            AbortReason::ResponseEncryptionMetadataInvalid => (
+                "presentation_response_encryption_metadata_invalid",
+                "The relying party did not provide valid response-encryption metadata.",
+            ),
+            AbortReason::ResponseEncryptionFailed => (
+                "presentation_response_encryption_failed",
+                "The presentation response could not be encrypted safely.",
+            ),
+            _ => return None,
+        };
+        Some(vec![
+            Effect::Render {
+                screen: ScreenDescription::Error {
+                    code: code.into(),
+                    message: message.into(),
+                },
+            },
+            Effect::Close,
+        ])
+    }
+
+    fn abort_presentation_delivery(&mut self, reason: AbortReason) -> Vec<Effect> {
+        self.vp = State::Aborted(reason);
+        self.session = None;
+        Self::presentation_delivery_error_effects(reason).unwrap_or_default()
     }
 
     /// Validate the issuer path against PID/attestation anchors and return only the authenticated
@@ -1989,24 +2049,34 @@ impl Core {
                 payload: signing_input,
             }],
             O::SendVpToken(body) => {
-                let sess = self.session.as_ref();
-                let url = sess.map(|s| s.response_uri.clone()).unwrap_or_default();
+                let Some(sess) = self.session.as_ref() else {
+                    return self.abort_presentation_delivery(AbortReason::ResponseUriInvalid);
+                };
+                let url = sess.response_uri.clone();
                 // For `direct_post.jwt` the response is JWE-encrypted (ECDH-ES + A256GCM) to the
                 // verifier's key before it leaves the device. Encryption needs RNG (ephemeral key +
                 // IV), so it happens here in the facade, not in the sans-IO `oid4vp` core.
-                let enc_key = sess.and_then(|s| {
-                    (s.response_mode == "direct_post.jwt")
-                        .then_some(s.response_encryption_key.as_deref())
-                        .flatten()
-                });
-                match enc_key {
-                    Some(key) => match self.encrypt_direct_post_jwt(&body, key) {
-                        Some(encrypted) => vec![Effect::Http { url, body: encrypted }],
-                        // Fail closed: the verifier asked for encryption, so never fall back to a
-                        // plaintext POST that would disclose the presentation.
-                        None => vec![],
-                    },
-                    None => vec![Effect::Http { url, body }],
+                match sess.response_mode.as_str() {
+                    "direct_post" => vec![Effect::Http { url, body }],
+                    "direct_post.jwt" => {
+                        let Some(key) = sess.response_encryption_key.clone() else {
+                            return self.abort_presentation_delivery(
+                                AbortReason::ResponseEncryptionMetadataInvalid,
+                            );
+                        };
+                        match self.encrypt_direct_post_jwt(&body, &key) {
+                            Some(encrypted) => vec![Effect::Http {
+                                url,
+                                body: encrypted,
+                            }],
+                            // Fail closed: the verifier asked for encryption, so never fall back to a
+                            // plaintext POST that would disclose the presentation. The stable abort
+                            // + error effects make the failure observable to the shell and holder.
+                            None => self
+                                .abort_presentation_delivery(AbortReason::ResponseEncryptionFailed),
+                        }
+                    }
+                    _ => self.abort_presentation_delivery(AbortReason::ResponseModeUnsupported),
                 }
             }
             O::Close => vec![Effect::Close],

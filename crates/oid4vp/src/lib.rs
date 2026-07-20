@@ -136,6 +136,16 @@ pub enum AbortReason {
     AudienceMismatch,
     /// HLR-VP-G-006 — redirect_uri_is_registered failed (redirect attack).
     RedirectUriNotRegistered,
+    /// The request selected a response mode outside the wallet's closed supported set.
+    ResponseModeUnsupported,
+    /// The direct-post response URI was absent, malformed, or not HTTPS.
+    ResponseUriInvalid,
+    /// The direct-post response URI was not authenticated as an RP-registered endpoint.
+    ResponseUriNotRegistered,
+    /// `direct_post.jwt` was requested without a usable response-encryption key.
+    ResponseEncryptionMetadataInvalid,
+    /// Response encryption failed after request validation (for example, an off-curve EC key).
+    ResponseEncryptionFailed,
     /// HLR-VP-G-007 — the request could not be parsed.
     MalformedRequest,
     /// HLR-VP-G-008 — user declined at the consent screen.
@@ -172,7 +182,8 @@ pub struct AuthRequest {
     /// The wallet selects a credential for EACH entry (multi-credential presentation).
     pub dcql: Option<dcql::DcqlQuery>,
     /// The verifier's response-encryption public key (uncompressed SEC1 P-256), parsed from
-    /// `client_metadata.jwks` when the RP asks for `direct_post.jwt`. `None` ⇒ unencrypted response.
+    /// `client_metadata.jwks` when the RP asks for `direct_post.jwt`. `None` is valid only for
+    /// plaintext `direct_post`; encrypted mode fails closed before consent.
     pub response_encryption_key: Option<Vec<u8>>,
     pub signed_payload: Vec<u8>,
     pub signature: Vec<u8>,
@@ -184,6 +195,8 @@ pub struct AuthRequest {
 pub struct ResolvedTrust {
     pub registered: bool,
     pub rp_public_key: Vec<u8>,
+    /// Authenticated RP delivery endpoints. The legacy field name is retained for FFI/wire
+    /// compatibility; both `response_uri` and an optional `redirect_uri` must exact-match it.
     pub registered_redirect_uris: Vec<String>,
 }
 
@@ -298,6 +311,114 @@ pub mod guards {
             Some(uri) => trust.registered_redirect_uris.iter().any(|r| r == uri),
         }
     }
+
+    /// Only the two direct-post modes implemented by this wallet are accepted. Exact comparison
+    /// prevents lookalike or extension modes from falling through to plaintext delivery.
+    pub fn response_mode_is_supported(req: &AuthRequest) -> bool {
+        matches!(
+            req.response_mode.as_str(),
+            "direct_post" | "direct_post.jwt"
+        )
+    }
+
+    /// A presentation endpoint must be a non-empty, absolute HTTPS URI with an authority. Userinfo,
+    /// fragments, whitespace, controls, and backslashes are rejected to avoid parser differentials.
+    pub fn response_uri_is_https(req: &AuthRequest) -> bool {
+        is_valid_https_uri(&req.response_uri)
+    }
+
+    /// The signed request may deliver only to an endpoint authenticated in the RP registration
+    /// metadata. Matching is deliberately exact: metadata ingestion owns URI canonicalisation.
+    pub fn response_uri_is_registered(req: &AuthRequest, trust: &ResolvedTrust) -> bool {
+        trust
+            .registered_redirect_uris
+            .iter()
+            .any(|registered| registered == &req.response_uri)
+    }
+
+    /// Encrypted direct-post requires a parsed uncompressed P-256 point. Full on-curve validation
+    /// occurs in the crypto backend when ECDH runs; failure there is also handled fail-closed.
+    pub fn response_encryption_metadata_is_valid(req: &AuthRequest) -> bool {
+        match req.response_mode.as_str() {
+            "direct_post" => true,
+            "direct_post.jwt" => req
+                .response_encryption_key
+                .as_deref()
+                .is_some_and(|key| key.len() == 65 && key[0] == 0x04),
+            _ => false,
+        }
+    }
+
+    fn is_valid_https_uri(uri: &str) -> bool {
+        if uri.is_empty()
+            || uri
+                .bytes()
+                .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+            || uri.contains(['\\', '#'])
+        {
+            return false;
+        }
+        let Some((scheme, remainder)) = uri.split_once("://") else {
+            return false;
+        };
+        if !scheme.eq_ignore_ascii_case("https") || remainder.is_empty() {
+            return false;
+        }
+
+        let authority_end = remainder
+            .find('/')
+            .into_iter()
+            .chain(remainder.find('?'))
+            .min()
+            .unwrap_or(remainder.len());
+        let authority = &remainder[..authority_end];
+        if authority.is_empty() || authority.contains('@') {
+            return false;
+        }
+
+        if let Some(ipv6) = authority.strip_prefix('[') {
+            let Some(close) = ipv6.find(']') else {
+                return false;
+            };
+            if close == 0 || ipv6[..close].parse::<std::net::Ipv6Addr>().is_err() {
+                return false;
+            }
+            return valid_optional_port(&ipv6[close + 1..]);
+        }
+
+        if authority.matches(':').count() > 1 {
+            return false; // IPv6 literals must use brackets.
+        }
+        match authority.rsplit_once(':') {
+            Some((host, port)) => valid_host(host) && valid_port(port),
+            None => valid_host(authority),
+        }
+    }
+
+    fn valid_host(host: &str) -> bool {
+        if host.is_empty() || host.len() > 253 {
+            return false;
+        }
+        host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+    }
+
+    fn valid_optional_port(suffix: &str) -> bool {
+        suffix.is_empty() || suffix.strip_prefix(':').is_some_and(valid_port)
+    }
+
+    fn valid_port(port: &str) -> bool {
+        !port.is_empty()
+            && port.bytes().all(|b| b.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|p| p != 0)
+    }
 }
 
 /// Pure transition function — exhaustive match. Refines [`model::step`].
@@ -321,6 +442,24 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
             if !guards::rp_is_registered(req, trust) {
                 return (
                     State::Aborted(AbortReason::RelyingPartyNotRegistered),
+                    vec![],
+                );
+            }
+            if !guards::response_mode_is_supported(req) {
+                return (State::Aborted(AbortReason::ResponseModeUnsupported), vec![]);
+            }
+            if !guards::response_uri_is_https(req) {
+                return (State::Aborted(AbortReason::ResponseUriInvalid), vec![]);
+            }
+            if !guards::response_uri_is_registered(req, trust) {
+                return (
+                    State::Aborted(AbortReason::ResponseUriNotRegistered),
+                    vec![],
+                );
+            }
+            if !guards::response_encryption_metadata_is_valid(req) {
+                return (
+                    State::Aborted(AbortReason::ResponseEncryptionMetadataInvalid),
                     vec![],
                 );
             }
@@ -642,11 +781,11 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         .map(String::from);
     let purpose = p.get("purpose").and_then(|v| v.as_str()).map(String::from);
     let state = p.get("state").and_then(|v| v.as_str()).map(String::from);
-    // direct_post is implemented; direct_post.jwt (encrypted JWE response) is a HAIP follow-on.
+    // Preserve an absent/non-string mode as unsupported instead of silently selecting plaintext.
     let response_mode = p
         .get("response_mode")
         .and_then(|v| v.as_str())
-        .unwrap_or("direct_post")
+        .unwrap_or_default()
         .to_string();
     // Prefer the real DCQL query (OpenID4VP 1.0 §6); fall back to the legacy flat `claims` array.
     // The parsed query is carried whole so the wallet can select one credential PER query entry.
@@ -673,6 +812,8 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
     };
 
     // For direct_post.jwt, the verifier publishes its response-encryption key in client_metadata.
+    // Parsing is intentionally strict enough that malformed metadata becomes `None` and therefore
+    // trips the fail-closed guard before consent.
     let response_encryption_key = p.get("client_metadata").and_then(parse_enc_jwk);
 
     let signed_payload = format!("{}.{}", parts[0], parts[1]).into_bytes();
@@ -699,17 +840,34 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
     })
 }
 
-/// Extract a response-encryption public key from `client_metadata`: the first EC P-256 key in
-/// `jwks.keys` marked for encryption (`use == "enc"`, or an ECDH-ES `alg`). Returns it as an
-/// uncompressed SEC1 point (`0x04 || X || Y`), or `None` if absent/unsupported.
+/// Validate the response-encryption profile in `client_metadata` (`ECDH-ES` + `A256GCM`) and
+/// extract the first EC P-256 key in `jwks.keys` marked for encryption (`use == "enc"`, or an
+/// ECDH-ES `alg`). Returns it as an uncompressed SEC1 point (`0x04 || X || Y`), or `None` if any
+/// required metadata is absent or unsupported.
 fn parse_enc_jwk(md: &serde_json::Value) -> Option<Vec<u8>> {
+    if md
+        .get("authorization_encrypted_response_alg")
+        .and_then(|v| v.as_str())
+        != Some("ECDH-ES")
+        || md
+            .get("authorization_encrypted_response_enc")
+            .and_then(|v| v.as_str())
+            != Some("A256GCM")
+    {
+        return None;
+    }
     let keys = md.get("jwks")?.get("keys")?.as_array()?;
     for k in keys {
-        let is_enc = k.get("use").and_then(|v| v.as_str()) == Some("enc")
-            || k.get("alg")
-                .and_then(|v| v.as_str())
-                .is_some_and(|a| a.starts_with("ECDH-ES"));
-        if !is_enc || k.get("kty").and_then(|v| v.as_str()) != Some("EC") {
+        let key_alg = k.get("alg").and_then(|v| v.as_str());
+        let key_use = k.get("use").and_then(|v| v.as_str());
+        let is_enc = key_use == Some("enc") || key_alg == Some("ECDH-ES");
+        let use_is_compatible = key_use.is_none() || key_use == Some("enc");
+        let alg_is_compatible = key_alg.is_none() || key_alg == Some("ECDH-ES");
+        if !is_enc
+            || !use_is_compatible
+            || !alg_is_compatible
+            || k.get("kty").and_then(|v| v.as_str()) != Some("EC")
+        {
             continue;
         }
         if k.get("crv").and_then(|v| v.as_str()) != Some("P-256") {

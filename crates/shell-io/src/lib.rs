@@ -29,8 +29,9 @@ pub trait DeviceSigner {
     fn sign(&self, key_ref: &str, payload: &[u8]) -> Vec<u8>;
 }
 
-/// Fetches an RP's certificate chain + registered redirect URIs. The registration DECISION is made
-/// in-core against the trusted list; this only performs the fetch.
+/// Fetches an RP's certificate chain + authenticated delivery endpoints. The tuple retains the
+/// legacy redirect-URI shape; the core also exact-matches presentation response URIs against it.
+/// The registration DECISION is made in-core against the trusted list; this only performs the fetch.
 pub trait TrustFetcher {
     fn fetch(&self, client_id: &str) -> (Vec<Vec<u8>>, Vec<String>);
 }
