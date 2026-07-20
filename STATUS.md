@@ -149,6 +149,9 @@ operational solution needed to enter those processes.
 
 - [ ] [#16](https://github.com/advatar/EUWallet/issues/16): implement versioned encrypted durable
       wallet state and crash-safe lifecycle recovery across the Rust core, iOS and Android.
+  - [ ] Add the iOS WalletShell encrypted dual-slot storage primitive with strict bounded envelopes,
+        a Keychain generation/digest anchor, compare-and-swap commits, backup/file-protection policy
+        and crash/tamper tests; Core serialization and lifecycle wiring remain separate work.
   - [ ] Restore only bounded authenticated holdings, replay state and audit data through current
         trust/WUA/device-key revalidation; never revive pending operations or protocol sessions.
   - [ ] Add atomic, rollback-detecting, device-bound iOS and Android stores with backup exclusion,
