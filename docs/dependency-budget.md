@@ -14,7 +14,7 @@ directly by a protocol/codec crate — they are reached only through `crypto-tra
 | `cose` | — | Canonical CBOR + COSE_Sign1 are hand-written; crypto via `crypto-traits`. |
 | `mdoc` | `cose` (path) | mdoc structures over the shared CBOR/COSE codec. |
 | `sdjwt` | `serde_json`, `base64ct` | Strict JSON parsing and base64url are not worth hand-rolling; both are small, vetted, and in the budget. Signatures via `crypto-traits`. |
-| `x509` | `der`, `x509-cert` | Vetted RustCrypto DER/X.509 parsers. Parsing + profile evaluation are *logic*, not crypto; certificate-signature verification goes through `crypto-traits`. |
+| `x509` | `der`, `pkcs1`, `x509-cert` | Vetted RustCrypto DER/X.509/PKCS#1 parsers. Parsing + profile evaluation are *logic*, not crypto; public-key and certificate-signature validation go through `crypto-traits`. `pkcs1` is used only to validate RSA SPKI modulus/exponent shape and strength. |
 | `oid4vp` | `serde_json`, `base64ct` | Parses the JOSE request object and builds the key-binding JWT (JSON + base64url). Signatures via `crypto-traits`. |
 | `presenter` | `cose` (path) | Canonical consent hashing via the shared CBOR codec. |
 | `oid4vci`,`iso18013-5`,`trust`,`status`,`wua` | (path deps only, so far) | Protocol/trust logic over the codecs + crypto boundary. |

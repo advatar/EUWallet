@@ -1,0 +1,136 @@
+[ root_ca ]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[ root_name_constraints ]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+nameConstraints = critical,@supported_constraints
+
+[ supported_constraints ]
+permitted;DNS.1 = allowed.example
+permitted;URI.1 = .service.example
+permitted;IP.1 = 10.0.0.0/255.0.0.0
+excluded;DNS.1 = blocked.allowed.example
+excluded;URI.1 = blocked.service.example
+excluded;IP.1 = 10.66.0.0/255.255.0.0
+
+[ root_narrow_name_constraints ]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+nameConstraints = critical,permitted;DNS:team.allowed.example
+
+[ root_email_constraint ]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+nameConstraints = critical,permitted;email:.allowed.example
+
+[ root_noncritical_constraint ]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+nameConstraints = permitted;DNS:allowed.example
+
+[ intermediate_narrow ]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+nameConstraints = critical,permitted;DNS:team.allowed.example
+
+[ leaf ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[ leaf_allowed ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = @san_allowed
+
+[ san_allowed ]
+DNS.1 = wallet.allowed.example
+URI.1 = https://issuer.service.example/credential
+IP.1 = 10.1.2.3
+
+[ leaf_dns_outside ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = DNS:wallet.outside.example
+
+[ leaf_dns_excluded ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = DNS:blocked.allowed.example
+
+[ leaf_uri_apex ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = URI:https://service.example/path
+
+[ leaf_uri_no_authority ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = URI:urn:example:wallet
+
+[ leaf_uri_excluded ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = URI:https://blocked.service.example/path
+
+[ leaf_ip_outside ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = IP:192.0.2.1
+
+[ leaf_ip_excluded ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = IP:10.66.1.1
+
+[ leaf_team_allowed ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = DNS:wallet.team.allowed.example
+
+[ leaf_team_outside ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = DNS:wallet.allowed.example
+
+[ leaf_illegal_constraint ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+nameConstraints = critical,permitted;DNS:allowed.example
