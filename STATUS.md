@@ -35,7 +35,10 @@ operational solution needed to enter those processes.
 - [ ] Implement recursive RFC 9901 disclosures, reject invalid issued SD-JWT+KB/control claims,
       and include permanently visible PII in consent.
 - [ ] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths.
-- [ ] Add flow operation IDs, explicit terminal outcomes and recoverable failure/cancel transitions.
+- [ ] [#7](https://github.com/advatar/EUWallet/issues/7): add flow-scoped operation IDs to every
+      asynchronous effect/result pair, reject stale callbacks, and make shell failure/cancel
+      notifications reset presentation, issuance, payment and QES without weakening exact terminal
+      outcomes.
 - [ ] Harden QR/deep-link and protocol networking with HTTPS-only URL policy, bounded responses,
       redirect/origin controls and SSRF-resistant destination validation.
 
