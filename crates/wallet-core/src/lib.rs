@@ -2109,8 +2109,12 @@ impl Core {
         }
     }
 
-    fn audit_log_failure_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
-        self.audit_log_available = false;
+    fn terminate_audited_flow(
+        &mut self,
+        flow: ActiveFlow,
+        code: &'static str,
+        message: &'static str,
+    ) -> Vec<Effect> {
         if self.active != ActiveFlow::None && self.active != flow {
             self.reset_flow(self.active);
         }
@@ -2118,13 +2122,37 @@ impl Core {
         vec![
             Effect::Render {
                 screen: ScreenDescription::Error {
-                    code: "audit_log_unavailable".into(),
-                    message: "The wallet cannot securely record this operation. No further auditable operation is allowed until the wallet history is repaired or reset."
-                        .into(),
+                    code: code.into(),
+                    message: message.into(),
                 },
             },
             Effect::Close,
         ]
+    }
+
+    fn audit_log_fault_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
+        self.audit_log_available = false;
+        self.terminate_audited_flow(
+            flow,
+            "audit_log_unavailable",
+            "The wallet cannot securely record this operation. No further auditable operation is allowed until the wallet history is repaired or reset.",
+        )
+    }
+
+    fn audit_log_capacity_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
+        self.terminate_audited_flow(
+            flow,
+            "audit_log_capacity_exhausted",
+            "The wallet history does not have enough capacity for this operation. Review or erase history before trying again.",
+        )
+    }
+
+    fn audit_log_candidate_rejection_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
+        self.terminate_audited_flow(
+            flow,
+            "audit_log_entry_invalid",
+            "This operation contains activity details that cannot be recorded safely.",
+        )
     }
 
     fn append_audit_entry(&mut self, entry: txnlog::NewEntry) -> Result<(), txnlog::Error> {
@@ -2140,21 +2168,18 @@ impl Core {
         }
     }
 
-    fn check_audit_entry(&mut self, entry: &txnlog::NewEntry) -> Result<(), txnlog::Error> {
-        match self.log.check_append(entry) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                self.audit_log_available = false;
-                Err(error)
-            }
-        }
+    fn check_audit_entry(&self, entry: &txnlog::NewEntry) -> Result<(), txnlog::Error> {
+        self.log.check_append(entry)
     }
 
     /// The single entry point. Same state + same event ⇒ same effects (I/O is all in the shell).
     pub fn handle_event(&mut self, event: Event) -> Vec<Effect> {
         if let Some(flow) = Self::audited_flow_started_by(&event) {
-            if !self.audit_log_available || !self.log.can_guarantee_max_entry() {
-                return self.audit_log_failure_effects(flow);
+            if !self.audit_log_available {
+                return self.audit_log_fault_effects(flow);
+            }
+            if !self.log.can_guarantee_max_entry() {
+                return self.audit_log_capacity_effects(flow);
             }
         }
         match event {
@@ -2265,7 +2290,7 @@ impl Core {
                     return Vec::new();
                 }
                 if self.record_payment().is_err() {
-                    return self.audit_log_failure_effects(ActiveFlow::Payment);
+                    return self.audit_log_fault_effects(ActiveFlow::Payment);
                 }
                 self.finish_flow(ActiveFlow::Payment);
                 vec![Effect::Close]
@@ -2319,7 +2344,7 @@ impl Core {
                     payment: None,
                 };
                 if self.check_audit_entry(&audit_candidate).is_err() {
-                    return self.audit_log_failure_effects(ActiveFlow::WalletTransfer);
+                    return self.audit_log_candidate_rejection_effects(ActiveFlow::WalletTransfer);
                 }
                 self.begin_flow(ActiveFlow::WalletTransfer);
                 self.drive_w2w(w2w::Input::CreateOffer)
@@ -2828,7 +2853,7 @@ impl Core {
                 .as_ref()
                 .is_some_and(|entry| self.check_audit_entry(entry).is_err())
             {
-                return self.audit_log_failure_effects(ActiveFlow::Presentation);
+                return self.audit_log_candidate_rejection_effects(ActiveFlow::Presentation);
             }
         }
 
@@ -2848,7 +2873,7 @@ impl Core {
 
         // Record a completed presentation the moment the machine reaches Done (once).
         if !was_done && matches!(self.vp, State::Done) && self.record_presentation().is_err() {
-            return self.audit_log_failure_effects(ActiveFlow::Presentation);
+            return self.audit_log_fault_effects(ActiveFlow::Presentation);
         }
         effects
     }
@@ -3260,7 +3285,7 @@ impl Core {
                 payment: None,
             };
             if self.check_audit_entry(&audit_candidate).is_err() {
-                return self.audit_log_failure_effects(ActiveFlow::Issuance);
+                return self.audit_log_candidate_rejection_effects(ActiveFlow::Issuance);
             }
         }
 
@@ -3278,7 +3303,7 @@ impl Core {
                 match self.pending_verified_credential.take() {
                     Some(verified) if verified.credential.format() == issued_format => {
                         if self.record_issuance(fmt).is_err() {
-                            return self.audit_log_failure_effects(ActiveFlow::Issuance);
+                            return self.audit_log_fault_effects(ActiveFlow::Issuance);
                         }
                         self.store_verified_credential(verified);
                     }
@@ -3405,7 +3430,7 @@ impl Core {
                     payment: Some(summary.clone()),
                 };
                 if self.check_audit_entry(&audit_candidate).is_err() {
-                    return self.audit_log_failure_effects(ActiveFlow::Payment);
+                    return self.audit_log_candidate_rejection_effects(ActiveFlow::Payment);
                 }
                 self.pay_consent_hash = consent_hash;
                 self.pay_summary = Some(summary);
@@ -4137,7 +4162,7 @@ impl Core {
                     payment: None,
                 };
                 if self.append_audit_entry(entry).is_err() {
-                    return self.audit_log_failure_effects(ActiveFlow::WalletTransfer);
+                    return self.audit_log_fault_effects(ActiveFlow::WalletTransfer);
                 }
                 self.w2w_credential = Some(credential);
                 vec![]
@@ -4548,13 +4573,15 @@ mod audit_log_failure_tests {
         log
     }
 
-    fn is_audit_error(effect: &Effect) -> bool {
-        matches!(
-            effect,
-            Effect::Render {
-                screen: ScreenDescription::Error { code, .. }
-            } if code == "audit_log_unavailable"
-        )
+    fn has_error_code(effects: &[Effect], expected: &str) -> bool {
+        effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::Render {
+                    screen: ScreenDescription::Error { code, .. }
+                } if code == expected
+            )
+        })
     }
 
     #[test]
@@ -4574,7 +4601,7 @@ mod audit_log_failure_tests {
         let effects = core.handle_event(Event::AuthorizationRequestReceived {
             request: Vec::new(),
         });
-        assert!(effects.iter().any(is_audit_error));
+        assert!(has_error_code(&effects, "audit_log_unavailable"));
         assert!(effects.iter().any(|effect| matches!(effect, Effect::Close)));
         assert_eq!(core.active, ActiveFlow::None);
     }
@@ -4604,7 +4631,7 @@ mod audit_log_failure_tests {
         assert!(core.log.is_exhausted());
 
         let effects = core.handle_event(Event::WalletTransferOfferCreated);
-        assert!(effects.iter().any(is_audit_error));
+        assert!(has_error_code(&effects, "audit_log_capacity_exhausted"));
         assert_eq!(core.active, ActiveFlow::None);
         assert!(matches!(core.w2w, w2w::State::Idle));
         assert!(core.w2w_credential.is_none());
@@ -4642,7 +4669,7 @@ mod audit_log_failure_tests {
             let mut core = Core::new("wallet.example", "device-key");
             core.log = near_capacity.clone();
             let effects = core.handle_event(event);
-            assert!(effects.iter().any(is_audit_error));
+            assert!(has_error_code(&effects, "audit_log_capacity_exhausted"));
             assert!(effects.iter().all(|effect| matches!(
                 effect,
                 Effect::Render {
@@ -4672,7 +4699,7 @@ mod audit_log_failure_tests {
         .unwrap();
 
         let effects = core.handle_event(Event::PaymentAuthorizationRequestReceived { request });
-        assert!(effects.iter().any(is_audit_error));
+        assert!(has_error_code(&effects, "audit_log_entry_invalid"));
         assert!(effects.iter().all(|effect| matches!(
             effect,
             Effect::Render {
@@ -4682,6 +4709,51 @@ mod audit_log_failure_tests {
         assert!(core.pay_summary.is_none());
         assert!(core.transaction_log().is_empty());
         assert_eq!(core.active, ActiveFlow::None);
+        assert!(core.audit_log_available());
+
+        let valid_request = serde_json::to_vec(&serde_json::json!({
+            "creditor_name": "Acme Store",
+            "creditor_account": "DE89370400440532013000",
+            "amount_minor": 100,
+            "currency": "EUR",
+            "transaction_id": "txn-2",
+            "nonce": 2,
+            "response_uri": "https://psp.example/authorize"
+        }))
+        .unwrap();
+        let valid_effects = core.handle_event(Event::PaymentAuthorizationRequestReceived {
+            request: valid_request,
+        });
+        assert!(valid_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Render {
+                screen: ScreenDescription::PaymentConfirmation(_)
+            }
+        )));
+        assert_eq!(core.active, ActiveFlow::Payment);
+    }
+
+    #[test]
+    fn redaction_recovers_dynamic_aggregate_capacity_without_history_wipe() {
+        let mut core = Core::new("wallet.example", "device-key");
+        core.log = near_capacity_log();
+        let head = core.log.head();
+
+        let rejected = core.handle_event(Event::WalletTransferOfferCreated);
+        assert!(has_error_code(&rejected, "audit_log_capacity_exhausted"));
+        assert!(!core.audit_log_available());
+        assert!(core.audit_log_available, "capacity must not latch a fault");
+
+        assert!(core.redact_transaction(0));
+        assert_eq!(core.log.head(), head);
+        assert!(core.audit_log_available());
+
+        let admitted = core.handle_event(Event::WalletTransferOfferCreated);
+        assert!(admitted
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishTransferOffer { .. })));
+        assert!(!has_error_code(&admitted, "audit_log_capacity_exhausted"));
+        assert_eq!(core.active, ActiveFlow::WalletTransfer);
     }
 }
 
