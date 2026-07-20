@@ -16,43 +16,46 @@ public final class URLSessionHttpClient: HttpClient {
 
     /// POST `body` to `url`. Content-Type is inferred from the body shape (JSON vs. the OAuth
     /// default of form-encoding), which matches the OpenID4VCI/VP endpoints the core drives.
-    public func post(url: String, body: Data) async -> (UInt16, Data) {
+    public func post(url: String, body: Data) async throws -> HttpResponse {
         guard let u = URL(string: url), u.scheme == "https" || u.scheme == "http" else {
-            return (0, Data())
+            throw HttpClientError.invalidUrl(url)
         }
         var req = URLRequest(url: u)
         req.httpMethod = "POST"
         req.httpBody = body
         req.setValue(Self.contentType(for: body), forHTTPHeaderField: "Content-Type")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-        return await perform(req)
+        return try await perform(req)
     }
 
     /// GET `url` (issuer/verifier metadata, request objects fetched by reference, JWKS, …).
-    public func get(url: String, headers: [String: String] = [:]) async -> (UInt16, Data) {
+    public func get(url: String, headers: [String: String] = [:]) async throws -> HttpResponse {
         guard let u = URL(string: url), u.scheme == "https" || u.scheme == "http" else {
-            return (0, Data())
+            throw HttpClientError.invalidUrl(url)
         }
         var req = URLRequest(url: u)
         req.httpMethod = "GET"
         headers.forEach { req.setValue($0.value, forHTTPHeaderField: $0.key) }
-        return await perform(req)
+        return try await perform(req)
     }
 
     /// Fetch an OpenID4VCI issuer's metadata (`/.well-known/openid-credential-issuer`).
-    public func fetchIssuerMetadata(issuer: String) async -> (UInt16, Data) {
+    public func fetchIssuerMetadata(issuer: String) async throws -> HttpResponse {
         let base = issuer.hasSuffix("/") ? String(issuer.dropLast()) : issuer
-        return await get(url: base + "/.well-known/openid-credential-issuer")
+        return try await get(url: base + "/.well-known/openid-credential-issuer")
     }
 
-    private func perform(_ req: URLRequest) async -> (UInt16, Data) {
+    private func perform(_ req: URLRequest) async throws -> HttpResponse {
         do {
             let (data, resp) = try await session.data(for: req)
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            return (UInt16(clamping: code), data)
+            guard let http = resp as? HTTPURLResponse else {
+                throw HttpClientError.nonHttpResponse
+            }
+            return HttpResponse(statusCode: UInt16(clamping: http.statusCode), body: data)
+        } catch let error as HttpClientError {
+            throw error
         } catch {
-            // Surface the transport error as a zero status + its description (never a fake 200).
-            return (0, Data(String(describing: error).utf8))
+            throw HttpClientError.transport(String(describing: error))
         }
     }
 

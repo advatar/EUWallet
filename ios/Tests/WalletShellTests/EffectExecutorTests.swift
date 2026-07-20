@@ -2,12 +2,22 @@ import XCTest
 @testable import WalletShell
 
 /// A scripted engine standing in for the Rust WalletEngine over the JSON contract. It returns the
-/// same effect sequence the real core does, so we can test the SHELL's effect dispatch (signer,
-/// http, renderer, trust) on the host without linking the xcframework. The core's own logic is
-/// tested in Rust (wallet-core/tests/e2e_flow.rs).
+/// same effect sequence the real core does, so the shell's dispatch and fail-closed boundaries can
+/// be tested on the host without linking the xcframework.
 final class MockEngine: WalletEngineDriving {
-    func loadCredential(issuerJwt: String, disclosuresByClaimJson: String, statusIndex: UInt64?) {}
+    private let response: (String) -> String
+    private(set) var receivedEvents: [String] = []
+
+    init(response: @escaping (String) -> String = MockEngine.happyPathResponse) {
+        self.response = response
+    }
+
     func handleEventJson(eventJson: String) -> String {
+        receivedEvents.append(eventJson)
+        return response(eventJson)
+    }
+
+    private static func happyPathResponse(_ eventJson: String) -> String {
         if eventJson.contains("\"authorizationRequestReceived\"") {
             return #"[{"type":"resolveRpTrust","clientId":"rp.example"}]"#
         }
@@ -33,62 +43,109 @@ final class MockEngine: WalletEngineDriving {
     }
 }
 
+private enum ExpectedFailure: Error { case failure }
+
+private final class FailingSigner: Signer {
+    func sign(keyRef: String, payload: Data) throws -> Data { throw ExpectedFailure.failure }
+}
+
+private final class FailingStorage: SecureStorage {
+    func put(key: String, value: Data) throws { throw ExpectedFailure.failure }
+    func get(key: String) throws -> Data? { throw ExpectedFailure.failure }
+}
+
+private final class FixedHttpClient: HttpClient {
+    enum Outcome {
+        case response(HttpResponse)
+        case failure(HttpClientError)
+    }
+
+    private let outcome: Outcome
+    init(_ outcome: Outcome) { self.outcome = outcome }
+
+    func post(url: String, body: Data) async throws -> HttpResponse {
+        switch outcome {
+        case .response(let response): return response
+        case .failure(let error): throw error
+        }
+    }
+}
+
 final class EffectExecutorTests: XCTestCase {
     private func makeExecutor(
-        signer: Signer, http: StubHttpClient, render: @escaping (ScreenDescription) -> Void
+        engine: MockEngine = MockEngine(),
+        signer: Signer = StubSigner(),
+        http: HttpClient = StubHttpClient(),
+        storage: SecureStorage = InMemoryStorage(),
+        render: @escaping (ScreenDescription) -> Void = { _ in }
     ) -> EffectExecutor {
         EffectExecutor(
-            engine: MockEngine(),
+            engine: engine,
             signer: signer,
             http: http,
-            storage: InMemoryStorage(),
+            storage: storage,
             trust: StubTrustResolver(certChain: [Data([1, 2, 3])]),
             render: render)
     }
 
-    func testRequestRendersConsentScreen() async {
-        var rendered: [ScreenDescription] = []
-        let executor = makeExecutor(signer: StubSigner(), http: StubHttpClient()) { rendered.append($0) }
+    private func assertNoSemanticSuccessOrDecline(
+        _ events: [String], file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertFalse(
+            events.contains { $0.contains("\"userDeclined\"") },
+            "Infrastructure failure became userDeclined",
+            file: file,
+            line: line)
+        XCTAssertFalse(
+            events.contains { $0.contains("\"presentationDelivered\"") },
+            "Infrastructure failure became presentationDelivered",
+            file: file,
+            line: line)
+    }
 
-        await executor.send(eventJson: WalletEventJSON.authorizationRequestReceived(Data([1, 2, 3])))
+    func testRequestRendersConsentScreen() async throws {
+        var rendered: [ScreenDescription] = []
+        let executor = makeExecutor { rendered.append($0) }
+
+        try await executor.send(
+            eventJson: WalletEventJSON.authorizationRequestReceived(Data([1, 2, 3])))
 
         guard case .consent(let rp, _, let claims)? = rendered.last else {
             return XCTFail("expected a consent screen, got \(String(describing: rendered.last))")
         }
         XCTAssertEqual(rp, "Example RP")
-        XCTAssertEqual(claims, ["age_over_18"]) // data minimisation surfaced to the UI
+        XCTAssertEqual(claims, ["age_over_18"])
     }
 
-    func testConsentTriggersSecureEnclaveSignThenHttpPost() async {
+    func testConsentTriggersSignThenSuccessfulHttpPost() async throws {
         let signer = StubSigner()
         let http = StubHttpClient()
-        let executor = makeExecutor(signer: signer, http: http) { _ in }
+        let executor = makeExecutor(signer: signer, http: http)
 
-        await executor.send(eventJson: WalletEventJSON.userConsented())
+        try await executor.send(eventJson: WalletEventJSON.userConsented())
 
-        // The device signer was invoked for the key-binding JWT...
         XCTAssertEqual(signer.signedPayloads.count, 1)
         XCTAssertEqual(signer.signedPayloads.first, Data([1, 2, 3]))
-        // ...and the resulting vp_token was posted to the RP.
         XCTAssertEqual(http.posted.count, 1)
         XCTAssertEqual(http.posted.first?.0, "https://rp.example/response")
         XCTAssertEqual(http.posted.first?.1, Data([9, 9, 9]))
     }
 
-    func testDeclineRendersNothingUnexpected() async {
+    func testExplicitDeclineRendersNothingUnexpected() async throws {
         var rendered: [ScreenDescription] = []
-        let executor = makeExecutor(signer: StubSigner(), http: StubHttpClient()) { rendered.append($0) }
-        await executor.send(eventJson: WalletEventJSON.userDeclined())
+        let executor = makeExecutor { rendered.append($0) }
+        try await executor.send(eventJson: WalletEventJSON.userDeclined())
         XCTAssertTrue(rendered.isEmpty)
     }
 
-    func testPaymentRendersConfirmationThenSignsAuthCode() async {
+    func testPaymentRendersConfirmationThenSignsAuthCode() async throws {
         var rendered: [ScreenDescription] = []
         let signer = StubSigner()
         let http = StubHttpClient()
         let executor = makeExecutor(signer: signer, http: http) { rendered.append($0) }
 
-        await executor.send(eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(Data([1])))
+        try await executor.send(
+            eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(Data([1])))
         guard case .paymentConfirmation(let payee, _, let amount, let currency)? = rendered.last else {
             return XCTFail("expected a payment confirmation screen, got \(String(describing: rendered.last))")
         }
@@ -96,8 +153,95 @@ final class EffectExecutorTests: XCTestCase {
         XCTAssertEqual(amount, 1299)
         XCTAssertEqual(currency, "EUR")
 
-        await executor.send(eventJson: WalletEventJSON.paymentApproved())
-        XCTAssertEqual(signer.signedPayloads.first, Data([7, 7, 7])) // SCA auth code signed
+        try await executor.send(eventJson: WalletEventJSON.paymentApproved())
+        XCTAssertEqual(signer.signedPayloads.first, Data([7, 7, 7]))
         XCTAssertEqual(http.posted.first?.0, "https://psp.example/authorize")
+    }
+
+    func testMalformedCoreOutputThrowsTypedError() async {
+        let engine = MockEngine { _ in "not-json" }
+        let executor = makeExecutor(engine: engine)
+
+        do {
+            try await executor.send(eventJson: WalletEventJSON.userConsented())
+            XCTFail("expected malformed core output to fail")
+        } catch let error as EffectExecutorError {
+            guard case .ffi(.malformedCoreOutput) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        } catch {
+            XCTFail("untyped error: \(error)")
+        }
+        assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+    }
+
+    func testStorageFailureThrowsAndStopsCascade() async {
+        let engine = MockEngine()
+        let executor = makeExecutor(engine: engine, storage: FailingStorage())
+
+        do {
+            try await executor.send(
+                eventJson: WalletEventJSON.authorizationRequestReceived(Data([1])))
+            XCTFail("expected storage failure")
+        } catch let error as EffectExecutorError {
+            guard case .storageFailed = error else { return XCTFail("unexpected error: \(error)") }
+        } catch {
+            XCTFail("untyped error: \(error)")
+        }
+        assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+    }
+
+    func testSigningFailureDoesNotBecomeUserDecline() async {
+        let engine = MockEngine()
+        let executor = makeExecutor(engine: engine, signer: FailingSigner())
+
+        do {
+            try await executor.send(eventJson: WalletEventJSON.userConsented())
+            XCTFail("expected signing failure")
+        } catch let error as EffectExecutorError {
+            guard case .signingFailed = error else { return XCTFail("unexpected error: \(error)") }
+        } catch {
+            XCTFail("untyped error: \(error)")
+        }
+        assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+    }
+
+    func testNon2xxResponseDoesNotBecomePresentationDelivered() async {
+        let engine = MockEngine()
+        let http = FixedHttpClient(.response(HttpResponse(
+            statusCode: 503,
+            body: Data("unavailable".utf8))))
+        let executor = makeExecutor(engine: engine, http: http)
+
+        do {
+            try await executor.send(eventJson: WalletEventJSON.userConsented())
+            XCTFail("expected non-2xx failure")
+        } catch let error as EffectExecutorError {
+            guard case .httpStatusFailed(let status, let body) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(status, 503)
+            XCTAssertEqual(body, Data("unavailable".utf8))
+        } catch {
+            XCTFail("untyped error: \(error)")
+        }
+        assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+    }
+
+    func testTransportFailureDoesNotBecomePresentationDelivered() async {
+        let engine = MockEngine()
+        let executor = makeExecutor(
+            engine: engine,
+            http: FixedHttpClient(.failure(.transport("offline"))))
+
+        do {
+            try await executor.send(eventJson: WalletEventJSON.userConsented())
+            XCTFail("expected transport failure")
+        } catch let error as EffectExecutorError {
+            XCTAssertEqual(error, .transportFailed(.transport("offline")))
+        } catch {
+            XCTFail("untyped error: \(error)")
+        }
+        assertNoSemanticSuccessOrDecline(engine.receivedEvents)
     }
 }

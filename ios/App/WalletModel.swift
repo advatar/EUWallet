@@ -163,6 +163,21 @@ final class WalletModel: ObservableObject {
 
     private func note(_ line: String) { log.append(line) }
 
+    /// Run one shell cascade and surface infrastructure/core-contract failures as a terminal app
+    /// failure. A failed cascade must never let a caller publish a success message.
+    @discardableResult
+    private func run(_ executor: EffectExecutor, eventJson: String) async -> Bool {
+        do {
+            try await executor.send(eventJson: eventJson)
+            return true
+        } catch {
+            let message = error.localizedDescription
+            note("Wallet operation failed: \(message)")
+            phase = .failed(message)
+            return false
+        }
+    }
+
     // MARK: - Add a credential (real OpenID4VCI issuance)
 
     /// Add a credential to the wallet by running a REAL OpenID4VCI issuance through the core: the
@@ -174,7 +189,7 @@ final class WalletModel: ObservableObject {
         isIssuing = true
         log = ["Adding \(type.displayName) via OpenID4VCI…"]
         Task {
-            await issue(type)
+            guard await issue(type) else { isIssuing = false; return }
             note("Core ran the issuance machine: issuer-trust decision, WUA key-attestation gate, "
                  + "device-signed proof-of-possession — then stored the issuer-signed credential.")
             reloadCredentials()
@@ -189,8 +204,7 @@ final class WalletModel: ObservableObject {
         guard !isIssuing else { return }
         isIssuing = true
         Task {
-            await issue(.pid)
-            await issue(.mdl)
+            guard await issue(.pid), await issue(.mdl) else { isIssuing = false; return }
             reloadCredentials()
             reloadHistory()
             isIssuing = false
@@ -202,8 +216,7 @@ final class WalletModel: ObservableObject {
         guard !isIssuing else { return }
         isIssuing = true
         Task {
-            await issue(.nid)
-            await issue(.germanId)
+            guard await issue(.nid), await issue(.germanId) else { isIssuing = false; return }
             reloadCredentials()
             reloadHistory()
             isIssuing = false
@@ -215,7 +228,9 @@ final class WalletModel: ObservableObject {
         guard !isIssuing else { return }
         isIssuing = true
         Task {
-            for type in CredentialType.allCases { await issue(type) }
+            for type in CredentialType.allCases {
+                guard await issue(type) else { isIssuing = false; return }
+            }
             reloadCredentials()
             reloadHistory()
             isIssuing = false
@@ -230,7 +245,7 @@ final class WalletModel: ObservableObject {
 
     /// The awaitable core of issuance (also used to seed demo state silently). Routes the credential
     /// compact, offer, and format by type — `.mdlMdoc` issues the ISO 18013-5 mDL in `mso_mdoc`.
-    private func issue(_ type: CredentialType) async {
+    private func issue(_ type: CredentialType) async -> Bool {
         let compact: String
         switch type {
         case .pid: compact = issuance.pidCredentialCompact
@@ -246,7 +261,7 @@ final class WalletModel: ObservableObject {
             cNonce: nextNonce(),
             format: type.issuanceFormat)
         let ex = makeExecutor(issuer: issuer, render: { _ in })
-        await ex.send(eventJson: WalletEventJSON.credentialOfferReceived(
+        return await run(ex, eventJson: WalletEventJSON.credentialOfferReceived(
             offer: offer,
             issuerCertChain: issuance.issuerCertChain,
             issuerId: issuance.issuerId))
@@ -262,7 +277,10 @@ final class WalletModel: ObservableObject {
         let ex = liveExecutor()
         let request = demo.presentationRequest(nonce: nextNonce())
         Task {
-            await ex.send(eventJson: WalletEventJSON.authorizationRequestReceived(request))
+            guard await run(
+                ex,
+                eventJson: WalletEventJSON.authorizationRequestReceived(request)
+            ) else { return }
             note("Core resolved RP trust in-core and computed the minimised consent screen.")
         }
     }
@@ -276,7 +294,10 @@ final class WalletModel: ObservableObject {
         let ex = liveExecutor()
         let request = demo.mdocPresentationRequest(nonce: nextNonce())
         Task {
-            await ex.send(eventJson: WalletEventJSON.authorizationRequestReceived(request))
+            guard await run(
+                ex,
+                eventJson: WalletEventJSON.authorizationRequestReceived(request)
+            ) else { return }
             note("Core selected the mDL by doctype and will emit a signed DeviceResponse vp_token.")
         }
     }
@@ -288,7 +309,10 @@ final class WalletModel: ObservableObject {
         let ex = liveExecutor()
         let request = demo.paymentRequest(nonce: nextNonce())
         Task {
-            await ex.send(eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(request))
+            guard await run(
+                ex,
+                eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(request)
+            ) else { return }
             note("Core produced the payment confirmation screen (amount + payee bound in-core).")
         }
     }
@@ -300,13 +324,17 @@ final class WalletModel: ObservableObject {
         if case .screen(.paymentConfirmation) = phase { wasPayment = true } else { wasPayment = false }
         phase = .running
         Task {
+            guard let executor else {
+                phase = .failed("Wallet executor is unavailable")
+                return
+            }
             if wasPayment {
-                await executor?.send(eventJson: WalletEventJSON.paymentApproved())
+                guard await run(executor, eventJson: WalletEventJSON.paymentApproved()) else { return }
                 note("Device signed the dynamic-linking binding; auth code posted to the PSP.")
                 reloadHistory()
                 phase = .done("Payment authorised — SCA auth code delivered.")
             } else {
-                await executor?.send(eventJson: WalletEventJSON.userConsented())
+                guard await run(executor, eventJson: WalletEventJSON.userConsented()) else { return }
                 note("Device signed the key-binding JWT; vp_token posted to the RP.")
                 reloadHistory()
                 phase = .done("Presentation delivered — only the requested claim was shared.")
@@ -317,7 +345,11 @@ final class WalletModel: ObservableObject {
     func decline() {
         phase = .running
         Task {
-            await executor?.send(eventJson: WalletEventJSON.userDeclined())
+            guard let executor else {
+                phase = .failed("Wallet executor is unavailable")
+                return
+            }
+            guard await run(executor, eventJson: WalletEventJSON.userDeclined()) else { return }
             phase = .done("Declined — nothing was shared.")
         }
     }
@@ -334,16 +366,18 @@ final class WalletModel: ObservableObject {
     /// sheet (TS10).
     func seedHistoryForDemo(redactFirst: Bool = false, thenExport: Bool = false) {
         Task {
-            await issue(.pid)
+            guard await issue(.pid) else { return }
             let ex = makeExecutor(issuer: nil, render: { _ in })
-            await ex.send(
+            guard await run(
+                ex,
                 eventJson: WalletEventJSON.authorizationRequestReceived(
-                    demo.presentationRequest(nonce: nextNonce())))
-            await ex.send(eventJson: WalletEventJSON.userConsented())
-            await ex.send(
+                    demo.presentationRequest(nonce: nextNonce()))) else { return }
+            guard await run(ex, eventJson: WalletEventJSON.userConsented()) else { return }
+            guard await run(
+                ex,
                 eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(
-                    demo.paymentRequest(nonce: nextNonce())))
-            await ex.send(eventJson: WalletEventJSON.paymentApproved())
+                    demo.paymentRequest(nonce: nextNonce()))) else { return }
+            guard await run(ex, eventJson: WalletEventJSON.paymentApproved()) else { return }
             if redactFirst {
                 _ = engine.redactTransaction(seq: 0)
             }
@@ -505,26 +539,32 @@ final class WalletModel: ObservableObject {
         probeResult = "Contacting issuer.eudiw.dev…"
         Task {
             let client = URLSessionHttpClient()
-            let (status, data) = await client.fetchIssuerMetadata(issuer: "https://issuer.eudiw.dev")
-            var summary = "HTTP \(status)"
-            if status == 200,
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                let iss = obj["credential_issuer"] as? String ?? "?"
-                let configs = (obj["credential_configurations_supported"] as? [String: Any])?.keys.sorted()
-                    ?? (obj["credentials_supported"] as? [String: Any])?.keys.sorted()
-                    ?? []
-                summary += "\nissuer: \(iss)\n\(configs.count) credential types; e.g.\n• "
-                    + configs.prefix(5).joined(separator: "\n• ")
-            } else {
-                summary += "\n" + String(decoding: data.prefix(200), as: UTF8.self)
+            do {
+                let response = try await client.fetchIssuerMetadata(
+                    issuer: "https://issuer.eudiw.dev")
+                var summary = "HTTP \(response.statusCode)"
+                if response.statusCode == 200,
+                   let obj = try? JSONSerialization.jsonObject(with: response.body) as? [String: Any] {
+                    let iss = obj["credential_issuer"] as? String ?? "?"
+                    let configs = (obj["credential_configurations_supported"] as? [String: Any])?.keys.sorted()
+                        ?? (obj["credentials_supported"] as? [String: Any])?.keys.sorted()
+                        ?? []
+                    summary += "\nissuer: \(iss)\n\(configs.count) credential types; e.g.\n• "
+                        + configs.prefix(5).joined(separator: "\n• ")
+                } else {
+                    summary += "\n" + String(
+                        decoding: response.body.prefix(200),
+                        as: UTF8.self)
+                }
+                probeResult = summary
+            } catch {
+                probeResult = "Network error: \(error.localizedDescription)"
             }
-            probeResult = summary
         }
     }
 
-    /// A short fingerprint of the device's REAL signing key (Secure Enclave on device; a keychain
-    /// key on the Simulator). Proves a genuine key exists — the key the core binds and the WUA
-    /// attests when we wire issuance to a real issuer.
+    /// A short fingerprint of the device's REAL signing key (strict Secure Enclave policy on a
+    /// physical device; an explicit development-only keychain key on the Simulator).
     func deviceKeyPreview() -> String {
         let signer = SecureEnclaveSigner()
         if let pub = try? signer.publicKeyRaw(keyRef: "wallet-device-key") {

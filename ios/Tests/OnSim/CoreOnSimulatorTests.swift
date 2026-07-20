@@ -7,6 +7,7 @@ import XCTest
 final class CoreOnSimulatorTests: XCTestCase {
     private func makeExecutor(
         _ engine: WalletEngine, _ demo: DemoWallet, _ s: DemoScenario,
+        issuer: IssuerResponder? = nil,
         render: @escaping (ScreenDescription) -> Void
     ) -> EffectExecutor {
         EffectExecutor(
@@ -15,26 +16,44 @@ final class CoreOnSimulatorTests: XCTestCase {
             http: StubHttpClient(),
             storage: InMemoryStorage(),
             trust: DemoTrustResolver(certChain: s.rpCertChain, redirectUris: s.registeredRedirectUris),
+            issuer: issuer,
             render: render)
     }
 
-    func testPresentationRunsOnSimulator() async {
+    func testPresentationRunsOnSimulator() async throws {
         let engine = WalletEngine(walletClientId: "wallet.example", deviceKeyRef: "device-key")
         let demo = DemoWallet()
         let s = demo.scenario()
-        engine.loadCredential(
-            issuerJwt: s.issuerJwt, disclosuresByClaimJson: s.disclosuresByClaimJson, statusIndex: nil)
-        engine.loadDeviceKey(devicePublicKey: s.devicePublicKey)
+        let issuance = demo.issuanceScenario()
+        engine.loadDeviceKey(devicePublicKey: issuance.devicePublicKey)
         // The clock MUST be set before loading the trusted list: the core verifies the list (and
         // the RP/CA certificate validity windows) against `now_epoch`, which defaults to 0 (1970)
         // when unset — at which point the real certs are not yet valid and the list is rejected.
-        _ = engine.handleEventJson(eventJson: WalletEventJSON.setClock(epoch: s.epoch))
-        _ = engine.loadTrustList(signedList: s.trustList, operatorPublicKey: s.operatorPublicKey)
+        _ = engine.handleEventJson(eventJson: WalletEventJSON.setClock(epoch: issuance.epoch))
+        _ = engine.loadTrustList(
+            signedList: issuance.trustList,
+            operatorPublicKey: issuance.operatorPublicKey)
+        _ = engine.loadWua(
+            wuaJwt: issuance.wuaJwt,
+            providerPublicKey: issuance.walletProviderPublicKey)
+
+        // Seed through the same issuance event path as the app. No direct credential loader is part
+        // of WalletEngineDriving, so this test cannot bypass issuer trust or proof-of-possession.
+        let issuer = DemoIssuer(
+            credentialCompact: Data(issuance.pidCredentialCompact.utf8),
+            cNonce: 43)
+        let issuanceExecutor = makeExecutor(engine, demo, s, issuer: issuer) { _ in }
+        try await issuanceExecutor.send(
+            eventJson: WalletEventJSON.credentialOfferReceived(
+                offer: issuance.offer,
+                issuerCertChain: issuance.issuerCertChain,
+                issuerId: issuance.issuerId))
 
         var screens: [ScreenDescription] = []
         let exec = makeExecutor(engine, demo, s) { screens.append($0) }
 
-        await exec.send(eventJson: WalletEventJSON.authorizationRequestReceived(s.presentationRequest))
+        try await exec.send(
+            eventJson: WalletEventJSON.authorizationRequestReceived(s.presentationRequest))
 
         // The core validated the RP against the trusted list and computed the minimised consent
         // screen — surfacing ONLY the requested-and-held claim.
@@ -45,10 +64,10 @@ final class CoreOnSimulatorTests: XCTestCase {
 
         // Consent → device signs (demo key) → vp_token assembled + delivered. No throw/crash means
         // the sign + key-binding path ran with the simulator's real crypto.
-        await exec.send(eventJson: WalletEventJSON.userConsented())
+        try await exec.send(eventJson: WalletEventJSON.userConsented())
     }
 
-    func testPaymentRunsOnSimulator() async {
+    func testPaymentRunsOnSimulator() async throws {
         let engine = WalletEngine(walletClientId: "wallet.example", deviceKeyRef: "device-key")
         let demo = DemoWallet()
         let s = demo.scenario()
@@ -56,8 +75,9 @@ final class CoreOnSimulatorTests: XCTestCase {
         var screens: [ScreenDescription] = []
         let exec = makeExecutor(engine, demo, s) { screens.append($0) }
 
-        await exec.send(eventJson: WalletEventJSON.setClock(epoch: s.epoch))
-        await exec.send(eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(s.paymentRequest))
+        try await exec.send(eventJson: WalletEventJSON.setClock(epoch: s.epoch))
+        try await exec.send(
+            eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(s.paymentRequest))
 
         guard case .paymentConfirmation(let payee, _, let amount, let currency)? = screens.last else {
             return XCTFail("expected a payment confirmation, got \(String(describing: screens.last))")
@@ -67,6 +87,6 @@ final class CoreOnSimulatorTests: XCTestCase {
         XCTAssertEqual(currency, "EUR")
 
         // Approve → device signs the dynamic-linking binding (SCA) → auth code posted.
-        await exec.send(eventJson: WalletEventJSON.paymentApproved())
+        try await exec.send(eventJson: WalletEventJSON.paymentApproved())
     }
 }

@@ -6,8 +6,24 @@ import Foundation
 public protocol WalletEngineDriving: AnyObject {
     /// Drive one event (JSON) → a JSON array of effects (or a `{"error":...}` object).
     func handleEventJson(eventJson: String) -> String
-    /// Load a held credential: issuer JWT + JSON object mapping claim name → disclosure.
-    func loadCredential(issuerJwt: String, disclosuresByClaimJson: String, statusIndex: UInt64?)
+}
+
+/// Failures at the JSON boundary with the Rust core. A core error object and malformed output are
+/// deliberately distinct: neither may be interpreted as an empty effect list.
+public enum FfiContractError: Error, Equatable {
+    case coreRejected(String)
+    case malformedCoreOutput(String)
+}
+
+extension FfiContractError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .coreRejected(let message):
+            return "Wallet core rejected the event: \(message)"
+        case .malformedCoreOutput(let reason):
+            return "Wallet core returned malformed output: \(reason)"
+        }
+    }
 }
 
 /// Mirror of `presenter::ScreenDescription` (internally tagged by `screen`).
@@ -68,6 +84,25 @@ public enum WalletEffect: Decodable {
         case type, clientId, nonce, screen, keyRef, payload, url, body, proofJwt, offeredKey
     }
 
+    private struct CoreErrorEnvelope: Decodable {
+        let error: String
+    }
+
+    /// Decode the core's complete response. The response must be either an effect array or the
+    /// documented `{ "error": "..." }` envelope; unknown effect types are malformed contract data.
+    public static func decodeCoreOutput(_ json: String) throws -> [WalletEffect] {
+        let data = Data(json.utf8)
+        let decoder = JSONDecoder()
+        if let envelope = try? decoder.decode(CoreErrorEnvelope.self, from: data) {
+            throw FfiContractError.coreRejected(envelope.error)
+        }
+        do {
+            return try decoder.decode([WalletEffect].self, from: data)
+        } catch {
+            throw FfiContractError.malformedCoreOutput(String(describing: error))
+        }
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .type) {
@@ -94,7 +129,11 @@ public enum WalletEffect: Decodable {
         case "publishTransferOffer":
             self = .publishTransferOffer(offeredKey: try c.decode([UInt8].self, forKey: .offeredKey))
         case "close": self = .close
-        default: self = .close
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .type,
+                in: c,
+                debugDescription: "Unknown wallet effect type")
         }
     }
 }
