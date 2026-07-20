@@ -53,7 +53,9 @@ interface DurableWalletEngineDriving : WalletEngineDriving {
 }
 
 /** Exact retry seam consumed by [EffectExecutor]. */
-fun interface DurableLifecycleRetrying {
+interface DurableLifecycleRetrying {
+    val hasPendingCommit: Boolean
+
     fun retryPendingEvent(eventJson: String): String
 }
 
@@ -158,7 +160,7 @@ class DurableLifecycleCoordinator(
 
     private var state: State = State.Uninitialized
 
-    val hasPendingCommit: Boolean
+    override val hasPendingCommit: Boolean
         @Synchronized get() = state is State.PendingExport || state is State.PendingCommit
 
     @Synchronized
@@ -230,7 +232,15 @@ class DurableLifecycleCoordinator(
                 state = State.Failed
                 fail(DurableLifecycleErrorCode.MALFORMED_CORE_OUTPUT)
             }
-            CoreOutputKind.EFFECTS -> Unit
+            CoreOutputKind.EFFECTS -> try {
+                // Validate every individual effect with the exact decoder used by EffectExecutor
+                // before exporting or committing the mutated Core state. Array shape alone would
+                // otherwise allow a committed batch that the native shell cannot execute.
+                WalletEffectDecoder.decodeCoreOutput(output)
+            } catch (_: Exception) {
+                state = State.Failed
+                fail(DurableLifecycleErrorCode.MALFORMED_CORE_OUTPUT)
+            }
         }
 
         val pending = Export(generation, nextGeneration, eventJson, output)

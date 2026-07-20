@@ -25,18 +25,24 @@ The coordinator serializes Core events. For every successful JSON effect-array r
 
 1. reserves `current generation + 1` with checked arithmetic;
 2. handles the event exactly once in Core;
-3. exports a non-empty, bounded checkpoint embedding that exact next generation;
-4. compare-and-swap commits the bytes from the current to the next platform-store generation; and
-5. returns the retained effect array only after the store returns the exact generation and bytes.
+3. decodes and validates every individual effect with the exact native executor contract;
+4. exports a non-empty, bounded checkpoint embedding that exact next generation;
+5. compare-and-swap commits the bytes from the current to the next platform-store generation; and
+6. returns the retained effect array only after the store returns the exact generation and bytes.
 
-A Core error envelope is returned without advancing the generation. Malformed output, generation
-mismatch and oversized state fail closed and never release effects.
+A Core error envelope is returned without advancing the generation. A malformed individual effect
+poisons the coordinator before checkpoint export or commit. Generation mismatch and oversized state
+also fail closed and never release effects.
 
 ## Failure and retry semantics
 
 An export or commit failure retains the exact event and effect batch in process memory. A retry is
 accepted only for byte-for-byte identical event JSON. Export may be retried when no checkpoint was
 produced; once produced, the exact checkpoint is reused. Core is never called a second time.
+While either export or commit remains pending, every other event is rejected before Core is called;
+the pending event cannot be overwritten even by a replacement executor. The coordinator state is
+authoritative, and native callers receive the original typed lifecycle failure rather than a
+generic Core error.
 
 After an ambiguous commit error, retry first repeats the exact compare-and-swap. If that fails, the
 coordinator loads the store and accepts success only when both the next generation and plaintext

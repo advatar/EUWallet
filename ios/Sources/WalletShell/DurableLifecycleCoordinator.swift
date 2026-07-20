@@ -61,6 +61,7 @@ public protocol DurableWalletEngineDriving: WalletEngineDriving {
 /// Retry seam consumed by `EffectExecutor`. The exact event must match the blocked transition;
 /// implementations commit the already-computed checkpoint and return its already-computed effects.
 public protocol DurableLifecycleRetrying: AnyObject {
+    var hasPendingCommit: Bool { get }
     func retryPendingEvent(eventJson: String) throws -> String
 }
 
@@ -293,7 +294,16 @@ public final class DurableLifecycleCoordinator: WalletEngineDriving, DurableLife
             state = .failed
             throw DurableLifecycleError.malformedCoreOutput
         case .effects:
-            break
+            // JSON-array shape alone is not enough: an unknown effect type, missing correlated
+            // operation identifier or otherwise malformed individual effect must be rejected
+            // before Core state is exported or committed. Use the exact decoder the executor will
+            // use after persistence so a committed batch is always executable by this shell.
+            do {
+                _ = try WalletEffect.decodeCoreOutput(output)
+            } catch {
+                state = .failed
+                throw DurableLifecycleError.malformedCoreOutput
+            }
         }
 
         let pending = PendingExport(

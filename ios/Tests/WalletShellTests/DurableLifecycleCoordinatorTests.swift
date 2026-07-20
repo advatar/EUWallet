@@ -250,7 +250,8 @@ final class DurableLifecycleCoordinatorTests: XCTestCase {
         let sharedStore = ScriptedDurableStore()
         sharedStore.commitFailures = 1
         let oldEngine = ScriptedDurableEngine()
-        oldEngine.response = #"[{"type":"sign","payload":[115,101,99,114,101,116]}]"#
+        oldEngine.response =
+            #"[{"type":"sign","operationId":7,"keyRef":"device","payload":[115,101,99,114,101,116]}]"#
         var oldLifecycle: DurableLifecycleCoordinator? = try coordinator(
             engine: oldEngine, store: sharedStore)
         try oldLifecycle?.bootstrap(environment: environment)
@@ -285,6 +286,23 @@ final class DurableLifecycleCoordinatorTests: XCTestCase {
         XCTAssertTrue(store.commits.isEmpty)
     }
 
+    func testMalformedIndividualEffectIsRejectedBeforeCheckpointCommit() throws {
+        let engine = ScriptedDurableEngine()
+        engine.response = #"[{"type":"unknownNativeEffect","operationId":7}]"#
+        let store = ScriptedDurableStore()
+        let lifecycle = try coordinator(engine: engine, store: store)
+        try lifecycle.bootstrap(environment: environment)
+
+        XCTAssertThrowsError(
+            try lifecycle.handleEventJson(eventJson: #"{"type":"start"}"#)
+        ) {
+            XCTAssertEqual($0 as? DurableLifecycleError, .malformedCoreOutput)
+        }
+        XCTAssertTrue(engine.exportedGenerations.isEmpty)
+        XCTAssertTrue(store.commits.isEmpty)
+        XCTAssertFalse(lifecycle.hasPendingCommit)
+    }
+
     func testPlatformContextBindsAppSchemaWalletAndDeviceDeterministically() throws {
         let original = try context()
         XCTAssertEqual(original.binding.count, 32)
@@ -300,7 +318,7 @@ final class DurableLifecycleCoordinatorTests: XCTestCase {
         }
     }
 
-    func testExecutorRunsRetriedEffectsOnceWithoutASecondCoreTransition() async throws {
+    func testExecutorRejectsSecondEventWithoutOverwritingPendingRetry() async throws {
         let engine = ScriptedDurableEngine()
         let store = ScriptedDurableStore()
         store.commitFailures = 1
@@ -314,25 +332,84 @@ final class DurableLifecycleCoordinatorTests: XCTestCase {
             storage: InMemoryStorage(),
             trust: StubTrustResolver(),
             render: { _, _, _ in renders += 1 })
+        let firstEvent = #"{"type":"start"}"#
+        let secondEvent = #"{"type":"other"}"#
 
         do {
-            _ = try await executor.send(eventJson: #"{"type":"start"}"#)
+            _ = try await executor.send(eventJson: firstEvent)
             XCTFail("commit failure must withhold effects")
         } catch {
-            XCTAssertEqual(error as? EffectExecutorError, .coreInvocationFailed)
+            XCTAssertEqual(error as? DurableLifecycleError, .storageCommitFailed)
+        }
+        do {
+            _ = try await executor.send(eventJson: secondEvent)
+            XCTFail("a second event must not overwrite the exact pending retry")
+        } catch {
+            XCTAssertEqual(error as? DurableLifecycleError, .commitPending)
         }
         XCTAssertEqual(renders, 0)
+        XCTAssertEqual(engine.handledEvents, [firstEvent])
+        XCTAssertEqual(store.commits.count, 1)
 
         let outcome = try await executor.retryPendingDurableCommit()
         XCTAssertEqual(outcome, .awaitingInput)
         XCTAssertEqual(renders, 1)
-        XCTAssertEqual(engine.handledEvents.count, 1)
+        XCTAssertEqual(engine.handledEvents, [firstEvent])
+        XCTAssertEqual(store.commits.count, 2)
         do {
             _ = try await executor.retryPendingDurableCommit()
             XCTFail("an already released batch must not be released again")
         } catch {
             XCTAssertEqual(error as? EffectExecutorError, .noPendingDurableCommit)
         }
+        XCTAssertEqual(renders, 1)
+    }
+
+    func testExecutorRetainsExactEventWheneverCoordinatorRemainsPending() async throws {
+        let engine = ScriptedDurableEngine()
+        engine.exportedGenerationOverride = 9
+        let store = ScriptedDurableStore()
+        let lifecycle = try coordinator(engine: engine, store: store)
+        try lifecycle.bootstrap(environment: environment)
+        var renders = 0
+        let executor = EffectExecutor(
+            engine: lifecycle,
+            signer: StubSigner(),
+            http: StubHttpClient(),
+            storage: InMemoryStorage(),
+            trust: StubTrustResolver(),
+            render: { _, _, _ in renders += 1 })
+        let firstEvent = #"{"type":"start"}"#
+
+        do {
+            _ = try await executor.send(eventJson: firstEvent)
+            XCTFail("generation mismatch must retain the original transition")
+        } catch {
+            XCTAssertEqual(error as? DurableLifecycleError, .checkpointGenerationMismatch)
+        }
+        let replacementExecutor = EffectExecutor(
+            engine: lifecycle,
+            signer: StubSigner(),
+            http: StubHttpClient(),
+            storage: InMemoryStorage(),
+            trust: StubTrustResolver(),
+            render: { _, _, _ in XCTFail("replacement executor must not render") })
+        do {
+            _ = try await replacementExecutor.send(eventJson: #"{"type":"other"}"#)
+            XCTFail("a replacement executor must not adopt a new event while Core retains one")
+        } catch {
+            XCTAssertEqual(error as? DurableLifecycleError, .commitPending)
+        }
+        XCTAssertEqual(engine.handledEvents, [firstEvent])
+        XCTAssertTrue(lifecycle.hasPendingCommit)
+        XCTAssertTrue(store.commits.isEmpty)
+
+        engine.exportedGenerationOverride = nil
+        let outcome = try await executor.retryPendingDurableCommit()
+        XCTAssertEqual(outcome, .awaitingInput)
+        XCTAssertEqual(engine.handledEvents, [firstEvent])
+        XCTAssertEqual(engine.exportedGenerations, [1, 1])
+        XCTAssertEqual(store.commits.count, 1)
         XCTAssertEqual(renders, 1)
     }
 

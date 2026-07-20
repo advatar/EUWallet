@@ -184,9 +184,11 @@ operational solution needed to enter those processes.
           retry a failed commit without re-handling the event; and discard in-flight protocol work
           across process death.
     - [ ] Wire both stores to the Core checkpoint boundary and prove crash-safe effect delivery.
-      - [ ] Make the lifecycle coordinator the only production event path; reject every new event
-            while an exact checkpoint/effect batch awaits commit, predecode and validate the full
-            effect batch before committing it, and retain the original typed failure category.
+      - [x] Reject every new event while an exact checkpoint/effect batch awaits commit, predecode
+            and validate the full effect batch before committing it, preserve the exact pending
+            event across executor replacement and retain the original typed failure category.
+      - [ ] Make the lifecycle coordinator the only production event path; remove or isolate raw
+            `WalletEngine` event driving so application composition cannot bypass persistence.
       - [ ] Align Core checkpoint export admission with the native store capacity so a successful
             state transition cannot wedge permanently at commit time; add exact boundary tests.
       - [ ] Add a bounded durable effect outbox with stable effect identifiers and acknowledgements

@@ -367,6 +367,7 @@ public final class EffectExecutor {
     private let transferOffers: TransferOfferPublisher?
     private let presentationRedirectHandler: OpenID4VPRedirectHandler?
     private let render: (UInt64?, Data?, ScreenDescription) throws -> Void
+    private let durableStateLock = NSLock()
     private var pendingDurableEventJson: String?
 
     public init(
@@ -407,19 +408,7 @@ public final class EffectExecutor {
     /// invoking Core again; draining then continues from that batch.
     @discardableResult
     public func retryPendingDurableCommit() async throws -> EffectCascadeOutcome {
-        guard let eventJson = pendingDurableEventJson else {
-            throw EffectExecutorError.noPendingDurableCommit
-        }
-        guard let retrying = engine as? any DurableLifecycleRetrying else {
-            throw EffectExecutorError.durableRetryUnavailable
-        }
-        let output: String
-        do {
-            output = try retrying.retryPendingEvent(eventJson: eventJson)
-        } catch {
-            throw EffectExecutorError.coreInvocationFailed
-        }
-        pendingDurableEventJson = nil
+        let (eventJson, output) = try retryPendingCoreOutput()
         return try await drain(
             initialCoreOutput: output,
             initialEventType: Self.eventType(eventJson))
@@ -493,15 +482,57 @@ public final class EffectExecutor {
     }
 
     private func invokeCore(_ eventJson: String) throws -> String {
+        durableStateLock.lock()
+        defer { durableStateLock.unlock() }
+        // Never replace the exact event associated with a retained checkpoint/effect batch. A
+        // second event cannot be handled until the first event's commit has succeeded or failed
+        // terminally.
+        guard pendingDurableEventJson == nil else {
+            throw DurableLifecycleError.commitPending
+        }
+        let retrying = engine as? any DurableLifecycleRetrying
+        // A newly-created executor must also respect a transition retained by the coordinator;
+        // never adopt the new event as if it were the original pending event.
+        guard retrying?.hasPendingCommit != true else {
+            throw DurableLifecycleError.commitPending
+        }
         pendingDurableEventJson = eventJson
         do {
             let output = try engine.handleEventJson(eventJson: eventJson)
             pendingDurableEventJson = nil
             return output
+        } catch let error as DurableLifecycleError {
+            if retrying?.hasPendingCommit != true {
+                pendingDurableEventJson = nil
+            }
+            // Preserve the stable lifecycle category so callers can distinguish an exact retry
+            // from a poisoned lifecycle or persistence divergence.
+            throw error
         } catch {
-            // Retain only the exact event in process memory so the durable coordinator can retry
-            // its already-computed checkpoint/effects. Never attach the event or source error to a
-            // diagnostic value.
+            pendingDurableEventJson = nil
+            throw EffectExecutorError.coreInvocationFailed
+        }
+    }
+
+    private func retryPendingCoreOutput() throws -> (eventJson: String, output: String) {
+        durableStateLock.lock()
+        defer { durableStateLock.unlock() }
+        guard let eventJson = pendingDurableEventJson else {
+            throw EffectExecutorError.noPendingDurableCommit
+        }
+        guard let retrying = engine as? any DurableLifecycleRetrying else {
+            throw EffectExecutorError.durableRetryUnavailable
+        }
+        do {
+            let output = try retrying.retryPendingEvent(eventJson: eventJson)
+            pendingDurableEventJson = nil
+            return (eventJson, output)
+        } catch let error as DurableLifecycleError {
+            if !retrying.hasPendingCommit {
+                pendingDurableEventJson = nil
+            }
+            throw error
+        } catch {
             throw EffectExecutorError.coreInvocationFailed
         }
     }

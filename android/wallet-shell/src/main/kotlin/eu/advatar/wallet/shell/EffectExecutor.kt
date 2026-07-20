@@ -53,17 +53,28 @@ class EffectExecutor(
      * returns its retained effects without invoking Core again.
      */
     fun retryPendingDurableCommit(): EffectCascadeOutcome {
+        val (eventJson, output) = retryPendingCoreOutput()
+        return drain(WalletEffectDecoder.decodeCoreOutput(output), eventType(eventJson))
+    }
+
+    @Synchronized
+    private fun retryPendingCoreOutput(): Pair<String, String> {
         val eventJson = pendingDurableEventJson
             ?: throw WalletShellException.NoPendingDurableCommit()
         val retrying = engine as? DurableLifecycleRetrying
             ?: throw WalletShellException.DurableRetryUnavailable()
         val output = try {
             retrying.retryPendingEvent(eventJson)
+        } catch (error: DurableLifecycleException) {
+            if (!retrying.hasPendingCommit) pendingDurableEventJson = null
+            // Preserve the stable lifecycle code rather than hiding it behind a generic Core
+            // invocation failure.
+            throw error
         } catch (error: Exception) {
             throw WalletShellException.CoreInvocationFailure(error)
         }
         pendingDurableEventJson = null
-        return drain(WalletEffectDecoder.decodeCoreOutput(output), eventType(eventJson))
+        return eventJson to output
     }
 
     private fun drain(
@@ -127,11 +138,26 @@ class EffectExecutor(
         null
     }
 
+    @Synchronized
     private fun invokeCore(eventJson: String): List<WalletEffect> {
+        // Do not overwrite the event associated with an exact retained checkpoint/effect batch.
+        if (pendingDurableEventJson != null) {
+            throw DurableLifecycleException(DurableLifecycleErrorCode.COMMIT_PENDING)
+        }
+        val retrying = engine as? DurableLifecycleRetrying
+        // A coordinator can outlive an executor. A replacement executor must reject a new event
+        // without mistaking it for the exact transition already retained by that coordinator.
+        if (retrying?.hasPendingCommit == true) {
+            throw DurableLifecycleException(DurableLifecycleErrorCode.COMMIT_PENDING)
+        }
         pendingDurableEventJson = eventJson
         val output = try {
             engine.handleEventJson(eventJson)
+        } catch (error: DurableLifecycleException) {
+            if (retrying?.hasPendingCommit != true) pendingDurableEventJson = null
+            throw error
         } catch (error: Exception) {
+            pendingDurableEventJson = null
             throw WalletShellException.CoreInvocationFailure(error)
         }
         pendingDurableEventJson = null
