@@ -1,22 +1,19 @@
-//! The FULL credential lifecycle over live TCP — one core, one process, real sockets end to end:
+//! Credential issuance over live TCP followed by fail-closed OpenID4VP delivery policy:
 //!
 //!   ISSUANCE   offer (issuer trusted in-core, real chain) → live POST /token → in-core WUA
 //!              key-attestation gate → device signs the proof → live POST /credential → the wallet
 //!              stores the SD-JWT exactly as received over the wire;
-//!   PRESENTATION  RP-signed DCQL request → minimised consent → device-signed KB-JWT →
-//!              live POST /response → the RP verifies the presentation with real crypto.
+//!   PRESENTATION  an RP-signed DCQL request targeting plaintext HTTP is rejected before consent,
+//!              signing, or a network effect.
 //!
-//! The credential the RP verifies at the end is the one that travelled the wire at issuance —
-//! nothing is loaded out-of-band. This is the "issue → hold → present" loop a production wallet
-//! runs, minus only TLS and real endpoints.
+//! This preserves live issuance coverage while proving that the reference shell's local-only HTTP
+//! transport cannot accidentally become a presentation confidentiality downgrade.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
 
 use base64ct::{Base64UrlUnpadded, Encoding};
-use crypto_backend::AwsLc;
-use crypto_traits::Alg;
 use presenter::ScreenDescription;
 use shell_io::{DeviceSigner, IssuerEndpoints, ShellRunner, TrustFetcher};
 use wallet_core::{Core, DemoWallet, Event, HeldCredential};
@@ -38,20 +35,16 @@ impl TrustFetcher for DemoTrust {
     }
 }
 
-/// One live server playing issuer AND relying party, routing by path over real TCP:
+/// One live server playing the issuer, routing by path over real TCP:
 ///   POST /token       → {"bound":true,"cNonce":111}
 ///   POST /credential  → {"format":"dc+sd-jwt","credential":"<jwt~d1~d2~>"} (captures the proof)
-///   POST /response    → 200 (captures the vp_token)
-fn spawn_issuer_and_rp(
-    issuance_compact: String,
-) -> (u16, mpsc::Receiver<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
+fn spawn_issuer(issuance_compact: String) -> (u16, mpsc::Receiver<Vec<u8>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let port = listener.local_addr().unwrap().port();
     let (proof_tx, proof_rx) = mpsc::channel();
-    let (vp_tx, vp_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        // The flow makes exactly three sequential requests.
-        for _ in 0..3 {
+        // Issuance makes exactly two sequential requests. Presentation is rejected before I/O.
+        for _ in 0..2 {
             let (mut stream, _) = listener.accept().expect("accept");
             let (path, body) = read_request(&mut stream);
             match path.as_str() {
@@ -64,15 +57,11 @@ fn spawn_issuer_and_rp(
                         format!(r#"{{"format":"dc+sd-jwt","credential":"{issuance_compact}"}}"#);
                     respond_json(&mut stream, &json);
                 }
-                "/response" => {
-                    vp_tx.send(body).expect("hand vp_token to test");
-                    respond_json(&mut stream, "");
-                }
                 other => panic!("unexpected path {other}"),
             }
         }
     });
-    (port, proof_rx, vp_rx)
+    (port, proof_rx)
 }
 
 /// Read one HTTP request; return (path, body).
@@ -138,7 +127,7 @@ fn held_credential_from_wire(compact: &str) -> HeldCredential {
 }
 
 #[test]
-fn full_lifecycle_issue_then_present_over_live_tcp() {
+fn live_issuance_then_plaintext_presentation_is_rejected() {
     let wallet = DemoWallet::new();
     // What the live issuer will hand out: the SD-JWT issuance compact serialization
     // (issuer JWT + both disclosures), exactly as a real issuer responds.
@@ -151,7 +140,7 @@ fn full_lifecycle_issue_then_present_over_live_tcp() {
         disclosures.values().cloned().collect::<Vec<_>>().join("~")
     );
 
-    let (port, proof_rx, vp_rx) = spawn_issuer_and_rp(issuance_compact.clone());
+    let (port, proof_rx) = spawn_issuer(issuance_compact.clone());
     let s = wallet.scenario_with_response_uri(&format!("http://127.0.0.1:{port}/response"));
 
     // One core for the whole lifecycle: trust list anchors BOTH issuance (pid) and RP access.
@@ -207,80 +196,28 @@ fn full_lifecycle_issue_then_present_over_live_tcp() {
     );
     shell.core.load_credential(held);
 
-    // ---- PRESENTATION, live: DCQL request → consent → KB-JWT → /response → RP verifies. ----
+    // ---- PRESENTATION: the signed request's plaintext HTTP endpoint is rejected before consent. ----
     let outcome = shell.handle(Event::AuthorizationRequestReceived {
         request: s.presentation_request.clone(),
     });
     assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
-    match shell.last_screen() {
-        Some(ScreenDescription::Consent(c)) => {
-            assert_eq!(c.requested_claims, vec!["age_over_18".to_string()]);
-        }
-        other => panic!("expected the consent screen, got {other:?}"),
-    }
-
-    let outcome = shell.handle(Event::UserConsented);
-    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
-    assert!(outcome.closed);
-    assert_eq!(shell.core.state(), &oid4vp::State::Done);
-
-    // The RP verifies the LIVE-delivered presentation of the LIVE-issued credential.
-    let vp_token = vp_token_from_form(&vp_rx.recv().expect("vp_token received"));
-    let sd = sdjwt::SdJwtVc::parse(&vp_token).expect("well-formed presentation");
-    let claims = sd
-        .verify_presentation(
-            &AwsLc,
-            &AwsLc,
-            &wallet.issuer_public_key(),
-            Alg::Es256,
-            &sdjwt::KeyBindingCheck {
-                device_public_key: &s.device_public_key,
-                expected_aud: "rp.example",
-                expected_nonce: wallet.demo_nonce(),
-                device_alg: Alg::Es256,
-            },
-        )
-        .expect("RP accepts");
-    assert_eq!(claims.get("age_over_18"), Some(&serde_json::json!(true)));
     assert!(
-        claims.get("family_name").is_none(),
-        "family_name was issued over the wire but never disclosed"
+        outcome.http_posts.is_empty(),
+        "unsafe endpoint must never be contacted"
     );
+    assert!(outcome.persisted_nonces.is_empty());
+    assert!(outcome.closed);
+    assert_eq!(
+        shell.core.state(),
+        &oid4vp::State::Aborted(oid4vp::AbortReason::ResponseUriInvalid)
+    );
+    assert!(matches!(
+        shell.last_screen(),
+        Some(ScreenDescription::Error { code, .. })
+            if code == "presentation_response_uri_invalid"
+    ));
 }
 
 fn core_str(bytes: &[u8]) -> &str {
     core::str::from_utf8(bytes).expect("utf8 credential")
-}
-
-/// Extract the SD-JWT presentation from an OpenID4VP 1.0 `direct_post` form body (DCQL id "pid").
-fn vp_token_from_form(body: &[u8]) -> String {
-    let s = String::from_utf8(body.to_vec()).expect("utf8 body");
-    let raw = s
-        .strip_prefix("vp_token=")
-        .and_then(|v| v.split('&').next())
-        .expect("vp_token form field");
-    let decoded = percent_decode(raw);
-    let obj: serde_json::Value = serde_json::from_str(&decoded).expect("vp_token JSON object");
-    obj.get("pid")
-        .and_then(|v| v.as_str())
-        .expect("pid presentation")
-        .to_string()
-}
-
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            let hi = (b[i + 1] as char).to_digit(16).unwrap();
-            let lo = (b[i + 2] as char).to_digit(16).unwrap();
-            out.push((hi * 16 + lo) as u8);
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).unwrap()
 }

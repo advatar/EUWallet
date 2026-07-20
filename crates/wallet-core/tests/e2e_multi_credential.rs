@@ -81,6 +81,7 @@ fn sign_multi_request(rp: &SoftwareSigner, nonce: u64) -> Vec<u8> {
         "nonce": nonce,
         "aud": "wallet.example",
         "response_uri": RESPONSE_URI,
+        "response_mode": "direct_post",
         "purpose": "Prove your identity and driving entitlement",
         "dcql_query": { "credentials": [
             {
@@ -177,7 +178,7 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
     core.handle_event(Event::AuthorizationRequestReceived { request: sign_multi_request(&rp, NONCE) });
     core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec![RESPONSE_URI.into()],
     });
 
     // Two credentials ⇒ two sequential device-signing rounds. Sign each; the last yields the Http.

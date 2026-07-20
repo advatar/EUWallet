@@ -50,7 +50,7 @@ fn trust() -> ResolvedTrust {
     ResolvedTrust {
         registered: true,
         rp_public_key: b"rp-pub".to_vec(),
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec!["https://rp.example/resp".into()],
     }
 }
 
@@ -116,7 +116,10 @@ fn happy_path_idle_free_to_done() {
             let t = String::from_utf8(token.clone()).unwrap();
             // direct_post body; this req() has no DCQL id → the bare presentation under vp_token.
             // vp_token = <issuer-jwt>~<disclosure>~<kb-jwt>
-            assert!(t.starts_with("vp_token=hdr.pay.sig~disc1~"), "form body, got {t}");
+            assert!(
+                t.starts_with("vp_token=hdr.pay.sig~disc1~"),
+                "form body, got {t}"
+            );
             assert_eq!(t.matches('~').count(), 2);
         }
         other => panic!("expected SendVpToken, got {other:?}"),
@@ -169,6 +172,110 @@ fn abort_redirect_not_registered() {
         "wallet.example",
     );
     assert_eq!(s, State::Aborted(AbortReason::RedirectUriNotRegistered));
+}
+
+#[test]
+fn aborts_every_unsupported_response_mode_exactly() {
+    for mode in [
+        "",
+        "Direct_Post",
+        "direct_post.jwt.extra",
+        "query",
+        "fragment",
+    ] {
+        let s = resolve_with(
+            |r, _| r.response_mode = mode.into(),
+            &[],
+            &Accept,
+            "wallet.example",
+        );
+        assert_eq!(
+            s,
+            State::Aborted(AbortReason::ResponseModeUnsupported),
+            "mode {mode:?} must not fall through"
+        );
+    }
+}
+
+#[test]
+fn accepts_only_nonempty_absolute_https_response_uris() {
+    for uri in [
+        "",
+        "http://rp.example/resp",
+        "https:///resp",
+        "https://user@rp.example/resp",
+        "https://rp.example/resp#fragment",
+        "https://rp.example\\resp",
+        "https://rp.example:0/resp",
+        "https://rp.example:/resp",
+        "https://bad_host.example/resp",
+        "https://[not-ipv6]/resp",
+        "/relative",
+    ] {
+        let s = resolve_with(
+            |r, t| {
+                r.response_uri = uri.into();
+                t.registered_redirect_uris = vec![uri.into()];
+            },
+            &[],
+            &Accept,
+            "wallet.example",
+        );
+        assert_eq!(
+            s,
+            State::Aborted(AbortReason::ResponseUriInvalid),
+            "URI {uri:?} must not be accepted"
+        );
+    }
+}
+
+#[test]
+fn abort_response_uri_not_registered_for_rp() {
+    let s = resolve_with(
+        |r, t| {
+            r.response_uri = "https://other.example/resp".into();
+            t.registered_redirect_uris = vec!["https://rp.example/resp".into()];
+        },
+        &[],
+        &Accept,
+        "wallet.example",
+    );
+    assert_eq!(s, State::Aborted(AbortReason::ResponseUriNotRegistered));
+}
+
+#[test]
+fn direct_post_jwt_requires_well_formed_key_metadata() {
+    for key in [
+        None,
+        Some(vec![]),
+        Some(vec![0x04; 64]),
+        Some(vec![0x03; 65]),
+    ] {
+        let s = resolve_with(
+            |r, _| {
+                r.response_mode = "direct_post.jwt".into();
+                r.response_encryption_key = key;
+            },
+            &[],
+            &Accept,
+            "wallet.example",
+        );
+        assert_eq!(
+            s,
+            State::Aborted(AbortReason::ResponseEncryptionMetadataInvalid)
+        );
+    }
+
+    let s = resolve_with(
+        |r, _| {
+            r.response_mode = "direct_post.jwt".into();
+            r.response_encryption_key = Some(vec![0x04; 65]);
+        },
+        &[],
+        &Accept,
+        "wallet.example",
+    );
+    assert!(matches!(s, State::RequestValidated(_)));
 }
 
 #[test]

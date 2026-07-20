@@ -32,6 +32,8 @@ const RP_PKCS8: &[u8] = include_bytes!("../../x509/tests/vectors/rp.pkcs8.der");
 const DEMO_EPOCH: i64 = 1_790_000_000;
 /// The nonce the RP's request is bound to (echoed in the key-binding JWT).
 const DEMO_NONCE: u64 = 424_242;
+/// The authenticated direct-post endpoint carried by the demo RP registration.
+const DEMO_RESPONSE_URI: &str = "https://rp.example/response";
 
 /// A self-contained payment request (PSD2/TS12 shape). Static because it needs no signing —
 /// the SCA binding the user authorises is computed and signed in-core at approval time.
@@ -60,7 +62,8 @@ pub struct DemoScenario {
     pub device_public_key: Vec<u8>,
     /// RP certificate chain (DER, leaf-first) the shell supplies on `resolveRpTrust`.
     pub rp_cert_chain: Vec<Vec<u8>>,
-    /// Redirect URIs registered for the RP (empty for the demo).
+    /// Authenticated delivery endpoints registered for the RP. The field keeps its legacy name for
+    /// compatibility with the native FFI contract.
     pub registered_redirect_uris: Vec<String>,
     /// RP-signed authorization request (compact JWS) requesting only `age_over_18`.
     pub presentation_request: Vec<u8>,
@@ -154,7 +157,7 @@ impl DemoWallet {
             operator_public_key: self.operator.public_key_raw().to_vec(),
             device_public_key: self.device.public_key_raw().to_vec(),
             rp_cert_chain: vec![RP_DER.to_vec()],
-            registered_redirect_uris: vec![],
+            registered_redirect_uris: vec![DEMO_RESPONSE_URI.into()],
             presentation_request: self.sign_request(DEMO_NONCE, &["age_over_18"]),
             payment_request: PAYMENT_REQUEST_JSON.to_vec(),
         }
@@ -185,7 +188,8 @@ impl DemoWallet {
             "client_id": "rp.example",
             "nonce": nonce,
             "aud": "wallet.example",
-            "response_uri": "https://rp.example/response",
+            "response_uri": DEMO_RESPONSE_URI,
+            "response_mode": "direct_post",
             "purpose": "Prove you are over 18 (mDL)",
             "dcql_query": {
                 "credentials": [{
@@ -302,6 +306,7 @@ impl DemoWallet {
     pub fn scenario_with_response_uri(&self, response_uri: &str) -> DemoScenario {
         let mut s = self.scenario();
         s.presentation_request = self.sign_request_dcql(DEMO_NONCE, response_uri);
+        s.registered_redirect_uris = vec![response_uri.into()];
         s
     }
 
@@ -399,6 +404,7 @@ impl DemoWallet {
             "nonce": nonce,
             "aud": "wallet.example",
             "response_uri": response_uri,
+            "response_mode": "direct_post",
             "purpose": "Prove you are over 18",
             "dcql_query": {
                 "credentials": [{
@@ -556,7 +562,8 @@ impl DemoWallet {
             "client_id": "rp.example",
             "nonce": nonce,
             "aud": "wallet.example",
-            "response_uri": "https://rp.example/response",
+            "response_uri": DEMO_RESPONSE_URI,
+            "response_mode": "direct_post",
             "purpose": "Prove you are over 18",
             "claims": requested,
         }))

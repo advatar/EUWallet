@@ -55,7 +55,7 @@ fn presentation_json_contract_is_camel_case() {
         .join(",");
     let out = core
         .handle_event_json(&format!(
-            r#"{{"type":"rpCertChainResolved","rpCertChain":[{certs}],"registeredRedirectUris":[]}}"#
+            r#"{{"type":"rpCertChainResolved","rpCertChain":[{certs}],"registeredRedirectUris":["https://rp.example/response"]}}"#
         ))
         .unwrap();
     assert!(

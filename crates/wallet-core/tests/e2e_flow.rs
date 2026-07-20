@@ -69,6 +69,7 @@ fn sign_request(rp: &SoftwareSigner, nonce: u64, requested: &[&str]) -> Vec<u8> 
         "nonce": nonce,
         "aud": "wallet.example",
         "response_uri": "https://rp.example/response",
+        "response_mode": "direct_post",
         "purpose": "Prove you are over 18",
         "claims": requested,
     }))
@@ -128,7 +129,7 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
     //    (registration is NOT a shell boolean) → PersistNonce + Render(consent)
     let fx = core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec!["https://rp.example/response".into()],
     });
     let screen = fx.iter().find_map(|e| match e {
         Effect::Render { screen } => Some(screen.clone()),

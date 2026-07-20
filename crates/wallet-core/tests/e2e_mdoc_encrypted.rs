@@ -74,9 +74,13 @@ fn sign_encrypted_mdoc_request(rp: &SoftwareSigner, nonce: u64, recipient_pub: &
         "response_uri": RESPONSE_URI,
         "response_mode": "direct_post.jwt",
         "purpose": "Prove you are over 18 (mDL)",
-        "client_metadata": { "jwks": { "keys": [{
-            "kty": "EC", "crv": "P-256", "use": "enc", "alg": "ECDH-ES", "x": b64(x), "y": b64(y)
-        }]}},
+        "client_metadata": {
+            "authorization_encrypted_response_alg": "ECDH-ES",
+            "authorization_encrypted_response_enc": "A256GCM",
+            "jwks": { "keys": [{
+                "kty": "EC", "crv": "P-256", "use": "enc", "alg": "ECDH-ES", "x": b64(x), "y": b64(y)
+            }]}
+        },
         "dcql_query": { "credentials": [{
             "id": "mdl",
             "format": "mso_mdoc",
@@ -140,7 +144,7 @@ fn haip_mdoc_profile_encrypted_device_response_round_trips() {
     core.handle_event(Event::AuthorizationRequestReceived { request });
     core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec![RESPONSE_URI.into()],
     });
     let fx = core.handle_event(Event::UserConsented);
     let signing_input = fx

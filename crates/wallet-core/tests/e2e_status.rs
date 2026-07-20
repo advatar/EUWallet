@@ -51,7 +51,8 @@ fn sign_request(rp: &SoftwareSigner) -> Vec<u8> {
     let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
     let payload = b64(json!({
         "client_id":"rp.example","nonce":7u64,"aud":"wallet.example",
-        "response_uri":"https://rp.example/response","purpose":"age","claims":["age_over_18"]
+        "response_uri":"https://rp.example/response","response_mode":"direct_post",
+        "purpose":"age","claims":["age_over_18"]
     })
     .to_string()
     .as_bytes());
@@ -104,7 +105,7 @@ fn drive_to_consent(status_index: Option<u64>, load_status: bool) -> Vec<Effect>
     });
     core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec!["https://rp.example/response".into()],
     });
     core.handle_event(Event::UserConsented)
 }

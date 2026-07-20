@@ -70,6 +70,8 @@ fn sign_encrypted_request(rp: &SoftwareSigner, nonce: u64, recipient_pub: &[u8])
         "response_mode": "direct_post.jwt",
         "purpose": "Prove you are over 18",
         "client_metadata": {
+            "authorization_encrypted_response_alg": "ECDH-ES",
+            "authorization_encrypted_response_enc": "A256GCM",
             "jwks": { "keys": [{
                 "kty": "EC", "crv": "P-256", "use": "enc", "alg": "ECDH-ES",
                 "x": b64(x), "y": b64(y)
@@ -116,7 +118,7 @@ fn encrypted_response_leaves_the_device_as_a_jwe_only_the_verifier_can_open() {
     assert!(matches!(fx.as_slice(), [Effect::ResolveRpTrust { .. }]), "got {fx:?}");
     core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec!["https://rp.example/response".into()],
     });
     let fx = core.handle_event(Event::UserConsented);
     let signing_input = fx
