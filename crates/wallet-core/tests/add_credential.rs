@@ -5,7 +5,7 @@
 //! the iOS "Add credential" button; only the (stubbed) issuer transport is not a live socket.
 
 use base64ct::{Base64UrlUnpadded, Encoding};
-use wallet_core::{Core, DemoWallet, Effect, Event, IssuanceScenario};
+use wallet_core::{Core, CredentialIngestionError, DemoWallet, Effect, Event, IssuanceScenario};
 
 /// Run ONE pre-authorized OID4VCI issuance to completion against `core`. `wallet` supplies the
 /// device signature over the proof — the same key the loaded WUA attests, so the in-core
@@ -250,6 +250,27 @@ fn mso_mdoc_issuance_stores_a_presentable_mdoc_holding() {
         1,
         "re-issuing the mdoc does not duplicate the holding"
     );
+}
+
+#[test]
+fn mso_mdoc_issuance_does_not_reconstruct_missing_x5chain_from_the_offer() {
+    let wallet = DemoWallet::new();
+    let scn = wallet.issuance_scenario();
+    let decoded = Base64UrlUnpadded::decode_vec(&scn.mdl_mdoc_credential).expect("mdoc base64url");
+    let mut issued = mdoc::IssuerSigned::parse(&decoded).expect("demo IssuerSigned");
+    issued.issuer_auth.unprotected.x5chain = None;
+    let without_x5chain = Base64UrlUnpadded::encode_string(&issued.to_value().to_canonical());
+    let mut core = issuance_ready_core(&scn);
+
+    // The offer's shell-supplied issuer path is valid, but it is only offer/transport evidence.
+    // The credential response must independently authenticate its own issuerAuth x5chain.
+    add_mdoc_credential(&mut core, &wallet, &scn, 603, &without_x5chain);
+
+    assert_eq!(
+        core.last_credential_ingestion_error(),
+        Some(&CredentialIngestionError::UntrustedIssuer)
+    );
+    assert_eq!(core.held_credentials_json(), "[]");
 }
 
 /// DCQL type constraint drives selection: with BOTH an mDL and a PID held — the mDL added first,

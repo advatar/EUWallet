@@ -51,7 +51,8 @@ operational solution needed to enter those processes.
         critical extensions and AKI/SKI mismatches; enforce BasicConstraints/pathLen and KeyUsage.
   - [ ] Enforce name constraints, certificate policies, algorithm constraints and service-specific
         EUDI PID, attestation/mdoc, RP, status and WUA/WIA profiles.
-  - [ ] Authenticate bounded mdoc `x5chain` evidence through that service-scoped path.
+  - [x] Authenticate bounded mdoc `x5chain` evidence through the current strict service-scoped
+        path at ingestion and presentation-time revalidation.
 - [x] [#10](https://github.com/advatar/EUWallet/issues/10): complete RFC 9901 SD-JWT holding,
       presentation and consent integration without flattening authenticated disclosure structure.
   - [x] Verify recursive object/array disclosures with exact paths, parent dependencies, collision
@@ -76,7 +77,12 @@ operational solution needed to enter those processes.
   - [x] Bind mandatory mdoc catalogue claims to the exact doctype, namespace and element.
   - [x] Preserve structurally validated COSE label 33 `x5chain` header values without treating
         them as trust.
-  - [ ] Route the embedded issuer chain through the approved EUDI trust/path-validation profile.
+  - [x] Route bounded embedded `issuerAuth` `x5chain` evidence through the current strict,
+        service-scoped validator at ingestion and presentation-time revalidation; caller-supplied
+        paths and identities cannot override it.
+  - [ ] Re-evaluate the authenticated path against the final approved EUDI issuer certificate and
+        service profiles when the remaining [#11](https://github.com/advatar/EUWallet/issues/11)
+        profile work lands.
 - [ ] Add flow operation IDs, explicit terminal outcomes and recoverable failure/cancel transitions.
 - [ ] Harden QR/deep-link and protocol networking with HTTPS-only URL policy, bounded responses,
       redirect/origin controls and SSRF-resistant destination validation.

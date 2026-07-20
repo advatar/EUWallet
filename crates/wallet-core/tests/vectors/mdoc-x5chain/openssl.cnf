@@ -1,0 +1,18 @@
+[req]
+distinguished_name = dn
+prompt = no
+
+[dn]
+CN = unused
+
+[root_ca]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[bridge_ca]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
