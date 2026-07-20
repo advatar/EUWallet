@@ -174,8 +174,9 @@ private fun isPublicIpv6(bytes: ByteArray): Boolean {
     if (bytes.size != 16) return false
     val first = bytes[0].toInt() and 0xff
     val second = bytes[1].toInt() and 0xff
-    // Conservatively allow only global-unicast 2000::/3, then remove special transition/test nets.
-    if (first !in 0x20..0x3f) return false
+    // Current RIR/global allocations are in 2000::/4. IANA still reserves 3000::/5, so accepting
+    // the historical wider 2000::/3 definition would admit presently non-global destinations.
+    if (first !in 0x20..0x2f) return false
     if (first == 0x20 && second == 0x01) {
         val third = bytes[2].toInt() and 0xff
         val fourth = bytes[3].toInt() and 0xff
@@ -184,9 +185,6 @@ private fun isPublicIpv6(bytes: ByteArray): Boolean {
         if (third == 0x00 && fourth == 0x02) return false // benchmark
     }
     if (first == 0x20 && second == 0x02) return false // 6to4 can tunnel non-public IPv4
-    if (first == 0x3f && second == 0xff && (bytes[2].toInt() and 0xf0) == 0) {
-        return false // documentation prefix 3fff:0000::/20
-    }
     return true
 }
 
