@@ -157,7 +157,7 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
         .unwrap();
     let decoded = percent_decode(vp_json);
     let obj: serde_json::Value = serde_json::from_str(&decoded).unwrap();
-    let device_response_b64 = obj["cred1"].as_str().expect("DCQL-keyed vp_token");
+    let device_response_b64 = obj["cred1"][0].as_str().expect("DCQL-keyed vp_token");
     let dr_cbor =
         Base64UrlUnpadded::decode_vec(device_response_b64).expect("base64url DeviceResponse");
     let dr = cbor::from_canonical_slice(&dr_cbor).expect("canonical DeviceResponse CBOR");

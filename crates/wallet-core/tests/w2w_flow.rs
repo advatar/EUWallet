@@ -44,13 +44,20 @@ fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
 }
 
 /// An SD-JWT VC signed by the issuer whose key matches `ISSUER_LEAF`.
-fn issued_credential(issuer: &SoftwareSigner) -> Vec<u8> {
+fn issued_credential(issuer: &SoftwareSigner, device_public_key: &[u8]) -> Vec<u8> {
     let header = b64(br#"{"alg":"ES256","typ":"dc+sd-jwt"}"#);
-    let payload = b64(
-        json!({"iss":"https://issuer.example","vct":"urn:eudi:pid:1"})
-            .to_string()
-            .as_bytes(),
-    );
+    let payload = b64(json!({
+        "iss":"https://issuer.example",
+        "vct":"urn:eudi:pid:1",
+        "cnf":{"jwk":{
+            "kty":"EC",
+            "crv":"P-256",
+            "x":b64(&device_public_key[1..33]),
+            "y":b64(&device_public_key[33..65])
+        }}
+    })
+    .to_string()
+    .as_bytes());
     let si = format!("{header}.{payload}");
     let sig = issuer
         .sign(&KeyRef("i".into()), Alg::Es256, si.as_bytes())
@@ -99,7 +106,7 @@ fn accepts_a_trusted_peer_bound_transfer_in_core() {
     let issuer = SoftwareSigner::from_pkcs8_der(ISSUER_PKCS8).unwrap();
 
     let mut core = receiver(&device, true, &operator);
-    let cred = issued_credential(&issuer);
+    let cred = issued_credential(&issuer, device.public_key_raw());
     let consent = [7u8; 32];
     let sig = sender_transfer(&sender, device.public_key_raw(), &cred, &consent, 1);
 
@@ -131,7 +138,7 @@ fn rejects_an_untrusted_issuer_in_core() {
 
     // No trust list loaded → issuer_valid is false in-core.
     let mut core = receiver(&device, false, &operator);
-    let cred = issued_credential(&issuer);
+    let cred = issued_credential(&issuer, device.public_key_raw());
     let consent = [7u8; 32];
     let sig = sender_transfer(&sender, device.public_key_raw(), &cred, &consent, 2);
 
@@ -158,7 +165,7 @@ fn rejects_a_misdirected_transfer_in_core() {
     let issuer = SoftwareSigner::from_pkcs8_der(ISSUER_PKCS8).unwrap();
 
     let mut core = receiver(&device, true, &operator);
-    let cred = issued_credential(&issuer);
+    let cred = issued_credential(&issuer, device.public_key_raw());
     let consent = [7u8; 32];
     // The sender bound the transfer to a DIFFERENT wallet's key → peer_bound is false here.
     let other_key = SoftwareSigner::generate_p256()

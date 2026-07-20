@@ -52,8 +52,23 @@ operational solution needed to enter those processes.
   - [ ] Enforce name constraints, certificate policies, algorithm constraints and service-specific
         EUDI PID, attestation/mdoc, RP, status and WUA/WIA profiles.
   - [ ] Authenticate bounded mdoc `x5chain` evidence through that service-scoped path.
-- [ ] Implement recursive RFC 9901 disclosures, reject invalid issued SD-JWT+KB/control claims,
-      and include permanently visible PII in consent.
+- [x] [#10](https://github.com/advatar/EUWallet/issues/10): complete RFC 9901 SD-JWT holding,
+      presentation and consent integration without flattening authenticated disclosure structure.
+  - [x] Verify recursive object/array disclosures with exact paths, parent dependencies, collision
+        checks and fixed processing budgets in the `sdjwt` crate.
+  - [x] Reject issuer-provided key-binding JWTs and require all SD-JWT VC protocol-control claims
+        to be permanent issuer-payload values.
+  - [x] Retain authenticated processed claims, exact paths and disclosure dependencies in private
+        production storage while preserving the public fixture API.
+  - [x] Select a minimal dependency-closed disclosure set for exact DCQL object/array paths and
+        fail the complete request atomically when any path is unavailable.
+  - [x] Include permanent PII and every incidental value revealed by selected dependencies in the
+        holder-visible consent contract.
+- [x] Bound DCQL request/query/path/value cardinality and fail closed on malformed queries or
+      unsupported selection, trust and transaction-data modifiers.
+- [ ] Implement final DCQL `credential_sets`, `claim_sets`, `trusted_authorities`, multiple-return,
+      retention-intent and `transaction_data` semantics; they are rejected until enforceable end
+      to end.
 - [ ] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths
       ([#6](https://github.com/advatar/EUWallet/issues/6)).
   - [x] Require and emit canonical CBOR tag-0 RFC 3339 `tdate` validity values, with malformed

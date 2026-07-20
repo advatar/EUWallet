@@ -295,7 +295,7 @@ fn dcql_vct_constraint_selects_the_requested_type() {
 }
 
 /// Extract the presented SD-JWT's `vct` from a DCQL direct_post body
-/// (`vp_token=<percent-encoded {"pid":"<compact>"}>`).
+/// (`vp_token=<percent-encoded {"pid":["<compact>"]}>`).
 fn presented_vct(body: &str) -> String {
     let raw = body
         .strip_prefix("vp_token=")
@@ -303,7 +303,7 @@ fn presented_vct(body: &str) -> String {
         .expect("vp_token field");
     let decoded = percent_decode(raw);
     let obj: serde_json::Value = serde_json::from_str(&decoded).expect("vp_token JSON object");
-    let compact = obj["pid"].as_str().expect("pid presentation");
+    let compact = obj["pid"][0].as_str().expect("pid presentation");
     let issuer_jwt = compact.split('~').next().expect("issuer jwt");
     let payload_b64 = issuer_jwt.split('.').nth(1).expect("jwt payload");
     let payload = Base64UrlUnpadded::decode_vec(payload_b64).expect("b64 payload");
