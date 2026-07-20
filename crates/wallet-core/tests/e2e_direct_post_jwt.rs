@@ -184,7 +184,7 @@ fn encrypted_response_leaves_the_device_as_a_jwe_only_the_verifier_can_open() {
 
     // The decrypted response is the OpenID4VP object: vp_token keyed by the DCQL id, with a
     // verifiable SD-JWT presentation that disclosed exactly age_over_18.
-    let presentation = response["vp_token"]["pid"]
+    let presentation = response["vp_token"]["pid"][0]
         .as_str()
         .expect("DCQL-keyed vp_token");
     let sd = sdjwt::SdJwtVc::parse(presentation).expect("SD-JWT presentation parses");

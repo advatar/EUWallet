@@ -199,7 +199,7 @@ fn haip_mdoc_profile_encrypted_device_response_round_trips() {
         .expect("verifier opens the JWE");
     let response: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
 
-    let dr_b64 = response["vp_token"]["mdl"]
+    let dr_b64 = response["vp_token"]["mdl"][0]
         .as_str()
         .expect("DCQL-keyed DeviceResponse");
     let dr = cbor::from_canonical_slice(&Base64UrlUnpadded::decode_vec(dr_b64).unwrap()).unwrap();

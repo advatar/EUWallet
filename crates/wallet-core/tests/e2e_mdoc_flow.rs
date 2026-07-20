@@ -213,7 +213,7 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
     let vp_field = field(&body, "vp_token").expect("vp_token field");
     let mgn = field(&body, "mdoc_generated_nonce").expect("mdoc_generated_nonce field");
     let obj: serde_json::Value = serde_json::from_str(&vp_field).expect("vp_token JSON object");
-    let dr_b64 = obj["mdl"].as_str().expect("DCQL-keyed DeviceResponse");
+    let dr_b64 = obj["mdl"][0].as_str().expect("DCQL-keyed DeviceResponse");
     let dr_cbor = Base64UrlUnpadded::decode_vec(dr_b64).expect("base64url DeviceResponse");
     let dr = cbor::from_canonical_slice(&dr_cbor).expect("canonical DeviceResponse CBOR");
 

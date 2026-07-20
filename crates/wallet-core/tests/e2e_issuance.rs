@@ -100,6 +100,57 @@ fn issued_sd_jwt(
     format!("{si}.{}~{}~", b64(&sig), disclosures.join("~")).into_bytes()
 }
 
+fn issued_sd_jwt_with_selective_exp(issuer: &SoftwareSigner, device_pub: &[u8]) -> Vec<u8> {
+    let disclosures: Vec<String> = [
+        ("family_name", json!("Andersson")),
+        ("given_name", json!("Astrid")),
+        ("birthdate", json!("1988-04-12")),
+        ("exp", json!(4_000_000_000i64)),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (name, value))| {
+        b64(json!([format!("control-salt-{index}"), name, value])
+            .to_string()
+            .as_bytes())
+    })
+    .collect();
+    let digests: Vec<String> = disclosures
+        .iter()
+        .map(|raw| b64(&AwsLc.sha256(raw.as_bytes())))
+        .collect();
+    let header = b64(br#"{"alg":"ES256","typ":"dc+sd-jwt"}"#);
+    let payload = b64(json!({
+        "iss": "https://issuer.example",
+        "iat": NOW,
+        "vct": "urn:eudi:pid:1",
+        "_sd_alg": "sha-256",
+        "_sd": digests,
+        "cnf": { "jwk": {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": b64(&device_pub[1..33]),
+            "y": b64(&device_pub[33..65]),
+        }}
+    })
+    .to_string()
+    .as_bytes());
+    let signing_input = format!("{header}.{payload}");
+    let signature = issuer
+        .sign(
+            &KeyRef("issuer".into()),
+            Alg::Es256,
+            signing_input.as_bytes(),
+        )
+        .unwrap();
+    format!(
+        "{signing_input}.{}~{}~",
+        b64(&signature),
+        disclosures.join("~")
+    )
+    .into_bytes()
+}
+
 const OFFER: &[u8] = br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#;
 
 fn setup(load_trust: bool, load_wua: bool) -> (Core, SoftwareSigner, SoftwareSigner) {
@@ -177,6 +228,67 @@ fn full_issuance_with_in_core_trust_and_attestation() {
     let (fmt, bytes) = core.issued_credential().expect("credential issued");
     assert_eq!(fmt, "dc+sd-jwt");
     assert_eq!(bytes, cred);
+}
+
+#[test]
+fn issuer_provided_key_binding_jwt_is_rejected_during_issuance() {
+    let (mut core, device, issuer) = setup(true, true);
+    assert!(core
+        .handle_event(offer_event())
+        .contains(&Effect::RequestToken));
+    let signing_input = core
+        .handle_event(Event::TokenReceived {
+            bound: true,
+            c_nonce: 112,
+        })
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Sign { payload, .. } => Some(payload),
+            _ => None,
+        })
+        .expect("proof signature requested");
+    let proof_signature = device
+        .sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input)
+        .unwrap();
+    assert!(core
+        .handle_event(Event::DeviceSignatureProduced {
+            signature: proof_signature,
+        })
+        .iter()
+        .any(|effect| matches!(effect, Effect::RequestCredential { .. })));
+
+    let mut issued_presentation =
+        String::from_utf8(issued_sd_jwt(&issuer, device.public_key_raw(), None)).unwrap();
+    // The credential builder ends in `~` (empty KB slot). Filling that slot turns it into a
+    // presentation received from another transaction, which must never become a reusable holding.
+    issued_presentation.push_str("fake.kb.jwt");
+    let effects = core.handle_event(Event::CredentialReceived {
+        format: "dc+sd-jwt".into(),
+        bytes: issued_presentation.into_bytes(),
+    });
+    assert_eq!(effects, vec![Effect::Close]);
+    assert!(core.issued_credential().is_none());
+    assert_eq!(core.held_credentials_json(), "[]");
+    assert_eq!(
+        core.last_credential_ingestion_error(),
+        Some(&CredentialIngestionError::MalformedCredential)
+    );
+}
+
+#[test]
+fn selectively_disclosed_protocol_control_is_rejected_at_storage_boundary() {
+    let (mut core, device, issuer) = setup(true, false);
+    let credential = issued_sd_jwt_with_selective_exp(&issuer, device.public_key_raw());
+    assert_eq!(
+        core.ingest_credential(
+            "dc+sd-jwt",
+            &credential,
+            &[issuer_chain_leaf()],
+            "https://issuer.example",
+        ),
+        Err(CredentialIngestionError::MalformedCredential)
+    );
+    assert_eq!(core.held_credentials_json(), "[]");
 }
 
 #[test]

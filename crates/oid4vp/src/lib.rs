@@ -686,7 +686,8 @@ fn base64url(bytes: &[u8]) -> String {
 /// carrying `vp_token`, the echoed `state`, and (for any mdoc entry) the `mdoc_generated_nonce`.
 ///
 /// Per §8.1 the `vp_token` for a DCQL request is a JSON object keyed by each credential query `id`
-/// (`{"<id>":"<presentation>", …}`) — so one OR MANY credentials share one response object. The
+/// (`{"<id>":["<presentation>"], …}`) — each query value is a non-empty Presentation array,
+/// including when `multiple` is false. One OR MANY credential queries share one response object. The
 /// sole legacy exception (one entry, no DCQL id — the flat `claims` path) sends the bare
 /// presentation string, which pre-1.0 verifiers accept.
 ///
@@ -701,7 +702,7 @@ fn assemble_direct_post_body(done: &[CompletedPresentation], state: Option<&str>
         for c in done {
             obj.insert(
                 c.dcql_id.clone().unwrap_or_default(),
-                serde_json::Value::String(c.vp_token.clone()),
+                serde_json::Value::Array(vec![serde_json::Value::String(c.vp_token.clone())]),
             );
         }
         serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
@@ -765,7 +766,36 @@ fn kb_jwt_signing_input(nonce: u64, aud: &str, iat: i64, sd_hash: &str) -> Strin
 /// Parse an authorization request object (a compact JWS). Extracts the claims and the exact
 /// signing input + signature so the `request_object_is_signed_and_bound` guard can verify it
 /// against the RP key the shell resolves. Returns `Err(())` on malformed input.
+const MAX_REQUEST_OBJECT_BYTES: usize = 256 * 1024;
+const MAX_LEGACY_CLAIMS: usize = 64;
+const MAX_LEGACY_CLAIM_BYTES: usize = 256;
+
+fn parse_legacy_claims(value: Option<&Json>) -> Result<Vec<String>, ()> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or(())?;
+    if values.len() > MAX_LEGACY_CLAIMS {
+        return Err(());
+    }
+    let mut claims = Vec::with_capacity(values.len());
+    for value in values {
+        let claim = value.as_str().ok_or(())?;
+        if claim.is_empty()
+            || claim.len() > MAX_LEGACY_CLAIM_BYTES
+            || claims.iter().any(|existing| existing == claim)
+        {
+            return Err(());
+        }
+        claims.push(claim.to_string());
+    }
+    Ok(claims)
+}
+
 fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
+    if bytes.len() > MAX_REQUEST_OBJECT_BYTES {
+        return Err(());
+    }
     let s = core::str::from_utf8(bytes).map_err(|_| ())?;
     let parts: Vec<&str> = s.split('.').collect();
     if parts.len() != 3 {
@@ -781,6 +811,11 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
     };
     let payload_bytes = Base64UrlUnpadded::decode_vec(parts[1]).map_err(|_| ())?;
     let p: Json = serde_json::from_slice(&payload_bytes).map_err(|_| ())?;
+    // Transaction-data hashing/binding is not implemented yet. Ignoring it while still producing
+    // a presentation would authorize a different transaction, so fail closed on any presence.
+    if p.get("transaction_data").is_some() {
+        return Err(());
+    }
 
     let client_id = p
         .get("client_id")
@@ -814,9 +849,12 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    // Prefer the real DCQL query (OpenID4VP 1.0 §6); fall back to the legacy flat `claims` array.
-    // The parsed query is carried whole so the wallet can select one credential PER query entry.
-    let dcql = p.get("dcql_query").and_then(dcql::DcqlQuery::from_value);
+    // Prefer the real DCQL query (OpenID4VP 1.0 §6); fall back to legacy flat `claims` only when
+    // `dcql_query` is absent. A present malformed query is never allowed to downgrade its meaning.
+    let dcql = match p.get("dcql_query") {
+        Some(value) => Some(dcql::DcqlQuery::from_value(value).ok_or(())?),
+        None => None,
+    };
     let (requested_claims, dcql_id, requested_vcts, requested_doctypes) = match &dcql {
         Some(dq) => (
             dq.requested_claim_paths(),
@@ -825,15 +863,7 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
             dq.requested_doctypes(),
         ),
         None => {
-            let claims = p
-                .get("claims")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let claims = parse_legacy_claims(p.get("claims"))?;
             (claims, None, Vec::new(), Vec::new())
         }
     };
@@ -1033,8 +1063,8 @@ mod response_tests {
             &[entry(Some("pid"), "issuer.jwt~disc~kb.jwt", None)],
             Some("xyz 123"),
         );
-        // vp_token value is the JSON object {"pid":"<presentation>"} percent-encoded.
-        assert!(body.starts_with("vp_token=%7B%22pid%22%3A%22issuer.jwt~disc~kb.jwt%22%7D"));
+        // Each DCQL id maps to a non-empty array, even when only one Presentation is returned.
+        assert!(body.starts_with("vp_token=%7B%22pid%22%3A%5B%22issuer.jwt~disc~kb.jwt%22%5D%7D"));
         // state is echoed and its space is percent-encoded (never '+').
         assert!(body.ends_with("&state=xyz%20123"));
         // A verifier that form-decodes then JSON-parses vp_token recovers the presentation.
@@ -1044,7 +1074,7 @@ mod response_tests {
             .map(percent_decode)
             .unwrap();
         let obj: serde_json::Value = serde_json::from_str(&vp).unwrap();
-        assert_eq!(obj["pid"], serde_json::json!("issuer.jwt~disc~kb.jwt"));
+        assert_eq!(obj["pid"], serde_json::json!(["issuer.jwt~disc~kb.jwt"]));
     }
 
     #[test]
@@ -1065,7 +1095,7 @@ mod response_tests {
             )],
             None,
         );
-        assert!(body.starts_with("vp_token=%7B%22mdl%22%3A%22ZGV2aWNlcmVzcG9uc2U%22%7D"));
+        assert!(body.starts_with("vp_token=%7B%22mdl%22%3A%5B%22ZGV2aWNlcmVzcG9uc2U%22%5D%7D"));
         assert!(body.ends_with("&mdoc_generated_nonce=mgn-abc123"));
     }
 
@@ -1085,8 +1115,8 @@ mod response_tests {
             .map(percent_decode)
             .unwrap();
         let obj: serde_json::Value = serde_json::from_str(&vp).unwrap();
-        assert_eq!(obj["pid"], serde_json::json!("issuer.jwt~disc~kb.jwt"));
-        assert_eq!(obj["mdl"], serde_json::json!("ZGV2aWNlcmVzcG9uc2U"));
+        assert_eq!(obj["pid"], serde_json::json!(["issuer.jwt~disc~kb.jwt"]));
+        assert_eq!(obj["mdl"], serde_json::json!(["ZGV2aWNlcmVzcG9uc2U"]));
         assert!(body.contains("&state=st-1"));
         assert!(
             body.contains("&mdoc_generated_nonce=mgn-xyz"),
@@ -1128,13 +1158,22 @@ mod internal_tests {
     use base64ct::{Base64UrlUnpadded, Encoding};
     use crypto_traits::Alg;
 
-    fn req_jws(alg: &str) -> Vec<u8> {
+    fn req_jws_with_payload(alg: &str, payload: serde_json::Value) -> Vec<u8> {
         let header = Base64UrlUnpadded::encode_string(format!(r#"{{"alg":"{alg}"}}"#).as_bytes());
-        let payload = Base64UrlUnpadded::encode_string(
-            br#"{"client_id":"rp.example","nonce":1,"aud":"wallet.example"}"#,
-        );
+        let payload = Base64UrlUnpadded::encode_string(&serde_json::to_vec(&payload).unwrap());
         let sig = Base64UrlUnpadded::encode_string(&[0u8; 64]);
         format!("{header}.{payload}.{sig}").into_bytes()
+    }
+
+    fn req_jws(alg: &str) -> Vec<u8> {
+        req_jws_with_payload(
+            alg,
+            serde_json::json!({
+                "client_id": "rp.example",
+                "nonce": 1,
+                "aud": "wallet.example"
+            }),
+        )
     }
 
     #[test]
@@ -1164,6 +1203,70 @@ mod internal_tests {
             "a non-3-part JWS must be rejected"
         );
         assert!(parse_request(b"not-a-jws").is_err());
+    }
+
+    #[test]
+    fn parse_request_never_downgrades_present_malformed_dcql_to_legacy_claims() {
+        let request = req_jws_with_payload(
+            "ES256",
+            serde_json::json!({
+                "client_id": "rp.example",
+                "nonce": 1,
+                "aud": "wallet.example",
+                "claims": ["age_over_18"],
+                "dcql_query": { "credentials": "malformed" }
+            }),
+        );
+        assert!(parse_request(&request).is_err());
+    }
+
+    #[test]
+    fn parse_request_rejects_oversized_jws_before_decoding() {
+        let request = vec![b'a'; super::MAX_REQUEST_OBJECT_BYTES + 1];
+        assert!(parse_request(&request).is_err());
+    }
+
+    #[test]
+    fn parse_request_rejects_unsupported_transaction_data() {
+        let request = req_jws_with_payload(
+            "ES256",
+            serde_json::json!({
+                "client_id": "rp.example",
+                "nonce": 1,
+                "aud": "wallet.example",
+                "transaction_data": []
+            }),
+        );
+        assert!(parse_request(&request).is_err());
+    }
+
+    #[test]
+    fn parse_request_rejects_ambiguous_or_unbounded_legacy_claims() {
+        for claims in [
+            serde_json::json!("age_over_18"),
+            serde_json::json!(["age_over_18", 7]),
+            serde_json::json!([""]),
+            serde_json::json!(["age_over_18", "age_over_18"]),
+            serde_json::Value::Array(vec![serde_json::Value::String(
+                "x".repeat(super::MAX_LEGACY_CLAIM_BYTES + 1),
+            )]),
+            serde_json::Value::Array(
+                (0..=super::MAX_LEGACY_CLAIMS)
+                    .map(|index| serde_json::json!(format!("claim-{index}")))
+                    .collect(),
+            ),
+        ] {
+            let request = req_jws_with_payload(
+                "ES256",
+                serde_json::json!({
+                    "client_id": "rp.example",
+                    "nonce": 1,
+                    "aud": "wallet.example",
+                    "claims": claims
+                }),
+            );
+            assert!(parse_request(&request).is_err());
+        }
     }
 
     #[test]
