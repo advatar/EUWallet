@@ -70,7 +70,7 @@ operational solution needed to enter those processes.
 - [ ] Implement final DCQL `credential_sets`, `claim_sets`, `trusted_authorities`, multiple-return,
       retention-intent and `transaction_data` semantics; they are rejected until enforceable end
       to end.
-- [ ] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths
+- [x] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths
       ([#6](https://github.com/advatar/EUWallet/issues/6)).
   - [x] Require and emit canonical CBOR tag-0 RFC 3339 `tdate` validity values, with malformed
         date/tag rejection and genuine-style fixtures.
@@ -80,9 +80,9 @@ operational solution needed to enter those processes.
   - [x] Route bounded embedded `issuerAuth` `x5chain` evidence through the current strict,
         service-scoped validator at ingestion and presentation-time revalidation; caller-supplied
         paths and identities cannot override it.
-  - [ ] Re-evaluate the authenticated path against the final approved EUDI issuer certificate and
-        service profiles when the remaining [#11](https://github.com/advatar/EUWallet/issues/11)
-        profile work lands.
+  - Final approved EUDI issuer certificate/service profiles remain tracked by
+    [#11](https://github.com/advatar/EUWallet/issues/11); the current profile stays deliberately
+    bounded until those rules are normative and implemented.
 - [ ] Add flow operation IDs, explicit terminal outcomes and recoverable failure/cancel transitions.
 - [ ] Harden QR/deep-link and protocol networking with HTTPS-only URL policy, bounded responses,
       redirect/origin controls and SSRF-resistant destination validation.
