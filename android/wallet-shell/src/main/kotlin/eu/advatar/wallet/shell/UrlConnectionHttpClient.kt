@@ -59,6 +59,32 @@ class ProductionUrlPolicy internal constructor(
     constructor() : this(SystemHostAddressResolver)
 
     fun validate(url: String): URI {
+        val destination = validateCanonicalDestination(url)
+        if (destination.literalAddress != null) return destination.uri
+
+        val addresses = try {
+            resolver.resolve(destination.host)
+        } catch (_: Exception) {
+            throw WalletHttpClientException.UnsafeDestination(destination.host)
+        }
+        if (
+            addresses.isEmpty() ||
+            addresses.size > MAXIMUM_DNS_ADDRESSES ||
+            addresses.any { !it.isPublicWalletDestination() }
+        ) {
+            throw WalletHttpClientException.UnsafeDestination(destination.host)
+        }
+        return destination.uri
+    }
+
+    /**
+     * Applies the same canonical HTTPS, host, port, and literal-address rules without resolving a
+     * DNS name. QR/deep-link classification stays pure; the transport repeats this policy and the
+     * bounded DNS preflight immediately before opening a connection.
+     */
+    internal fun validateForIngress(url: String): URI = validateCanonicalDestination(url).uri
+
+    private fun validateCanonicalDestination(url: String): CanonicalDestination {
         if (
             url.length > MAXIMUM_URL_BYTES ||
             url.toByteArray(Charsets.UTF_8).size > MAXIMUM_URL_BYTES ||
@@ -106,23 +132,16 @@ class ProductionUrlPolicy internal constructor(
             if (!literalAddress.isPublicWalletDestination()) {
                 throw WalletHttpClientException.UnsafeDestination(canonicalHost)
             }
-            return uri
+            return CanonicalDestination(uri, canonicalHost, literalAddress)
         }
-
-        val addresses = try {
-            resolver.resolve(canonicalHost)
-        } catch (_: Exception) {
-            throw WalletHttpClientException.UnsafeDestination(canonicalHost)
-        }
-        if (
-            addresses.isEmpty() ||
-            addresses.size > MAXIMUM_DNS_ADDRESSES ||
-            addresses.any { !it.isPublicWalletDestination() }
-        ) {
-            throw WalletHttpClientException.UnsafeDestination(canonicalHost)
-        }
-        return uri
+        return CanonicalDestination(uri, canonicalHost, null)
     }
+
+    private data class CanonicalDestination(
+        val uri: URI,
+        val host: String,
+        val literalAddress: InetAddress?,
+    )
 
     private fun canonicalHost(host: String): String? {
         if (!host.isAscii() || host.any { it.isWhitespace() || it.isISOControl() }) return null
