@@ -151,9 +151,30 @@ operational solution needed to enter those processes.
   - [ ] Add atomic, rollback-detecting, device-bound iOS and Android stores with backup exclusion,
         corruption/migration/process-death tests and no release-build fallback to demo storage.
 - [ ] Build the Android client with equivalent StrongBox/KeyMint security behavior.
-- [ ] Implement German eID/eAT onboarding, live PID issuance, RP registration, trust, WIA/WUA,
-      status and revocation integration.
-- [ ] Implement final OpenID4VCI/OpenID4VP/HAIP profiles and ISO 18013-5 proximity transports.
+- [ ] [#18](https://github.com/advatar/EUWallet/issues/18): implement German eID/eAT onboarding and
+      HAIP-compliant live PID issuance through an accepted German PID Provider.
+  - [ ] Pin OpenID4VCI 1.0 Final, HAIP 1.0 Final, ARF 2.9.0, PID Rulebook 1.7, TS3 1.5.2,
+        AusweisApp SDK 2.5.4 and applicable CIR/BSI baselines, including exact source commits for
+        EU documents maintained on `main`.
+  - [ ] Replace the synthetic issuance model with bounded real offers, issuer and AS metadata,
+        distinct PID-provider trust, current PID configuration selection and fail-closed feature
+        negotiation.
+  - [ ] Implement authorization-code issuance with PAR, PKCE S256, RFC 9207 issuer binding, exact
+        redirect/state correlation, DPoP and DPoP-Nonce, final token/nonce/proofs/credentials wire
+        models and typed native effects.
+  - [ ] Replace the custom WUA gate with TS3 1.5.2 WIA + KA transport, Wallet Provider trust,
+        one-use/privacy rules, WSCD key binding and client/key-storage status maintenance.
+  - [ ] Add and test a secret-safe native `GermanEidClient` seam; then integrate the official
+        AusweisApp SDK on iOS and Android against the accepted PID Provider's authenticated TcToken
+        and secure-return contract, with identity attributes available only at the provider backend.
+  - [ ] Authenticate and ingest both `eu.europa.ec.eudi.pid.1` mdoc and `urn:eudi:pid:1` SD-JWT VC;
+        explicitly reject deferred/batch/encrypted/notification modes until separately implemented.
+  - [ ] Pass hostile local vectors, fake-provider end-to-end tests, official AusweisApp simulator and
+        physical-card/device tests, OIDF/EU functional conformance and German sandbox interoperability.
+  - External launch gates: accepted German PID Provider/eID-service relationship and sandbox; BVA
+    authorization/technical certificates where applicable; Wallet Provider WIA/KA/status service and
+    trust-list inclusion; certified WSCA/WSCD and Wallet Solution; German recognition/notification.
+- [ ] Implement ISO 18013-5 proximity transports and remaining non-PID OpenID profile extensions.
 - [ ] Build wallet-provider, remote WSCA/WSCD/HSM, WUA/WTE, status/revocation and device-management
       services.
 - [ ] Complete pseudonyms, unlinkability, wallet-to-wallet, dashboard, reporting, erasure,
