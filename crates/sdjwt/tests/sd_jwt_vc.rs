@@ -345,6 +345,34 @@ fn rejects_malformed_recursive_machinery_and_noncanonical_hash_name() {
 }
 
 #[test]
+fn recursive_processor_enforces_depth_and_digest_budgets() {
+    let mut nested = json!(true);
+    for _ in 0..34 {
+        nested = json!({"child":nested});
+    }
+    let jwt = signed_payload(nested);
+    let sd = SdJwtVc::parse(&format!("{jwt}~")).unwrap();
+    assert_eq!(
+        sd.verify_and_disclose(&StubCrypto, &RealDigest, b"issuer", Alg::Es256),
+        Err(SdJwtError::TooLarge)
+    );
+
+    let digests = (0..4_097u32)
+        .map(|index| {
+            let mut bytes = [0u8; 32];
+            bytes[..4].copy_from_slice(&index.to_be_bytes());
+            json!(b64(&bytes))
+        })
+        .collect::<Vec<_>>();
+    let jwt = signed_payload(json!({"_sd":digests}));
+    let sd = SdJwtVc::parse(&format!("{jwt}~")).unwrap();
+    assert_eq!(
+        sd.verify_and_disclose(&StubCrypto, &RealDigest, b"issuer", Alg::Es256),
+        Err(SdJwtError::TooLarge)
+    );
+}
+
+#[test]
 fn verify_rejects_a_jwt_from_another_media_type() {
     let header = b64(br#"{"alg":"ES256","typ":"JWT"}"#);
     let payload = b64(br#"{"iss":"https://issuer.example","vct":"urn:eudi:pid:1"}"#);
