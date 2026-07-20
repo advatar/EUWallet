@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -26,7 +27,10 @@ class CiEvidenceConfigurationTests(unittest.TestCase):
         self.assertNotIn("continue-on-error: true", WORKFLOW)
         self.assertNotIn("|| true", WORKFLOW)
         self.assertIn("tools/evidence/sbom.sh", WORKFLOW)
-        self.assertIn("actions/upload-artifact@v4", WORKFLOW)
+        self.assertIn(
+            "actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5",
+            WORKFLOW,
+        )
         self.assertIn("if-no-files-found: error", WORKFLOW)
         self.assertIn("test \"$falsified\" -eq 0", WORKFLOW)
 
@@ -59,6 +63,43 @@ class CiEvidenceConfigurationTests(unittest.TestCase):
         self.assertIn('args: "-p cose"', WORKFLOW)
         self.assertNotIn("cargo install kani-verifier", WORKFLOW)
         self.assertNotIn("cargo kani -p mdoc", WORKFLOW)
+
+    def test_workflow_actions_are_reviewed_immutable_and_read_only(self):
+        self.assertIn("permissions:\n  contents: read", WORKFLOW)
+        action_lines = [
+            line.strip()
+            for line in WORKFLOW.splitlines()
+            if re.match(r"(?:-\s+)?uses:", line.strip())
+        ]
+        self.assertGreater(len(action_lines), 0)
+        action_pattern = re.compile(
+            r"(?:-\s+)?uses:\s+"
+            r"([A-Za-z0-9_.-]+)/"
+            r"([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)@([0-9a-f]{40})"
+            r"\s+#\s+v[^\s]+"
+        )
+        for line in action_lines:
+            match = action_pattern.fullmatch(line)
+            self.assertIsNotNone(match, f"mutable or undocumented action reference: {line}")
+            self.assertIn(match.group(1), {"actions", "gradle", "model-checking"})
+
+    def test_android_shell_is_a_required_release_gate(self):
+        android_job = WORKFLOW.split("  android-shell:", 1)[1].split(
+            "  traceability:", 1
+        )[0]
+        self.assertIn("runs-on: ubuntu-24.04", android_job)
+        self.assertIn(
+            "actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95",
+            android_job,
+        )
+        self.assertIn(
+            "gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92",
+            android_job,
+        )
+        self.assertIn("validate-wrappers: true", android_job)
+        self.assertIn(":wallet-shell:test", android_job)
+        self.assertIn(":wallet-shell:lint", android_job)
+        self.assertIn(":wallet-shell:assembleRelease", android_job)
 
     def test_kani_proof_closure_has_a_verified_compatible_msrv(self):
         self.assertIn('rust-version = "1.97"', ROOT_MANIFEST)

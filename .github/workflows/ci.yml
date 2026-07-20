@@ -9,6 +9,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -18,7 +21,7 @@ jobs:
     name: Rust core (fmt, clippy, test)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Validate CI and evidence gates
         run: python3 -m unittest discover -s tools/evidence/tests -p 'test_*.py'
       - name: Format
@@ -32,7 +35,7 @@ jobs:
     name: Supply chain (deny, audit, SBOM)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Install supply-chain tools
         run: |
           cargo install cargo-deny --locked
@@ -44,7 +47,7 @@ jobs:
       - name: Generate SBOM (CycloneDX)
         run: tools/evidence/sbom.sh
       - name: Upload SBOM evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: cyclonedx-sboms
           path: docs/certification-evidence/sbom/*.cdx.json
@@ -54,7 +57,7 @@ jobs:
     name: Tier 1 (bounded fuzz + Kani)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Install nightly (for cargo-fuzz)
         run: rustup toolchain install nightly --profile minimal
       - name: Bounded fuzz of the CBOR codec
@@ -72,7 +75,7 @@ jobs:
     name: Tier 2 (Lean proofs + oracle replay)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Install elan/Lean
         run: |
           curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
@@ -111,7 +114,7 @@ jobs:
     name: Tier 3 (Tamarin symbolic proofs)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Install pinned Tamarin runtime
         run: |
           set -euo pipefail
@@ -145,7 +148,7 @@ jobs:
       run:
         working-directory: ios
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Verify Swift 6 toolchain
         run: |
           set -euo pipefail
@@ -164,7 +167,7 @@ jobs:
       run:
         working-directory: android
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Set up the supported JDK
         uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
         with:
@@ -195,7 +198,7 @@ jobs:
     name: HLR traceability import
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Import HLRs and refresh mappings
         run: |
           python3 tools/hlr-import/import_hlr.py \
