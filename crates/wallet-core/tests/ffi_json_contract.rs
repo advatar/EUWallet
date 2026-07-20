@@ -16,6 +16,17 @@ fn byte_array(b: &[u8]) -> String {
     )
 }
 
+fn operation_id(output: &str, effect_type: &str) -> u64 {
+    serde_json::from_str::<serde_json::Value>(output)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["type"] == effect_type)
+        .and_then(|effect| effect["operationId"].as_u64())
+        .unwrap_or_else(|| panic!("missing operationId for {effect_type}: {output}"))
+}
+
 #[test]
 fn presentation_json_contract_is_camel_case() {
     let wallet = DemoWallet::new();
@@ -44,6 +55,7 @@ fn presentation_json_contract_is_camel_case() {
         "expected camelCase clientId, got: {out}"
     );
     assert!(!out.contains("client_id"), "leaked snake_case field: {out}");
+    let trust_operation_id = operation_id(&out, "resolveRpTrust");
 
     // The shell echoes the RP cert chain via a camelCase `rpCertChain` event field; the core must
     // accept it and emit a consent render minimised to the one requested-and-held claim.
@@ -55,7 +67,7 @@ fn presentation_json_contract_is_camel_case() {
         .join(",");
     let out = core
         .handle_event_json(&format!(
-            r#"{{"type":"rpCertChainResolved","rpCertChain":[{certs}],"registeredRedirectUris":["https://rp.example/response"]}}"#
+            r#"{{"type":"rpCertChainResolved","operationId":{trust_operation_id},"rpCertChain":[{certs}],"registeredRedirectUris":["https://rp.example/response"]}}"#
         ))
         .unwrap();
     assert!(

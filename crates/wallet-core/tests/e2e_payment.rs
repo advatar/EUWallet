@@ -55,6 +55,16 @@ fn payment_sca_through_wallet_core() {
         .expect("expected the auth code to be posted");
     assert_eq!(url, "https://psp.example/authorize");
     assert_eq!(body, auth_code);
+    assert_eq!(
+        core.transaction_log().len(),
+        0,
+        "delivery is not acknowledged yet"
+    );
+    assert_eq!(
+        core.handle_event(Event::PaymentAuthorizationDelivered),
+        vec![Effect::Close]
+    );
+    assert_eq!(core.transaction_log().len(), 1);
 
     // The PSP verifies the code against the true transaction (real crypto), and dynamic linking
     // rejects any tampering.

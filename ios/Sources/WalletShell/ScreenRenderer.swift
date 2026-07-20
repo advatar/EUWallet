@@ -31,9 +31,43 @@ public struct ScreenRenderer: View {
             PaymentConfirmationView(
                 payee: creditorName, account: creditorAccount, amountMinor: amountMinor,
                 currency: currency, onConsent: onConsent, onDecline: onDecline)
+        case .signConfirmation(let documentName, let qtspId, let documentHashHex):
+            SignConfirmationView(
+                documentName: documentName,
+                qtspId: qtspId,
+                documentHashHex: documentHashHex,
+                onConsent: onConsent,
+                onDecline: onDecline)
         case .other(let name):
             Text(name)
         }
+    }
+}
+
+struct SignConfirmationView: View {
+    let documentName: String
+    let qtspId: String
+    let documentHashHex: String
+    let onConsent: () -> Void
+    let onDecline: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Authorize qualified signature").font(.headline)
+            Text(documentName).font(.title2.bold())
+            Text("Trust service: \(qtspId)").font(.subheadline)
+            Text("Document hash: \(documentHashHex)")
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+            Spacer()
+            HStack {
+                Button("Cancel", role: .cancel, action: onDecline)
+                Spacer()
+                Button("Sign", action: onConsent).buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -48,7 +82,14 @@ struct PaymentConfirmationView: View {
     let onDecline: () -> Void
 
     private var amountText: String {
-        String(format: "%.2f %@", Double(amountMinor) / 100.0, currency)
+        Self.exactAmountText(amountMinor: amountMinor, currency: currency)
+    }
+
+    nonisolated static func exactAmountText(amountMinor: UInt64, currency: String) -> String {
+        let major = amountMinor / 100
+        let minor = amountMinor % 100
+        let minorText = minor < 10 ? "0\(minor)" : "\(minor)"
+        return "\(major).\(minorText) \(currency)"
     }
 
     var body: some View {

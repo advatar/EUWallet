@@ -27,7 +27,7 @@ fun interface TrustResolver {
 }
 
 fun interface ScreenRenderer {
-    fun render(screen: WalletScreen)
+    fun render(operationId: Long?, authorizationHash: ByteArray?, screen: WalletScreen)
 }
 
 data class TokenResult(
@@ -54,4 +54,9 @@ data class StatusListResolution(
 /** Fetches a Token Status List and the status provider's leaf-first certificate chain. */
 fun interface StatusListResolver {
     fun fetch(uri: String): StatusListResolution
+}
+
+/** Publishes a TS09 transfer offer. Success means the wallet is waiting for peer input. */
+fun interface TransferOfferPublisher {
+    fun publish(offeredKey: ByteArray)
 }

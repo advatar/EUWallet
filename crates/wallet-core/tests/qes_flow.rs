@@ -44,4 +44,12 @@ fn qes_flow_renders_confirmation_then_signs_and_delivers() {
         fx.iter().any(|e| matches!(e, Effect::Http { .. })),
         "expected the authorization to be delivered to the QTSP, got {fx:?}"
     );
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Close)),
+        "QES must remain open until the QTSP acknowledgement"
+    );
+    assert_eq!(
+        core.handle_event(Event::QesAuthorizationDelivered),
+        vec![Effect::Close]
+    );
 }

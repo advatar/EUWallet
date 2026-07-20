@@ -49,6 +49,7 @@ public enum EffectExecutorError: Error, Equatable {
     case httpStatusFailed(statusCode: UInt16, body: Data)
     case missingDependency(String)
     case issuerFailed(String)
+    case renderingFailed(String)
     case unsupportedEffect(String)
     case effectCascadeLimitExceeded(Int)
 }
@@ -65,6 +66,7 @@ extension EffectExecutorError: LocalizedError {
         case .missingDependency(let dependency):
             return "Wallet flow is missing required dependency: \(dependency)"
         case .issuerFailed(let reason): return "Credential issuer request failed: \(reason)"
+        case .renderingFailed(let reason): return "Wallet screen rendering failed: \(reason)"
         case .unsupportedEffect(let effect):
             return "Wallet shell does not implement required effect: \(effect)"
         case .effectCascadeLimitExceeded(let limit):
@@ -113,7 +115,8 @@ public final class EffectExecutor {
     private let trust: TrustResolver
     private let statusLists: StatusListResolver?
     private let issuer: IssuerResponder?
-    private let render: (ScreenDescription) -> Void
+    private let transferOffers: TransferOfferPublisher?
+    private let render: (UInt64?, Data?, ScreenDescription) throws -> Void
 
     public init(
         engine: WalletEngineDriving,
@@ -123,7 +126,8 @@ public final class EffectExecutor {
         trust: TrustResolver,
         statusLists: StatusListResolver? = nil,
         issuer: IssuerResponder? = nil,
-        render: @escaping (ScreenDescription) -> Void
+        transferOffers: TransferOfferPublisher? = nil,
+        render: @escaping (UInt64?, Data?, ScreenDescription) throws -> Void
     ) {
         self.engine = engine
         self.signer = signer
@@ -132,6 +136,7 @@ public final class EffectExecutor {
         self.trust = trust
         self.statusLists = statusLists
         self.issuer = issuer
+        self.transferOffers = transferOffers
         self.render = render
     }
 
@@ -142,6 +147,7 @@ public final class EffectExecutor {
         let initialEventType = Self.eventType(eventJson)
         var acknowledged = false
         var renderedInput = false
+        var awaitingExternalInput = false
         var abortReason: EffectAbortReason?
         var closed = false
         var executedEffects = 0
@@ -157,7 +163,7 @@ public final class EffectExecutor {
                 return .aborted(.effectAfterClose)
             }
             switch effect {
-            case .render(.error(let code, let message)):
+            case .render(_, _, .error(let code, let message)):
                 abortReason = .coreError(code: code, message: message)
             case .render:
                 renderedInput = true
@@ -167,11 +173,17 @@ public final class EffectExecutor {
                 break
             }
             if let followUp = try await execute(effect) {
-                switch effect {
-                case .http, .requestCredential:
+                let followUpType = Self.eventType(followUp)
+                switch followUpType {
+                case "presentationDelivered", "paymentAuthorizationDelivered",
+                     "qesAuthorizationDelivered", "credentialReceived":
                     acknowledged = true
                 default:
                     break
+                }
+                if case .publishTransferOffer = effect,
+                   followUpType == "operationSucceeded" {
+                    awaitingExternalInput = true
                 }
                 queue.append(contentsOf: try decode(engine.handleEventJson(eventJson: followUp)))
             }
@@ -186,7 +198,7 @@ public final class EffectExecutor {
             }
             return acknowledged ? .succeeded : .aborted(.closedWithoutSuccess)
         }
-        if renderedInput {
+        if renderedInput || awaitingExternalInput {
             return .awaitingInput
         }
         if Self.idleEventTypes.contains(initialEventType ?? "") {
@@ -217,91 +229,137 @@ public final class EffectExecutor {
     /// Execute one effect; return a follow-up event (JSON) when it produces a result.
     private func execute(_ effect: WalletEffect) async throws -> String? {
         switch effect {
-        case .render(let screen):
-            render(screen)
-            return nil
-        case .sign(let keyRef, let payload):
+        case .render(let operationId, let authorizationHash, let screen):
+            do {
+                try render(operationId, authorizationHash.map { Data($0) }, screen)
+                return nil
+            } catch is CancellationError {
+                guard let operationId else { throw CancellationError() }
+                return WalletEventJSON.operationCancelled(operationId: operationId)
+            } catch {
+                guard let operationId else {
+                    throw EffectExecutorError.renderingFailed(String(describing: error))
+                }
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .rendering)
+            }
+        case .sign(let operationId, let keyRef, let payload):
             do {
                 let sig = try signer.sign(keyRef: keyRef, payload: Data(payload))
-                return WalletEventJSON.deviceSignatureProduced(sig)
+                return WalletEventJSON.deviceSignatureProduced(
+                    operationId: operationId, signature: sig)
+            } catch is CancellationError {
+                return WalletEventJSON.operationCancelled(operationId: operationId)
             } catch {
-                throw EffectExecutorError.signingFailed(String(describing: error))
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .signing)
             }
-        case .http(let url, let body):
+        case .http(let operationId, let resultType, let url, let body):
             let response: HttpResponse
             do {
                 response = try await http.post(url: url, body: Data(body))
-            } catch let error as HttpClientError {
-                throw EffectExecutorError.transportFailed(error)
+            } catch is CancellationError {
+                return WalletEventJSON.operationCancelled(operationId: operationId)
             } catch {
-                throw EffectExecutorError.transportFailed(.transport(String(describing: error)))
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .transport)
             }
             guard (200...299).contains(response.statusCode) else {
-                throw EffectExecutorError.httpStatusFailed(
-                    statusCode: response.statusCode,
-                    body: response.body)
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .httpStatus)
             }
-            return WalletEventJSON.presentationDelivered()
-        case .resolveRpTrust(let clientId):
-            let t = await trust.resolve(clientId: clientId)
-            return WalletEventJSON.rpCertChainResolved(chain: t.certChain, redirectUris: t.redirectUris)
-        case .persistNonce(let nonce):
+            switch resultType {
+            case .presentationDelivered:
+                return WalletEventJSON.presentationDelivered(operationId: operationId)
+            case .paymentAuthorizationDelivered:
+                return WalletEventJSON.paymentAuthorizationDelivered(operationId: operationId)
+            case .qesAuthorizationDelivered:
+                return WalletEventJSON.qesAuthorizationDelivered(operationId: operationId)
+            }
+        case .resolveRpTrust(let operationId, let clientId):
+            do {
+                let t = try await trust.resolve(clientId: clientId)
+                return WalletEventJSON.rpCertChainResolved(
+                    operationId: operationId,
+                    chain: t.certChain,
+                    redirectUris: t.redirectUris)
+            } catch is CancellationError {
+                return WalletEventJSON.operationCancelled(operationId: operationId)
+            } catch {
+                return WalletEventJSON.operationFailed(operationId: operationId, failure: .trust)
+            }
+        case .persistNonce(let operationId, let nonce):
             do {
                 try storage.put(key: "nonce:\(nonce)", value: Data())
+                return WalletEventJSON.operationSucceeded(operationId: operationId)
             } catch {
-                throw EffectExecutorError.storageFailed(String(describing: error))
+                return WalletEventJSON.operationFailed(operationId: operationId, failure: .storage)
             }
-            return nil
         // --- Issuance (OpenID4VCI). The demo's pre-authorized flow uses only token + credential;
         //     PAR / browser / tx-code are unreachable here and safely no-op. ---
-        case .requestToken:
-            guard let issuer else { throw EffectExecutorError.missingDependency("issuer") }
+        case .requestToken(let operationId):
+            guard let issuer else {
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .missingDependency)
+            }
             do {
                 let t = try await issuer.token()
-                return WalletEventJSON.tokenReceived(bound: t.bound, cNonce: t.cNonce)
+                return WalletEventJSON.tokenReceived(
+                    operationId: operationId, bound: t.bound, cNonce: t.cNonce)
+            } catch is CancellationError {
+                return WalletEventJSON.operationCancelled(operationId: operationId)
             } catch {
-                throw EffectExecutorError.issuerFailed(String(describing: error))
+                return WalletEventJSON.operationFailed(operationId: operationId, failure: .issuer)
             }
-        case .requestCredential(let proofJwt):
-            guard let issuer else { throw EffectExecutorError.missingDependency("issuer") }
+        case .requestCredential(let operationId, let proofJwt):
+            guard let issuer else {
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .missingDependency)
+            }
             do {
                 let c = try await issuer.credential(proofJwt: Data(proofJwt))
-                return WalletEventJSON.credentialReceived(format: c.format, bytes: c.bytes)
+                return WalletEventJSON.credentialReceived(
+                    operationId: operationId, format: c.format, bytes: c.bytes)
+            } catch is CancellationError {
+                return WalletEventJSON.operationCancelled(operationId: operationId)
             } catch {
-                throw EffectExecutorError.issuerFailed(String(describing: error))
+                return WalletEventJSON.operationFailed(operationId: operationId, failure: .issuer)
             }
-        case .fetchStatusList(let uri):
+        case .fetchStatusList(let operationId, let uri):
             guard let statusLists else {
-                return WalletEventJSON.statusListReceived(
-                    uri: uri,
-                    httpStatus: 0,
-                    token: Data(),
-                    providerCertChain: [])
+                return WalletEventJSON.operationFailed(operationId: operationId, failure: .status)
             }
             do {
                 let resolution = try await statusLists.fetch(uri: uri)
                 return WalletEventJSON.statusListReceived(
+                    operationId: operationId,
                     uri: uri,
                     httpStatus: resolution.response.statusCode,
                     token: resolution.response.body,
                     providerCertChain: resolution.providerCertChain)
+            } catch is CancellationError {
+                return WalletEventJSON.operationCancelled(operationId: operationId)
             } catch {
-                // Feed a deterministic failed result into Rust. It renders the status-unavailable
-                // error and closes; transport failure can never be interpreted as consent success.
-                return WalletEventJSON.statusListReceived(
-                    uri: uri,
-                    httpStatus: 0,
-                    token: Data(),
-                    providerCertChain: [])
+                return WalletEventJSON.operationFailed(operationId: operationId, failure: .status)
             }
-        case .pushPar:
-            throw EffectExecutorError.unsupportedEffect("pushPar")
-        case .openAuthBrowser:
-            throw EffectExecutorError.unsupportedEffect("openAuthBrowser")
-        case .promptTxCode:
-            throw EffectExecutorError.unsupportedEffect("promptTxCode")
-        case .publishTransferOffer:
-            throw EffectExecutorError.unsupportedEffect("publishTransferOffer")
+        case .publishTransferOffer(let operationId, let offeredKey):
+            guard let transferOffers else {
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .missingDependency)
+            }
+            do {
+                try await transferOffers.publish(offeredKey: Data(offeredKey))
+                return WalletEventJSON.operationSucceeded(operationId: operationId)
+            } catch is CancellationError {
+                return WalletEventJSON.operationCancelled(operationId: operationId)
+            } catch {
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .transport)
+            }
+        case .pushPar(let operationId), .openAuthBrowser(let operationId),
+             .promptTxCode(let operationId):
+            return WalletEventJSON.operationFailed(
+                operationId: operationId, failure: .unsupported)
         case .close:
             return nil
         }
@@ -321,4 +379,10 @@ public protocol HttpClient {
 public protocol SecureStorage {
     func put(key: String, value: Data) throws
     func get(key: String) throws -> Data?
+}
+
+/// Publishes the encrypted TS09 transfer offer to the chosen peer/transport. A successful publish
+/// means the wallet is waiting for the peer's next message; it does not complete the transfer.
+public protocol TransferOfferPublisher {
+    func publish(offeredKey: Data) async throws
 }
