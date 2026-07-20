@@ -162,9 +162,14 @@ operational solution needed to enter those processes.
   - [ ] Pin OpenID4VCI 1.0 Final, HAIP 1.0 Final, ARF 2.9.0, PID Rulebook 1.7, TS3 1.5.2,
         AusweisApp SDK 2.5.4 and applicable CIR/BSI baselines, including exact source commits for
         EU documents maintained on `main`.
+    - [x] Record final OpenID4VCI/HAIP sources and immutable PID Rulebook 1.7 and TS3 1.5.2 source
+          commits in `docs/normative-baselines.md`; remaining German/ARF/SDK baselines stay open.
   - [ ] Replace the synthetic issuance model with bounded real offers, issuer and AS metadata,
         distinct PID-provider trust, current PID configuration selection and fail-closed feature
         negotiation.
+    - [x] Add an isolated final-1.0 foundation with a hard-bounded duplicate-aware JSON boundary,
+          canonical HTTPS discovery, typed offers/metadata and authorization-code-only German PID
+          profile selection; legacy state-machine/native-effect rewiring remains open.
   - [ ] Implement authorization-code issuance with PAR, PKCE S256, RFC 9207 issuer binding, exact
         redirect/state correlation, DPoP and DPoP-Nonce, final token/nonce/proofs/credentials wire
         models and typed native effects.
