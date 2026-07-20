@@ -29,8 +29,16 @@ operational solution needed to enter those processes.
 - [x] [#5](https://github.com/advatar/EUWallet/issues/5): freeze and revalidate selected credential
       provenance/validity plus RP, issuer and status trust before consent, signing and delivery;
       reject clock rollback, and recheck WUA time when it authorizes issuance proofs.
-- [ ] Bind the credential issuer identity and EUDI service type to the authenticated certificate
-      path instead of caller-provided metadata.
+- [x] Bind the credential issuer identity and EUDI service type to the authenticated certificate
+      path instead of caller-provided metadata ([#8](https://github.com/advatar/EUWallet/issues/8)).
+  - [x] Return a typed issuer-path result and preserve its authenticated leaf identity/service.
+  - [x] Bind SD-JWT `iss` and mdoc catalogue authorization to that identity, treating shell
+        `issuerId` only as a checked compatibility assertion.
+  - [x] Reject issuer impersonation, cross-service paths, and CA issuer leaves with negative tests.
+  - [x] Integrate service-scoped issuer identity/key/path evidence with presentation-time
+        reauthentication while preserving atomic DCQL selection and missing-claim rejection.
+  - The interim identity profile accepts one canonical HTTPS-origin URI SAN. Complete RFC 5280,
+    extension processing and final EUDI certificate policy remain tracked by the next task.
 - [ ] Replace the incomplete X.509 path validator with strict RFC 5280 and EUDI profile validation.
 - [ ] Implement recursive RFC 9901 disclosures, reject invalid issued SD-JWT+KB/control claims,
       and include permanently visible PII in consent.

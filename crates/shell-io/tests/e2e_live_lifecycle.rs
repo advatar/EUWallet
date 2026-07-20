@@ -110,7 +110,9 @@ fn respond_json(stream: &mut std::net::TcpStream, body: &str) {
 fn live_issuance_then_plaintext_presentation_is_rejected() {
     let wallet = DemoWallet::new();
     // The live issuer returns the device-bound PID fixture with every mandatory type claim.
-    let issuance_compact = wallet.issuance_scenario().pid_credential_compact;
+    let issuance = wallet.issuance_scenario();
+    let issuance_compact = issuance.pid_credential_compact;
+    let issuer_cert_chain = issuance.issuer_cert_chain;
 
     let (port, proof_rx) = spawn_issuer(issuance_compact.clone());
     let s = wallet.scenario_with_response_uri(&format!("http://127.0.0.1:{port}/response"));
@@ -144,7 +146,7 @@ fn live_issuance_then_plaintext_presentation_is_rejected() {
     let outcome = shell.handle(Event::CredentialOfferReceived {
         offer: br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#
             .to_vec(),
-        issuer_cert_chain: s.rp_cert_chain.clone(), // demo leaf chains to the trusted CA
+        issuer_cert_chain,
         issuer_id: "https://issuer.example".into(),
     });
     assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);

@@ -7,21 +7,25 @@
 //!
 //! Real aws-lc-rs crypto throughout. Mirrors the proven receiver machine (formal/lean/W2wModel).
 
-use base64ct::{Base64UrlUnpadded, Encoding};
+use base64ct::{Base64, Base64UrlUnpadded, Encoding};
 use crypto_backend::SoftwareSigner;
 use crypto_traits::{Alg, KeyRef, Signer};
 use serde_json::json;
 use wallet_core::{Core, Effect, Event};
 
-// The issuer leaf `rp.der` chains to the trusted CA `ca.der`; `rp.pkcs8.der` is the leaf's key, so
-// a credential signed with it verifies against the leaf cert's public key.
+// The credential issuer leaf carries one authenticated URI SAN and chains to `ca.der`;
+// `rp.pkcs8.der` is the matching fixture key.
 const CA_DER: &[u8] = include_bytes!("../../x509/tests/vectors/ca.der");
-const ISSUER_LEAF: &[u8] = include_bytes!("../../x509/tests/vectors/rp.der");
+const ISSUER_LEAF_B64: &str = include_str!("../../x509/tests/vectors/issuer.der.b64");
 const ISSUER_PKCS8: &[u8] = include_bytes!("../../x509/tests/vectors/rp.pkcs8.der");
 const NOW: i64 = 1_790_000_000;
 
 fn b64(b: &[u8]) -> String {
     Base64UrlUnpadded::encode_string(b)
+}
+
+fn issuer_leaf() -> Vec<u8> {
+    Base64::decode_vec(ISSUER_LEAF_B64.trim()).expect("embedded issuer certificate")
 }
 
 fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
@@ -102,7 +106,7 @@ fn accepts_a_trusted_peer_bound_transfer_in_core() {
     core.handle_event(Event::WalletTransferOfferCreated);
     core.handle_event(Event::WalletTransferReceived {
         credential: cred.clone(),
-        issuer_cert_chain: vec![ISSUER_LEAF.to_vec()],
+        issuer_cert_chain: vec![issuer_leaf()],
         sender_public_key: sender.public_key_raw().to_vec(),
         sender_signature: sig,
         sender_consent_hash: consent.to_vec(),
@@ -133,7 +137,7 @@ fn rejects_an_untrusted_issuer_in_core() {
 
     core.handle_event(Event::WalletTransferReceived {
         credential: cred,
-        issuer_cert_chain: vec![ISSUER_LEAF.to_vec()],
+        issuer_cert_chain: vec![issuer_leaf()],
         sender_public_key: sender.public_key_raw().to_vec(),
         sender_signature: sig,
         sender_consent_hash: consent.to_vec(),
@@ -165,7 +169,7 @@ fn rejects_a_misdirected_transfer_in_core() {
 
     core.handle_event(Event::WalletTransferReceived {
         credential: cred,
-        issuer_cert_chain: vec![ISSUER_LEAF.to_vec()],
+        issuer_cert_chain: vec![issuer_leaf()],
         sender_public_key: sender.public_key_raw().to_vec(),
         sender_signature: sig,
         sender_consent_hash: consent.to_vec(),
