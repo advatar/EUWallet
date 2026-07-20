@@ -20,6 +20,7 @@ module reaches its definition-of-done (plan Section 12).
 | `perf-benchmarks.md` | Hot-path latency/throughput vs. the real backend (`crates/benches`) | — |
 | `mutation-testing.md` | cargo-mutants score for the presentation machine | EUCC (test adequacy) |
 | `interop.md` | Reference-environment reachability + wire-shape probe (`tools/interop/probe.sh`) | interoperability |
+| `openid-self-certification.md` | OpenID Foundation profile matrix, evidence retention, submission and renewal gate | OIDF self-certification |
 | `payment-sca.md` | PSD2 RTS Art. 4–5 dynamic-linking traceability | 2018/389 |
 
 ## External conformance suites (where to run real interop/certification tests)

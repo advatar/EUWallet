@@ -344,7 +344,11 @@ operational solution needed to enter those processes.
 - [ ] Replace keyword traceability with reviewed applicability and behavior-level evidence.
 - [ ] Bind formal oracle tests to production state machines.
 - [ ] Complete the TOE, threat model, DPIA, key lifecycle, algorithm profile and KAT evidence.
-- [ ] Pass OIDF, FCAF, German sandbox and cross-border interoperability suites.
+  - [ ] Run and submit OpenID Foundation self-certification for every shipped
+        OpenID4VP/OpenID4VCI + HAIP profile; archive signed, release-matched
+        suite configuration/results and renewal triggers in
+        `docs/certification-evidence/openid-self-certification.md`.
+  - [ ] Pass OIDF, FCAF, German sandbox and cross-border interoperability suites.
 - [ ] Complete independent review, penetration testing, red team and bug bounty.
 - [ ] Establish signed reproducible releases, SBOM/provenance, incident response, revocation,
       support, monitoring, rollback and disaster recovery.

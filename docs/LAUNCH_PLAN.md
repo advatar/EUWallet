@@ -69,7 +69,9 @@ Foundation ("P0 trustworthy") is largely landed and CI enforces the gates fail-c
   activity dashboard, reporting, erasure, portability; German localization; EN 301 549 / BITV
   accessibility; GDPR product controls + DPIA.
 - **M8 — Assurance + certification readiness.** Bind formal oracles to the production machines;
-  complete TOE, threat model, DPIA, key-lifecycle and algorithm-profile + KAT evidence; pass OIDF /
+  complete TOE, threat model, DPIA, key-lifecycle and algorithm-profile + KAT evidence; run and
+  submit the OpenID Foundation self-certification for every shipped OpenID4VP/OpenID4VCI + HAIP
+  profile with release-matched signed evidence; pass OIDF /
   FCAF / German-sandbox / cross-border interop; independent pen test + red team + bug bounty; signed
   reproducible releases + SBOM/provenance + IR / revocation / monitoring / rollback / DR.
 
