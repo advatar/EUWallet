@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Regenerate the published CycloneDX SBOMs (docs/certification-evidence/sbom/).
-# Reproducible from a clean checkout. See docs/certification-evidence/sbom/README.md.
+# Generate run-specific CycloneDX SBOMs in docs/certification-evidence/sbom/.
+# The output records its generation time, target, and checkout path. CI preserves the exact files
+# from each run as an artifact. See docs/certification-evidence/sbom/README.md.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 export PATH="$HOME/.cargo/bin:/opt/homebrew/opt/rustup/bin:$PATH"
-command -v cargo-cyclonedx >/dev/null 2>&1 || cargo install cargo-cyclonedx --locked
+CARGO_CYCLONEDX_VERSION=0.5.9
+if ! cargo cyclonedx --version 2>/dev/null | grep -q " $CARGO_CYCLONEDX_VERSION$"; then
+  cargo install cargo-cyclonedx --version "$CARGO_CYCLONEDX_VERSION" --locked --force
+fi
 
 cargo cyclonedx --format json --all
 mkdir -p docs/certification-evidence/sbom
