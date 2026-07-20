@@ -174,7 +174,14 @@ operational solution needed to enter those processes.
         fallback to demo storage.
     - [x] Add the bounded, authenticated and encrypted iOS storage primitive.
     - [ ] Add the equivalent Android Keystore-backed storage primitive.
+    - [ ] Expose a bounded, secret-safe Core checkpoint contract through UniFFI and add native
+          lifecycle coordinator seams that bootstrap the live clock, trust, device key and WUA
+          before restore; gate each resulting effect batch on an exact compare-and-swap commit;
+          retry a failed commit without re-handling the event; and discard in-flight protocol work
+          across process death.
     - [ ] Wire both stores to the Core checkpoint boundary and prove crash-safe effect delivery.
+      Production iOS application composition and an Android application/generated binding are not
+      present yet, so those host entry-point integrations remain open after the coordinator seam.
 - [ ] Build the Android client with equivalent StrongBox/KeyMint security behavior.
 - [ ] [#18](https://github.com/advatar/EUWallet/issues/18): implement German eID/eAT onboarding and
       HAIP-compliant live PID issuance through an accepted German PID Provider.
