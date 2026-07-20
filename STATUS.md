@@ -111,6 +111,13 @@ operational solution needed to enter those processes.
         the shared OpenID4VP/payment/QES effect intentionally advertises `*/*` today.
   - [ ] Eliminate DNS validation-to-connect TOCTOU by binding the validated address to the TLS
         socket; URLSession and HttpsURLConnection currently perform their own second DNS lookup.
+- [ ] [#15](https://github.com/advatar/EUWallet/issues/15): make Android a first-class,
+      independently shippable wallet client with the same core contract and assurance gates as iOS.
+  - [ ] Require hosted Android unit tests, lint and release assembly on every pull request.
+  - [ ] Integrate generated UniFFI bindings plus production networking, trust, issuance and
+        lifecycle adapters; demo/test doubles must not be reachable from release builds.
+  - [ ] Add the production app, StrongBox/KeyMint capability policy, encrypted rollback-resistant
+        persistence, process-death recovery, accessibility and physical-device release evidence.
 
 ## Next phase — production clients and provider platform
 
