@@ -35,6 +35,8 @@ operational solution needed to enter those processes.
       and include permanently visible PII in consent.
 - [ ] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths.
 - [ ] Add flow operation IDs, explicit terminal outcomes and recoverable failure/cancel transitions.
+- [ ] Harden QR/deep-link and protocol networking with HTTPS-only URL policy, bounded responses,
+      redirect/origin controls and SSRF-resistant destination validation.
 
 ## Next phase — production clients and provider platform
 
