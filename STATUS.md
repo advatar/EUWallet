@@ -16,6 +16,8 @@ operational solution needed to enter those processes.
 ## Active phase — P0 trustworthy foundation
 
 - [x] Repair CI paths and make every claimed assurance gate fail closed.
+- [x] Restore hosted Swift, Kani and Tamarin CI compatibility with pinned/scoped tooling
+      ([#13](https://github.com/advatar/EUWallet/issues/13)).
 - [x] Make OpenID4VP response delivery HTTPS-only, endpoint-bound, mode-strict, and fail closed when
       `direct_post.jwt` encryption metadata is absent or invalid.
 - [x] Propagate typed transport/signing failures through the Swift effect executor.
