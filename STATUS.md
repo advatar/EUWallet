@@ -140,6 +140,9 @@ operational solution needed to enter those processes.
 - [ ] [#15](https://github.com/advatar/EUWallet/issues/15): make Android a first-class,
       independently shippable wallet client with the same core contract and assurance gates as iOS.
   - [x] Require hosted Android unit tests, lint and release assembly on every pull request.
+  - [ ] Add an Android-specific formal shell model and exhaustive Kotlin model-conformance suite
+        equivalent to the iOS NavigationModel/NavigationTests boundary; shared Rust proofs do not
+        substitute for native Android parity.
   - [ ] Integrate generated UniFFI bindings plus production networking, trust, issuance and
         lifecycle adapters; demo/test doubles must not be reachable from release builds.
   - [ ] Add the production app, StrongBox/KeyMint capability policy, encrypted rollback-resistant

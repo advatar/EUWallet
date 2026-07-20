@@ -53,7 +53,9 @@ Foundation ("P0 trustworthy") is largely landed and CI enforces the gates fail-c
 - **M2 — Complete X.509 + freeze EUDI profiles.** Residual RFC 5280 surface; normative cert/algorithm
   profiles for PID / (Q)EAA·mdoc / RP / status / WUA·WIA; proven against official EUDI/PKITS suites +
   production chains + revocation. *(Gates certification.)*
-- **M3 — Android first-class parity.** Production app + StrongBox/KeyMint capability policy +
+- **M3 — Android first-class parity.** Android-specific formal shell model + exhaustive Kotlin
+  model-conformance suite equivalent to the iOS NavigationModel/NavigationTests boundary; production
+  app + StrongBox/KeyMint capability policy +
   encrypted rollback-resistant persistence + process-death recovery + accessibility + physical-device
   evidence; UniFFI production adapters with **no** demo doubles reachable in release.
 - **M4 — Durable / crash-safe delivery complete.** Wire both stores to the Core checkpoint boundary;
