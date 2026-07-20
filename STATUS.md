@@ -179,6 +179,14 @@ operational solution needed to enter those processes.
     - [x] Add the bounded, authenticated and encrypted iOS storage primitive.
     - [x] Add the equivalent Android Keystore-backed storage primitive.
     - [ ] Wire both stores to the Core checkpoint boundary and prove crash-safe effect delivery.
+      - [ ] Make the lifecycle coordinator the only production event path; reject every new event
+            while an exact checkpoint/effect batch awaits commit, predecode and validate the full
+            effect batch before committing it, and retain the original typed failure category.
+      - [ ] Align Core checkpoint export admission with the native store capacity so a successful
+            state transition cannot wedge permanently at commit time; add exact boundary tests.
+      - [ ] Add a bounded durable effect outbox with stable effect identifiers and acknowledgements
+            before claiming crash-safe external delivery; process death after checkpoint commit
+            must neither lose nor duplicate browser, signing, network or attestation work.
 - [ ] Build the Android client with equivalent StrongBox/KeyMint security behavior.
 - [ ] [#18](https://github.com/advatar/EUWallet/issues/18): implement German eID/eAT onboarding and
       HAIP-compliant live PID issuance through an accepted German PID Provider.
