@@ -46,8 +46,9 @@ operational solution needed to enter those processes.
     extension processing and final EUDI certificate policy remain tracked by the next task.
 - [ ] Replace the incomplete X.509 path validator with strict RFC 5280 and EUDI profile validation
       ([#11](https://github.com/advatar/EUWallet/issues/11)).
-  - [ ] Reject unknown critical extensions and enforce KeyUsage, BasicConstraints/pathLen,
-        AKI/SKI, loop and duplicate-certificate rules during deterministic path construction.
+  - [x] Land the bounded first strict slice: deterministically construct leaf-to-anchor paths from
+        unordered inputs with explicit budgets; reject ambiguous/looped/duplicate paths, unknown
+        critical extensions and AKI/SKI mismatches; enforce BasicConstraints/pathLen and KeyUsage.
   - [ ] Enforce name constraints, certificate policies, algorithm constraints and service-specific
         EUDI PID, attestation/mdoc, RP, status and WUA/WIA profiles.
   - [ ] Authenticate bounded mdoc `x5chain` evidence through that service-scoped path.
