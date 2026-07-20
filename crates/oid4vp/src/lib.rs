@@ -180,8 +180,8 @@ pub struct AuthRequest {
     pub response_uri: String,
     pub redirect_uri: Option<String>,
     pub purpose: Option<String>,
-    /// Claim names the RP asked for (a simplified stand-in for the DCQL query). Used for data
-    /// minimisation upstream (the wallet discloses only the requested-and-held subset).
+    /// Every declared claim path, or legacy flat claim name when DCQL is absent. Actual DCQL
+    /// disclosure is determined from the selected claim-set and credential-set plan upstream.
     pub requested_claims: Vec<String>,
     /// The RP's opaque `state`, echoed verbatim in the response (OpenID4VP 1.0 §8).
     pub state: Option<String>,
@@ -194,8 +194,8 @@ pub struct AuthRequest {
     pub requested_vcts: Vec<String>,
     /// Acceptable mdoc doctypes (`meta.doctype_value`) — the mso_mdoc analogue of `requested_vcts`.
     pub requested_doctypes: Vec<String>,
-    /// The full parsed DCQL query, when present — one credential query per credential the RP wants.
-    /// The wallet selects a credential for EACH entry (multi-credential presentation).
+    /// The full parsed DCQL query. `credential_sets`, when present, determine the required and
+    /// optional subset of query entries selected for the multi-credential presentation.
     pub dcql: Option<dcql::DcqlQuery>,
     /// The verifier's response-encryption public key (uncompressed SEC1 P-256), parsed from
     /// `client_metadata.jwks` when the RP asks for `direct_post.jwt`. `None` is valid only for
@@ -266,9 +266,9 @@ pub struct Env<'a> {
     pub digest: &'a dyn Digest,
     /// Unix seconds supplied by the shell (the core has no clock) for the KB-JWT `iat`.
     pub now_epoch: i64,
-    /// The credentials chosen to present — one per DCQL credential query (set once consent is
-    /// granted). Empty means nothing satisfied the request. A single-credential request yields a
-    /// one-element slice, and the machine's behaviour + wire output are identical to before.
+    /// The credentials chosen by the complete DCQL plan. Empty means nothing satisfied the
+    /// request. A single-credential request yields a one-element slice, and the machine's
+    /// behaviour + wire output are identical to before.
     pub selected_credentials: &'a [SelectedCredential],
     /// Opaque handle to the device key the shell will sign the KB-JWT with.
     pub device_key_ref: &'a str,

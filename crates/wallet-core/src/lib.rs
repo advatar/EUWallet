@@ -1125,8 +1125,8 @@ pub struct WalletConfig {
 struct SessionInfo {
     rp_client_id: String,
     purpose: String,
-    /// The union of requested claim paths across all DCQL queries — drives the consent screen and
-    /// the legacy (no-DCQL) single-credential selection. Per-query selection reads `dcql` instead.
+    /// Every declared DCQL path, or the legacy flat claims when DCQL is absent. DCQL consent uses
+    /// `selected_revealed_claims`; only the legacy selector reads this field directly.
     requested_claims: Vec<String>,
     /// The request nonce, needed to bind the mdoc OpenID4VP SessionTranscript.
     nonce: u64,
@@ -1135,8 +1135,8 @@ struct SessionInfo {
     response_mode: String,
     /// The verifier's response-encryption key (uncompressed P-256), present iff `direct_post.jwt`.
     response_encryption_key: Option<Vec<u8>>,
-    /// The full DCQL query when present — one credential query per credential the RP wants, so the
-    /// wallet can select and present ONE credential per query (multi-credential presentation).
+    /// The full DCQL query when present. Its set planner selects the complete required/optional
+    /// subset, with at most one held credential per supported query until `multiple=true` lands.
     dcql: Option<oid4vp::dcql::DcqlQuery>,
     /// Exact credentials selected before consent. Later phases revalidate these values instead of
     /// silently switching to a different holding after the user approved the screen.
@@ -2673,7 +2673,7 @@ impl Core {
     }
 
     fn drive(&mut self, input: Input) -> Vec<Effect> {
-        // For consent, compute the data-minimised selection — one credential per DCQL query.
+        // For consent, compute the complete data-minimised DCQL set plan.
         let selected = self.select_credentials_for(&input);
 
         let verifier = AwsLc;
@@ -3504,7 +3504,7 @@ impl Core {
         Ok(())
     }
 
-    /// Freeze one exact, currently eligible credential for every query before consent is rendered.
+    /// Freeze the complete, currently eligible DCQL plan before consent is rendered.
     fn prepare_presentation_selection(&mut self) -> Result<(), PresentationEligibilityError> {
         let session = self
             .session
@@ -3514,14 +3514,45 @@ impl Core {
 
         let prepared = match &session.dcql {
             Some(dcql) if !dcql.credentials.is_empty() => {
-                let mut ids = Vec::with_capacity(dcql.credentials.len());
-                let mut prepared = Vec::with_capacity(dcql.credentials.len());
+                // Evaluate every query without mutating session state, then select Credential Set
+                // options atomically. Optional unsatisfied sets therefore cannot poison an
+                // otherwise valid plan, while a required unsatisfied set cannot leak a partial
+                // credential through consent, signing or response assembly.
+                let mut candidates = Vec::with_capacity(dcql.credentials.len());
+                let mut errors = Vec::with_capacity(dcql.credentials.len());
                 for query in &dcql.credentials {
-                    if query.id.is_empty() || ids.contains(&query.id) {
-                        return Err(PresentationEligibilityError::NoEligibleCredential);
+                    match self.select_for_query(&session, query) {
+                        Ok(candidate) => {
+                            candidates.push(Some(candidate));
+                            errors.push(None);
+                        }
+                        Err(error) => {
+                            candidates.push(None);
+                            errors.push(Some(error));
+                        }
                     }
-                    ids.push(query.id.clone());
-                    prepared.push(self.select_for_query(&session, query)?);
+                }
+                let satisfiable: Vec<bool> = candidates.iter().map(Option::is_some).collect();
+                let indices = dcql
+                    .credential_selection_plan(&satisfiable)
+                    .ok_or_else(|| {
+                        errors
+                            .iter()
+                            .flatten()
+                            .copied()
+                            .next()
+                            .unwrap_or(PresentationEligibilityError::NoEligibleCredential)
+                    })?;
+                if indices.is_empty() {
+                    return Err(PresentationEligibilityError::NoEligibleCredential);
+                }
+                let mut prepared = Vec::with_capacity(indices.len());
+                for index in indices {
+                    prepared.push(
+                        candidates[index]
+                            .take()
+                            .ok_or(PresentationEligibilityError::NoEligibleCredential)?,
+                    );
                 }
                 prepared
             }
@@ -3562,8 +3593,32 @@ impl Core {
         sess: &SessionInfo,
         q: &oid4vp::dcql::CredentialQuery,
     ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
-        let claims: Vec<String> = q
-            .claims
+        let options = q
+            .claim_selection_options()
+            .ok_or(PresentationEligibilityError::NoEligibleCredential)?;
+        let mut first_error = None;
+        for option in options {
+            let claims: Vec<&oid4vp::dcql::ClaimQuery> =
+                option.iter().map(|index| &q.claims[*index]).collect();
+            match self.select_for_query_claims(sess, q, &claims) {
+                Ok(selected) => return Ok(selected),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
+    }
+
+    /// Select one holding for one already-resolved claim-set option. The caller tries options in
+    /// verifier preference order and commits only the first complete match.
+    fn select_for_query_claims(
+        &self,
+        sess: &SessionInfo,
+        q: &oid4vp::dcql::CredentialQuery,
+        requested_claims: &[&oid4vp::dcql::ClaimQuery],
+    ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
+        let claims: Vec<String> = requested_claims
             .iter()
             .map(|c| c.path_string())
             .filter(|s| !s.is_empty())
@@ -3574,7 +3629,7 @@ impl Core {
         // of the listed values (e.g. `age_over_18 ∈ [true]`). A candidate that can't satisfy it is
         // not eligible — the wallet never presents a value the verifier asked to exclude.
         let fixture_sdjwt_values_ok = |c: &HeldCredential| -> bool {
-            q.claims.iter().all(|cq| match &cq.values {
+            requested_claims.iter().all(|cq| match &cq.values {
                 None => true,
                 Some(allowed) => c
                     .disclosures_by_claim
@@ -3585,8 +3640,7 @@ impl Core {
         };
 
         if q.format == "mso_mdoc" {
-            let requested_mdoc_paths: Vec<(String, String)> = q
-                .claims
+            let requested_mdoc_paths: Vec<(String, String)> = requested_claims
                 .iter()
                 .map(|claim| requested_mdoc_path(&claim.path))
                 .collect::<Option<_>>()
@@ -3596,7 +3650,7 @@ impl Core {
                 .map(|(namespace, element)| format!("{namespace}.{element}"))
                 .collect();
             let mdoc_values_ok = |issued: &mdoc::IssuerSigned| -> bool {
-                q.claims
+                requested_claims
                     .iter()
                     .zip(&requested_mdoc_paths)
                     .all(|(claim, path)| match &claim.values {
@@ -3654,8 +3708,7 @@ impl Core {
             return Err(PresentationEligibilityError::NoEligibleCredential);
         }
 
-        let requested_paths: Vec<Vec<RequestedSdJwtPathElement>> = q
-            .claims
+        let requested_paths: Vec<Vec<RequestedSdJwtPathElement>> = requested_claims
             .iter()
             .map(|claim| requested_sdjwt_path(&claim.path))
             .collect::<Option<_>>()
@@ -3689,7 +3742,7 @@ impl Core {
                     // exact JSON value is allowed, and treat the claim as absent if none match.
                     let mut selected_paths = Vec::new();
                     let mut claims_match = true;
-                    for (claim, requested) in q.claims.iter().zip(&requested_paths) {
+                    for (claim, requested) in requested_claims.iter().zip(&requested_paths) {
                         let matches = matching_sdjwt_values(authenticated, requested);
                         let matching_paths: Vec<Vec<sdjwt::ClaimPathElement>> = matches
                             .into_iter()
