@@ -32,6 +32,8 @@ pub const MAX_WALLET_ATTESTATION_POP_BYTES: usize = 16 * 1024;
 pub const MAX_DPOP_NONCE_BYTES: usize = 2_048;
 pub const MAX_DPOP_SIGNING_INPUT_BYTES: usize = 16 * 1024;
 pub const MAX_ACCESS_TOKEN_BYTES: usize = 8 * 1024;
+pub const MAX_CREDENTIAL_IDENTIFIERS: usize = 32;
+pub const MAX_CREDENTIAL_IDENTIFIER_BYTES: usize = 2_048;
 pub const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
 pub const MAX_PAR_RESPONSE_BYTES: usize = 16 * 1024;
 pub const MAX_CALLBACK_QUERY_BYTES: usize = 16 * 1024;
@@ -780,7 +782,9 @@ impl fmt::Debug for AuthorizationInput {
 
 pub struct AccessTokenGrant {
     access_token: SecretString,
+    issued_at_epoch_seconds: i64,
     expires_in_seconds: Option<u32>,
+    credential_identifiers: Vec<SecretString>,
     token_endpoint_dpop_nonce: Option<SecretString>,
     authorization_server: HttpsIdentifier,
     token_endpoint: HttpsEndpoint,
@@ -795,6 +799,9 @@ impl AccessTokenGrant {
     pub fn access_token(&self) -> &str {
         self.access_token.expose()
     }
+    pub fn issued_at_epoch_seconds(&self) -> i64 {
+        self.issued_at_epoch_seconds
+    }
     pub fn expires_in_seconds(&self) -> Option<u32> {
         self.expires_in_seconds
     }
@@ -802,6 +809,9 @@ impl AccessTokenGrant {
         self.token_endpoint_dpop_nonce
             .as_ref()
             .map(SecretString::expose)
+    }
+    pub fn credential_identifiers(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.credential_identifiers.iter().map(SecretString::expose)
     }
     pub fn credential_issuer(&self) -> &str {
         self.credential_issuer.as_str()
@@ -834,7 +844,16 @@ impl fmt::Debug for AccessTokenGrant {
         formatter
             .debug_struct("AccessTokenGrant")
             .field("access_token", &"[REDACTED]")
+            .field("issued_at_epoch_seconds", &self.issued_at_epoch_seconds)
             .field("expires_in_seconds", &self.expires_in_seconds)
+            .field(
+                "credential_identifiers",
+                &self
+                    .credential_identifiers
+                    .iter()
+                    .map(|_| "[REDACTED]")
+                    .collect::<Vec<_>>(),
+            )
             .field(
                 "token_endpoint_dpop_nonce",
                 &self
@@ -1492,10 +1511,17 @@ impl AuthorizationFlow {
         if let Some(nonce) = nonce {
             self.rotate_token_endpoint_nonce(nonce)?;
         }
-        let parsed = parse_access_token_response(response.body.expose(), &self.context.scope)?;
+        let parsed = parse_access_token_response(
+            response.body.expose(),
+            &self.context.scope,
+            &self.context.configuration_id,
+            self.context.credential_issuer.as_str(),
+        )?;
         let grant = AccessTokenGrant {
             access_token: parsed.access_token,
+            issued_at_epoch_seconds: environment.now_epoch_seconds,
             expires_in_seconds: parsed.expires_in_seconds,
+            credential_identifiers: parsed.credential_identifiers,
             token_endpoint_dpop_nonce: self
                 .context
                 .token_endpoint_nonce
@@ -1636,11 +1662,14 @@ fn parse_oauth_error(input: &[u8], limits: JsonLimits) -> Result<OAuthError, Jso
 struct ParsedAccessTokenGrant {
     access_token: SecretString,
     expires_in_seconds: Option<u32>,
+    credential_identifiers: Vec<SecretString>,
 }
 
 fn parse_access_token_response(
     input: &[u8],
     expected_scope: &str,
+    expected_configuration_id: &str,
+    expected_credential_issuer: &str,
 ) -> Result<ParsedAccessTokenGrant, AuthorizationError> {
     let mut object = bounded_json::parse_object(input, TOKEN_JSON_LIMITS)
         .map_err(|_| AuthorizationError::InvalidTokenResponse)?;
@@ -1676,13 +1705,89 @@ fn parse_access_token_response(
         Some(_) => return Err(AuthorizationError::InvalidTokenResponse),
         None => {}
     }
+    let credential_identifiers = parse_credential_identifiers(
+        object.remove("authorization_details"),
+        expected_configuration_id,
+        expected_credential_issuer,
+    )?;
     // OpenID4VCI 1.0 Final obtains c_nonce from the separate Nonce Endpoint. Any bounded unknown
     // token-response member (including legacy c_nonce deployments) is ignored as required by the
     // final specification and is never promoted into credential-proof state here.
     Ok(ParsedAccessTokenGrant {
         access_token: SecretString::from_string(access_token),
         expires_in_seconds,
+        credential_identifiers,
     })
+}
+
+fn parse_credential_identifiers(
+    authorization_details: Option<Value>,
+    expected_configuration_id: &str,
+    expected_credential_issuer: &str,
+) -> Result<Vec<SecretString>, AuthorizationError> {
+    let Some(Value::Array(details)) = authorization_details else {
+        return if authorization_details.is_none() {
+            Ok(Vec::new())
+        } else {
+            Err(AuthorizationError::InvalidTokenResponse)
+        };
+    };
+    if details.is_empty() || details.len() > MAX_CREDENTIAL_IDENTIFIERS {
+        return Err(AuthorizationError::InvalidTokenResponse);
+    }
+
+    let mut result = None;
+    for detail in details {
+        let detail = detail
+            .as_object()
+            .ok_or(AuthorizationError::InvalidTokenResponse)?;
+        let detail_type = detail
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|value| valid_bounded_text(value, 128, false))
+            .ok_or(AuthorizationError::InvalidTokenResponse)?;
+        if detail_type != "openid_credential" {
+            continue;
+        }
+        if result.is_some()
+            || detail
+                .get("credential_configuration_id")
+                .and_then(Value::as_str)
+                != Some(expected_configuration_id)
+        {
+            return Err(AuthorizationError::InvalidTokenResponse);
+        }
+        if let Some(locations) = detail.get("locations") {
+            let locations = locations
+                .as_array()
+                .filter(|values| values.len() == 1)
+                .ok_or(AuthorizationError::InvalidTokenResponse)?;
+            if locations[0].as_str() != Some(expected_credential_issuer) {
+                return Err(AuthorizationError::InvalidTokenResponse);
+            }
+        }
+        let identifiers = detail
+            .get("credential_identifiers")
+            .and_then(Value::as_array)
+            .filter(|values| !values.is_empty() && values.len() <= MAX_CREDENTIAL_IDENTIFIERS)
+            .ok_or(AuthorizationError::InvalidTokenResponse)?;
+        let mut parsed = Vec::with_capacity(identifiers.len());
+        for identifier in identifiers {
+            let identifier = identifier
+                .as_str()
+                .filter(|value| valid_bounded_text(value, MAX_CREDENTIAL_IDENTIFIER_BYTES, false))
+                .ok_or(AuthorizationError::InvalidTokenResponse)?;
+            if parsed
+                .iter()
+                .any(|seen: &SecretString| ct_eq(seen.expose().as_bytes(), identifier.as_bytes()))
+            {
+                return Err(AuthorizationError::InvalidTokenResponse);
+            }
+            parsed.push(SecretString::from_str(identifier));
+        }
+        result = Some(parsed);
+    }
+    result.ok_or(AuthorizationError::InvalidTokenResponse)
 }
 
 fn take_required_string(

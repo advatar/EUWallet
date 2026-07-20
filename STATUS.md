@@ -218,8 +218,8 @@ operational solution needed to enter those processes.
       - [ ] Require native adapters to enforce streaming body/header/decompression limits before
             allocation, exact final URL/method correlation, disabled redirects, deadlines,
             cancellation and secret-safe logging; add the missing hostile/conformance vectors.
-    - [ ] Add an isolated final Nonce/Credential Endpoint transport machine that consumes the
-          sender-constrained authorization grant; obtains bounded `c_nonce`; requires exact
+    - [ ] Add and harden the isolated final Nonce/Credential Endpoint transport machine that
+          consumes the sender-constrained authorization grant; obtains bounded `c_nonce`; requires exact
           request-bound key-attestation acquisition and ES256 credential-proof signing; sends an
           `ath`-bound DPoP request with a finite resource-server nonce retry; and accepts only one
           immediate, unencrypted German PID credential in the selected format while preserving its
