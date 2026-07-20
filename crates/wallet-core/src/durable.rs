@@ -357,6 +357,117 @@ fn validate_record_parts(
     Ok(())
 }
 
+fn authenticated_provenances(core: &Core) -> impl Iterator<Item = &CredentialProvenance> {
+    core.credentials
+        .iter()
+        .filter_map(|stored| match &stored.provenance {
+            StoredProvenance::Authenticated(provenance) => Some(provenance),
+            StoredProvenance::TestFixture => None,
+        })
+        .chain(
+            core.mdoc_holdings
+                .iter()
+                .filter_map(|stored| match &stored.provenance {
+                    StoredProvenance::Authenticated(provenance) => Some(provenance),
+                    StoredProvenance::TestFixture => None,
+                }),
+        )
+}
+
+fn matching_authenticated_provenance<'a>(
+    core: &'a Core,
+    candidate: &AuthenticatedCredential,
+) -> Option<&'a CredentialProvenance> {
+    match &candidate.credential {
+        VerifiedCredential::SdJwt { holding, .. } => core
+            .credentials
+            .iter()
+            .find(|stored| stored.holding == *holding)
+            .and_then(|stored| match &stored.provenance {
+                StoredProvenance::Authenticated(provenance) => Some(provenance),
+                StoredProvenance::TestFixture => None,
+            }),
+        VerifiedCredential::Mdoc { holding, .. } => core
+            .mdoc_holdings
+            .iter()
+            .find(|stored| stored.holding == *holding)
+            .and_then(|stored| match &stored.provenance {
+                StoredProvenance::Authenticated(provenance) => Some(provenance),
+                StoredProvenance::TestFixture => None,
+            }),
+    }
+}
+
+fn record_evidence_bytes(
+    provenance: &CredentialProvenance,
+) -> Result<usize, DurableCheckpointError> {
+    let mut total = 0usize;
+    validate_record_parts(
+        &provenance.raw_credential,
+        &provenance.issuer.identity,
+        &provenance.issuer.certificate_path,
+        &mut total,
+    )?;
+    Ok(total)
+}
+
+/// Project the exact authenticated upsert before any holding changes. This shares the component
+/// and aggregate limits with checkpoint export so an accepted credential can never make the
+/// in-memory wallet impossible to commit solely because of credential count/evidence capacity.
+pub(super) fn ensure_credential_storage_admission(
+    core: &Core,
+    candidate: &AuthenticatedCredential,
+) -> Result<(), CredentialIngestionError> {
+    ensure_credential_storage_admission_with_limits(
+        core,
+        candidate,
+        MAX_CREDENTIALS,
+        MAX_CREDENTIAL_EVIDENCE_BYTES,
+    )
+}
+
+fn ensure_credential_storage_admission_with_limits(
+    core: &Core,
+    candidate: &AuthenticatedCredential,
+    max_credentials: usize,
+    max_evidence_bytes: usize,
+) -> Result<(), CredentialIngestionError> {
+    let current_count = authenticated_provenances(core).count();
+    let replaced = matching_authenticated_provenance(core, candidate);
+    let projected_count = current_count
+        .checked_add(usize::from(replaced.is_none()))
+        .ok_or(CredentialIngestionError::CredentialStoreFull)?;
+    if projected_count > max_credentials {
+        return Err(CredentialIngestionError::CredentialStoreFull);
+    }
+
+    let mut current_evidence = 0usize;
+    for provenance in authenticated_provenances(core) {
+        validate_record_parts(
+            &provenance.raw_credential,
+            &provenance.issuer.identity,
+            &provenance.issuer.certificate_path,
+            &mut current_evidence,
+        )
+        .map_err(|_| CredentialIngestionError::CredentialEvidenceLimitExceeded)?;
+    }
+    let replaced_evidence = replaced
+        .map(record_evidence_bytes)
+        .transpose()
+        .map_err(|_| CredentialIngestionError::CredentialEvidenceLimitExceeded)?
+        .unwrap_or(0);
+    let candidate_evidence = record_evidence_bytes(&candidate.provenance)
+        .map_err(|_| CredentialIngestionError::CredentialEvidenceLimitExceeded)?;
+    let projected_evidence = current_evidence
+        .checked_sub(replaced_evidence)
+        .and_then(|total| total.checked_add(candidate_evidence))
+        .ok_or(CredentialIngestionError::CredentialEvidenceLimitExceeded)?;
+    if projected_evidence > max_evidence_bytes {
+        return Err(CredentialIngestionError::CredentialEvidenceLimitExceeded);
+    }
+    Ok(())
+}
+
 fn authenticated_records(core: &Core) -> Result<Vec<CredentialRecord>, DurableCheckpointError> {
     let authenticated_count = core
         .credentials
@@ -1722,6 +1833,15 @@ mod tests {
         issued_at: i64,
         expires_at: i64,
     ) -> Vec<u8> {
+        signed_pid_variant(device_public_key, issued_at, expires_at, 0)
+    }
+
+    fn signed_pid_variant(
+        device_public_key: &[u8],
+        issued_at: i64,
+        expires_at: i64,
+        variant: usize,
+    ) -> Vec<u8> {
         let issuer = SoftwareSigner::from_pkcs8_der(ISSUER_PKCS8).unwrap();
         let claims = [
             ("family_name", json!("Andersson")),
@@ -1732,7 +1852,7 @@ mod tests {
         let mut digests = Vec::new();
         for (index, (name, value)) in claims.into_iter().enumerate() {
             let disclosure = Base64UrlUnpadded::encode_string(
-                serde_json::to_string(&json!([format!("s{index}"), name, value]))
+                serde_json::to_string(&json!([format!("s{variant}-{index}"), name, value]))
                     .unwrap()
                     .as_bytes(),
             );
@@ -1774,6 +1894,213 @@ mod tests {
             disclosures.join("~")
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn projected_credential_admission_accounts_for_replacement_promotion_and_evidence() {
+        let scenario = DemoWallet::new().issuance_scenario();
+        let mut core = configured_core(&scenario, "wallet.example", "device-key");
+        let first_raw = signed_pid_variant(
+            &scenario.device_public_key,
+            scenario.epoch,
+            scenario.epoch + 10_000,
+            1,
+        );
+        let second_raw = signed_pid_variant(
+            &scenario.device_public_key,
+            scenario.epoch,
+            scenario.epoch + 10_000,
+            2,
+        );
+        let first = core
+            .authenticate_received_credential(
+                oid4vci::CredentialFormat::DcSdJwt,
+                &first_raw,
+                &scenario.issuer_cert_chain,
+                &scenario.issuer_id,
+            )
+            .unwrap();
+        let second = core
+            .authenticate_received_credential(
+                oid4vci::CredentialFormat::DcSdJwt,
+                &second_raw,
+                &scenario.issuer_cert_chain,
+                &scenario.issuer_id,
+            )
+            .unwrap();
+        let VerifiedCredential::SdJwt { holding, .. } = &first.credential else {
+            panic!("PID test credential must be SD-JWT");
+        };
+        core.load_unverified_credential_for_testing(holding.clone());
+        let fixture_checkpoint = core.export_durable_checkpoint(21).unwrap();
+        let fixture_log = core.log.clone();
+
+        assert_eq!(
+            ensure_credential_storage_admission_with_limits(
+                &core,
+                &first,
+                0,
+                MAX_CREDENTIAL_EVIDENCE_BYTES,
+            ),
+            Err(CredentialIngestionError::CredentialStoreFull),
+            "promoting a fixture consumes one authenticated slot"
+        );
+        assert_eq!(
+            core.export_durable_checkpoint(21).unwrap(),
+            fixture_checkpoint
+        );
+        assert_eq!(core.log, fixture_log);
+
+        core.store_verified_credential(first.clone()).unwrap();
+        let admitted_checkpoint = core.export_durable_checkpoint(22).unwrap();
+        let admitted_log = core.log.clone();
+        let first_evidence = record_evidence_bytes(&first.provenance).unwrap();
+        let second_evidence = record_evidence_bytes(&second.provenance).unwrap();
+        let combined = first_evidence.checked_add(second_evidence).unwrap();
+
+        assert!(
+            ensure_credential_storage_admission_with_limits(&core, &second, 2, combined,).is_ok()
+        );
+        assert_eq!(
+            ensure_credential_storage_admission_with_limits(&core, &second, 2, combined - 1,),
+            Err(CredentialIngestionError::CredentialEvidenceLimitExceeded),
+            "aggregate evidence is checked before appending a distinct credential"
+        );
+
+        let mut larger_replacement = first;
+        larger_replacement.provenance.raw_credential.push(b' ');
+        let replacement_evidence = record_evidence_bytes(&larger_replacement.provenance).unwrap();
+        assert!(ensure_credential_storage_admission_with_limits(
+            &core,
+            &larger_replacement,
+            1,
+            replacement_evidence,
+        )
+        .is_ok());
+        assert_eq!(
+            ensure_credential_storage_admission_with_limits(
+                &core,
+                &larger_replacement,
+                1,
+                replacement_evidence - 1,
+            ),
+            Err(CredentialIngestionError::CredentialEvidenceLimitExceeded),
+            "replacement subtracts old evidence and admits only the projected new total"
+        );
+        assert_eq!(
+            core.export_durable_checkpoint(22).unwrap(),
+            admitted_checkpoint
+        );
+        assert_eq!(core.log, admitted_log);
+    }
+
+    #[test]
+    fn count_capacity_rejects_direct_and_issuance_storage_without_wedging_checkpoint() {
+        let scenario = DemoWallet::new().issuance_scenario();
+        let mut core = configured_core(&scenario, "wallet.example", "device-key");
+        let mut first_raw = None;
+        for variant in 0..MAX_CREDENTIALS {
+            let raw = signed_pid_variant(
+                &scenario.device_public_key,
+                scenario.epoch,
+                scenario.epoch + 10_000,
+                100 + variant,
+            );
+            if first_raw.is_none() {
+                first_raw = Some(raw.clone());
+            }
+            core.ingest_credential(
+                "dc+sd-jwt",
+                &raw,
+                &scenario.issuer_cert_chain,
+                &scenario.issuer_id,
+            )
+            .unwrap();
+        }
+        let checkpoint = core.export_durable_checkpoint(23).unwrap();
+        let audit = core.log.clone();
+
+        core.ingest_credential(
+            "dc+sd-jwt",
+            &first_raw.unwrap(),
+            &scenario.issuer_cert_chain,
+            &scenario.issuer_id,
+        )
+        .expect("replacing an authenticated holding does not consume another slot");
+        assert_eq!(core.export_durable_checkpoint(23).unwrap(), checkpoint);
+
+        let overflow_raw = signed_pid_variant(
+            &scenario.device_public_key,
+            scenario.epoch,
+            scenario.epoch + 10_000,
+            10_000,
+        );
+        assert_eq!(
+            core.ingest_credential(
+                "dc+sd-jwt",
+                &overflow_raw,
+                &scenario.issuer_cert_chain,
+                &scenario.issuer_id,
+            ),
+            Err(CredentialIngestionError::CredentialStoreFull)
+        );
+        assert_eq!(core.export_durable_checkpoint(23).unwrap(), checkpoint);
+        assert_eq!(core.log, audit);
+
+        let overflow = core
+            .authenticate_received_credential(
+                oid4vci::CredentialFormat::DcSdJwt,
+                &overflow_raw,
+                &scenario.issuer_cert_chain,
+                &scenario.issuer_id,
+            )
+            .unwrap();
+        let VerifiedCredential::SdJwt { holding, .. } = &overflow.credential else {
+            panic!("PID test credential must be SD-JWT");
+        };
+        core.load_unverified_credential_for_testing(holding.clone());
+        assert_eq!(
+            core.ingest_credential(
+                "dc+sd-jwt",
+                &overflow_raw,
+                &scenario.issuer_cert_chain,
+                &scenario.issuer_id,
+            ),
+            Err(CredentialIngestionError::CredentialStoreFull),
+            "promoting a fixture must not bypass the combined authenticated count"
+        );
+        assert_eq!(core.export_durable_checkpoint(23).unwrap(), checkpoint);
+        assert_eq!(core.log, audit);
+
+        core.active = ActiveFlow::Issuance;
+        core.issuance = oid4vci::State::RequestingCredential {
+            format: oid4vci::CredentialFormat::DcSdJwt,
+        };
+        core.issuer_cert_chain_current = scenario.issuer_cert_chain.clone();
+        core.issuer_id_current = scenario.issuer_id.clone();
+        core.issuer_id_assertion_current = scenario.issuer_id.clone();
+        core.issuer_candidates_current =
+            core.resolve_credential_issuers(&core.issuer_cert_chain_current);
+        core.issuer_trusted_current = true;
+        let effects = core.handle_event(Event::CredentialReceived {
+            format: "dc+sd-jwt".into(),
+            bytes: overflow_raw,
+        });
+        assert_eq!(
+            core.last_credential_ingestion_error(),
+            Some(&CredentialIngestionError::CredentialStoreFull)
+        );
+        assert!(matches!(
+            core.issuance,
+            oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid)
+        ));
+        assert!(core.pending_verified_credential.is_none());
+        assert_eq!(effects, vec![Effect::Close]);
+        assert_eq!(core.export_durable_checkpoint(23).unwrap(), checkpoint);
+        assert_eq!(
+            core.log, audit,
+            "capacity rejection must not append issuance audit"
+        );
     }
 
     #[test]

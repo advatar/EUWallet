@@ -37,8 +37,10 @@ also fail closed and never release effects.
 Core and both native stores share a 33,554,312-byte checkpoint plaintext ceiling, derived from the
 32 MiB Android envelope and its 120-byte fixed overhead. Replay-set cardinality is admitted before
 each flow and again at the exact reservation transition; exhaustion resets the typed flow, clears
-its callbacks and leaves the prior durable checkpoint exportable. Credential count/evidence
-admission remains a separate required guard.
+its callbacks and leaves the prior durable checkpoint exportable. Direct and OID4VCI credential
+ingestion also project authenticated record count, each evidence component and aggregate evidence
+before the successful storage transition. The projection follows exact upsert semantics, including
+replacement and test-fixture promotion; rejection leaves the prior checkpoint and audit unchanged.
 
 ## Failure and retry semantics
 
@@ -76,7 +78,6 @@ checkpoint wrappers have redacted string/debug representations and defensively c
 
 The coordinators are production-facing seams, but application composition is still open. The iOS
 app must make the coordinator the sole owner-facing Core event path. Android still needs generated
-Rust bindings, a durable-engine adapter and an application entry point. Both clients also need an
-explicit credential-evidence admission policy, migration/recovery UX, physical-device evidence and
-a provider monotonic receipt (or evaluated platform monotonic anchor) before stronger rollback or
-delivery claims are justified.
+Rust bindings, a durable-engine adapter and an application entry point. Both clients also need
+migration/recovery UX, physical-device evidence and a provider monotonic receipt (or evaluated
+platform monotonic anchor) before stronger rollback or delivery claims are justified.

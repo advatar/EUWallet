@@ -1038,6 +1038,8 @@ pub enum CredentialIngestionError {
     DeviceBindingMismatch,
     DuplicateClaim,
     UnsupportedStatusReference,
+    CredentialStoreFull,
+    CredentialEvidenceLimitExceeded,
 }
 
 /// Why a downloaded status assertion was refused before entering the bounded cache.
@@ -1796,8 +1798,12 @@ impl Core {
         }
     }
 
-    fn store_verified_credential(&mut self, authenticated: AuthenticatedCredential) {
+    fn store_verified_credential(
+        &mut self,
+        authenticated: AuthenticatedCredential,
+    ) -> Result<(), CredentialIngestionError> {
         debug_assert!(authenticated.provenance.issuer.is_internally_consistent());
+        durable::ensure_credential_storage_admission(self, &authenticated)?;
         let provenance = StoredProvenance::Authenticated(authenticated.provenance);
         match authenticated.credential {
             VerifiedCredential::SdJwt {
@@ -1839,6 +1845,7 @@ impl Core {
                 }
             }
         }
+        Ok(())
     }
 
     fn authenticate_received_credential(
@@ -1901,7 +1908,7 @@ impl Core {
         let format = parse_format(format).ok_or(CredentialIngestionError::UnsupportedFormat)?;
         let verified =
             self.authenticate_received_credential(format, bytes, issuer_cert_chain, issuer_id)?;
-        self.store_verified_credential(verified);
+        self.store_verified_credential(verified)?;
         self.last_credential_ingestion_error = None;
         Ok(())
     }
@@ -2495,13 +2502,22 @@ impl Core {
                     &self.issuer_id_assertion_current,
                 ) {
                     Ok(verified) => {
-                        self.pending_verified_credential = Some(verified);
-                        self.last_credential_ingestion_error = None;
-                        self.drive_issuance(oid4vci::Input::CredentialResponse {
-                            format: f,
-                            bytes,
-                            issuer_authenticated: true,
-                        })
+                        match durable::ensure_credential_storage_admission(self, &verified) {
+                            Ok(()) => {
+                                self.pending_verified_credential = Some(verified);
+                                self.last_credential_ingestion_error = None;
+                                self.drive_issuance(oid4vci::Input::CredentialResponse {
+                                    format: f,
+                                    bytes,
+                                    issuer_authenticated: true,
+                                })
+                            }
+                            Err(error) => {
+                                self.pending_verified_credential = None;
+                                self.last_credential_ingestion_error = Some(error);
+                                self.drive_issuance(oid4vci::Input::CredentialResponseRejected)
+                            }
+                        }
                     }
                     Err(error) => {
                         self.pending_verified_credential = None;
@@ -3402,7 +3418,15 @@ impl Core {
                         if self.record_issuance(fmt).is_err() {
                             return self.audit_log_fault_effects(ActiveFlow::Issuance);
                         }
-                        self.store_verified_credential(verified);
+                        if let Err(error) = self.store_verified_credential(verified) {
+                            // The credential was admitted immediately before the successful
+                            // protocol transition. A later refusal is therefore an internal
+                            // invariant failure; fail closed instead of exposing issued state.
+                            self.issuance =
+                                oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid);
+                            self.last_credential_ingestion_error = Some(error);
+                            return self.audit_log_fault_effects(ActiveFlow::Issuance);
+                        }
                     }
                     _ => {
                         // Defensive invariant: the OID4VCI machine must never reach its success
