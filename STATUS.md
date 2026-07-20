@@ -24,11 +24,11 @@ operational solution needed to enter those processes.
 - [x] Route OpenID4VCI-issued credentials through verified ingestion and reject untrusted,
       expired, wrongly typed, unbound, malformed, or revoked credentials.
 - [x] Remove or test-gate unchecked credential-loading APIs from production FFI.
-- [ ] Bind the rendered consent/payment/QES contract to holder authorization across core and FFI
+- [x] Bind the rendered consent/payment/QES contract to holder authorization across core and FFI
       ([#12](https://github.com/advatar/EUWallet/issues/12)).
-  - [ ] Attach the core-computed canonical authorization hash to each interactive render and
+  - [x] Attach the core-computed canonical authorization hash to each interactive render and
         require the exact operation ID and hash on approval before signing or disclosure.
-  - [ ] Mirror the closed contract in Swift and Android with stale, mismatched and cross-screen
+  - [x] Mirror the closed contract in Swift and Android with stale, mismatched and cross-screen
         negative tests while preserving the same hash in audit/signing bindings.
 - [x] Make credential status per-credential, issuer/list-bound, fresh, and resource-bounded.
 - [x] [#5](https://github.com/advatar/EUWallet/issues/5): freeze and revalidate selected credential
@@ -83,7 +83,15 @@ operational solution needed to enter those processes.
   - Final approved EUDI issuer certificate/service profiles remain tracked by
     [#11](https://github.com/advatar/EUWallet/issues/11); the current profile stays deliberately
     bounded until those rules are normative and implemented.
-- [ ] Add flow operation IDs, explicit terminal outcomes and recoverable failure/cancel transitions.
+- [x] [#7](https://github.com/advatar/EUWallet/issues/7): add CSPRNG-seeded monotonic operation IDs,
+      exact result types, explicit terminal outcomes and reusable failure/cancel transitions across
+      the Rust core, Swift shell and Android shell.
+  - [x] Reject missing, stale, cross-flow, wrong-result and wrong-resource callbacks before a state
+        transition; cap pending operations and stage effect batches atomically.
+  - [x] Require presentation, payment and QES remote acknowledgements before success, and route
+        every native infrastructure failure/cancellation back into a typed core reset.
+  - Durable restoration of in-flight operations after process death remains part of encrypted
+    persistence/lifecycle work; restart ID collision is mitigated with a 62-bit random namespace.
 - [ ] Harden QR/deep-link and protocol networking with HTTPS-only URL policy, bounded responses,
       redirect/origin controls and SSRF-resistant destination validation.
 
