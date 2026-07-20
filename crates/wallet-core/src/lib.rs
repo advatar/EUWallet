@@ -1371,6 +1371,11 @@ pub struct Core {
     pending_status_references: Vec<StatusReference>,
     // Transaction (audit) log: privacy-preserving, tamper-evident record of completed flows (TS06).
     log: txnlog::TransactionLog,
+    /// Process-local safety latch: once an interaction cannot be recorded, later auditable flows
+    /// stay blocked until the holder explicitly wipes/resets the incomplete history. The eventual
+    /// #16 checkpoint must restore/revalidate the log and external anchor; this flag is not durable
+    /// rollback protection by itself.
+    audit_log_available: bool,
     // Payment details captured at the confirmation screen, recorded into the log on authorization.
     pay_summary: Option<txnlog::PaymentSummary>,
     pay_consent_hash: [u8; 32],
@@ -1420,6 +1425,7 @@ impl Core {
             status_lists: BTreeMap::new(),
             pending_status_references: Vec::new(),
             log: txnlog::TransactionLog::new(),
+            audit_log_available: true,
             pay_summary: None,
             pay_consent_hash: [0u8; 32],
             catalogue: catalogue::default_catalogue(),
@@ -1476,6 +1482,12 @@ impl Core {
         &self.log
     }
 
+    /// Whether new auditable operations may start. False means a prior append failed or the log
+    /// cannot reserve one maximum-sized entry; the core fails before consent/signing/delivery.
+    pub fn audit_log_available(&self) -> bool {
+        self.audit_log_available && self.log.can_guarantee_max_entry()
+    }
+
     /// The transaction log as a JSON array (what the iOS history screen renders). Records claim
     /// PATHS + a committing consent hash, never raw claim values.
     pub fn transaction_log_json(&self) -> String {
@@ -1516,8 +1528,8 @@ impl Core {
 
     /// Erase one transaction-log entry's content (data-subject right to erasure, TS07). Leaves a
     /// tamper-evident tombstone: the chain stays intact and the deletion is auditable, but the
-    /// counterparty / claim paths / consent hash / payment detail are gone. Returns whether `seq`
-    /// existed.
+    /// original time, kind, outcome, counterparty, claim paths, consent hash and payment detail are
+    /// replaced by deterministic blank values. Returns whether `seq` existed.
     pub fn redact_transaction(&mut self, seq: u64) -> bool {
         self.log.redact(seq)
     }
@@ -1525,6 +1537,7 @@ impl Core {
     /// Erase the entire transaction log (full erasure / reset).
     pub fn wipe_transaction_log(&mut self) {
         self.log.wipe();
+        self.audit_log_available = true;
     }
 
     /// A portable, integrity-protected export of the holder's own wallet data (TS10): the held
@@ -2084,8 +2097,66 @@ impl Core {
         ]
     }
 
+    fn audited_flow_started_by(event: &Event) -> Option<ActiveFlow> {
+        match event {
+            Event::AuthorizationRequestReceived { .. } => Some(ActiveFlow::Presentation),
+            Event::PaymentAuthorizationRequestReceived { .. } => Some(ActiveFlow::Payment),
+            Event::CredentialOfferReceived { .. } => Some(ActiveFlow::Issuance),
+            Event::WalletTransferOfferCreated | Event::WalletTransferReceived { .. } => {
+                Some(ActiveFlow::WalletTransfer)
+            }
+            _ => None,
+        }
+    }
+
+    fn audit_log_failure_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
+        self.audit_log_available = false;
+        if self.active != ActiveFlow::None && self.active != flow {
+            self.reset_flow(self.active);
+        }
+        self.reset_flow(flow);
+        vec![
+            Effect::Render {
+                screen: ScreenDescription::Error {
+                    code: "audit_log_unavailable".into(),
+                    message: "The wallet cannot securely record this operation. No further auditable operation is allowed until the wallet history is repaired or reset."
+                        .into(),
+                },
+            },
+            Effect::Close,
+        ]
+    }
+
+    fn append_audit_entry(&mut self, entry: txnlog::NewEntry) -> Result<(), txnlog::Error> {
+        // Each auditable flow reserved MAX_ENTRY_BYTES at admission and checked its exact variable
+        // fields before its first consequential effect. A post-ack error is therefore an internal
+        // invariant/storage-coordination fault, not a recoverable capacity condition.
+        match self.log.append(&AwsLc, entry) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                self.audit_log_available = false;
+                Err(error)
+            }
+        }
+    }
+
+    fn check_audit_entry(&mut self, entry: &txnlog::NewEntry) -> Result<(), txnlog::Error> {
+        match self.log.check_append(entry) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.audit_log_available = false;
+                Err(error)
+            }
+        }
+    }
+
     /// The single entry point. Same state + same event ⇒ same effects (I/O is all in the shell).
     pub fn handle_event(&mut self, event: Event) -> Vec<Effect> {
+        if let Some(flow) = Self::audited_flow_started_by(&event) {
+            if !self.audit_log_available || !self.log.can_guarantee_max_entry() {
+                return self.audit_log_failure_effects(flow);
+            }
+        }
         match event {
             Event::SetClock { epoch } => {
                 // `now_epoch` is a process-local high-water mark. A backwards update must never
@@ -2193,7 +2264,9 @@ impl Core {
                 {
                     return Vec::new();
                 }
-                self.record_payment();
+                if self.record_payment().is_err() {
+                    return self.audit_log_failure_effects(ActiveFlow::Payment);
+                }
                 self.finish_flow(ActiveFlow::Payment);
                 vec![Effect::Close]
             }
@@ -2236,6 +2309,18 @@ impl Core {
             Event::QesAuthorized => self.drive_qes(qes::Input::UserAuthorized),
             Event::QesDeclined => self.drive_qes(qes::Input::UserDeclined),
             Event::WalletTransferOfferCreated => {
+                let audit_candidate = txnlog::NewEntry {
+                    epoch: self.now_epoch,
+                    kind: txnlog::Kind::Transfer,
+                    counterparty: "peer-wallet".into(),
+                    consent_hash: [0u8; 32],
+                    claim_paths: Vec::new(),
+                    outcome: txnlog::Outcome::Completed,
+                    payment: None,
+                };
+                if self.check_audit_entry(&audit_candidate).is_err() {
+                    return self.audit_log_failure_effects(ActiveFlow::WalletTransfer);
+                }
                 self.begin_flow(ActiveFlow::WalletTransfer);
                 self.drive_w2w(w2w::Input::CreateOffer)
             }
@@ -2727,6 +2812,24 @@ impl Core {
             if let Err(error) = self.prepare_presentation_selection() {
                 return self.abort_presentation_eligibility(error);
             }
+            // Admission happens before the RP trust effect and before any consent/sign/delivery.
+            // The consent hash has fixed width and is filled after rendering; every variable-sized
+            // field is already exact here.
+            let audit_candidate = self.session.as_ref().map(|session| txnlog::NewEntry {
+                epoch: self.now_epoch,
+                kind: txnlog::Kind::Presentation,
+                counterparty: session.rp_client_id.clone(),
+                consent_hash: [0u8; 32],
+                claim_paths: session.selected_revealed_claims.clone(),
+                outcome: txnlog::Outcome::Completed,
+                payment: None,
+            });
+            if audit_candidate
+                .as_ref()
+                .is_some_and(|entry| self.check_audit_entry(entry).is_err())
+            {
+                return self.audit_log_failure_effects(ActiveFlow::Presentation);
+            }
         }
 
         let mut effects: Vec<Effect> = outputs
@@ -2744,8 +2847,8 @@ impl Core {
         }
 
         // Record a completed presentation the moment the machine reaches Done (once).
-        if !was_done && matches!(self.vp, State::Done) {
-            self.record_presentation();
+        if !was_done && matches!(self.vp, State::Done) && self.record_presentation().is_err() {
+            return self.audit_log_failure_effects(ActiveFlow::Presentation);
         }
         effects
     }
@@ -3136,6 +3239,31 @@ impl Core {
         let was_issued = matches!(self.issuance, oid4vci::State::CredentialIssued { .. });
         self.issuance = next;
 
+        let audit_format = match &self.issuance {
+            oid4vci::State::OfferParsed { format, .. }
+            | oid4vci::State::Authorizing { format }
+            | oid4vci::State::AwaitingTxCode { format }
+            | oid4vci::State::RequestingToken { format }
+            | oid4vci::State::ProvingPossession { format, .. }
+            | oid4vci::State::RequestingCredential { format }
+            | oid4vci::State::CredentialIssued { format, .. } => Some(*format),
+            oid4vci::State::Idle | oid4vci::State::Aborted(_) => None,
+        };
+        if let Some(format) = audit_format {
+            let audit_candidate = txnlog::NewEntry {
+                epoch: self.now_epoch,
+                kind: txnlog::Kind::Issuance,
+                counterparty: self.issuer_id_current.clone(),
+                consent_hash: [0u8; 32],
+                claim_paths: vec![format_name(format).to_string()],
+                outcome: txnlog::Outcome::Completed,
+                payment: None,
+            };
+            if self.check_audit_entry(&audit_candidate).is_err() {
+                return self.audit_log_failure_effects(ActiveFlow::Issuance);
+            }
+        }
+
         let effects: Vec<Effect> = outputs
             .into_iter()
             .map(|o| self.translate_issuance(o))
@@ -3149,8 +3277,10 @@ impl Core {
                 let fmt = format_name(issued_format).to_string();
                 match self.pending_verified_credential.take() {
                     Some(verified) if verified.credential.format() == issued_format => {
+                        if self.record_issuance(fmt).is_err() {
+                            return self.audit_log_failure_effects(ActiveFlow::Issuance);
+                        }
                         self.store_verified_credential(verified);
-                        self.record_issuance(fmt);
                     }
                     _ => {
                         // Defensive invariant: the OID4VCI machine must never reach its success
@@ -3259,12 +3389,26 @@ impl Core {
                     currency: currency.clone(),
                 });
                 // Capture the payer-visible essence + the committing hash for the audit log.
-                self.pay_consent_hash = presenter::consent_hash(&AwsLc, &screen);
-                self.pay_summary = Some(txnlog::PaymentSummary {
+                let consent_hash = presenter::consent_hash(&AwsLc, &screen);
+                let summary = txnlog::PaymentSummary {
                     payee: creditor_name,
                     amount_minor,
                     currency,
-                });
+                };
+                let audit_candidate = txnlog::NewEntry {
+                    epoch: self.now_epoch,
+                    kind: txnlog::Kind::Payment,
+                    counterparty: summary.payee.clone(),
+                    consent_hash,
+                    claim_paths: Vec::new(),
+                    outcome: txnlog::Outcome::Completed,
+                    payment: Some(summary.clone()),
+                };
+                if self.check_audit_entry(&audit_candidate).is_err() {
+                    return self.audit_log_failure_effects(ActiveFlow::Payment);
+                }
+                self.pay_consent_hash = consent_hash;
+                self.pay_summary = Some(summary);
                 vec![Effect::Render { screen }]
             }
             PO::SignAuthCode {
@@ -3914,7 +4058,7 @@ impl Core {
     }
 
     /// Append a completed presentation to the audit log (paths + consent hash, never values).
-    fn record_presentation(&mut self) {
+    fn record_presentation(&mut self) -> Result<(), txnlog::Error> {
         let entry = match &self.session {
             Some(sess) => txnlog::NewEntry {
                 epoch: self.now_epoch,
@@ -3925,16 +4069,16 @@ impl Core {
                 outcome: txnlog::Outcome::Completed,
                 payment: None,
             },
-            None => return,
+            None => return Ok(()),
         };
-        self.log.append(&AwsLc, entry);
+        self.append_audit_entry(entry)
     }
 
     /// Append an authorised payment to the audit log (payer-visible summary + consent hash).
-    fn record_payment(&mut self) {
+    fn record_payment(&mut self) -> Result<(), txnlog::Error> {
         let summary = match &self.pay_summary {
             Some(s) => s.clone(),
-            None => return,
+            None => return Ok(()),
         };
         let entry = txnlog::NewEntry {
             epoch: self.now_epoch,
@@ -3945,11 +4089,11 @@ impl Core {
             outcome: txnlog::Outcome::Completed,
             payment: Some(summary),
         };
-        self.log.append(&AwsLc, entry);
+        self.append_audit_entry(entry)
     }
 
     /// Append a completed issuance to the audit log (issuer identity + credential format).
-    fn record_issuance(&mut self, format: String) {
+    fn record_issuance(&mut self, format: String) -> Result<(), txnlog::Error> {
         let entry = txnlog::NewEntry {
             epoch: self.now_epoch,
             kind: txnlog::Kind::Issuance,
@@ -3959,7 +4103,7 @@ impl Core {
             outcome: txnlog::Outcome::Completed,
             payment: None,
         };
-        self.log.append(&AwsLc, entry);
+        self.append_audit_entry(entry)
     }
 
     // --- Wallet-to-wallet receive (TS09) ---
@@ -3992,7 +4136,9 @@ impl Core {
                     outcome: txnlog::Outcome::Completed,
                     payment: None,
                 };
-                self.log.append(&AwsLc, entry);
+                if self.append_audit_entry(entry).is_err() {
+                    return self.audit_log_failure_effects(ActiveFlow::WalletTransfer);
+                }
                 self.w2w_credential = Some(credential);
                 vec![]
             }
@@ -4357,6 +4503,185 @@ impl WalletEngine {
             Ok(effects) => effects,
             Err(err) => serde_json::json!({ "error": err }).to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod audit_log_failure_tests {
+    use super::*;
+
+    fn audit_entry(epoch: i64) -> txnlog::NewEntry {
+        txnlog::NewEntry {
+            epoch,
+            kind: txnlog::Kind::Transfer,
+            counterparty: "peer-wallet".into(),
+            consent_hash: [1u8; 32],
+            claim_paths: Vec::new(),
+            outcome: txnlog::Outcome::Completed,
+            payment: None,
+        }
+    }
+
+    fn bulky_audit_entry(epoch: i64) -> txnlog::NewEntry {
+        txnlog::NewEntry {
+            epoch,
+            kind: txnlog::Kind::Presentation,
+            counterparty: "rp.example".into(),
+            consent_hash: [1u8; 32],
+            claim_paths: (0..100)
+                .map(|index| format!("{index:03}:{}", "x".repeat(496)))
+                .collect(),
+            outcome: txnlog::Outcome::Completed,
+            payment: None,
+        }
+    }
+
+    fn near_capacity_log() -> txnlog::TransactionLog {
+        let mut log = txnlog::TransactionLog::new();
+        let mut epoch = 0i64;
+        while log.can_guarantee_max_entry() {
+            log.append(&AwsLc, bulky_audit_entry(epoch)).unwrap();
+            epoch += 1;
+        }
+        assert!(!log.is_exhausted());
+        assert!(!log.can_guarantee_max_entry());
+        log
+    }
+
+    fn is_audit_error(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::Render {
+                screen: ScreenDescription::Error { code, .. }
+            } if code == "audit_log_unavailable"
+        )
+    }
+
+    #[test]
+    fn append_validation_failure_blocks_later_auditable_flows_without_panicking() {
+        let mut core = Core::new("wallet.example", "device-key");
+        core.issuer_id_current = "x".repeat(txnlog::MAX_COUNTERPARTY_BYTES + 1);
+        assert!(matches!(
+            core.record_issuance("dc+sd-jwt".into()),
+            Err(txnlog::Error::FieldTooLong {
+                field: txnlog::TextField::Counterparty,
+                ..
+            })
+        ));
+        assert!(!core.audit_log_available());
+        assert!(core.transaction_log().is_empty());
+
+        let effects = core.handle_event(Event::AuthorizationRequestReceived {
+            request: Vec::new(),
+        });
+        assert!(effects.iter().any(is_audit_error));
+        assert!(effects.iter().any(|effect| matches!(effect, Effect::Close)));
+        assert_eq!(core.active, ActiveFlow::None);
+    }
+
+    #[test]
+    fn explicit_history_wipe_clears_the_fault_and_allows_a_fresh_chain() {
+        let mut core = Core::new("wallet.example", "device-key");
+        core.issuer_id_current = "x".repeat(txnlog::MAX_COUNTERPARTY_BYTES + 1);
+        core.record_issuance("dc+sd-jwt".into()).unwrap_err();
+
+        core.wipe_transaction_log();
+        assert!(core.audit_log_available());
+        core.issuer_id_current = "https://issuer.example".into();
+        core.record_issuance("dc+sd-jwt".into()).unwrap();
+        assert_eq!(core.transaction_log().len(), 1);
+        assert!(core.audit_log_available());
+    }
+
+    #[test]
+    fn exhausted_history_blocks_a_transfer_before_progress_or_storage() {
+        let mut core = Core::new("wallet.example", "device-key");
+        for epoch in 0..txnlog::MAX_ENTRIES {
+            core.log
+                .append(&AwsLc, audit_entry(i64::try_from(epoch).unwrap()))
+                .unwrap();
+        }
+        assert!(core.log.is_exhausted());
+
+        let effects = core.handle_event(Event::WalletTransferOfferCreated);
+        assert!(effects.iter().any(is_audit_error));
+        assert_eq!(core.active, ActiveFlow::None);
+        assert!(matches!(core.w2w, w2w::State::Idle));
+        assert!(core.w2w_credential.is_none());
+        assert_eq!(core.transaction_log().len(), txnlog::MAX_ENTRIES);
+    }
+
+    #[test]
+    fn near_aggregate_limit_rejects_every_auditable_flow_before_consequential_effects() {
+        let near_capacity = near_capacity_log();
+        let original_head = near_capacity.head();
+        let cases = [
+            Event::AuthorizationRequestReceived {
+                request: Vec::new(),
+            },
+            Event::PaymentAuthorizationRequestReceived {
+                request: Vec::new(),
+            },
+            Event::CredentialOfferReceived {
+                offer: Vec::new(),
+                issuer_cert_chain: Vec::new(),
+                issuer_id: String::new(),
+            },
+            Event::WalletTransferOfferCreated,
+            Event::WalletTransferReceived {
+                credential: Vec::new(),
+                issuer_cert_chain: Vec::new(),
+                sender_public_key: Vec::new(),
+                sender_signature: Vec::new(),
+                sender_consent_hash: Vec::new(),
+                nonce: 1,
+            },
+        ];
+
+        for event in cases {
+            let mut core = Core::new("wallet.example", "device-key");
+            core.log = near_capacity.clone();
+            let effects = core.handle_event(event);
+            assert!(effects.iter().any(is_audit_error));
+            assert!(effects.iter().all(|effect| matches!(
+                effect,
+                Effect::Render {
+                    screen: ScreenDescription::Error { .. }
+                } | Effect::Close
+            )));
+            assert_eq!(core.transaction_log().head(), original_head);
+            assert!(core.credentials.is_empty());
+            assert!(core.mdoc_holdings.is_empty());
+            assert!(core.w2w_credential.is_none());
+            assert_eq!(core.active, ActiveFlow::None);
+        }
+    }
+
+    #[test]
+    fn oversized_payment_audit_fields_fail_before_confirmation_or_signing() {
+        let mut core = Core::new("wallet.example", "device-key");
+        let request = serde_json::to_vec(&serde_json::json!({
+            "creditor_name": "x".repeat(txnlog::MAX_PAYMENT_PAYEE_BYTES + 1),
+            "creditor_account": "DE89370400440532013000",
+            "amount_minor": 100,
+            "currency": "EUR",
+            "transaction_id": "txn-1",
+            "nonce": 1,
+            "response_uri": "https://psp.example/authorize"
+        }))
+        .unwrap();
+
+        let effects = core.handle_event(Event::PaymentAuthorizationRequestReceived { request });
+        assert!(effects.iter().any(is_audit_error));
+        assert!(effects.iter().all(|effect| matches!(
+            effect,
+            Effect::Render {
+                screen: ScreenDescription::Error { .. }
+            } | Effect::Close
+        )));
+        assert!(core.pay_summary.is_none());
+        assert!(core.transaction_log().is_empty());
+        assert_eq!(core.active, ActiveFlow::None);
     }
 }
 
