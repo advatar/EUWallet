@@ -35,18 +35,16 @@ fn eudiw_pid_issuer_cas_are_ingestible_anchors() {
 }
 
 #[test]
-fn eudiw_reader_ca_parse_status_is_documented() {
-    // The reference reader-auth chain is GlobalSign R45 AATL (RSA); our x509 parser is EC-only
-    // (`Alg` has no RSA), so validating a verifier's reader cert against this CA is a KNOWN gap.
-    // This test pins the current behaviour so a future RSA addition flips it deliberately.
-    match parse_cert(READER_CA) {
-        Ok(c) => assert!(
-            c.subject.contains("GlobalSign") || c.subject.contains("R45"),
-            "unexpected reader CA subject: {}",
-            c.subject
-        ),
-        Err(_) => {
-            // Expected today: RSA reader-auth anchors are not yet supported by the EC-only parser.
-        }
-    }
+fn eudiw_reader_ca_is_an_ingestible_profiled_rsa_anchor() {
+    // RSA exists only in the certificate-signature boundary. JOSE/COSE `Alg` remains unchanged,
+    // so interoperability with this development anchor does not broaden protocol algorithms.
+    let c =
+        parse_cert(READER_CA).expect("GlobalSign R45 reader CA must satisfy the RSA SPKI policy");
+    assert!(
+        c.subject.contains("GlobalSign") || c.subject.contains("R45"),
+        "unexpected reader CA subject: {}",
+        c.subject
+    );
+    assert!(c.is_ca);
+    assert!(!c.public_key_raw.is_empty());
 }

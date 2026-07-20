@@ -11,8 +11,9 @@
 //! tests and server-side roles (an issuer simulation), NOT for device keys.
 //!
 //! ## Key & signature encodings (the boundary contract)
-//! * Public keys are the algorithm's **raw** form: an uncompressed EC point `0x04||X||Y` for
-//!   ES256/ES384, or the 32-byte key for EdDSA.
+//! * Public keys are the algorithm's native form: an uncompressed EC point `0x04||X||Y` for
+//!   ES256/ES384, the 32-byte key for EdDSA, or DER PKCS#1 `RSAPublicKey` at the certificate-only
+//!   boundary.
 //! * ECDSA signatures may be either JOSE/COSE **fixed** `r||s` or X.509 **ASN.1 DER**; the
 //!   verifier accepts both (it tries DER, then fixed).
 
@@ -21,12 +22,14 @@ use aws_lc_rs::agreement::{agree, PrivateKey, UnparsedPublicKey as AgreementPubl
 use aws_lc_rs::hkdf::{Salt, HKDF_SHA256};
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use aws_lc_rs::signature::{
-    self, EcdsaKeyPair, KeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_ASN1,
-    ECDSA_P256_SHA256_FIXED, ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_ASN1,
-    ECDSA_P384_SHA384_FIXED, ED25519,
+    self, EcdsaKeyPair, KeyPair, ParsedPublicKey, UnparsedPublicKey, ECDSA_P256_SHA256_ASN1,
+    ECDSA_P256_SHA256_FIXED, ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P256_SHA384_ASN1,
+    ECDSA_P384_SHA256_ASN1, ECDSA_P384_SHA384_ASN1, ECDSA_P384_SHA384_FIXED, ED25519,
+    RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_2048_8192_SHA384, RSA_PKCS1_2048_8192_SHA512,
 };
 use crypto_traits::{
-    Aead, Alg, CryptoError, Digest, EcdhEs, Kdf, KeyAgreement, KeyRef, Random, Signer, Verifier,
+    Aead, Alg, CertificatePublicKeyAlg, CertificateSignatureAlg, CryptoError, Digest, EcdhEs, Kdf,
+    KeyAgreement, KeyRef, Random, Signer, Verifier,
 };
 
 /// Stateless aws-lc-rs backend: verification, digest, KDF, AEAD, randomness. No private keys.
@@ -59,6 +62,58 @@ impl Verifier for AwsLc {
         } else {
             Err(CryptoError::Backend("signature verification failed".into()))
         }
+    }
+
+    fn verify_certificate(
+        &self,
+        alg: CertificateSignatureAlg,
+        public_key: &[u8],
+        payload: &[u8],
+        sig: &[u8],
+    ) -> Result<(), CryptoError> {
+        // X.509 ECDSA signatures are ASN.1 DER, never JOSE/COSE fixed-width `r || s`. Curve choice
+        // comes from the already-profiled issuer SPKI (represented here by the exact raw-key
+        // length), while the certificate AlgorithmIdentifier supplies the digest.
+        let verification_algorithm: &'static dyn signature::VerificationAlgorithm = match alg {
+            CertificateSignatureAlg::EcdsaSha256 if public_key.len() == 65 => {
+                &ECDSA_P256_SHA256_ASN1
+            }
+            CertificateSignatureAlg::EcdsaSha256 if public_key.len() == 97 => {
+                &ECDSA_P384_SHA256_ASN1
+            }
+            CertificateSignatureAlg::EcdsaSha384 if public_key.len() == 65 => {
+                &ECDSA_P256_SHA384_ASN1
+            }
+            CertificateSignatureAlg::EcdsaSha384 if public_key.len() == 97 => {
+                &ECDSA_P384_SHA384_ASN1
+            }
+            CertificateSignatureAlg::Ed25519 => &ED25519,
+            CertificateSignatureAlg::RsaPkcs1Sha256 => &RSA_PKCS1_2048_8192_SHA256,
+            CertificateSignatureAlg::RsaPkcs1Sha384 => &RSA_PKCS1_2048_8192_SHA384,
+            CertificateSignatureAlg::RsaPkcs1Sha512 => &RSA_PKCS1_2048_8192_SHA512,
+            CertificateSignatureAlg::EcdsaSha256 | CertificateSignatureAlg::EcdsaSha384 => {
+                return Err(CryptoError::Unsupported)
+            }
+        };
+        UnparsedPublicKey::new(verification_algorithm, public_key)
+            .verify(payload, sig)
+            .map_err(|_| CryptoError::Backend("certificate signature verification failed".into()))
+    }
+
+    fn validate_certificate_public_key(
+        &self,
+        alg: CertificatePublicKeyAlg,
+        public_key: &[u8],
+    ) -> Result<(), CryptoError> {
+        let validation_algorithm: &'static dyn signature::VerificationAlgorithm = match alg {
+            CertificatePublicKeyAlg::EcP256 => &ECDSA_P256_SHA256_ASN1,
+            CertificatePublicKeyAlg::EcP384 => &ECDSA_P384_SHA384_ASN1,
+            CertificatePublicKeyAlg::Ed25519 => &ED25519,
+            CertificatePublicKeyAlg::Rsa => &RSA_PKCS1_2048_8192_SHA256,
+        };
+        ParsedPublicKey::new(validation_algorithm, public_key)
+            .map(|_| ())
+            .map_err(|_| CryptoError::Backend("certificate public key validation failed".into()))
     }
 }
 

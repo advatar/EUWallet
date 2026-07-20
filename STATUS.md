@@ -51,13 +51,17 @@ operational solution needed to enter those processes.
   - [x] Land the bounded first strict slice: deterministically construct leaf-to-anchor paths from
         unordered inputs with explicit budgets; reject ambiguous/looped/duplicate paths, unknown
         critical extensions and AKI/SKI mismatches; enforce BasicConstraints/pathLen and KeyUsage.
-  - [ ] Land the bounded second strict slice with checked positive/adversarial vectors:
-    - [ ] Process critical RFC 5280 name constraints for DNS, URI-host and IP GeneralNames across
+  - [x] Land the bounded second strict slice with checked positive/adversarial vectors:
+    - [x] Process critical RFC 5280 name constraints for DNS, URI-host and IP GeneralNames across
           the whole constructed path, and fail closed on unsupported forms, distances or syntax.
-    - [ ] Enforce explicit certificate signature/SPKI compatibility and key-strength policy;
+    - [x] Enforce explicit certificate signature/SPKI compatibility and key-strength policy;
           support strong RSA PKCS#1 certificate verification without enabling RSA in JOSE/COSE.
-  - [ ] Enforce name constraints, certificate policies, algorithm constraints and service-specific
-        EUDI PID, attestation/mdoc, RP, status and WUA/WIA profiles.
+  - [ ] Complete the residual RFC 5280 surface: canonical DN chaining, `directoryName` and
+        `rfc822Name` constraints, policy tree/mappings/constraints/`anyPolicy`, and RSASSA-PSS.
+  - [ ] Freeze and enforce the normative algorithm and certificate profiles for EUDI PID,
+        (Q)EAA/mdoc, RP, status and WUA/WIA services.
+  - [ ] Prove those final profiles against official EUDI/PKITS suites and production certificate
+        chains, including the applicable revocation and operational-validation rules.
   - [x] Authenticate bounded mdoc `x5chain` evidence through the current strict service-scoped
         path at ingestion and presentation-time revalidation.
 - [x] [#10](https://github.com/advatar/EUWallet/issues/10): complete RFC 9901 SD-JWT holding,

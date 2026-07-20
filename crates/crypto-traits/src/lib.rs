@@ -9,11 +9,46 @@
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct KeyRef(pub String);
 
+/// JOSE/COSE protocol signature algorithms.
+///
+/// RSA certificate support is deliberately not a protocol algorithm:
+///
+/// ```compile_fail
+/// use crypto_traits::Alg;
+/// let _ = Alg::RsaPkcs1Sha384;
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Alg {
     Es256,
     Es384,
     EdDsa,
+}
+
+/// Signature algorithms as encoded by X.509 `AlgorithmIdentifier` values.
+///
+/// This is intentionally distinct from [`Alg`]: accepting an RSA certificate signature must not
+/// make RSA available to JOSE/COSE protocol code. Certificate validation also needs to distinguish
+/// the signature hash from the issuer key's curve, because RFC 5280 paths can contain, for
+/// example, a P-256 issuer using ECDSA with SHA-384.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CertificateSignatureAlg {
+    EcdsaSha256,
+    EcdsaSha384,
+    Ed25519,
+    RsaPkcs1Sha256,
+    RsaPkcs1Sha384,
+    RsaPkcs1Sha512,
+}
+
+/// Public-key families admitted by the bounded X.509 strength profile. As with
+/// [`CertificateSignatureAlg`], this type is certificate-only and cannot be selected by JOSE/COSE
+/// callers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CertificatePublicKeyAlg {
+    EcP256,
+    EcP384,
+    Ed25519,
+    Rsa,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +72,30 @@ pub trait Verifier {
         payload: &[u8],
         sig: &[u8],
     ) -> Result<(), CryptoError>;
+
+    /// Verify a certificate signature. Every backend must opt in explicitly: certificate ECDSA
+    /// identifies a digest separately from the issuer curve, and RSA must remain unavailable to
+    /// protocol callers.
+    fn verify_certificate(
+        &self,
+        _alg: CertificateSignatureAlg,
+        _public_key: &[u8],
+        _payload: &[u8],
+        _sig: &[u8],
+    ) -> Result<(), CryptoError> {
+        Err(CryptoError::Unsupported)
+    }
+
+    /// Validate an X.509 subject public key independently of signature verification. Parsing code
+    /// enforces algorithm identifiers, parameters and strength; production backends override this
+    /// hook to make the cryptographic library validate curve points/key encodings as well.
+    fn validate_certificate_public_key(
+        &self,
+        _alg: CertificatePublicKeyAlg,
+        _public_key: &[u8],
+    ) -> Result<(), CryptoError> {
+        Err(CryptoError::Unsupported)
+    }
 }
 
 /// Cryptographic digest (e.g. SHA-256) — used for the consent hash in `presenter`.
