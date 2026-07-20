@@ -8,6 +8,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = (ROOT / ".github/workflows/ci.yml").read_text()
+ROOT_MANIFEST = (ROOT / "Cargo.toml").read_text()
+COSE_MANIFEST = (ROOT / "crates/cose/Cargo.toml").read_text()
+CRYPTO_TRAITS_MANIFEST = (ROOT / "crates/crypto-traits/Cargo.toml").read_text()
 EVIDENCE_SCRIPT = ROOT / "tools/evidence/generate.sh"
 EVIDENCE_TEXT = EVIDENCE_SCRIPT.read_text()
 SBOM_SCRIPT = ROOT / "tools/evidence/sbom.sh"
@@ -47,8 +50,44 @@ class CiEvidenceConfigurationTests(unittest.TestCase):
         ):
             self.assertIn(executable, WORKFLOW)
         self.assertIn("formal/tamarin/*.spthy", WORKFLOW)
-        self.assertIn("cargo kani -p cose", WORKFLOW)
+        self.assertIn(
+            "model-checking/kani-github-action@"
+            "f838096619a707b0f6b2118cf435eaccfa33e51f",
+            WORKFLOW,
+        )
+        self.assertIn('kani-version: "0.67.0"', WORKFLOW)
+        self.assertIn('args: "-p cose"', WORKFLOW)
+        self.assertNotIn("cargo install kani-verifier", WORKFLOW)
         self.assertNotIn("cargo kani -p mdoc", WORKFLOW)
+
+    def test_kani_proof_closure_has_a_verified_compatible_msrv(self):
+        self.assertIn('rust-version = "1.97"', ROOT_MANIFEST)
+        self.assertIn('rust-version = "1.93"', COSE_MANIFEST)
+        self.assertIn('rust-version = "1.93"', CRYPTO_TRAITS_MANIFEST)
+        self.assertNotIn("--ignore-rust-version", WORKFLOW)
+
+    def test_swift_runner_and_tamarin_trust_are_scoped(self):
+        ios_job = WORKFLOW.split("  ios-shell:", 1)[1].split("  traceability:", 1)[0]
+        self.assertIn("runs-on: macos-15", ios_job)
+        self.assertIn("Verify Swift 6 toolchain", ios_job)
+        self.assertIn("grep -Eq 'Swift version", ios_job)
+
+        tamarin_job = WORKFLOW.split("  tier3-tamarin:", 1)[1].split("  ios-shell:", 1)[0]
+        self.assertIn("brew tap tamarin-prover/tap", tamarin_job)
+        self.assertIn("brew install tamarin-prover/tap/tamarin-prover", tamarin_job)
+        trust_commands = [
+            line.strip()
+            for line in tamarin_job.splitlines()
+            if line.strip().startswith("brew trust")
+        ]
+        self.assertEqual(
+            [
+                "brew trust --formula tamarin-prover/tap/tamarin-prover",
+                "brew trust --formula tamarin-prover/tap/maude",
+            ],
+            trust_commands,
+        )
+        self.assertNotIn("HOMEBREW_NO_REQUIRE_TAP_TRUST", WORKFLOW)
 
     def test_evidence_script_is_syntax_valid_and_fail_closed(self):
         subprocess.run(["bash", "-n", EVIDENCE_SCRIPT], check=True)
