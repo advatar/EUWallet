@@ -69,9 +69,9 @@ operational solution needed to enter those processes.
         holder-visible consent contract.
 - [x] Bound DCQL request/query/path/value cardinality and fail closed on malformed queries or
       unsupported selection, trust and transaction-data modifiers.
-- [ ] Implement final DCQL `credential_sets`, `claim_sets`, `trusted_authorities`, multiple-return,
-      retention-intent and `transaction_data` semantics; they are rejected until enforceable end
-      to end.
+- [ ] [#14](https://github.com/advatar/EUWallet/issues/14): implement final DCQL
+      `credential_sets`, `claim_sets`, `trusted_authorities`, multiple-return, retention-intent and
+      `transaction_data` semantics; they are rejected until enforceable end to end.
 - [x] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths
       ([#6](https://github.com/advatar/EUWallet/issues/6)).
   - [x] Require and emit canonical CBOR tag-0 RFC 3339 `tdate` validity values, with malformed
@@ -94,8 +94,23 @@ operational solution needed to enter those processes.
         every native infrastructure failure/cancellation back into a typed core reset.
   - Durable restoration of in-flight operations after process death remains part of encrypted
     persistence/lifecycle work; restart ID collision is mitigated with a 62-bit random namespace.
-- [ ] Harden QR/deep-link and protocol networking with HTTPS-only URL policy, bounded responses,
-      redirect/origin controls and SSRF-resistant destination validation.
+- [ ] [#9](https://github.com/advatar/EUWallet/issues/9): harden QR/deep-link and protocol
+      networking against downgrade, redirect, resource-exhaustion and SSRF attacks.
+  - [x] Reject HTTP, URL credentials/fragments/invalid ports, unsafe literal addresses and mixed
+        public/private DNS answers; keep redirects disabled, stream responses under fixed caps and
+        expose loopback only through an iOS debug-build factory.
+  - [x] Enforce the same canonical host, reserved-address and bounded-DNS policy on iOS and Android,
+        including ambiguous numeric/single-label hosts and current IPv6 allocation boundaries.
+  - [x] Add protocol-specific bounded GET coverage and response media-type enforcement for issuer
+        metadata, status lists, credential offers and presentation requests fetched by reference.
+  - [x] Reject unregistered origins plus duplicate, conflicting, dropped and oversized security
+        inputs in the iOS QR/deep-link parser.
+  - [ ] Add an Android Intent/QR ingress layer with the same scheme/verified-origin and ambiguity
+        policy; the current Android module has no deep-link entry point.
+  - [ ] Split the generic POST effect into typed protocol response contracts before enforcing MIME;
+        the shared OpenID4VP/payment/QES effect intentionally advertises `*/*` today.
+  - [ ] Eliminate DNS validation-to-connect TOCTOU by binding the validated address to the TLS
+        socket; URLSession and HttpsURLConnection currently perform their own second DNS lookup.
 
 ## Next phase — production clients and provider platform
 
