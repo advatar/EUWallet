@@ -148,6 +148,20 @@ pub enum AbortReason {
     ResponseEncryptionMetadataInvalid,
     /// Response encryption failed after request validation (for example, an off-curve EC key).
     ResponseEncryptionFailed,
+    /// The trusted clock was asked to move backwards during a presentation.
+    ClockRollback,
+    /// A selected credential expired after it entered storage.
+    CredentialExpired,
+    /// A selected credential is not yet valid at the current trusted time.
+    CredentialNotYetValid,
+    /// A selected credential no longer has valid authenticated issuer provenance.
+    CredentialProvenanceInvalid,
+    /// RP/trust evidence used by the presentation is no longer current.
+    PresentationTrustInvalid,
+    /// A selected credential is revoked or suspended.
+    CredentialStatusInvalid,
+    /// Current authenticated status evidence is unavailable for a selected credential.
+    CredentialStatusUnavailable,
     /// HLR-VP-G-007 — the request could not be parsed.
     MalformedRequest,
     /// HLR-VP-G-008 — user declined at the consent screen.

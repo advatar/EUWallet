@@ -91,7 +91,11 @@ fn status_ref(index: u64) -> StatusReference {
     }
 }
 
-fn core_at_consent(status: Option<StatusReference>, load_status: bool) -> (Core, SoftwareSigner) {
+fn core_at_consent_with_extra(
+    status: Option<StatusReference>,
+    load_status: bool,
+    extra: Option<HeldCredential>,
+) -> (Core, SoftwareSigner) {
     let issuer = SoftwareSigner::generate_p256().unwrap();
     let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
     let trust_op = SoftwareSigner::generate_p256().unwrap();
@@ -108,9 +112,14 @@ fn core_at_consent(status: Option<StatusReference>, load_status: bool) -> (Core,
         )
         .unwrap();
     }
+    if let Some(credential) = extra {
+        core.load_unverified_credential_for_testing(credential);
+    }
     core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt: issued(&issuer),
-        disclosures_by_claim: Default::default(),
+        disclosures_by_claim: [("age_over_18".into(), "disclosure".into())]
+            .into_iter()
+            .collect(),
         status,
     });
 
@@ -122,6 +131,10 @@ fn core_at_consent(status: Option<StatusReference>, load_status: bool) -> (Core,
         registered_redirect_uris: vec!["https://rp.example/response".into()],
     });
     (core, rp)
+}
+
+fn core_at_consent(status: Option<StatusReference>, load_status: bool) -> (Core, SoftwareSigner) {
+    core_at_consent_with_extra(status, load_status, None)
 }
 
 fn drive_to_consent(status: Option<StatusReference>, load_status: bool) -> Vec<Effect> {
@@ -236,6 +249,29 @@ fn a_stale_cached_list_is_refetched_before_signing() {
 }
 
 #[test]
+fn status_expiring_while_a_device_signature_is_pending_aborts_before_delivery() {
+    let (mut core, _) = core_at_consent(Some(status_ref(0)), true);
+    let effects = core.handle_event(Event::UserConsented);
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Sign { .. })));
+
+    core.handle_event(Event::SetClock { epoch: NOW + 300 });
+    let effects = core.handle_event(Event::DeviceSignatureProduced {
+        signature: vec![0x55; 64],
+    });
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Error { code, .. }
+        } if code == "credential_status_unavailable"
+    )));
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Sign { .. } | Effect::Http { .. })));
+}
+
+#[test]
 fn cache_cardinality_is_bounded() {
     let status_provider = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
     let trust_op = SoftwareSigner::generate_p256().unwrap();
@@ -266,15 +302,18 @@ fn cache_cardinality_is_bounded() {
 
 #[test]
 fn a_revoked_unselected_holding_does_not_poison_the_selected_credential() {
-    let (mut core, _) = core_at_consent(Some(status_ref(1)), true);
     let second_issuer = SoftwareSigner::generate_p256().unwrap();
-    core.load_unverified_credential_for_testing(HeldCredential {
-        issuer_jwt: issued(&second_issuer),
-        disclosures_by_claim: [("age_over_18".into(), "disclosure".into())]
-            .into_iter()
-            .collect(),
-        status: Some(status_ref(0)),
-    });
+    let (mut core, _) = core_at_consent_with_extra(
+        Some(status_ref(1)),
+        true,
+        Some(HeldCredential {
+            issuer_jwt: issued(&second_issuer),
+            disclosures_by_claim: [("age_over_18".into(), "disclosure".into())]
+                .into_iter()
+                .collect(),
+            status: Some(status_ref(0)),
+        }),
+    );
 
     let fx = core.handle_event(Event::UserConsented);
     assert!(fx

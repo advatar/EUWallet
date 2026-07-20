@@ -165,15 +165,20 @@ pub fn validate_path(
         .ok_or(X509Error::PathInvalid("no trust anchor for chain"))?;
     path.push(anchor.clone());
 
-    // Walk child→parent: validity, linkage, parent-is-CA, signature.
-    for i in 0..path.len() - 1 {
-        let child = &path[i];
-        let parent = &path[i + 1];
-        if now < child.not_before || now > child.not_after {
+    // Every certificate authorizing the path, including the appended trust anchor, must be
+    // current. Otherwise a cached path could remain usable after its root expires.
+    for certificate in &path {
+        if now < certificate.not_before || now > certificate.not_after {
             return Err(X509Error::PathInvalid(
                 "certificate expired or not yet valid",
             ));
         }
+    }
+
+    // Walk child→parent: linkage, parent-is-CA, signature.
+    for i in 0..path.len() - 1 {
+        let child = &path[i];
+        let parent = &path[i + 1];
         if child.issuer != parent.subject {
             return Err(X509Error::PathInvalid("issuer/subject mismatch"));
         }

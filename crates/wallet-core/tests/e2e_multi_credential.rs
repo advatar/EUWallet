@@ -298,6 +298,61 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
     assert_eq!(core.state(), &oid4vp::State::Done);
 }
 
+#[test]
+fn an_incomplete_multi_query_aborts_atomically_before_consent_or_signing() {
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let trust_operator = SoftwareSigner::generate_p256().unwrap();
+    let (issuer_jwt, by_claim) = issue_pid(&issuer);
+
+    // The PID satisfies query #1, but the wallet has no mdoc for query #2. The request is one
+    // atomic authorization decision: it must not fall back to presenting only the PID.
+    let mut core = Core::new("wallet.example", "device-key");
+    core.load_unverified_credential_for_testing(HeldCredential {
+        issuer_jwt,
+        disclosures_by_claim: by_claim,
+        status: None,
+    });
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    core.load_trust_list(
+        &signed_trust_list(&trust_operator),
+        trust_operator.public_key_raw(),
+    )
+    .unwrap();
+    core.handle_event(Event::AuthorizationRequestReceived {
+        request: sign_multi_request(&rp, NONCE),
+    });
+    let effects = core.handle_event(Event::RpCertChainResolved {
+        rp_cert_chain: vec![RP_DER.to_vec()],
+        registered_redirect_uris: vec![RESPONSE_URI.into()],
+    });
+
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Error { code, .. }
+        } if code == "no_eligible_credential"
+    )));
+    assert!(effects.contains(&Effect::Close));
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Consent(_)
+        } | Effect::Sign { .. }
+            | Effect::Http { .. }
+    )));
+    let late_consent = core.handle_event(Event::UserConsented);
+    assert!(!late_consent
+        .iter()
+        .any(|effect| matches!(effect, Effect::Sign { .. } | Effect::Http { .. })));
+    assert_eq!(
+        core.state(),
+        &oid4vp::State::Aborted(oid4vp::AbortReason::NoCredential)
+    );
+}
+
 fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());

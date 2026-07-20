@@ -120,24 +120,45 @@ fn json_epoch_claim(
     }
 }
 
-fn validate_json_validity(
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CredentialValidity {
+    issued_at: Option<i64>,
+    not_before: Option<i64>,
+    expires_at: Option<i64>,
+}
+
+impl CredentialValidity {
+    const IAT_CLOCK_SKEW_SECONDS: i64 = 300;
+
+    fn validate_at(&self, now: i64) -> Result<(), CredentialIngestionError> {
+        if self
+            .issued_at
+            .is_some_and(|iat| iat > now.saturating_add(Self::IAT_CLOCK_SKEW_SECONDS))
+            || self.not_before.is_some_and(|nbf| nbf > now)
+        {
+            return Err(CredentialIngestionError::CredentialNotYetValid);
+        }
+        if self.expires_at.is_some_and(|exp| exp <= now) {
+            return Err(CredentialIngestionError::CredentialExpired);
+        }
+        Ok(())
+    }
+}
+
+fn json_validity(
     claims: &serde_json::Map<String, serde_json::Value>,
     now: i64,
-) -> Result<(), CredentialIngestionError> {
+) -> Result<CredentialValidity, CredentialIngestionError> {
     // Permit a small positive skew for issuer clocks, but never accept a future `nbf` or an
     // expired credential. The SD-JWT VC claims are optional at the format layer; when present they
     // are security inputs and therefore must have the exact integer type.
-    const IAT_CLOCK_SKEW_SECONDS: i64 = 300;
-    if json_epoch_claim(claims, "iat")?.is_some_and(|iat| iat > now + IAT_CLOCK_SKEW_SECONDS) {
-        return Err(CredentialIngestionError::CredentialNotYetValid);
-    }
-    if json_epoch_claim(claims, "nbf")?.is_some_and(|nbf| nbf > now) {
-        return Err(CredentialIngestionError::CredentialNotYetValid);
-    }
-    if json_epoch_claim(claims, "exp")?.is_some_and(|exp| exp <= now) {
-        return Err(CredentialIngestionError::CredentialExpired);
-    }
-    Ok(())
+    let validity = CredentialValidity {
+        issued_at: json_epoch_claim(claims, "iat")?,
+        not_before: json_epoch_claim(claims, "nbf")?,
+        expires_at: json_epoch_claim(claims, "exp")?,
+    };
+    validity.validate_at(now)?;
+    Ok(validity)
 }
 
 fn sdjwt_device_binding_matches(
@@ -336,26 +357,26 @@ fn mdoc_datetime_epoch(value: &str) -> Option<i64> {
     Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
-fn validate_mdoc_validity(
+fn mdoc_validity(
     validity: &mdoc::ValidityInfo,
     now: i64,
-) -> Result<(), CredentialIngestionError> {
+) -> Result<CredentialValidity, CredentialIngestionError> {
     let signed = mdoc_datetime_epoch(&validity.signed)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
     let valid_from = mdoc_datetime_epoch(&validity.valid_from)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
     let valid_until = mdoc_datetime_epoch(&validity.valid_until)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
-    if signed > now + 300 || valid_from > now {
-        return Err(CredentialIngestionError::CredentialNotYetValid);
-    }
-    if valid_until <= now {
-        return Err(CredentialIngestionError::CredentialExpired);
-    }
     if signed > valid_until || valid_from > valid_until {
         return Err(CredentialIngestionError::MalformedCredential);
     }
-    Ok(())
+    let validity = CredentialValidity {
+        issued_at: Some(signed),
+        not_before: Some(valid_from),
+        expires_at: Some(valid_until),
+    };
+    validity.validate_at(now)?;
+    Ok(validity)
 }
 
 /// A human-readable rendering of an mdoc element value for the card display (UI hint only).
@@ -530,6 +551,38 @@ pub struct MdocHolding {
     pub issuer_signed: mdoc::IssuerSigned,
 }
 
+/// Authenticated material retained with a holding so time, trust-list, certificate-path, issuer,
+/// signature, catalogue, and device-binding decisions can be repeated at presentation time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CredentialProvenance {
+    format: oid4vci::CredentialFormat,
+    raw_credential: Vec<u8>,
+    issuer_cert_chain: Vec<Vec<u8>>,
+    issuer_id: String,
+}
+
+/// The explicitly named Rust-only fixture loaders remain source-compatible for existing tests;
+/// production ingestion always stores the `Authenticated` variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StoredProvenance {
+    Authenticated(CredentialProvenance),
+    TestFixture,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredSdJwtCredential {
+    holding: HeldCredential,
+    validity: CredentialValidity,
+    provenance: StoredProvenance,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredMdocCredential {
+    holding: MdocHolding,
+    validity: CredentialValidity,
+    provenance: StoredProvenance,
+}
+
 /// Why a credential was refused before it could enter wallet storage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CredentialIngestionError {
@@ -565,17 +618,56 @@ pub enum StatusLoadError {
 /// The only values allowed across the authentication-to-storage boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum VerifiedCredential {
-    SdJwt(HeldCredential),
-    Mdoc(MdocHolding),
+    SdJwt {
+        holding: HeldCredential,
+        validity: CredentialValidity,
+    },
+    Mdoc {
+        holding: MdocHolding,
+        validity: CredentialValidity,
+    },
 }
 
 impl VerifiedCredential {
     fn format(&self) -> oid4vci::CredentialFormat {
         match self {
-            Self::SdJwt(_) => oid4vci::CredentialFormat::DcSdJwt,
-            Self::Mdoc(_) => oid4vci::CredentialFormat::MsoMdoc,
+            Self::SdJwt { .. } => oid4vci::CredentialFormat::DcSdJwt,
+            Self::Mdoc { .. } => oid4vci::CredentialFormat::MsoMdoc,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthenticatedCredential {
+    credential: VerifiedCredential,
+    provenance: CredentialProvenance,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PresentationCredentialReference {
+    SdJwt(HeldCredential),
+    Mdoc(MdocHolding),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PresentationEligibilityError {
+    CredentialExpired,
+    CredentialNotYetValid,
+    CredentialProvenanceInvalid,
+    TrustEvidenceInvalid,
+    NoEligibleCredential,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedPresentationCredential {
+    selected: SelectedCredential,
+    source: PresentationCredentialReference,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RelyingPartyProvenance {
+    certificate_chain: Vec<Vec<u8>>,
+    public_key: Vec<u8>,
 }
 
 /// Static wallet configuration.
@@ -605,6 +697,12 @@ struct SessionInfo {
     /// The full DCQL query when present — one credential query per credential the RP wants, so the
     /// wallet can select and present ONE credential per query (multi-credential presentation).
     dcql: Option<oid4vp::dcql::DcqlQuery>,
+    /// Exact credentials selected before consent. Later phases revalidate these values instead of
+    /// silently switching to a different holding after the user approved the screen.
+    selected_credentials: Vec<SelectedCredential>,
+    selected_sources: Vec<PresentationCredentialReference>,
+    /// RP certificate path + request-verification key retained for current-time revalidation.
+    rp_provenance: Option<RelyingPartyProvenance>,
     /// The consent hash + the exact claim paths shown on the consent screen, captured when it is
     /// rendered, so the transaction log can record what was shared without storing values.
     consent_hash: [u8; 32],
@@ -759,6 +857,12 @@ enum StatusGate {
     Indeterminate,
 }
 
+#[derive(Clone, Debug)]
+struct CachedStatusList {
+    list: status::StatusList,
+    provider_cert_chain: Vec<Vec<u8>>,
+}
+
 /// The whole wallet state.
 #[derive(Debug)]
 pub struct Core {
@@ -767,10 +871,11 @@ pub struct Core {
     seen_nonces: Vec<u64>,
     /// The credentials the wallet holds. A real wallet holds several (a PID, an mDL, …); issuance
     /// appends, and presentation selects the one that data-minimally satisfies the request.
-    credentials: Vec<HeldCredential>,
+    credentials: Vec<StoredSdJwtCredential>,
     /// mdoc holdings (ISO 18013-5), presented over OpenID4VP as DeviceResponses.
-    mdoc_holdings: Vec<MdocHolding>,
+    mdoc_holdings: Vec<StoredMdocCredential>,
     session: Option<SessionInfo>,
+    pending_rp_provenance: Option<RelyingPartyProvenance>,
     now_epoch: i64,
     // Payment SCA flow.
     payment: payment::State,
@@ -786,14 +891,16 @@ pub struct Core {
     wua: Option<wua::WalletUnitAttestation>,
     issuer_trusted_current: bool,
     issuer_id_current: String,
+    /// Full issuer path retained for revalidation throughout issuance and credential provenance.
+    issuer_cert_chain_current: Vec<Vec<u8>>,
     /// Public key from the leaf of the currently validated issuer path.
     issuer_public_key_current: Vec<u8>,
     /// Parsed credential that crossed the authentication/policy boundary for this response.
-    pending_verified_credential: Option<VerifiedCredential>,
+    pending_verified_credential: Option<AuthenticatedCredential>,
     last_credential_ingestion_error: Option<CredentialIngestionError>,
     // Revocation: URI-keyed verified lists plus the exact selected references awaiting refresh.
     // Both collections are explicitly bounded to keep hostile issuer data from growing memory.
-    status_lists: BTreeMap<String, status::StatusList>,
+    status_lists: BTreeMap<String, CachedStatusList>,
     pending_status_references: Vec<StatusReference>,
     // Transaction (audit) log: privacy-preserving, tamper-evident record of completed flows (TS06).
     log: txnlog::TransactionLog,
@@ -823,6 +930,7 @@ impl Core {
             credentials: Vec::new(),
             mdoc_holdings: Vec::new(),
             session: None,
+            pending_rp_provenance: None,
             now_epoch: 0,
             payment: payment::State::Idle,
             pay_seen_nonces: Vec::new(),
@@ -835,6 +943,7 @@ impl Core {
             wua: None,
             issuer_trusted_current: false,
             issuer_id_current: String::new(),
+            issuer_cert_chain_current: Vec::new(),
             issuer_public_key_current: Vec::new(),
             pending_verified_credential: None,
             last_credential_ingestion_error: None,
@@ -952,7 +1061,12 @@ impl Core {
     /// credential + the transaction log, under a SHA-256 hash over canonical bytes. The holder's
     /// explicit action; the shell adds at-rest encryption before it leaves the device.
     pub fn export_json(&self) -> String {
-        export::export_json(&AwsLc, self.now_epoch, self.credentials.first(), &self.log)
+        export::export_json(
+            &AwsLc,
+            self.now_epoch,
+            self.credentials.first().map(|stored| &stored.holding),
+            &self.log,
+        )
     }
 
     /// A privacy-preserving activity report as JSON (TS08): counts by kind, redaction count, and
@@ -1001,32 +1115,33 @@ impl Core {
         // replace the same URI, but an attacker cannot fill an unbounded number of distinct lists.
         let now = self.now_epoch;
         self.status_lists
-            .retain(|_, cached| cached.is_fresh_at(now));
+            .retain(|_, cached| cached.list.is_fresh_at(now));
         if !self.status_lists.contains_key(uri)
             && self.status_lists.len() >= MAX_CACHED_STATUS_LISTS
         {
             return Err(StatusLoadError::CacheFull);
         }
-        self.status_lists.insert(uri.to_string(), list);
+        self.status_lists.insert(
+            uri.to_string(),
+            CachedStatusList {
+                list,
+                provider_cert_chain: provider_cert_chain.to_vec(),
+            },
+        );
         Ok(())
     }
 
     /// Evaluate status for exactly the credentials selected for this consent. Missing/stale lists
     /// request a refresh; known-bad, out-of-range and structurally inconsistent values fail closed.
     fn presentation_status_gate(&self) -> StatusGate {
-        let selected = self.select_credentials_for(&Input::ConsentGranted);
         let mut references = Vec::<StatusReference>::new();
 
-        for selected_credential in selected {
-            let SelectedCredential::SdJwt { issuer_jwt, .. } = selected_credential else {
+        let Some(session) = self.session.as_ref() else {
+            return StatusGate::Indeterminate;
+        };
+        for source in &session.selected_sources {
+            let PresentationCredentialReference::SdJwt(holding) = source else {
                 continue;
-            };
-            let Some(holding) = self
-                .credentials
-                .iter()
-                .find(|candidate| candidate.issuer_jwt == issuer_jwt)
-            else {
-                return StatusGate::Indeterminate;
             };
             if let Some(reference) = &holding.status {
                 if !references.contains(reference) {
@@ -1041,13 +1156,17 @@ impl Core {
 
         let mut fetch_uris = Vec::new();
         for reference in &references {
-            let Some(list) = self.status_lists.get(&reference.uri) else {
+            let Some(cached) = self.status_lists.get(&reference.uri) else {
                 if !fetch_uris.contains(&reference.uri) {
                     fetch_uris.push(reference.uri.clone());
                 }
                 continue;
             };
-            if !list.is_fresh_at(self.now_epoch) {
+            if !cached.list.is_fresh_at(self.now_epoch)
+                || self
+                    .resolve_status_provider_key(&cached.provider_cert_chain)
+                    .is_none()
+            {
                 if !fetch_uris.contains(&reference.uri) {
                     fetch_uris.push(reference.uri.clone());
                 }
@@ -1056,7 +1175,7 @@ impl Core {
             let Ok(index) = usize::try_from(reference.index) else {
                 return StatusGate::Indeterminate;
             };
-            match list.status_at(index) {
+            match cached.list.status_at(index) {
                 status::CredentialStatus::Valid => {}
                 status::CredentialStatus::Invalid | status::CredentialStatus::Suspended => {
                     return StatusGate::Revoked;
@@ -1075,27 +1194,13 @@ impl Core {
         }
     }
 
-    fn status_block_effects(revoked: bool) -> Vec<Effect> {
-        let (code, message) = if revoked {
-            (
-                "credential_revoked",
-                "This credential is revoked or suspended and cannot be shared.",
-            )
+    fn status_block_effects(&mut self, revoked: bool) -> Vec<Effect> {
+        let reason = if revoked {
+            AbortReason::CredentialStatusInvalid
         } else {
-            (
-                "credential_status_unavailable",
-                "A fresh, trusted status assertion is required before this credential can be shared.",
-            )
+            AbortReason::CredentialStatusUnavailable
         };
-        vec![
-            Effect::Render {
-                screen: ScreenDescription::Error {
-                    code: code.into(),
-                    message: message.into(),
-                },
-            },
-            Effect::Close,
-        ]
+        self.abort_presentation(reason)
     }
 
     /// Register the device public key (the Secure Enclave key the WUA attests). Needed to check
@@ -1141,7 +1246,7 @@ impl Core {
     fn resolve_rp(&self, chain: &[Vec<u8>]) -> (bool, Vec<u8>) {
         let anchors = self
             .trust_store
-            .parsed_anchors(ServiceType::RelyingPartyAccessCa);
+            .parsed_anchors_at(ServiceType::RelyingPartyAccessCa, self.now_epoch);
         match x509::check_relying_party(chain, &anchors, self.now_epoch, &AwsLc) {
             Ok(_) => {
                 let key = chain
@@ -1161,32 +1266,93 @@ impl Core {
     /// loudly named prevents test setup from becoming an accidental storage API.
     #[doc(hidden)]
     pub fn load_unverified_credential_for_testing(&mut self, credential: HeldCredential) {
-        if !self.credentials.contains(&credential) {
-            self.credentials.push(credential);
+        if !self
+            .credentials
+            .iter()
+            .any(|stored| stored.holding == credential)
+        {
+            self.credentials.push(StoredSdJwtCredential {
+                holding: credential,
+                validity: CredentialValidity::default(),
+                provenance: StoredProvenance::TestFixture,
+            });
         }
     }
 
     /// Install an unverified mdoc holding in a test fixture. Never exposed over FFI.
     #[doc(hidden)]
     pub fn load_unverified_mdoc_for_testing(&mut self, holding: MdocHolding) {
-        if !self.mdoc_holdings.contains(&holding) {
-            self.mdoc_holdings.push(holding);
+        if !self
+            .mdoc_holdings
+            .iter()
+            .any(|stored| stored.holding == holding)
+        {
+            self.mdoc_holdings.push(StoredMdocCredential {
+                holding,
+                validity: CredentialValidity::default(),
+                provenance: StoredProvenance::TestFixture,
+            });
         }
     }
 
-    fn store_verified_credential(&mut self, credential: VerifiedCredential) {
-        match credential {
-            VerifiedCredential::SdJwt(holding) => {
-                if !self.credentials.contains(&holding) {
-                    self.credentials.push(holding);
+    fn store_verified_credential(&mut self, authenticated: AuthenticatedCredential) {
+        let provenance = StoredProvenance::Authenticated(authenticated.provenance);
+        match authenticated.credential {
+            VerifiedCredential::SdJwt { holding, validity } => {
+                if let Some(stored) = self
+                    .credentials
+                    .iter_mut()
+                    .find(|stored| stored.holding == holding)
+                {
+                    stored.validity = validity;
+                    stored.provenance = provenance;
+                } else {
+                    self.credentials.push(StoredSdJwtCredential {
+                        holding,
+                        validity,
+                        provenance,
+                    });
                 }
             }
-            VerifiedCredential::Mdoc(holding) => {
-                if !self.mdoc_holdings.contains(&holding) {
-                    self.mdoc_holdings.push(holding);
+            VerifiedCredential::Mdoc { holding, validity } => {
+                if let Some(stored) = self
+                    .mdoc_holdings
+                    .iter_mut()
+                    .find(|stored| stored.holding == holding)
+                {
+                    stored.validity = validity;
+                    stored.provenance = provenance;
+                } else {
+                    self.mdoc_holdings.push(StoredMdocCredential {
+                        holding,
+                        validity,
+                        provenance,
+                    });
                 }
             }
         }
+    }
+
+    fn authenticate_received_credential(
+        &self,
+        format: oid4vci::CredentialFormat,
+        bytes: &[u8],
+        issuer_cert_chain: &[Vec<u8>],
+        issuer_id: &str,
+    ) -> Result<AuthenticatedCredential, CredentialIngestionError> {
+        let issuer_key = self
+            .resolve_issuer_key(issuer_cert_chain)
+            .ok_or(CredentialIngestionError::UntrustedIssuer)?;
+        let credential = self.verify_received_credential(format, bytes, &issuer_key, issuer_id)?;
+        Ok(AuthenticatedCredential {
+            credential,
+            provenance: CredentialProvenance {
+                format,
+                raw_credential: bytes.to_vec(),
+                issuer_cert_chain: issuer_cert_chain.to_vec(),
+                issuer_id: issuer_id.to_string(),
+            },
+        })
     }
 
     /// Authenticate, validate and store a credential obtained outside the active issuance
@@ -1199,10 +1365,8 @@ impl Core {
         issuer_id: &str,
     ) -> Result<(), CredentialIngestionError> {
         let format = parse_format(format).ok_or(CredentialIngestionError::UnsupportedFormat)?;
-        let issuer_key = self
-            .resolve_issuer_key(issuer_cert_chain)
-            .ok_or(CredentialIngestionError::UntrustedIssuer)?;
-        let verified = self.verify_received_credential(format, bytes, &issuer_key, issuer_id)?;
+        let verified =
+            self.authenticate_received_credential(format, bytes, issuer_cert_chain, issuer_id)?;
         self.store_verified_credential(verified);
         self.last_credential_ingestion_error = None;
         Ok(())
@@ -1220,7 +1384,8 @@ impl Core {
         let mut items: Vec<String> = self
             .credentials
             .iter()
-            .map(|c| {
+            .map(|stored| {
+                let c = &stored.holding;
                 let (vct, iss) = credential_vct_and_issuer(&c.issuer_jwt);
                 let disclosures = c
                     .disclosures_by_claim
@@ -1236,7 +1401,8 @@ impl Core {
             .collect();
         // mdoc holdings: values are already decoded (no salted disclosures) — surface them under
         // `claims` so the shell renders the card; `disclosuresByClaim` stays empty for this format.
-        for h in &self.mdoc_holdings {
+        for stored in &self.mdoc_holdings {
+            let h = &stored.holding;
             let claims = h
                 .issuer_signed
                 .name_spaces
@@ -1263,11 +1429,23 @@ impl Core {
     pub fn handle_event(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::SetClock { epoch } => {
+                // `now_epoch` is a process-local high-water mark. A backwards update must never
+                // make expired credentials, trust lists, certificates, status assertions or WUAs
+                // appear current again. Keep the prior value and terminate any in-flight
+                // presentation before another consent/sign/delivery effect can be emitted.
+                if epoch < self.now_epoch {
+                    if self.active == ActiveFlow::Presentation {
+                        return self.abort_presentation(AbortReason::ClockRollback);
+                    }
+                    return Self::presentation_error_effects(AbortReason::ClockRollback)
+                        .unwrap_or_default();
+                }
                 self.now_epoch = epoch;
                 Vec::new()
             }
             Event::AuthorizationRequestReceived { request } => {
                 self.active = ActiveFlow::Presentation;
+                self.pending_rp_provenance = None;
                 self.pending_status_references.clear();
                 self.drive(Input::AuthorizationRequest(request))
             }
@@ -1277,6 +1455,10 @@ impl Core {
             } => {
                 // The registration decision is computed here, in-core, from the trusted list.
                 let (registered, rp_public_key) = self.resolve_rp(&rp_cert_chain);
+                self.pending_rp_provenance = registered.then(|| RelyingPartyProvenance {
+                    certificate_chain: rp_cert_chain,
+                    public_key: rp_public_key.clone(),
+                });
                 self.drive(Input::RpTrustResolved(ResolvedTrust {
                     registered,
                     rp_public_key,
@@ -1284,6 +1466,14 @@ impl Core {
                 }))
             }
             Event::UserConsented => {
+                // Preserve an already-terminal state when the shell races a stale UI event after
+                // an earlier fail-closed abort (for example, no complete eligible selection).
+                if self.active != ActiveFlow::Presentation {
+                    return self.drive(Input::ConsentGranted);
+                }
+                if let Err(error) = self.presentation_evidence_is_current() {
+                    return self.abort_presentation_eligibility(error);
+                }
                 // Status is resolved after explicit consent but before any signature/disclosure.
                 // Missing or stale selected lists become bounded HTTPS fetch effects; known-bad
                 // and indeterminate values fail closed immediately.
@@ -1301,8 +1491,8 @@ impl Core {
                             .map(|uri| Effect::FetchStatusList { uri })
                             .collect()
                     }
-                    StatusGate::Revoked => Self::status_block_effects(true),
-                    StatusGate::Indeterminate => Self::status_block_effects(false),
+                    StatusGate::Revoked => self.status_block_effects(true),
+                    StatusGate::Indeterminate => self.status_block_effects(false),
                 }
             }
             Event::UserDeclined => {
@@ -1319,6 +1509,13 @@ impl Core {
                 }
                 ActiveFlow::Qes => {
                     self.drive_qes(qes::Input::AuthorizationSignatureProduced(signature))
+                }
+                ActiveFlow::Presentation => {
+                    if let Some(reason) = self.presentation_sensitive_abort_reason() {
+                        self.abort_presentation(reason)
+                    } else {
+                        self.drive(Input::DeviceSignatureProduced(signature))
+                    }
                 }
                 _ => self.drive(Input::DeviceSignatureProduced(signature)),
             },
@@ -1378,8 +1575,9 @@ impl Core {
                 // Replay protection (`iss_seen_c_nonces`) deliberately persists across sessions.
                 self.issuance = oid4vci::State::Idle;
                 // Issuer trust is decided in-core against the trusted list (PID/attestation CAs).
+                self.issuer_cert_chain_current = issuer_cert_chain;
                 self.issuer_public_key_current = self
-                    .resolve_issuer_key(&issuer_cert_chain)
+                    .resolve_issuer_key(&self.issuer_cert_chain_current)
                     .unwrap_or_default();
                 self.issuer_trusted_current = !self.issuer_public_key_current.is_empty();
                 self.issuer_id_current = issuer_id;
@@ -1407,10 +1605,10 @@ impl Core {
                 effects
             }
             Event::CredentialReceived { format, bytes } => match parse_format(&format) {
-                Some(f) => match self.verify_received_credential(
+                Some(f) => match self.authenticate_received_credential(
                     f,
                     &bytes,
-                    &self.issuer_public_key_current,
+                    &self.issuer_cert_chain_current,
                     &self.issuer_id_current,
                 ) {
                     Ok(verified) => {
@@ -1445,20 +1643,23 @@ impl Core {
                 token,
                 provider_cert_chain,
             } => {
+                if let Err(error) = self.presentation_evidence_is_current() {
+                    return self.abort_presentation_eligibility(error);
+                }
                 let expected = self
                     .pending_status_references
                     .iter()
                     .any(|reference| reference.uri == uri);
                 if !expected || !(200..=299).contains(&http_status) {
                     self.pending_status_references.clear();
-                    return Self::status_block_effects(false);
+                    return self.status_block_effects(false);
                 }
                 if self
                     .load_status_list(&uri, &token, &provider_cert_chain)
                     .is_err()
                 {
                     self.pending_status_references.clear();
-                    return Self::status_block_effects(false);
+                    return self.status_block_effects(false);
                 }
 
                 match self.presentation_status_gate() {
@@ -1474,11 +1675,11 @@ impl Core {
                     }
                     StatusGate::Revoked => {
                         self.pending_status_references.clear();
-                        Self::status_block_effects(true)
+                        self.status_block_effects(true)
                     }
                     StatusGate::Indeterminate => {
                         self.pending_status_references.clear();
-                        Self::status_block_effects(false)
+                        self.status_block_effects(false)
                     }
                 }
             }
@@ -1533,9 +1734,18 @@ impl Core {
                 response_mode: req.response_mode.clone(),
                 response_encryption_key: req.response_encryption_key.clone(),
                 dcql: req.dcql.clone(),
+                selected_credentials: Vec::new(),
+                selected_sources: Vec::new(),
+                rp_provenance: self.pending_rp_provenance.clone(),
                 consent_hash: [0u8; 32],
                 shared_claims: Vec::new(),
             });
+            // Freeze the complete selection while the request, RP trust and every credential are
+            // current. If one query cannot be satisfied, do not render consent (or emit any of the
+            // protocol outputs produced alongside it).
+            if let Err(error) = self.prepare_presentation_selection() {
+                return self.abort_presentation_eligibility(error);
+            }
         }
 
         let mut effects: Vec<Effect> = outputs
@@ -1546,7 +1756,7 @@ impl Core {
         // Delivery-policy failures happen before consent and therefore have no protocol output of
         // their own. Surface a stable error screen + close effect instead of silently stalling.
         if let Some(reason) = newly_aborted {
-            if let Some(error_effects) = Self::presentation_delivery_error_effects(reason) {
+            if let Some(error_effects) = Self::presentation_error_effects(reason) {
                 self.session = None;
                 effects.extend(error_effects);
             }
@@ -1559,7 +1769,7 @@ impl Core {
         effects
     }
 
-    fn presentation_delivery_error_effects(reason: AbortReason) -> Option<Vec<Effect>> {
+    fn presentation_error_effects(reason: AbortReason) -> Option<Vec<Effect>> {
         let (code, message) = match reason {
             AbortReason::ResponseModeUnsupported => (
                 "presentation_response_mode_unsupported",
@@ -1581,6 +1791,38 @@ impl Core {
                 "presentation_response_encryption_failed",
                 "The presentation response could not be encrypted safely.",
             ),
+            AbortReason::ClockRollback => (
+                "clock_rollback_rejected",
+                "The trusted wallet clock cannot move backwards.",
+            ),
+            AbortReason::CredentialExpired => (
+                "credential_expired",
+                "A selected credential expired before it could be shared.",
+            ),
+            AbortReason::CredentialNotYetValid => (
+                "credential_not_yet_valid",
+                "A selected credential is not currently valid.",
+            ),
+            AbortReason::CredentialProvenanceInvalid => (
+                "credential_provenance_invalid",
+                "A selected credential no longer has valid authenticated provenance.",
+            ),
+            AbortReason::PresentationTrustInvalid => (
+                "presentation_trust_invalid",
+                "Current trusted relying-party evidence is required before sharing.",
+            ),
+            AbortReason::NoCredential => (
+                "no_eligible_credential",
+                "No current credential satisfies the complete presentation request.",
+            ),
+            AbortReason::CredentialStatusInvalid => (
+                "credential_revoked",
+                "This credential is revoked or suspended and cannot be shared.",
+            ),
+            AbortReason::CredentialStatusUnavailable => (
+                "credential_status_unavailable",
+                "A fresh, trusted status assertion is required before this credential can be shared.",
+            ),
             _ => return None,
         };
         Some(vec![
@@ -1594,19 +1836,67 @@ impl Core {
         ])
     }
 
-    fn abort_presentation_delivery(&mut self, reason: AbortReason) -> Vec<Effect> {
+    fn abort_presentation(&mut self, reason: AbortReason) -> Vec<Effect> {
         self.vp = State::Aborted(reason);
         self.session = None;
-        Self::presentation_delivery_error_effects(reason).unwrap_or_default()
+        self.pending_rp_provenance = None;
+        self.pending_status_references.clear();
+        self.active = ActiveFlow::None;
+        Self::presentation_error_effects(reason).unwrap_or_default()
+    }
+
+    fn abort_presentation_eligibility(
+        &mut self,
+        error: PresentationEligibilityError,
+    ) -> Vec<Effect> {
+        self.abort_presentation(Self::eligibility_abort_reason(error))
+    }
+
+    fn eligibility_abort_reason(error: PresentationEligibilityError) -> AbortReason {
+        match error {
+            PresentationEligibilityError::CredentialExpired => AbortReason::CredentialExpired,
+            PresentationEligibilityError::CredentialNotYetValid => {
+                AbortReason::CredentialNotYetValid
+            }
+            PresentationEligibilityError::CredentialProvenanceInvalid => {
+                AbortReason::CredentialProvenanceInvalid
+            }
+            PresentationEligibilityError::TrustEvidenceInvalid => {
+                AbortReason::PresentationTrustInvalid
+            }
+            PresentationEligibilityError::NoEligibleCredential => {
+                // Keep the established protocol-state reason for API compatibility while the
+                // facade supplies the new explicit terminal error screen.
+                AbortReason::NoCredential
+            }
+        }
+    }
+
+    /// The complete gate used immediately before any signature or HTTP disclosure. Status-list
+    /// fetch/retry is supported at the consent transition; if evidence becomes stale later, abort
+    /// instead of consuming a signature callback or silently reusing cached authorization.
+    fn presentation_sensitive_abort_reason(&self) -> Option<AbortReason> {
+        if let Err(error) = self.presentation_evidence_is_current() {
+            return Some(Self::eligibility_abort_reason(error));
+        }
+        match self.presentation_status_gate() {
+            StatusGate::Ready => None,
+            StatusGate::Revoked => Some(AbortReason::CredentialStatusInvalid),
+            StatusGate::Fetch { .. } | StatusGate::Indeterminate => {
+                Some(AbortReason::CredentialStatusUnavailable)
+            }
+        }
     }
 
     /// Validate the issuer path against PID/attestation anchors and return only the authenticated
     /// leaf key. A caller cannot accidentally use a key from an unvalidated chain.
     fn resolve_issuer_key(&self, chain: &[Vec<u8>]) -> Option<Vec<u8>> {
-        let mut anchors = self.trust_store.parsed_anchors(ServiceType::PidProvider);
+        let mut anchors = self
+            .trust_store
+            .parsed_anchors_at(ServiceType::PidProvider, self.now_epoch);
         anchors.extend(
             self.trust_store
-                .parsed_anchors(ServiceType::AttestationProvider),
+                .parsed_anchors_at(ServiceType::AttestationProvider, self.now_epoch),
         );
         if anchors.is_empty() {
             return None;
@@ -1619,7 +1909,9 @@ impl Core {
     /// Resolve a status-signing key only through anchors authorised for the StatusProvider
     /// service. A PID issuer, RP or arbitrary shell-supplied key cannot sign cache entries.
     fn resolve_status_provider_key(&self, chain: &[Vec<u8>]) -> Option<Vec<u8>> {
-        let anchors = self.trust_store.parsed_anchors(ServiceType::StatusProvider);
+        let anchors = self
+            .trust_store
+            .parsed_anchors_at(ServiceType::StatusProvider, self.now_epoch);
         if anchors.is_empty() {
             return None;
         }
@@ -1719,7 +2011,7 @@ impl Core {
         if !self.catalogue.satisfies_mandatory(vct, &held_claims) {
             return Err(CredentialIngestionError::MandatoryClaimsMissing);
         }
-        validate_json_validity(&claims, self.now_epoch)?;
+        let validity = json_validity(&claims, self.now_epoch)?;
         if !claims.contains_key("cnf") {
             return Err(CredentialIngestionError::DeviceBindingMissing);
         }
@@ -1728,7 +2020,7 @@ impl Core {
         }
         let status = status_reference_from_claims(&claims)?;
         let holding = held_credential_from_verified_sd(&sd, status)?;
-        Ok(VerifiedCredential::SdJwt(holding))
+        Ok(VerifiedCredential::SdJwt { holding, validity })
     }
 
     fn verify_mdoc_credential(
@@ -1772,17 +2064,20 @@ impl Core {
         {
             return Err(CredentialIngestionError::MandatoryClaimsMissing);
         }
-        validate_mdoc_validity(&mso.validity_info, self.now_epoch)?;
+        let validity = mdoc_validity(&mso.validity_info, self.now_epoch)?;
         if matches!(mso.device_key, cose::cbor::Value::Null) {
             return Err(CredentialIngestionError::DeviceBindingMissing);
         }
         if !mdoc_device_binding_matches(&mso.device_key, &self.device_public_key) {
             return Err(CredentialIngestionError::DeviceBindingMismatch);
         }
-        Ok(VerifiedCredential::Mdoc(MdocHolding {
-            doctype: mso.doc_type,
-            issuer_signed,
-        }))
+        Ok(VerifiedCredential::Mdoc {
+            holding: MdocHolding {
+                doctype: mso.doc_type,
+                issuer_signed,
+            },
+            validity,
+        })
     }
 
     fn drive_issuance(&mut self, input: oid4vci::Input) -> Vec<Effect> {
@@ -1791,8 +2086,18 @@ impl Core {
         let proof_key_attested = self
             .wua
             .as_ref()
-            .map(|w| w.is_valid_for(&self.device_public_key, wua::AssuranceLevel::High))
+            .map(|w| {
+                w.is_valid_for_at(
+                    &self.device_public_key,
+                    wua::AssuranceLevel::High,
+                    self.now_epoch,
+                )
+            })
             .unwrap_or(false);
+        let issuer_trusted = self
+            .resolve_issuer_key(&self.issuer_cert_chain_current)
+            .is_some_and(|key| key == self.issuer_public_key_current);
+        self.issuer_trusted_current = issuer_trusted;
 
         let (next, outputs) = {
             let env = oid4vci::Env {
@@ -1820,7 +2125,7 @@ impl Core {
                 let issued_format = *format;
                 let fmt = format_name(issued_format).to_string();
                 match self.pending_verified_credential.take() {
-                    Some(verified) if verified.format() == issued_format => {
+                    Some(verified) if verified.credential.format() == issued_format => {
                         self.store_verified_credential(verified);
                         self.record_issuance(fmt);
                     }
@@ -2004,34 +2309,182 @@ impl Core {
         }
     }
 
-    /// Choose what to present: one credential per DCQL credential query (multi-credential), each
-    /// keyed by its query id. A legacy flat-`claims` request (no DCQL) yields a single bare SD-JWT.
-    /// Selection never widens disclosure — only the requested-and-held subset is ever revealed.
+    fn eligibility_from_ingestion_error(
+        error: CredentialIngestionError,
+    ) -> PresentationEligibilityError {
+        match error {
+            CredentialIngestionError::CredentialExpired => {
+                PresentationEligibilityError::CredentialExpired
+            }
+            CredentialIngestionError::CredentialNotYetValid => {
+                PresentationEligibilityError::CredentialNotYetValid
+            }
+            _ => PresentationEligibilityError::CredentialProvenanceInvalid,
+        }
+    }
+
+    fn sdjwt_credential_is_current(
+        &self,
+        stored: &StoredSdJwtCredential,
+    ) -> Result<(), PresentationEligibilityError> {
+        stored
+            .validity
+            .validate_at(self.now_epoch)
+            .map_err(Self::eligibility_from_ingestion_error)?;
+        let StoredProvenance::Authenticated(provenance) = &stored.provenance else {
+            return Ok(()); // Explicit Rust-only fixture loader; never reachable over FFI.
+        };
+        let authenticated = self
+            .authenticate_received_credential(
+                provenance.format,
+                &provenance.raw_credential,
+                &provenance.issuer_cert_chain,
+                &provenance.issuer_id,
+            )
+            .map_err(Self::eligibility_from_ingestion_error)?;
+        match authenticated.credential {
+            VerifiedCredential::SdJwt { holding, validity }
+                if holding == stored.holding && validity == stored.validity =>
+            {
+                Ok(())
+            }
+            _ => Err(PresentationEligibilityError::CredentialProvenanceInvalid),
+        }
+    }
+
+    fn mdoc_credential_is_current(
+        &self,
+        stored: &StoredMdocCredential,
+    ) -> Result<(), PresentationEligibilityError> {
+        stored
+            .validity
+            .validate_at(self.now_epoch)
+            .map_err(Self::eligibility_from_ingestion_error)?;
+        let StoredProvenance::Authenticated(provenance) = &stored.provenance else {
+            return Ok(()); // Explicit Rust-only fixture loader; never reachable over FFI.
+        };
+        let authenticated = self
+            .authenticate_received_credential(
+                provenance.format,
+                &provenance.raw_credential,
+                &provenance.issuer_cert_chain,
+                &provenance.issuer_id,
+            )
+            .map_err(Self::eligibility_from_ingestion_error)?;
+        match authenticated.credential {
+            VerifiedCredential::Mdoc { holding, validity }
+                if holding == stored.holding && validity == stored.validity =>
+            {
+                Ok(())
+            }
+            _ => Err(PresentationEligibilityError::CredentialProvenanceInvalid),
+        }
+    }
+
+    fn presentation_trust_is_current(
+        &self,
+        session: &SessionInfo,
+    ) -> Result<(), PresentationEligibilityError> {
+        if !self.trust_store.is_valid_at(self.now_epoch) {
+            return Err(PresentationEligibilityError::TrustEvidenceInvalid);
+        }
+        let provenance = session
+            .rp_provenance
+            .as_ref()
+            .ok_or(PresentationEligibilityError::TrustEvidenceInvalid)?;
+        let (registered, public_key) = self.resolve_rp(&provenance.certificate_chain);
+        if !registered || public_key != provenance.public_key {
+            return Err(PresentationEligibilityError::TrustEvidenceInvalid);
+        }
+        Ok(())
+    }
+
+    fn presentation_evidence_is_current(&self) -> Result<(), PresentationEligibilityError> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or(PresentationEligibilityError::TrustEvidenceInvalid)?;
+        self.presentation_trust_is_current(session)?;
+        if session.selected_sources.is_empty()
+            || session.selected_sources.len() != session.selected_credentials.len()
+        {
+            return Err(PresentationEligibilityError::NoEligibleCredential);
+        }
+        for source in &session.selected_sources {
+            match source {
+                PresentationCredentialReference::SdJwt(holding) => {
+                    let stored = self
+                        .credentials
+                        .iter()
+                        .find(|stored| stored.holding == *holding)
+                        .ok_or(PresentationEligibilityError::CredentialProvenanceInvalid)?;
+                    self.sdjwt_credential_is_current(stored)?;
+                }
+                PresentationCredentialReference::Mdoc(holding) => {
+                    let stored = self
+                        .mdoc_holdings
+                        .iter()
+                        .find(|stored| stored.holding == *holding)
+                        .ok_or(PresentationEligibilityError::CredentialProvenanceInvalid)?;
+                    self.mdoc_credential_is_current(stored)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Freeze one exact, currently eligible credential for every query before consent is rendered.
+    fn prepare_presentation_selection(&mut self) -> Result<(), PresentationEligibilityError> {
+        let session = self
+            .session
+            .clone()
+            .ok_or(PresentationEligibilityError::TrustEvidenceInvalid)?;
+        self.presentation_trust_is_current(&session)?;
+
+        let prepared = match &session.dcql {
+            Some(dcql) if !dcql.credentials.is_empty() => {
+                let mut ids = Vec::with_capacity(dcql.credentials.len());
+                let mut prepared = Vec::with_capacity(dcql.credentials.len());
+                for query in &dcql.credentials {
+                    if query.id.is_empty() || ids.contains(&query.id) {
+                        return Err(PresentationEligibilityError::NoEligibleCredential);
+                    }
+                    ids.push(query.id.clone());
+                    prepared.push(self.select_for_query(&session, query)?);
+                }
+                prepared
+            }
+            _ => vec![self.select_legacy_sdjwt(&session)?],
+        };
+        if prepared.is_empty() {
+            return Err(PresentationEligibilityError::NoEligibleCredential);
+        }
+        let target = self
+            .session
+            .as_mut()
+            .ok_or(PresentationEligibilityError::TrustEvidenceInvalid)?;
+        target.selected_credentials = prepared.iter().map(|item| item.selected.clone()).collect();
+        target.selected_sources = prepared.into_iter().map(|item| item.source).collect();
+        Ok(())
+    }
+
+    /// Frozen credentials are the only values the protocol state machine may sign.
     fn select_credentials_for(&self, input: &Input) -> Vec<SelectedCredential> {
         if !matches!(input, Input::ConsentGranted) {
             return Vec::new();
         }
-        let Some(sess) = self.session.as_ref() else {
-            return Vec::new();
-        };
-        match &sess.dcql {
-            Some(dcql) if !dcql.credentials.is_empty() => dcql
-                .credentials
-                .iter()
-                .filter_map(|q| self.select_for_query(sess, q))
-                .collect(),
-            _ => self.select_legacy_sdjwt(sess).into_iter().collect(),
-        }
+        self.session
+            .as_ref()
+            .map(|session| session.selected_credentials.clone())
+            .unwrap_or_default()
     }
 
-    /// Select a credential for ONE DCQL credential query, minimised to that query's claims and
-    /// keyed by its id. `mso_mdoc` → an ISO DeviceResponse; otherwise an SD-JWT VC of a matching
-    /// `vct`. `None` if nothing held satisfies this query.
+    /// Select a current credential for one exact supported DCQL format.
     fn select_for_query(
         &self,
         sess: &SessionInfo,
         q: &oid4vp::dcql::CredentialQuery,
-    ) -> Option<SelectedCredential> {
+    ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
         let claims: Vec<String> = q
             .claims
             .iter()
@@ -2063,28 +2516,49 @@ impl Core {
         };
 
         if q.format == "mso_mdoc" {
-            let doctype = q.meta.as_ref().and_then(|m| m.doctype_value.clone())?;
-            let holding = self
-                .mdoc_holdings
-                .iter()
-                .find(|h| h.doctype == doctype && mdoc_values_ok(&h.issuer_signed))?;
-            let issuer_signed = minimise_mdoc(&holding.issuer_signed, &claims);
-            let mgn = mdoc_generated_nonce(sess.nonce);
-            let session_transcript = mdoc::oid4vp_session_transcript(
-                &AwsLc,
-                &sess.rp_client_id,
-                &sess.response_uri,
-                &sess.nonce.to_string(),
-                &mgn,
-            );
-            return Some(SelectedCredential::Mdoc {
-                doctype: holding.doctype.clone(),
-                issuer_signed,
-                session_transcript,
-                device_namespaces: mdoc::empty_device_namespaces_bytes(),
-                mdoc_generated_nonce: mgn,
-                dcql_id,
-            });
+            let doctype = q
+                .meta
+                .as_ref()
+                .and_then(|m| m.doctype_value.clone())
+                .ok_or(PresentationEligibilityError::NoEligibleCredential)?;
+            let mut first_error = None;
+            for stored in self.mdoc_holdings.iter().filter(|stored| {
+                stored.holding.doctype == doctype
+                    && mdoc_values_ok(&stored.holding.issuer_signed)
+                    && claims
+                        .iter()
+                        .all(|claim| mdoc_value_at(&stored.holding.issuer_signed, claim).is_some())
+            }) {
+                if let Err(error) = self.mdoc_credential_is_current(stored) {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+                let holding = &stored.holding;
+                let issuer_signed = minimise_mdoc(&holding.issuer_signed, &claims);
+                let mgn = mdoc_generated_nonce(sess.nonce);
+                let session_transcript = mdoc::oid4vp_session_transcript(
+                    &AwsLc,
+                    &sess.rp_client_id,
+                    &sess.response_uri,
+                    &sess.nonce.to_string(),
+                    &mgn,
+                );
+                return Ok(PreparedPresentationCredential {
+                    selected: SelectedCredential::Mdoc {
+                        doctype: holding.doctype.clone(),
+                        issuer_signed,
+                        session_transcript,
+                        device_namespaces: mdoc::empty_device_namespaces_bytes(),
+                        mdoc_generated_nonce: mgn,
+                        dcql_id,
+                    },
+                    source: PresentationCredentialReference::Mdoc(holding.clone()),
+                });
+            }
+            return Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential));
+        }
+        if q.format != "dc+sd-jwt" {
+            return Err(PresentationEligibilityError::NoEligibleCredential);
         }
 
         // SD-JWT VC: a candidate must BE one of the query's `vct_values` (when given) — so a request
@@ -2102,50 +2576,70 @@ impl Core {
                 .iter()
                 .all(|r| c.disclosures_by_claim.contains_key(r))
         };
-        let cred = self
-            .credentials
-            .iter()
-            .find(|c| type_matches(c) && sdjwt_values_ok(c) && carries_all(c))
-            .or_else(|| {
-                self.credentials
-                    .iter()
-                    .find(|c| type_matches(c) && sdjwt_values_ok(c))
-            })?;
-        let held: Vec<String> = cred.disclosures_by_claim.keys().cloned().collect();
-        let disclosures = minimum_claim_set(&claims, &held)
-            .iter()
-            .filter_map(|c| cred.disclosures_by_claim.get(c).cloned())
-            .collect();
-        Some(SelectedCredential::SdJwt {
-            issuer_jwt: cred.issuer_jwt.clone(),
-            disclosures,
-            dcql_id,
-        })
+        let mut first_error = None;
+        for stored in &self.credentials {
+            let credential = &stored.holding;
+            if !type_matches(credential) || !sdjwt_values_ok(credential) || !carries_all(credential)
+            {
+                continue;
+            }
+            if let Err(error) = self.sdjwt_credential_is_current(stored) {
+                first_error.get_or_insert(error);
+                continue;
+            }
+            let held: Vec<String> = credential.disclosures_by_claim.keys().cloned().collect();
+            let disclosures = minimum_claim_set(&claims, &held)
+                .iter()
+                .filter_map(|claim| credential.disclosures_by_claim.get(claim).cloned())
+                .collect();
+            return Ok(PreparedPresentationCredential {
+                selected: SelectedCredential::SdJwt {
+                    issuer_jwt: credential.issuer_jwt.clone(),
+                    disclosures,
+                    dcql_id,
+                },
+                source: PresentationCredentialReference::SdJwt(credential.clone()),
+            });
+        }
+        Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
     }
 
     /// The legacy flat-`claims` path (no DCQL): one SD-JWT, minimised to the requested claims, sent
     /// as a bare `vp_token` (no DCQL id) — exactly the pre-DCQL behaviour.
-    fn select_legacy_sdjwt(&self, sess: &SessionInfo) -> Option<SelectedCredential> {
+    fn select_legacy_sdjwt(
+        &self,
+        sess: &SessionInfo,
+    ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
         let carries_all = |c: &HeldCredential| {
             sess.requested_claims
                 .iter()
                 .all(|r| c.disclosures_by_claim.contains_key(r))
         };
-        let cred = self
-            .credentials
-            .iter()
-            .find(|c| carries_all(c))
-            .or_else(|| self.credentials.first())?;
-        let held: Vec<String> = cred.disclosures_by_claim.keys().cloned().collect();
-        let disclosures = minimum_claim_set(&sess.requested_claims, &held)
-            .iter()
-            .filter_map(|c| cred.disclosures_by_claim.get(c).cloned())
-            .collect();
-        Some(SelectedCredential::SdJwt {
-            issuer_jwt: cred.issuer_jwt.clone(),
-            disclosures,
-            dcql_id: None,
-        })
+        let mut first_error = None;
+        for stored in &self.credentials {
+            let credential = &stored.holding;
+            if !carries_all(credential) {
+                continue;
+            }
+            if let Err(error) = self.sdjwt_credential_is_current(stored) {
+                first_error.get_or_insert(error);
+                continue;
+            }
+            let held: Vec<String> = credential.disclosures_by_claim.keys().cloned().collect();
+            let disclosures = minimum_claim_set(&sess.requested_claims, &held)
+                .iter()
+                .filter_map(|claim| credential.disclosures_by_claim.get(claim).cloned())
+                .collect();
+            return Ok(PreparedPresentationCredential {
+                selected: SelectedCredential::SdJwt {
+                    issuer_jwt: credential.issuer_jwt.clone(),
+                    disclosures,
+                    dcql_id: None,
+                },
+                source: PresentationCredentialReference::SdJwt(credential.clone()),
+            });
+        }
+        Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
     }
 
     /// Append a completed presentation to the audit log (paths + consent hash, never values).
@@ -2284,31 +2778,30 @@ impl Core {
     }
 
     fn consent_screen(&self) -> ScreenDescription {
-        let (rp, purpose, requested) = match &self.session {
-            Some(s) => (
-                s.rp_client_id.clone(),
-                s.purpose.clone(),
-                s.requested_claims.clone(),
-            ),
-            None => (String::new(), String::new(), Vec::new()),
+        let Some(session) = self.session.as_ref() else {
+            return ScreenDescription::Consent(ConsentScreen {
+                rp_display_name: String::new(),
+                purpose: String::new(),
+                requested_claims: Vec::new(),
+            });
         };
-        // The consent screen offers the minimum subset the request needs that ANY holding can
-        // provide (selection later binds to one credential). Union of held claim names across both
-        // SD-JWT disclosures and mdoc issuer-signed element identifiers.
-        let mut held: Vec<String> = self
-            .credentials
-            .iter()
-            .flat_map(|c| c.disclosures_by_claim.keys().cloned())
-            .collect();
-        held.extend(
-            self.mdoc_holdings
-                .iter()
-                .flat_map(|h| mdoc_claim_ids(&h.issuer_signed)),
-        );
+        // Render claims from the exact frozen holdings, never from the union of all wallet data.
+        // That keeps the screen and the later signed disclosure bound to the same credentials.
+        let mut held = Vec::new();
+        for source in &session.selected_sources {
+            match source {
+                PresentationCredentialReference::SdJwt(holding) => {
+                    held.extend(holding.disclosures_by_claim.keys().cloned());
+                }
+                PresentationCredentialReference::Mdoc(holding) => {
+                    held.extend(mdoc_claim_ids(&holding.issuer_signed));
+                }
+            }
+        }
         ScreenDescription::Consent(ConsentScreen {
-            rp_display_name: rp,
-            purpose,
-            requested_claims: minimum_claim_set(&requested, &held),
+            rp_display_name: session.rp_client_id.clone(),
+            purpose: session.purpose.clone(),
+            requested_claims: minimum_claim_set(&session.requested_claims, &held),
         })
     }
 
@@ -2321,6 +2814,9 @@ impl Core {
                 vec![Effect::PersistNonce { nonce }]
             }
             O::RenderConsent { .. } => {
+                if let Err(error) = self.presentation_evidence_is_current() {
+                    return self.abort_presentation_eligibility(error);
+                }
                 let screen = self.consent_screen();
                 // Capture what the user is about to see: the consent hash commits to it, and the
                 // exact claim paths shown are what we record when the presentation completes.
@@ -2335,13 +2831,21 @@ impl Core {
             O::SignKeyBinding {
                 key_ref,
                 signing_input,
-            } => vec![Effect::Sign {
-                key_ref,
-                payload: signing_input,
-            }],
+            } => {
+                if let Some(reason) = self.presentation_sensitive_abort_reason() {
+                    return self.abort_presentation(reason);
+                }
+                vec![Effect::Sign {
+                    key_ref,
+                    payload: signing_input,
+                }]
+            }
             O::SendVpToken(body) => {
+                if let Some(reason) = self.presentation_sensitive_abort_reason() {
+                    return self.abort_presentation(reason);
+                }
                 let Some(sess) = self.session.as_ref() else {
-                    return self.abort_presentation_delivery(AbortReason::ResponseUriInvalid);
+                    return self.abort_presentation(AbortReason::ResponseUriInvalid);
                 };
                 let url = sess.response_uri.clone();
                 // For `direct_post.jwt` the response is JWE-encrypted (ECDH-ES + A256GCM) to the
@@ -2351,7 +2855,7 @@ impl Core {
                     "direct_post" => vec![Effect::Http { url, body }],
                     "direct_post.jwt" => {
                         let Some(key) = sess.response_encryption_key.clone() else {
-                            return self.abort_presentation_delivery(
+                            return self.abort_presentation(
                                 AbortReason::ResponseEncryptionMetadataInvalid,
                             );
                         };
@@ -2363,11 +2867,10 @@ impl Core {
                             // Fail closed: the verifier asked for encryption, so never fall back to a
                             // plaintext POST that would disclose the presentation. The stable abort
                             // + error effects make the failure observable to the shell and holder.
-                            None => self
-                                .abort_presentation_delivery(AbortReason::ResponseEncryptionFailed),
+                            None => self.abort_presentation(AbortReason::ResponseEncryptionFailed),
                         }
                     }
-                    _ => self.abort_presentation_delivery(AbortReason::ResponseModeUnsupported),
+                    _ => self.abort_presentation(AbortReason::ResponseModeUnsupported),
                 }
             }
             O::Close => vec![Effect::Close],

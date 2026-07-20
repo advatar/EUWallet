@@ -77,6 +77,18 @@ fn expired_certificate_fails_path_validation() {
 }
 
 #[test]
+fn expired_appended_trust_anchor_fails_path_validation() {
+    let mut expired_anchor = parse_cert(CA).expect("parse CA");
+    expired_anchor.not_after = NOW - 1;
+    let err = validate_path(&[RP.to_vec()], &[expired_anchor], NOW, &AcceptingVerifier)
+        .expect_err("an expired root must not continue authorizing a cached path");
+    assert_eq!(
+        err,
+        X509Error::PathInvalid("certificate expired or not yet valid")
+    );
+}
+
+#[test]
 fn missing_trust_anchor_fails() {
     // No anchors supplied → cannot chain.
     let err = validate_path(&[RP.to_vec()], &[], NOW, &AcceptingVerifier)
