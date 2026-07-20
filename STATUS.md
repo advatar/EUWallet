@@ -149,7 +149,7 @@ operational solution needed to enter those processes.
 
 - [ ] [#16](https://github.com/advatar/EUWallet/issues/16): implement versioned encrypted durable
       wallet state and crash-safe lifecycle recovery across the Rust core, iOS and Android.
-  - [ ] Make transaction-log append and restoration bounded and fallible; atomically reject
+  - [x] Make transaction-log append and restoration bounded and fallible; atomically reject
         non-canonical chains unless they match an externally anchored head before any durable
         wallet-state schema can import audit history.
   - [ ] Restore only bounded authenticated holdings, replay state and audit data through current
