@@ -39,7 +39,13 @@ operational solution needed to enter those processes.
         reauthentication while preserving atomic DCQL selection and missing-claim rejection.
   - The interim identity profile accepts one canonical HTTPS-origin URI SAN. Complete RFC 5280,
     extension processing and final EUDI certificate policy remain tracked by the next task.
-- [ ] Replace the incomplete X.509 path validator with strict RFC 5280 and EUDI profile validation.
+- [ ] Replace the incomplete X.509 path validator with strict RFC 5280 and EUDI profile validation
+      ([#11](https://github.com/advatar/EUWallet/issues/11)).
+  - [ ] Reject unknown critical extensions and enforce KeyUsage, BasicConstraints/pathLen,
+        AKI/SKI, loop and duplicate-certificate rules during deterministic path construction.
+  - [ ] Enforce name constraints, certificate policies, algorithm constraints and service-specific
+        EUDI PID, attestation/mdoc, RP, status and WUA/WIA profiles.
+  - [ ] Authenticate bounded mdoc `x5chain` evidence through that service-scoped path.
 - [ ] Implement recursive RFC 9901 disclosures, reject invalid issued SD-JWT+KB/control claims,
       and include permanently visible PII in consent.
 - [ ] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths
