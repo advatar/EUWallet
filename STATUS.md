@@ -155,22 +155,26 @@ operational solution needed to enter those processes.
   - [x] Add the iOS WalletShell encrypted dual-slot storage primitive with strict bounded envelopes,
         a Keychain generation/digest anchor, compare-and-swap commits, backup/file-protection policy
         and crash/tamper tests; Core serialization and lifecycle wiring remain separate work.
-  - [ ] Restore only bounded authenticated holdings, replay state and audit data through current
+  - [x] Restore only bounded authenticated holdings, replay state and audit data through current
         trust/WUA/device-key revalidation; never revive pending operations or protocol sessions.
-    - [ ] Add a migration-ready canonical CBOR checkpoint v1 with explicit magic, version and
+    - [x] Add a migration-ready canonical CBOR checkpoint v1 with explicit magic, version and
           authenticated-envelope generation; hard 32 MiB and structural allocation budgets; and
           deterministic rejection of duplicate, non-canonical, unknown, trailing or future data.
-    - [ ] Export only production credential source evidence, sorted replay memberships and the
+    - [x] Export only production credential source evidence, sorted replay memberships and the
           externally anchored transaction log; document the legacy numeric issuance nonce in v1
           and exclude every active protocol machine, pending operation, callback and fixture.
-    - [ ] Restore into a staged core only after current clock, trust-list sequence, device key and
+    - [x] Restore into a staged core only after current clock, trust-list sequence, device key and
           high-assurance WUA checks; reauthenticate every credential and atomically retain the
           current environment while replacing only authenticated durable state.
-    - [ ] Prove exact resource boundaries, deterministic encoding, context/tamper/corruption
+    - [x] Prove exact resource boundaries, deterministic encoding, context/tamper/corruption
           rejection, credential and transaction revalidation, zero partial mutation, and that
           process-death restoration cannot revive stale callbacks or operation identifiers.
-  - [ ] Add atomic, rollback-detecting, device-bound iOS and Android stores with backup exclusion,
-        corruption/migration/process-death tests and no release-build fallback to demo storage.
+  - [ ] Complete atomic, rollback-detecting, device-bound platform storage and lifecycle wiring
+        with backup exclusion, corruption/migration/process-death tests and no release-build
+        fallback to demo storage.
+    - [x] Add the bounded, authenticated and encrypted iOS storage primitive.
+    - [ ] Add the equivalent Android Keystore-backed storage primitive.
+    - [ ] Wire both stores to the Core checkpoint boundary and prove crash-safe effect delivery.
 - [ ] Build the Android client with equivalent StrongBox/KeyMint security behavior.
 - [ ] [#18](https://github.com/advatar/EUWallet/issues/18): implement German eID/eAT onboarding and
       HAIP-compliant live PID issuance through an accepted German PID Provider.
