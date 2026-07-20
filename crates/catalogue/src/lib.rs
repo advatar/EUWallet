@@ -135,10 +135,26 @@ pub fn default_catalogue() -> Catalogue {
         display_name: "Person Identification Data".into(),
         format: "dc+sd-jwt".into(),
         claims: vec![
-            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
-            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
-            ClaimSpec { path: "birthdate".into(), display_name: "Date of birth".into(), mandatory: true },
-            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+            ClaimSpec {
+                path: "family_name".into(),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "given_name".into(),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "birthdate".into(),
+                display_name: "Date of birth".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "age_over_18".into(),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
     });
@@ -148,11 +164,31 @@ pub fn default_catalogue() -> Catalogue {
         display_name: "Mobile Driving Licence".into(),
         format: "dc+sd-jwt".into(),
         claims: vec![
-            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
-            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
-            ClaimSpec { path: "driving_privileges".into(), display_name: "Driving categories".into(), mandatory: true },
-            ClaimSpec { path: "issuing_country".into(), display_name: "Issuing country".into(), mandatory: true },
-            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+            ClaimSpec {
+                path: "family_name".into(),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "given_name".into(),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "driving_privileges".into(),
+                display_name: "Driving categories".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "issuing_country".into(),
+                display_name: "Issuing country".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "age_over_18".into(),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
     });
@@ -161,9 +197,21 @@ pub fn default_catalogue() -> Catalogue {
         display_name: "Mobile Driving Licence (mdoc)".into(),
         format: "mso_mdoc".into(),
         claims: vec![
-            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
-            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
-            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+            ClaimSpec {
+                path: "family_name".into(),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "given_name".into(),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "age_over_18".into(),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
     });
@@ -173,12 +221,36 @@ pub fn default_catalogue() -> Catalogue {
         display_name: "Passport".into(),
         format: "dc+sd-jwt".into(),
         claims: vec![
-            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
-            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
-            ClaimSpec { path: "document_number".into(), display_name: "Passport number".into(), mandatory: true },
-            ClaimSpec { path: "nationality".into(), display_name: "Nationality".into(), mandatory: true },
-            ClaimSpec { path: "expiry_date".into(), display_name: "Expiry date".into(), mandatory: true },
-            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+            ClaimSpec {
+                path: "family_name".into(),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "given_name".into(),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "document_number".into(),
+                display_name: "Passport number".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "nationality".into(),
+                display_name: "Nationality".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "expiry_date".into(),
+                display_name: "Expiry date".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "age_over_18".into(),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
     });
@@ -188,12 +260,36 @@ pub fn default_catalogue() -> Catalogue {
         display_name: "National ID Card".into(),
         format: "dc+sd-jwt".into(),
         claims: vec![
-            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
-            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
-            ClaimSpec { path: "document_number".into(), display_name: "Document number".into(), mandatory: true },
-            ClaimSpec { path: "issuing_country".into(), display_name: "Issuing country".into(), mandatory: true },
-            ClaimSpec { path: "expiry_date".into(), display_name: "Expiry date".into(), mandatory: true },
-            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+            ClaimSpec {
+                path: "family_name".into(),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "given_name".into(),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "document_number".into(),
+                display_name: "Document number".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "issuing_country".into(),
+                display_name: "Issuing country".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "expiry_date".into(),
+                display_name: "Expiry date".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "age_over_18".into(),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
     });
@@ -203,13 +299,41 @@ pub fn default_catalogue() -> Catalogue {
         display_name: "German ID Card".into(),
         format: "dc+sd-jwt".into(),
         claims: vec![
-            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
-            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
-            ClaimSpec { path: "birthdate".into(), display_name: "Date of birth".into(), mandatory: true },
-            ClaimSpec { path: "place_of_birth".into(), display_name: "Place of birth".into(), mandatory: true },
-            ClaimSpec { path: "resident_address".into(), display_name: "Resident address".into(), mandatory: true },
-            ClaimSpec { path: "issuing_country".into(), display_name: "Issuing country".into(), mandatory: true },
-            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+            ClaimSpec {
+                path: "family_name".into(),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "given_name".into(),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "birthdate".into(),
+                display_name: "Date of birth".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "place_of_birth".into(),
+                display_name: "Place of birth".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "resident_address".into(),
+                display_name: "Resident address".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "issuing_country".into(),
+                display_name: "Issuing country".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "age_over_18".into(),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
     });
@@ -260,9 +384,15 @@ mod tests {
                 "urn:eudi:pid:de:1"
             ]
         );
-        assert_eq!(c.types_offering("driving_privileges"), vec!["urn:eudi:mdl:1"]);
+        assert_eq!(
+            c.types_offering("driving_privileges"),
+            vec!["urn:eudi:mdl:1"]
+        );
         assert_eq!(c.types_offering("nationality"), vec!["urn:eudi:passport:1"]);
-        assert_eq!(c.types_offering("place_of_birth"), vec!["urn:eudi:pid:de:1"]);
+        assert_eq!(
+            c.types_offering("place_of_birth"),
+            vec!["urn:eudi:pid:de:1"]
+        );
         // Date of birth is on both the PID and the German ID card.
         assert_eq!(
             c.types_offering("birthdate"),
@@ -295,7 +425,9 @@ mod tests {
             vec!["urn:eudi:passport:1"]
         );
         // A request including a claim no type offers resolves to nothing.
-        assert!(c.types_satisfying(&["family_name".into(), "iban".into()]).is_empty());
+        assert!(c
+            .types_satisfying(&["family_name".into(), "iban".into()])
+            .is_empty());
 
         // Issuer policy.
         assert!(c.issuer_allowed("urn:eudi:pid:1", "https://issuer.example"));
@@ -313,7 +445,11 @@ mod tests {
         // All three mandatory claims present → satisfied (age_over_18 is optional).
         assert!(c.satisfies_mandatory(
             "urn:eudi:pid:1",
-            &["family_name".into(), "given_name".into(), "birthdate".into()]
+            &[
+                "family_name".into(),
+                "given_name".into(),
+                "birthdate".into()
+            ]
         ));
         // Missing a mandatory claim → not satisfied.
         assert!(!c.satisfies_mandatory(

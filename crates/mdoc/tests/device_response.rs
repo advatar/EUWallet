@@ -98,12 +98,16 @@ fn assembles_and_decodes_a_real_device_response() {
     // issuerSigned has nameSpaces + issuerAuth (a COSE_Sign1 array).
     let issuer_signed_v = map_get(doc, "issuerSigned").expect("issuerSigned");
     assert!(map_get(issuer_signed_v, "nameSpaces").is_some());
-    assert!(matches!(map_get(issuer_signed_v, "issuerAuth"), Some(Value::Array(a)) if a.len() == 4));
+    assert!(
+        matches!(map_get(issuer_signed_v, "issuerAuth"), Some(Value::Array(a)) if a.len() == 4)
+    );
 
     // deviceSigned has nameSpaces (tag-24) + deviceAuth.deviceSignature (COSE_Sign1).
     let device_signed_v = map_get(doc, "deviceSigned").expect("deviceSigned");
     let device_auth = map_get(device_signed_v, "deviceAuth").expect("deviceAuth");
-    assert!(matches!(map_get(device_auth, "deviceSignature"), Some(Value::Array(a)) if a.len() == 4));
+    assert!(
+        matches!(map_get(device_auth, "deviceSignature"), Some(Value::Array(a)) if a.len() == 4)
+    );
 }
 
 #[test]

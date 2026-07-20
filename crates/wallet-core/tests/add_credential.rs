@@ -69,14 +69,21 @@ fn add_mdoc_credential(
         issuer_cert_chain: scn.issuer_cert_chain.clone(),
         issuer_id: scn.issuer_id.clone(),
     });
-    assert!(fx.contains(&Effect::RequestToken), "mso_mdoc offer proceeds: {fx:?}");
+    assert!(
+        fx.contains(&Effect::RequestToken),
+        "mso_mdoc offer proceeds: {fx:?}"
+    );
 
-    let fx = core.handle_event(Event::TokenReceived { bound: true, c_nonce });
+    let fx = core.handle_event(Event::TokenReceived {
+        bound: true,
+        c_nonce,
+    });
     let signing_input = sign_payload(&fx).expect("attested proof key → Sign effect");
     let sig = wallet.sign_device(signing_input);
     let fx = core.handle_event(Event::DeviceSignatureProduced { signature: sig });
     assert!(
-        fx.iter().any(|e| matches!(e, Effect::RequestCredential { .. })),
+        fx.iter()
+            .any(|e| matches!(e, Effect::RequestCredential { .. })),
         "signed proof → RequestCredential, got {fx:?}"
     );
 
@@ -113,7 +120,11 @@ fn empty_wallet_gains_two_distinct_credentials_then_presents_one() {
     let mut core = issuance_ready_core(&scn);
 
     // The wallet starts empty.
-    assert_eq!(core.held_credentials_json(), "[]", "fresh wallet holds nothing");
+    assert_eq!(
+        core.held_credentials_json(),
+        "[]",
+        "fresh wallet holds nothing"
+    );
 
     // ---- Add the PID. ----
     add_credential(&mut core, &wallet, &scn, 111, &scn.pid_credential_compact);
@@ -135,15 +146,26 @@ fn empty_wallet_gains_two_distinct_credentials_then_presents_one() {
     // Re-issuing the SAME credential does not duplicate the holding.
     add_credential(&mut core, &wallet, &scn, 333, &scn.pid_credential_compact);
     assert_eq!(
-        core.held_credentials_json().matches("urn:eudi:pid:1").count(),
+        core.held_credentials_json()
+            .matches("urn:eudi:pid:1")
+            .count(),
         1,
         "re-issuing the PID is idempotent in the holdings"
     );
 
     // ---- Add a passport (a third, document-shaped type with its own claims). ----
-    add_credential(&mut core, &wallet, &scn, 444, &scn.passport_credential_compact);
+    add_credential(
+        &mut core,
+        &wallet,
+        &scn,
+        444,
+        &scn.passport_credential_compact,
+    );
     let held = core.held_credentials_json();
-    assert!(held.contains("urn:eudi:passport:1"), "passport held: {held}");
+    assert!(
+        held.contains("urn:eudi:passport:1"),
+        "passport held: {held}"
+    );
     assert!(
         held.contains("document_number") && held.contains("nationality"),
         "passport carries its discriminating claims: {held}"
@@ -206,17 +228,25 @@ fn mso_mdoc_issuance_stores_a_presentable_mdoc_holding() {
 
     add_mdoc_credential(&mut core, &wallet, &scn, 601, &scn.mdl_mdoc_credential);
     let held = core.held_credentials_json();
-    assert!(held.contains(r#""format":"mso_mdoc""#), "mdoc holding stored: {held}");
+    assert!(
+        held.contains(r#""format":"mso_mdoc""#),
+        "mdoc holding stored: {held}"
+    );
     assert!(
         held.contains("org.iso.18013.5.1.mDL"),
         "held mdoc surfaces its doctype: {held}"
     );
-    assert!(held.contains("age_over_18"), "mdoc element values surfaced: {held}");
+    assert!(
+        held.contains("age_over_18"),
+        "mdoc element values surfaced: {held}"
+    );
 
     // Re-issuing the same mdoc is idempotent in the holdings.
     add_mdoc_credential(&mut core, &wallet, &scn, 602, &scn.mdl_mdoc_credential);
     assert_eq!(
-        core.held_credentials_json().matches("org.iso.18013.5.1.mDL").count(),
+        core.held_credentials_json()
+            .matches("org.iso.18013.5.1.mDL")
+            .count(),
         1,
         "re-issuing the mdoc does not duplicate the holding"
     );

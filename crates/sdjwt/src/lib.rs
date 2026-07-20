@@ -170,9 +170,7 @@ impl SdJwtVc {
             Some(kb.to_string())
         };
         // Remaining parts are disclosures; none may be empty.
-        if parts.len() > MAX_DISCLOSURES
-            || parts.iter().any(|p| p.len() > MAX_DISCLOSURE_BYTES)
-        {
+        if parts.len() > MAX_DISCLOSURES || parts.iter().any(|p| p.len() > MAX_DISCLOSURE_BYTES) {
             return Err(SdJwtError::TooLarge);
         }
         if parts.iter().any(|p| p.is_empty()) {

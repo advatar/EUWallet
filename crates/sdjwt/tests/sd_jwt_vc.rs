@@ -158,21 +158,21 @@ fn verify_rejects_forged_disclosure() {
 
 #[test]
 fn verify_rejects_a_disclosure_that_overwrites_a_plain_claim() {
-    let raw = b64(serde_json::to_string(&json!(["salt", "family_name", "Mallory"]))
-        .unwrap()
-        .as_bytes());
+    let raw = b64(
+        serde_json::to_string(&json!(["salt", "family_name", "Mallory"]))
+            .unwrap()
+            .as_bytes(),
+    );
     let disclosure = Disclosure::parse(&raw).unwrap();
     let header = b64(br#"{"alg":"ES256","typ":"dc+sd-jwt"}"#);
-    let payload = b64(
-        serde_json::to_string(&json!({
-            "iss": "https://issuer.example",
-            "vct": "urn:eudi:pid:1",
-            "family_name": "Alice",
-            "_sd": [disclosure.digest_b64(&RealDigest)]
-        }))
-        .unwrap()
-        .as_bytes(),
-    );
+    let payload = b64(serde_json::to_string(&json!({
+        "iss": "https://issuer.example",
+        "vct": "urn:eudi:pid:1",
+        "family_name": "Alice",
+        "_sd": [disclosure.digest_b64(&RealDigest)]
+    }))
+    .unwrap()
+    .as_bytes());
     let signing_input = format!("{header}.{payload}");
     let jwt = format!("{signing_input}.{}", b64(&fnv(signing_input.as_bytes())));
     let sd = SdJwtVc::parse(&format!("{jwt}~{raw}~")).unwrap();

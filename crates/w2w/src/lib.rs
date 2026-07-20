@@ -144,7 +144,12 @@ mod tests {
                 credential: b"cred".to_vec(),
             },
         );
-        assert_eq!(s, State::Accepted { credential: b"cred".to_vec() });
+        assert_eq!(
+            s,
+            State::Accepted {
+                credential: b"cred".to_vec()
+            }
+        );
         assert!(out.iter().any(|o| matches!(o, Output::StoreCredential(_))));
     }
 
@@ -217,7 +222,10 @@ pub mod model {
     #[derive(Clone, Debug)]
     pub enum Ev {
         CreateOffer,
-        TransferReceived { issuer_valid: bool, peer_bound: bool },
+        TransferReceived {
+            issuer_valid: bool,
+            peer_bound: bool,
+        },
     }
 
     #[derive(Clone, Debug)]
@@ -229,7 +237,11 @@ pub mod model {
 
     impl Ctx {
         pub fn init() -> Self {
-            Ctx { st: St::Idle, issuer_valid: false, peer_bound: false }
+            Ctx {
+                st: St::Idle,
+                issuer_valid: false,
+                peer_bound: false,
+            }
         }
     }
 
@@ -241,7 +253,10 @@ pub mod model {
                     c.st = St::AwaitingTransfer;
                 }
             }
-            Ev::TransferReceived { issuer_valid, peer_bound } => match c.st {
+            Ev::TransferReceived {
+                issuer_valid,
+                peer_bound,
+            } => match c.st {
                 St::AwaitingTransfer => {
                     if !*issuer_valid {
                         c.st = St::Rejected; // IssuerInvalid

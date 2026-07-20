@@ -425,7 +425,7 @@ pub mod model {
 
     #[derive(Clone, Debug)]
     pub enum Ev {
-        Offer(bool),                       // issuer trusted in-core
+        Offer(bool),                           // issuer trusted in-core
         Token { bound: bool, attested: bool }, // sender-bound token + proof-key attested (WUA High)
         Proof,
         Credential(bool),

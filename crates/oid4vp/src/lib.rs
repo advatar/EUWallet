@@ -94,7 +94,9 @@ impl SubPresentation {
     /// The bytes the device key must sign for this sub-presentation.
     fn signing_input(&self) -> Vec<u8> {
         match self {
-            SubPresentation::SdJwt { kb_signing_input, .. } => kb_signing_input.clone().into_bytes(),
+            SubPresentation::SdJwt {
+                kb_signing_input, ..
+            } => kb_signing_input.clone().into_bytes(),
             SubPresentation::Mdoc { signing_input, .. } => signing_input.clone(),
         }
     }
@@ -514,8 +516,12 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                     } => {
                         let presentation = build_presentation(issuer_jwt, disclosures);
                         let sd_hash = base64url(&env.digest.sha256(presentation.as_bytes()));
-                        let kb_signing_input =
-                            kb_jwt_signing_input(req.nonce, &req.client_id, env.now_epoch, &sd_hash);
+                        let kb_signing_input = kb_jwt_signing_input(
+                            req.nonce,
+                            &req.client_id,
+                            env.now_epoch,
+                            &sd_hash,
+                        );
                         queue.push(SubPresentation::SdJwt {
                             presentation,
                             kb_signing_input,
@@ -612,8 +618,12 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                         payload: None,
                         signature: sig.clone(),
                     };
-                    let device_response =
-                        mdoc::device_response(&doctype, &issuer_signed, &device_namespaces, &device_auth);
+                    let device_response = mdoc::device_response(
+                        &doctype,
+                        &issuer_signed,
+                        &device_namespaces,
+                        &device_auth,
+                    );
                     CompletedPresentation {
                         dcql_id,
                         vp_token: base64url(&device_response),
@@ -638,7 +648,10 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                 // Every credential is signed → assemble the (multi-key) direct_post response.
                 None => {
                     let body = assemble_direct_post_body(&pending.done, pending.state.as_deref());
-                    (State::Presenting, vec![Output::SendVpToken(body.into_bytes())])
+                    (
+                        State::Presenting,
+                        vec![Output::SendVpToken(body.into_bytes())],
+                    )
                 }
             }
         }
@@ -1002,8 +1015,10 @@ mod response_tests {
     #[test]
     fn dcql_response_is_form_encoded_vp_token_object_with_state() {
         // A DCQL request → vp_token is a JSON object keyed by the query id, form-encoded, + state.
-        let body =
-            assemble_direct_post_body(&[entry(Some("pid"), "issuer.jwt~disc~kb.jwt", None)], Some("xyz 123"));
+        let body = assemble_direct_post_body(
+            &[entry(Some("pid"), "issuer.jwt~disc~kb.jwt", None)],
+            Some("xyz 123"),
+        );
         // vp_token value is the JSON object {"pid":"<presentation>"} percent-encoded.
         assert!(body.starts_with("vp_token=%7B%22pid%22%3A%22issuer.jwt~disc~kb.jwt%22%7D"));
         // state is echoed and its space is percent-encoded (never '+').
@@ -1028,8 +1043,14 @@ mod response_tests {
     #[test]
     fn mdoc_response_conveys_generated_nonce_as_companion_field() {
         // An mdoc response carries mdoc_generated_nonce so the verifier can rebuild the transcript.
-        let body =
-            assemble_direct_post_body(&[entry(Some("mdl"), "ZGV2aWNlcmVzcG9uc2U", Some("mgn-abc123"))], None);
+        let body = assemble_direct_post_body(
+            &[entry(
+                Some("mdl"),
+                "ZGV2aWNlcmVzcG9uc2U",
+                Some("mgn-abc123"),
+            )],
+            None,
+        );
         assert!(body.starts_with("vp_token=%7B%22mdl%22%3A%22ZGV2aWNlcmVzcG9uc2U%22%7D"));
         assert!(body.ends_with("&mdoc_generated_nonce=mgn-abc123"));
     }
@@ -1053,7 +1074,10 @@ mod response_tests {
         assert_eq!(obj["pid"], serde_json::json!("issuer.jwt~disc~kb.jwt"));
         assert_eq!(obj["mdl"], serde_json::json!("ZGV2aWNlcmVzcG9uc2U"));
         assert!(body.contains("&state=st-1"));
-        assert!(body.contains("&mdoc_generated_nonce=mgn-xyz"), "the mdoc entry contributes its nonce");
+        assert!(
+            body.contains("&mdoc_generated_nonce=mgn-xyz"),
+            "the mdoc entry contributes its nonce"
+        );
     }
 
     #[test]
@@ -1084,7 +1108,9 @@ mod response_tests {
 
 #[cfg(test)]
 mod internal_tests {
-    use super::{base64url, guards, kb_jwt_signing_input, parse_request, AuthRequest, ResolvedTrust};
+    use super::{
+        base64url, guards, kb_jwt_signing_input, parse_request, AuthRequest, ResolvedTrust,
+    };
     use base64ct::{Base64UrlUnpadded, Encoding};
     use crypto_traits::Alg;
 
@@ -1099,15 +1125,30 @@ mod internal_tests {
 
     #[test]
     fn parse_request_accepts_each_supported_alg() {
-        assert_eq!(parse_request(&req_jws("ES256")).unwrap().request_alg, Alg::Es256);
-        assert_eq!(parse_request(&req_jws("ES384")).unwrap().request_alg, Alg::Es384);
-        assert_eq!(parse_request(&req_jws("EdDSA")).unwrap().request_alg, Alg::EdDsa);
+        assert_eq!(
+            parse_request(&req_jws("ES256")).unwrap().request_alg,
+            Alg::Es256
+        );
+        assert_eq!(
+            parse_request(&req_jws("ES384")).unwrap().request_alg,
+            Alg::Es384
+        );
+        assert_eq!(
+            parse_request(&req_jws("EdDSA")).unwrap().request_alg,
+            Alg::EdDsa
+        );
     }
 
     #[test]
     fn parse_request_rejects_unknown_alg_and_wrong_part_count() {
-        assert!(parse_request(&req_jws("RS256")).is_err(), "unsupported alg must be rejected");
-        assert!(parse_request(b"only.two").is_err(), "a non-3-part JWS must be rejected");
+        assert!(
+            parse_request(&req_jws("RS256")).is_err(),
+            "unsupported alg must be rejected"
+        );
+        assert!(
+            parse_request(b"only.two").is_err(),
+            "a non-3-part JWS must be rejected"
+        );
         assert!(parse_request(b"not-a-jws").is_err());
     }
 
@@ -1120,7 +1161,11 @@ mod internal_tests {
     #[test]
     fn kb_jwt_signing_input_binds_nonce_and_aud() {
         let s = kb_jwt_signing_input(42, "rp.example", 100, "sd-hash");
-        assert_eq!(s.matches('.').count(), 1, "header.payload, no signature yet");
+        assert_eq!(
+            s.matches('.').count(),
+            1,
+            "header.payload, no signature yet"
+        );
         let payload_b64 = s.split('.').nth(1).unwrap();
         let bytes = Base64UrlUnpadded::decode_vec(payload_b64).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -1158,8 +1203,17 @@ mod internal_tests {
             rp_public_key: vec![],
             registered_redirect_uris: vec!["https://rp.example/cb".into()],
         };
-        assert!(guards::redirect_uri_is_registered(&auth_request(Some("https://rp.example/cb")), &trust));
-        assert!(!guards::redirect_uri_is_registered(&auth_request(Some("https://evil.example/cb")), &trust));
-        assert!(guards::redirect_uri_is_registered(&auth_request(None), &trust), "absent redirect is allowed");
+        assert!(guards::redirect_uri_is_registered(
+            &auth_request(Some("https://rp.example/cb")),
+            &trust
+        ));
+        assert!(!guards::redirect_uri_is_registered(
+            &auth_request(Some("https://evil.example/cb")),
+            &trust
+        ));
+        assert!(
+            guards::redirect_uri_is_registered(&auth_request(None), &trust),
+            "absent redirect is allowed"
+        );
     }
 }

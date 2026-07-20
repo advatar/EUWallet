@@ -244,7 +244,12 @@ pub mod model {
 
     impl Ctx {
         pub fn init() -> Self {
-            Ctx { st: St::Idle, seen: Vec::new(), confirmed: None, approved: false }
+            Ctx {
+                st: St::Idle,
+                seen: Vec::new(),
+                confirmed: None,
+                approved: false,
+            }
         }
     }
 
@@ -340,7 +345,11 @@ pub mod transaction_data {
         let credential_ids = v
             .get("credential_ids")
             .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         Some(PaymentTransactionData {
             kind: s("type")?,

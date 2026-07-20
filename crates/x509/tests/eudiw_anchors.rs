@@ -18,7 +18,8 @@ const READER_CA: &[u8] = include_bytes!("vectors/eudiw/r45_staging.der");
 #[test]
 fn eudiw_pid_issuer_cas_are_ingestible_anchors() {
     for (label, der) in [("UT", PID_CA_UT), ("EU", PID_CA_EU)] {
-        let c = parse_cert(der).unwrap_or_else(|e| panic!("{label} PID issuer CA must parse: {e:?}"));
+        let c =
+            parse_cert(der).unwrap_or_else(|e| panic!("{label} PID issuer CA must parse: {e:?}"));
         assert!(c.is_ca, "{label} PID issuer CA has the CA basic-constraint");
         assert!(
             c.subject.contains("PID Issuer CA"),
@@ -26,7 +27,10 @@ fn eudiw_pid_issuer_cas_are_ingestible_anchors() {
             c.subject
         );
         // A usable trust anchor exposes a verification key (EUDI reference issuer CAs are ECDSA).
-        assert!(!c.public_key_raw.is_empty(), "{label} anchor exposes a public key");
+        assert!(
+            !c.public_key_raw.is_empty(),
+            "{label} anchor exposes a public key"
+        );
     }
 }
 

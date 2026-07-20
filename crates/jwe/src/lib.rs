@@ -81,7 +81,9 @@ pub fn encrypt_ecdh_es_a256gcm(
 ) -> Result<String, JweError> {
     let ecdh = agreement.ecdh_es_p256(recipient_public)?;
     if ecdh.ephemeral_public.len() != 65 || ecdh.ephemeral_public[0] != 0x04 {
-        return Err(JweError::Malformed("ephemeral key is not an uncompressed P-256 point"));
+        return Err(JweError::Malformed(
+            "ephemeral key is not an uncompressed P-256 point",
+        ));
     }
     let x = &ecdh.ephemeral_public[1..33];
     let y = &ecdh.ephemeral_public[33..65];
@@ -150,14 +152,18 @@ fn epk_coord(epk: &serde_json::Value, key: &str) -> Result<Vec<u8>, JweError> {
 pub fn parse_compact(compact: &str) -> Result<JweParts, JweError> {
     let seg: Vec<&str> = compact.split('.').collect();
     if seg.len() != 5 {
-        return Err(JweError::Malformed("a compact JWE has exactly five segments"));
+        return Err(JweError::Malformed(
+            "a compact JWE has exactly five segments",
+        ));
     }
     if !seg[1].is_empty() {
-        return Err(JweError::Malformed("ECDH-ES direct requires an empty encrypted_key"));
+        return Err(JweError::Malformed(
+            "ECDH-ES direct requires an empty encrypted_key",
+        ));
     }
     let header_bytes = unb64(seg[0], "bad protected-header base64")?;
-    let header: serde_json::Value =
-        serde_json::from_slice(&header_bytes).map_err(|_| JweError::Malformed("bad header JSON"))?;
+    let header: serde_json::Value = serde_json::from_slice(&header_bytes)
+        .map_err(|_| JweError::Malformed("bad header JSON"))?;
     if header["alg"] != "ECDH-ES" || header["enc"] != "A256GCM" {
         return Err(JweError::Malformed("unsupported JWE alg/enc"));
     }
@@ -193,7 +199,12 @@ pub fn parse_compact(compact: &str) -> Result<JweParts, JweError> {
 impl JweParts {
     /// Open the JWE given the recovered shared secret `Z`: re-derive the CEK via Concat KDF and
     /// AES-256-GCM-decrypt with the protected header as AAD. Fails closed on any tamper.
-    pub fn open(&self, z: &[u8], digest: &dyn Digest, aead: &dyn Aead) -> Result<Vec<u8>, JweError> {
+    pub fn open(
+        &self,
+        z: &[u8],
+        digest: &dyn Digest,
+        aead: &dyn Aead,
+    ) -> Result<Vec<u8>, JweError> {
         let cek = concat_kdf_a256gcm(digest, z, &self.apu, &self.apv);
         let mut ct_and_tag = Vec::with_capacity(self.ciphertext.len() + self.tag.len());
         ct_and_tag.extend_from_slice(&self.ciphertext);
@@ -227,13 +238,18 @@ mod tests {
         )
         .expect("encrypt");
         assert_eq!(jwe.split('.').count(), 5, "five-segment compact JWE");
-        assert!(jwe.contains(".."), "ECDH-ES direct ⇒ empty encrypted_key segment");
+        assert!(
+            jwe.contains(".."),
+            "ECDH-ES direct ⇒ empty encrypted_key segment"
+        );
 
         // The verifier parses, agrees to the same Z with its private key, and opens the response.
         let parts = parse_compact(&jwe).expect("parse");
         assert_eq!(parts.apu, apu, "apu recovered verbatim");
         assert_eq!(parts.apv, apv);
-        let z = recipient.agree(&parts.ephemeral_public).expect("recipient agrees");
+        let z = recipient
+            .agree(&parts.ephemeral_public)
+            .expect("recipient agrees");
         let opened = parts.open(&z, &AwsLc, &AwsLc).expect("open");
         assert_eq!(opened, plaintext, "decrypted plaintext matches");
     }
@@ -242,7 +258,14 @@ mod tests {
     fn a_tampered_ciphertext_fails_closed() {
         let recipient = P256AgreementKey::generate().unwrap();
         let jwe = encrypt_ecdh_es_a256gcm(
-            b"secret", recipient.public_raw(), b"u", b"v", &AwsLc, &AwsLc, &AwsLc, &AwsLc,
+            b"secret",
+            recipient.public_raw(),
+            b"u",
+            b"v",
+            &AwsLc,
+            &AwsLc,
+            &AwsLc,
+            &AwsLc,
         )
         .unwrap();
         // Flip the last character of the ciphertext segment.
@@ -253,7 +276,10 @@ mod tests {
         let tampered = seg.join(".");
         let parts = parse_compact(&tampered).unwrap();
         let z = recipient.agree(&parts.ephemeral_public).unwrap();
-        assert!(parts.open(&z, &AwsLc, &AwsLc).is_err(), "GCM tag rejects tampering");
+        assert!(
+            parts.open(&z, &AwsLc, &AwsLc).is_err(),
+            "GCM tag rejects tampering"
+        );
     }
 
     #[test]
@@ -261,12 +287,22 @@ mod tests {
         let recipient = P256AgreementKey::generate().unwrap();
         let attacker = P256AgreementKey::generate().unwrap();
         let jwe = encrypt_ecdh_es_a256gcm(
-            b"secret", recipient.public_raw(), b"u", b"v", &AwsLc, &AwsLc, &AwsLc, &AwsLc,
+            b"secret",
+            recipient.public_raw(),
+            b"u",
+            b"v",
+            &AwsLc,
+            &AwsLc,
+            &AwsLc,
+            &AwsLc,
         )
         .unwrap();
         let parts = parse_compact(&jwe).unwrap();
         // The attacker agrees with its OWN key → a different Z → wrong CEK → open fails.
         let z = attacker.agree(&parts.ephemeral_public).unwrap();
-        assert!(parts.open(&z, &AwsLc, &AwsLc).is_err(), "only the intended recipient can open");
+        assert!(
+            parts.open(&z, &AwsLc, &AwsLc).is_err(),
+            "only the intended recipient can open"
+        );
     }
 }

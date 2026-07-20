@@ -226,7 +226,10 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(q.requested_claim_paths(), vec!["given_name".to_string(), "birthdate".to_string()]);
+        assert_eq!(
+            q.requested_claim_paths(),
+            vec!["given_name".to_string(), "birthdate".to_string()]
+        );
     }
 
     #[test]
@@ -242,7 +245,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mdl.first_credential_id(), Some("mdl".to_string()));
-        assert_eq!(mdl.requested_doctypes(), vec!["org.iso.18013.5.1.mDL".to_string()]);
+        assert_eq!(
+            mdl.requested_doctypes(),
+            vec!["org.iso.18013.5.1.mDL".to_string()]
+        );
         assert!(mdl.requested_vcts().is_empty());
 
         // from_value parses an equivalent serde_json::Value.

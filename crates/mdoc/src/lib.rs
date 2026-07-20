@@ -429,7 +429,9 @@ impl IssuerSigned {
                 let arr = Value::Array(
                     items
                         .iter()
-                        .map(|it| Value::Tag(24, Box::new(Value::Bytes(it.to_value().to_canonical()))))
+                        .map(|it| {
+                            Value::Tag(24, Box::new(Value::Bytes(it.to_value().to_canonical())))
+                        })
                         .collect(),
                 );
                 (Value::Text(ns.clone()), arr)
@@ -437,7 +439,10 @@ impl IssuerSigned {
             .collect();
         Value::Map(vec![
             (Value::Text("nameSpaces".into()), Value::Map(ns_pairs)),
-            (Value::Text("issuerAuth".into()), self.issuer_auth.to_value()),
+            (
+                Value::Text("issuerAuth".into()),
+                self.issuer_auth.to_value(),
+            ),
         ])
     }
 
@@ -469,9 +474,10 @@ impl IssuerSigned {
             }
             name_spaces.insert(ns, parsed);
         }
-        let issuer_auth_val = map_get(pairs, "issuerAuth").ok_or(MdocError::Malformed("issuerAuth"))?;
-        let issuer_auth =
-            CoseSign1::from_value(issuer_auth_val).map_err(|_| MdocError::Malformed("issuerAuth"))?;
+        let issuer_auth_val =
+            map_get(pairs, "issuerAuth").ok_or(MdocError::Malformed("issuerAuth"))?;
+        let issuer_auth = CoseSign1::from_value(issuer_auth_val)
+            .map_err(|_| MdocError::Malformed("issuerAuth"))?;
         Ok(IssuerSigned {
             name_spaces,
             issuer_auth,
@@ -485,7 +491,8 @@ impl IssuerSigned {
             .payload
             .as_ref()
             .ok_or(MdocError::Malformed("issuerAuth payload"))?;
-        let mso = MobileSecurityObject::from_value(&cbor::from_canonical_slice(&untag24(payload)?)?)?;
+        let mso =
+            MobileSecurityObject::from_value(&cbor::from_canonical_slice(&untag24(payload)?)?)?;
         Ok(mso.doc_type)
     }
 }
@@ -574,7 +581,10 @@ pub fn device_response(
     ]);
     Value::Map(vec![
         (Value::Text("version".into()), Value::Text("1.0".into())),
-        (Value::Text("documents".into()), Value::Array(vec![document])),
+        (
+            Value::Text("documents".into()),
+            Value::Array(vec![document]),
+        ),
         (Value::Text("status".into()), Value::Uint(0)),
     ])
     .to_canonical()

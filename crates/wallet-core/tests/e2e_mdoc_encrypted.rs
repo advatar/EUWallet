@@ -40,7 +40,9 @@ fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
     .to_string()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = operator.sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = operator
+        .sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
@@ -91,7 +93,9 @@ fn sign_encrypted_mdoc_request(rp: &SoftwareSigner, nonce: u64, recipient_pub: &
     .unwrap()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = rp.sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = rp
+        .sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
@@ -135,9 +139,14 @@ fn haip_mdoc_profile_encrypted_device_response_round_trips() {
         doctype: DOCTYPE.into(),
         issuer_signed,
     });
-    core.handle_event(Event::SetClock { epoch: 1_790_000_000 });
-    core.load_trust_list(&signed_trust_list(&trust_operator), trust_operator.public_key_raw())
-        .expect("trust list loads");
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    core.load_trust_list(
+        &signed_trust_list(&trust_operator),
+        trust_operator.public_key_raw(),
+    )
+    .expect("trust list loads");
 
     // Drive the presentation.
     let request = sign_encrypted_mdoc_request(&rp, NONCE, verifier_enc.public_raw());
@@ -154,7 +163,9 @@ fn haip_mdoc_profile_encrypted_device_response_round_trips() {
             _ => None,
         })
         .expect("consent → Sign the DeviceAuth");
-    let sig = device.sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input).unwrap();
+    let sig = device
+        .sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input)
+        .unwrap();
     let fx = core.handle_event(Event::DeviceSignatureProduced { signature: sig });
     let body = fx
         .iter()
@@ -165,30 +176,48 @@ fn haip_mdoc_profile_encrypted_device_response_round_trips() {
         .expect("Http response");
 
     // Encrypted on the wire.
-    assert!(body.starts_with("response="), "encrypted response, got {body}");
-    assert!(!body.contains("vp_token="), "no plaintext vp_token on the wire");
+    assert!(
+        body.starts_with("response="),
+        "encrypted response, got {body}"
+    );
+    assert!(
+        !body.contains("vp_token="),
+        "no plaintext vp_token on the wire"
+    );
     let compact = body.strip_prefix("response=").unwrap();
 
     // ---- VERIFIER: decrypt, recover mdoc_generated_nonce from apu, rebuild transcript, verify. ----
     let parts = jwe::parse_compact(compact).expect("parse JWE");
     let mgn = String::from_utf8(parts.apu.clone()).expect("apu is the mdoc_generated_nonce");
-    assert!(!mgn.is_empty(), "the mdoc_generated_nonce must travel as the JWE apu");
+    assert!(
+        !mgn.is_empty(),
+        "the mdoc_generated_nonce must travel as the JWE apu"
+    );
     let z = verifier_enc.agree(&parts.ephemeral_public).unwrap();
-    let plaintext = parts.open(&z, &AwsLc, &AwsLc).expect("verifier opens the JWE");
+    let plaintext = parts
+        .open(&z, &AwsLc, &AwsLc)
+        .expect("verifier opens the JWE");
     let response: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
 
-    let dr_b64 = response["vp_token"]["mdl"].as_str().expect("DCQL-keyed DeviceResponse");
+    let dr_b64 = response["vp_token"]["mdl"]
+        .as_str()
+        .expect("DCQL-keyed DeviceResponse");
     let dr = cbor::from_canonical_slice(&Base64UrlUnpadded::decode_vec(dr_b64).unwrap()).unwrap();
     let docs = match map_get(&dr, "documents") {
         Some(Value::Array(a)) => a,
         _ => panic!("documents"),
     };
-    assert_eq!(map_get(&docs[0], "docType"), Some(&Value::Text(DOCTYPE.into())));
+    assert_eq!(
+        map_get(&docs[0], "docType"),
+        Some(&Value::Text(DOCTYPE.into()))
+    );
 
     // Rebuild the SessionTranscript from the verifier's own values + the apu-carried mgn.
-    let transcript = oid4vp_session_transcript(&AwsLc, CLIENT_ID, RESPONSE_URI, &NONCE.to_string(), &mgn);
+    let transcript =
+        oid4vp_session_transcript(&AwsLc, CLIENT_ID, RESPONSE_URI, &NONCE.to_string(), &mgn);
     let expected_device_auth =
-        device_authentication_bytes(&transcript, DOCTYPE, &empty_device_namespaces_bytes()).unwrap();
+        device_authentication_bytes(&transcript, DOCTYPE, &empty_device_namespaces_bytes())
+            .unwrap();
 
     let device_signed = map_get(&docs[0], "deviceSigned").unwrap();
     let device_auth = map_get(device_signed, "deviceAuth").unwrap();
@@ -210,5 +239,7 @@ fn haip_mdoc_profile_encrypted_device_response_round_trips() {
     let tbs = cose::sig_structure(&protected, &[], &expected_device_auth);
     AwsLc
         .verify(Alg::Es256, device.public_key_raw(), &tbs, &dsig)
-        .expect("decrypted DeviceResponse verifies against the device key + apu-derived transcript");
+        .expect(
+            "decrypted DeviceResponse verifies against the device key + apu-derived transcript",
+        );
 }

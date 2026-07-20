@@ -162,8 +162,14 @@ fn live_issuance_then_plaintext_presentation_is_rejected() {
     // The authenticated response crossed the verified storage boundary without an out-of-band
     // loader, and all mandatory claims travelled even though only one will be presented.
     let held = shell.core.held_credentials_json();
-    assert!(held.contains("urn:eudi:pid:1"), "issued PID is held: {held}");
-    assert!(held.contains("birthdate"), "mandatory claims travelled: {held}");
+    assert!(
+        held.contains("urn:eudi:pid:1"),
+        "issued PID is held: {held}"
+    );
+    assert!(
+        held.contains("birthdate"),
+        "mandatory claims travelled: {held}"
+    );
 
     // ---- PRESENTATION: the signed request's plaintext HTTP endpoint is rejected before consent. ----
     let outcome = shell.handle(Event::AuthorizationRequestReceived {

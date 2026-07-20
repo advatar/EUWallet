@@ -287,9 +287,8 @@ impl DemoWallet {
             wallet_provider_public_key: self.wallet_provider.public_key_raw().to_vec(),
             issuer_cert_chain: vec![RP_DER.to_vec()],
             issuer_id: "https://issuer.example".into(),
-            offer:
-                br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#
-                    .to_vec(),
+            offer: br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#
+                .to_vec(),
             pid_credential_compact: Self::compact(&pid_jwt, &pid_claims),
             mdl_credential_compact: Self::compact(&mdl_jwt, &mdl_claims),
             passport_credential_compact: Self::compact(&passport_jwt, &passport_claims),
@@ -543,11 +542,7 @@ impl DemoWallet {
     /// The compact SD-JWT serialization (`<issuer-jwt>~<disclosure>~…~`) a pre-authorized issuer
     /// hands back at the `/credential` endpoint — exactly what the live-I/O lifecycle test feeds.
     fn compact(issuer_jwt: &str, by_claim: &BTreeMap<String, String>) -> String {
-        let disclosures = by_claim
-            .values()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("~");
+        let disclosures = by_claim.values().cloned().collect::<Vec<_>>().join("~");
         format!("{issuer_jwt}~{disclosures}~")
     }
 

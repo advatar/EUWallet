@@ -36,7 +36,11 @@ fn bench<R>(name: &str, f: impl Fn() -> R) {
 }
 
 fn main() {
-    let profile = if cfg!(debug_assertions) { "debug (NOT representative — use --release)" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug (NOT representative — use --release)"
+    } else {
+        "release"
+    };
     println!("# Wallet performance benchmarks\n");
     println!("Backend: aws-lc-rs (real crypto). Build profile: {profile}.");
     println!("Sample: auto-sized (~350 ms/bench after 2000-iter warmup). Single-threaded.\n");
@@ -56,24 +60,34 @@ fn main() {
     let key = KeyRef("bench-key".into());
     let payload = b"DeviceAuthenticationBytes-representative-signing-input-0123456789".to_vec();
     bench("ES256 sign (P-256)", || {
-        signer.sign(&key, Alg::Es256, black_box(&payload)).expect("sign")
+        signer
+            .sign(&key, Alg::Es256, black_box(&payload))
+            .expect("sign")
     });
     let sig = signer.sign(&key, Alg::Es256, &payload).expect("sign");
     let pk = signer.public_key_raw().to_vec();
     bench("ES256 verify (P-256)", || {
-        aws.verify(Alg::Es256, &pk, black_box(&payload), &sig).is_ok()
+        aws.verify(Alg::Es256, &pk, black_box(&payload), &sig)
+            .is_ok()
     });
 
     // --- Canonical CBOR (the mdoc/COSE codec hot path) ---
     let item = Value::Map(vec![
         (Value::Text("digestID".into()), Value::Uint(3)),
         (Value::Text("random".into()), Value::Bytes(vec![0x11u8; 16])),
-        (Value::Text("elementIdentifier".into()), Value::Text("family_name".into())),
-        (Value::Text("elementValue".into()), Value::Text("Andersson".into())),
+        (
+            Value::Text("elementIdentifier".into()),
+            Value::Text("family_name".into()),
+        ),
+        (
+            Value::Text("elementValue".into()),
+            Value::Text("Andersson".into()),
+        ),
     ]);
-    bench("Canonical CBOR encode (IssuerSignedItem-shaped map)", || {
-        black_box(&item).to_canonical()
-    });
+    bench(
+        "Canonical CBOR encode (IssuerSignedItem-shaped map)",
+        || black_box(&item).to_canonical(),
+    );
 
     // --- SD-JWT VC structural parse (combined serialization split + shape checks) ---
     let compact = format!(
@@ -88,6 +102,10 @@ fn main() {
         sdjwt::SdJwtVc::parse(black_box(&compact)).expect("parse")
     });
 
-    println!("\nNote: these are core-operation micro-benchmarks. End-to-end flow latency is dominated");
-    println!("by the ES256 operations above plus a single TLS round-trip (platform), not by parsing.");
+    println!(
+        "\nNote: these are core-operation micro-benchmarks. End-to-end flow latency is dominated"
+    );
+    println!(
+        "by the ES256 operations above plus a single TLS round-trip (platform), not by parsing."
+    );
 }
