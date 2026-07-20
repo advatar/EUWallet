@@ -152,6 +152,9 @@ operational solution needed to enter those processes.
   - [x] Make transaction-log append and restoration bounded and fallible; atomically reject
         non-canonical chains unless they match an externally anchored head before any durable
         wallet-state schema can import audit history.
+  - [ ] Add the iOS WalletShell encrypted dual-slot storage primitive with strict bounded envelopes,
+        a Keychain generation/digest anchor, compare-and-swap commits, backup/file-protection policy
+        and crash/tamper tests; Core serialization and lifecycle wiring remain separate work.
   - [ ] Restore only bounded authenticated holdings, replay state and audit data through current
         trust/WUA/device-key revalidation; never revive pending operations or protocol sessions.
   - [ ] Add atomic, rollback-detecting, device-bound iOS and Android stores with backup exclusion,
