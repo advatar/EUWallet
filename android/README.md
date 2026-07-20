@@ -10,6 +10,8 @@ an Android UI, a generated UniFFI/JNI bridge, or approved national-wallet servic
   Kotlin/JVM 17 configuration, `compileSdk 36`, and `minSdk 31`.
 - A narrow `WalletEngineDriving` JSON boundary and closed Kotlin mirrors of every current Rust
   `Effect` and `ScreenDescription` variant. `WalletEventJson` covers every current Rust `Event`.
+- A `StatusListResolver` boundary that returns the provider certificate chain and enforces the
+  Rust core's two-MiB Token Status List cap before forwarding an authenticated-status event.
 - `EffectExecutor`, which drains effect cascades and converts only successful operations into
   follow-up events. Core invocation/decoding, trust, rendering, storage, signing, transport,
   non-2xx status, missing adapters, and unsupported effects are terminal typed failures. No

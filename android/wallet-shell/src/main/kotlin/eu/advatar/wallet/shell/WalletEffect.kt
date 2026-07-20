@@ -27,6 +27,8 @@ sealed interface WalletEffect {
 
     data class RequestCredential(val proofJwt: ByteArray) : WalletEffect
 
+    data class FetchStatusList(val uri: String) : WalletEffect
+
     data class PublishTransferOffer(val offeredKey: ByteArray) : WalletEffect
 
     data object Close : WalletEffect
@@ -82,6 +84,7 @@ object WalletEffectDecoder {
         "promptTxCode" -> WalletEffect.PromptTxCode
         "requestToken" -> WalletEffect.RequestToken
         "requestCredential" -> WalletEffect.RequestCredential(bytes(value, "proofJwt"))
+        "fetchStatusList" -> WalletEffect.FetchStatusList(string(value, "uri"))
         "publishTransferOffer" -> WalletEffect.PublishTransferOffer(bytes(value, "offeredKey"))
         "close" -> WalletEffect.Close
         else -> malformed("unknown effect type: $type")

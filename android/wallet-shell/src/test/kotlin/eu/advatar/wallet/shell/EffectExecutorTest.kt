@@ -190,6 +190,69 @@ class EffectExecutorTest {
         }
     }
 
+    @Test
+    fun statusListFetchReturnsTokenAndProviderChainToCore() {
+        val engine = RecordingEngine { event ->
+            if (event.contains("statusListReceived")) {
+                "[{\"type\":\"close\"}]"
+            } else {
+                "[{\"type\":\"fetchStatusList\",\"uri\":\"https://status.example/list\"}]"
+            }
+        }
+        val resolver = StatusListResolver { uri ->
+            assertEquals("https://status.example/list", uri)
+            StatusListResolution(
+                response = HttpResponse(200, byteArrayOf(1, 2, 3)),
+                providerCertificateChain = listOf(byteArrayOf(4, 5)),
+            )
+        }
+
+        makeExecutor(engine = engine, statusLists = resolver).send("{\"type\":\"start\"}")
+
+        val event = engine.events.single { it.contains("statusListReceived") }
+        assertTrue(event.contains("\"httpStatus\":200"))
+        assertTrue(event.contains("\"token\":[1,2,3]"))
+        assertTrue(event.contains("\"providerCertChain\":[[4,5]]"))
+    }
+
+    @Test
+    fun missingFailedAndOversizedStatusResolversDriveExplicitFailure() {
+        val resolvers = listOf<StatusListResolver?>(
+            null,
+            StatusListResolver { throw ExpectedFailure() },
+            StatusListResolver {
+                StatusListResolution(
+                    response = HttpResponse(200, ByteArray(2 * 1_024 * 1_024 + 1)),
+                    providerCertificateChain = listOf(byteArrayOf(1)),
+                )
+            },
+            StatusListResolver {
+                StatusListResolution(
+                    response = HttpResponse(100_000, byteArrayOf(1)),
+                    providerCertificateChain = listOf(byteArrayOf(1)),
+                )
+            },
+        )
+
+        resolvers.forEach { resolver ->
+            val engine = RecordingEngine { event ->
+                if (event.contains("statusListReceived")) {
+                    "[{\"type\":\"close\"}]"
+                } else {
+                    "[{\"type\":\"fetchStatusList\",\"uri\":\"https://status.example/list\"}]"
+                }
+            }
+
+            makeExecutor(engine = engine, statusLists = resolver).send("{\"type\":\"start\"}")
+
+            val event = engine.events.single { it.contains("statusListReceived") }
+            assertTrue(event.contains("\"httpStatus\":0"))
+            assertTrue(event.contains("\"token\":[]"))
+            assertTrue(event.contains("\"providerCertChain\":[]"))
+            assertNoFabricatedOutcome(engine)
+        }
+    }
+
     private fun makeExecutor(
         engine: RecordingEngine,
         signer: WalletSigner = WalletSigner { _, _ -> byteArrayOf(1) },
@@ -197,6 +260,7 @@ class EffectExecutorTest {
         storage: WalletStorage = WalletStorage { _, _ -> },
         trust: TrustResolver = TrustResolver { TrustResolution(emptyList(), emptyList()) },
         renderer: ScreenRenderer = ScreenRenderer { },
+        statusLists: StatusListResolver? = null,
     ): EffectExecutor = EffectExecutor(
         engine = engine,
         signer = signer,
@@ -204,6 +268,7 @@ class EffectExecutorTest {
         storage = storage,
         trustResolver = trust,
         renderer = renderer,
+        statusListResolver = statusLists,
     )
 
     private fun assertNoFabricatedOutcome(engine: RecordingEngine) {

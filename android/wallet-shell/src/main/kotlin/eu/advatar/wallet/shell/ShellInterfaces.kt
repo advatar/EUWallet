@@ -45,3 +45,13 @@ interface IssuerResponder {
 
     fun credential(proofJwt: ByteArray): CredentialResult
 }
+
+data class StatusListResolution(
+    val response: HttpResponse,
+    val providerCertificateChain: List<ByteArray>,
+)
+
+/** Fetches a Token Status List and the status provider's leaf-first certificate chain. */
+fun interface StatusListResolver {
+    fun fetch(uri: String): StatusListResolution
+}

@@ -96,6 +96,21 @@ object WalletEventJson {
         .put("bytes", byteArray(result.bytes))
         .toString()
 
+    fun statusListReceived(
+        uri: String,
+        httpStatus: Int,
+        token: ByteArray,
+        providerCertificateChain: List<ByteArray>,
+    ): String = event("statusListReceived")
+        .put("uri", uri)
+        .put("httpStatus", httpStatus)
+        .put("token", byteArray(token))
+        .put(
+            "providerCertChain",
+            JSONArray().apply { providerCertificateChain.forEach { put(byteArray(it)) } },
+        )
+        .toString()
+
     fun walletTransferOfferCreated(): String = event("walletTransferOfferCreated").toString()
 
     fun walletTransferReceived(

@@ -21,17 +21,22 @@ class WalletEffectDecoderTest {
                 {"type":"promptTxCode"},
                 {"type":"requestToken"},
                 {"type":"requestCredential","proofJwt":[2]},
+                {"type":"fetchStatusList","uri":"https://status.example/list"},
                 {"type":"publishTransferOffer","offeredKey":[3]},
                 {"type":"close"}
             ]""".trimIndent(),
         )
 
-        assertEquals(12, effects.size)
+        assertEquals(13, effects.size)
         assertEquals(ULong.MAX_VALUE, (effects[1] as WalletEffect.PersistNonce).nonce)
         val screen = (effects[2] as WalletEffect.Render).screen as WalletScreen.Consent
         assertEquals("RP", screen.relyingPartyName)
         assertEquals(listOf("age_over_18"), screen.requestedClaims)
         assertArrayEquals(byteArrayOf(0, 127, -1), (effects[3] as WalletEffect.Sign).payload)
+        assertEquals(
+            "https://status.example/list",
+            (effects[10] as WalletEffect.FetchStatusList).uri,
+        )
         assertTrue(effects.last() is WalletEffect.Close)
     }
 

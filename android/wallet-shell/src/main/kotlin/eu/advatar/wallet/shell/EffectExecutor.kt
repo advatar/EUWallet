@@ -14,6 +14,7 @@ class EffectExecutor(
     private val trustResolver: TrustResolver,
     private val renderer: ScreenRenderer,
     private val issuerResponder: IssuerResponder? = null,
+    private val statusListResolver: StatusListResolver? = null,
 ) {
     fun send(eventJson: String) {
         val queue = ArrayDeque(invokeCore(eventJson))
@@ -95,6 +96,7 @@ class EffectExecutor(
             )
             WalletEventJson.credentialReceived(result)
         }
+        is WalletEffect.FetchStatusList -> statusListResult(effect.uri)
         WalletEffect.PushPar -> unsupported("pushPar")
         WalletEffect.OpenAuthBrowser -> unsupported("openAuthBrowser")
         WalletEffect.PromptTxCode -> unsupported("promptTxCode")
@@ -126,7 +128,36 @@ class EffectExecutor(
 
     private fun issuerFailure(error: Exception) = WalletShellException.IssuerFailure(error)
 
+    private fun statusListResult(uri: String): String {
+        val resolution = try {
+            statusListResolver?.fetch(uri)
+        } catch (_: Exception) {
+            null
+        }
+        val response = resolution?.response
+        val validStatus = response != null && response.statusCode in 0..UShort.MAX_VALUE.toInt()
+        val validBody = response != null && response.body.size <= MAX_STATUS_LIST_TOKEN_BYTES
+        return if (resolution != null && response != null && validStatus && validBody) {
+            WalletEventJson.statusListReceived(
+                uri = uri,
+                httpStatus = response.statusCode,
+                token = response.body,
+                providerCertificateChain = resolution.providerCertificateChain,
+            )
+        } else {
+            // Drive Rust's explicit status-unavailable terminal transition. Never translate a
+            // missing adapter, transport error, invalid status, or oversized body into consent.
+            WalletEventJson.statusListReceived(
+                uri = uri,
+                httpStatus = 0,
+                token = ByteArray(0),
+                providerCertificateChain = emptyList(),
+            )
+        }
+    }
+
     private companion object {
         const val MAX_EFFECTS_PER_CASCADE = 1_024
+        const val MAX_STATUS_LIST_TOKEN_BYTES = 2 * 1_024 * 1_024
     }
 }
