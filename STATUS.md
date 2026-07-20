@@ -47,7 +47,8 @@ operational solution needed to enter those processes.
   - [x] Require and emit canonical CBOR tag-0 RFC 3339 `tdate` validity values, with malformed
         date/tag rejection and genuine-style fixtures.
   - [x] Bind mandatory mdoc catalogue claims to the exact doctype, namespace and element.
-  - [ ] Preserve validated COSE label 33 `x5chain` header values without treating them as trust.
+  - [x] Preserve structurally validated COSE label 33 `x5chain` header values without treating
+        them as trust.
   - [ ] Route the embedded issuer chain through the approved EUDI trust/path-validation profile.
 - [ ] Add flow operation IDs, explicit terminal outcomes and recoverable failure/cancel transitions.
 - [ ] Harden QR/deep-link and protocol networking with HTTPS-only URL policy, bounded responses,
