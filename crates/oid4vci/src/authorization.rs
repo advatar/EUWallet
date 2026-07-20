@@ -2,18 +2,18 @@
 //!
 //! This module is sans-I/O. It emits typed requests for a native shell and does not establish
 //! PID-provider trust, mint Wallet Attestations, or perform signing. HAIP client authentication
-//! and RFC 9449 DPoP are deliberately separate: PAR and token requests both require fresh
-//! `OAuth-Client-Attestation` / `OAuth-Client-Attestation-PoP` material, while only the token
-//! request carries a DPoP proof. The future WIA/KA integration must satisfy the attestation
-//! acquisition effect; accepting an untrusted or self-asserted Wallet Attestation is not part of
-//! this boundary.
+//! and RFC 9449 DPoP are deliberately separate. A backend supplies only the Wallet Attestation;
+//! this core validates its bounded public claims and `cnf` binding, then constructs a fresh
+//! draft-07 Client Attestation PoP and asks the native shell to sign it with the bound WSCD key.
+//! The backend never receives the Authorization Server, endpoint, challenge, or PoP signing input.
 
 use crate::bounded_json::{self, JsonBoundaryError, JsonLimits};
 use crate::foundation::{
     CredentialOffer, GermanPidIssuancePlan, HttpsEndpoint, HttpsIdentifier, OpaqueValue,
+    MAX_PREFERRED_CLIENT_STATUS_PERIOD_SECONDS,
 };
-use base64ct::{Base64UrlUnpadded, Encoding};
-use crypto_traits::{Alg, Digest, KeyRef, Random};
+use base64ct::{Base64, Base64UrlUnpadded, Encoding};
+use crypto_traits::{Alg, Digest, KeyRef, Random, Verifier};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -29,6 +29,15 @@ pub const MAX_REQUEST_URI_BYTES: usize = 2_048;
 pub const MAX_AUTHORIZATION_CODE_BYTES: usize = 4_096;
 pub const MAX_WALLET_ATTESTATION_BYTES: usize = 32 * 1024;
 pub const MAX_WALLET_ATTESTATION_POP_BYTES: usize = 16 * 1024;
+pub const MAX_WALLET_ATTESTATION_X5C_CERTIFICATES: usize = 8;
+pub const MAX_WALLET_ATTESTATION_X5C_CERTIFICATE_BYTES: usize = 16 * 1024;
+pub const MAX_WALLET_NAME_BYTES: usize = 512;
+pub const MAX_WALLET_VERSION_BYTES: usize = 128;
+pub const MAX_WALLET_SOLUTION_CERTIFICATION_INFORMATION_BYTES: usize = 8 * 1024;
+pub const MAX_TOKEN_STATUS_LIST_INDEX: u64 = u32::MAX as u64;
+pub const MAX_ATTESTATION_CHALLENGE_BYTES: usize = 2_048;
+pub const MAX_ATTESTATION_CHALLENGE_RESPONSE_BYTES: usize = 16 * 1024;
+pub const MAX_CLIENT_ATTESTATION_POP_SIGNING_INPUT_BYTES: usize = 16 * 1024;
 pub const MAX_DPOP_NONCE_BYTES: usize = 2_048;
 pub const MAX_DPOP_SIGNING_INPUT_BYTES: usize = 16 * 1024;
 pub const MAX_ACCESS_TOKEN_BYTES: usize = 8 * 1024;
@@ -39,6 +48,17 @@ pub const MAX_PAR_RESPONSE_BYTES: usize = 16 * 1024;
 pub const MAX_CALLBACK_QUERY_BYTES: usize = 16 * 1024;
 pub const MAX_PAR_EXPIRES_IN_SECONDS: u64 = 599;
 pub const MAX_DPOP_NONCE_RETRIES: u8 = 2;
+pub const MAX_CLIENT_ATTESTATION_RETRIES: u8 = 2;
+pub const MAX_WALLET_ATTESTATION_LIFETIME_SECONDS: i64 = 24 * 60 * 60;
+pub const MIN_CLIENT_STATUS_MAINTENANCE_SECONDS: u64 = 31 * 24 * 60 * 60;
+pub const CLOCK_SKEW_SECONDS: i64 = 60;
+
+const ATTESTATION_CHALLENGE_JSON_LIMITS: JsonLimits = JsonLimits {
+    max_bytes: MAX_ATTESTATION_CHALLENGE_RESPONSE_BYTES,
+    max_depth: 4,
+    max_container_entries: 32,
+    max_string_bytes: 4 * 1024,
+};
 
 const PAR_JSON_LIMITS: JsonLimits = JsonLimits {
     max_bytes: MAX_PAR_RESPONSE_BYTES,
@@ -51,6 +71,13 @@ const TOKEN_JSON_LIMITS: JsonLimits = JsonLimits {
     max_bytes: MAX_TOKEN_RESPONSE_BYTES,
     max_depth: 12,
     max_container_entries: 128,
+    max_string_bytes: 8 * 1024,
+};
+
+const WALLET_ATTESTATION_JSON_LIMITS: JsonLimits = JsonLimits {
+    max_bytes: MAX_WALLET_ATTESTATION_BYTES,
+    max_depth: 8,
+    max_container_entries: 64,
     max_string_bytes: 8 * 1024,
 };
 
@@ -67,6 +94,13 @@ pub enum AuthorizationError {
     ClientAuthenticationBindingMismatch,
     ClientAuthenticationInvalid,
     ClientAuthenticationReused,
+    ClientAuthenticationReservationMismatch,
+    ClientAuthenticationReservationRejected,
+    AttestationChallengeInvalid,
+    AttestationChallengeStale,
+    AttestationChallengeRetryLimit,
+    ClientAttestationPopSigningResultMismatch,
+    ClientAttestationPopSignatureInvalid,
     DpopSigningResultMismatch,
     DpopSignatureInvalid,
     DpopNonceInvalid,
@@ -74,6 +108,7 @@ pub enum AuthorizationError {
     DpopNonceRetryLimit,
     TransportBindingMismatch,
     InvalidMediaType,
+    InvalidContentEncoding,
     CachePolicyMissing,
     InvalidParResponse,
     ParRejected,
@@ -96,7 +131,10 @@ pub enum EndpointPurpose {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlowStatus {
-    AwaitingClientAuthentication(EndpointPurpose),
+    AwaitingAttestationChallenge(EndpointPurpose),
+    AwaitingWalletAttestation(EndpointPurpose),
+    AwaitingWalletAttestationUsageReservation(EndpointPurpose),
+    AwaitingClientAttestationPopSignature(EndpointPurpose),
     AwaitingDpopSignature,
     AwaitingParResponse,
     AwaitingAuthorization,
@@ -185,10 +223,16 @@ impl fmt::Debug for SecretString {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Es256PublicJwk {
     x: String,
     y: String,
+}
+
+impl fmt::Debug for Es256PublicJwk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Es256PublicJwk([REDACTED])")
+    }
 }
 
 impl Es256PublicJwk {
@@ -216,6 +260,21 @@ impl Es256PublicJwk {
             self.x, self.y
         );
         base64url(&digest.sha256(canonical.as_bytes()))
+    }
+
+    fn uncompressed_point(&self) -> Result<[u8; 65], AuthorizationError> {
+        let x = Base64UrlUnpadded::decode_vec(&self.x)
+            .map_err(|_| AuthorizationError::InvalidConfiguration)?;
+        let y = Base64UrlUnpadded::decode_vec(&self.y)
+            .map_err(|_| AuthorizationError::InvalidConfiguration)?;
+        if x.len() != 32 || y.len() != 32 {
+            return Err(AuthorizationError::InvalidConfiguration);
+        }
+        let mut point = [0u8; 65];
+        point[0] = 0x04;
+        point[1..33].copy_from_slice(&x);
+        point[33..].copy_from_slice(&y);
+        Ok(point)
     }
 }
 
@@ -261,7 +320,66 @@ impl fmt::Debug for DpopKeyBinding {
         formatter
             .debug_struct("DpopKeyBinding")
             .field("key_ref", &"[REDACTED]")
-            .field("public_jwk", &self.public_jwk)
+            .field("public_jwk", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// The locally generated Client Instance Key bound into the backend-issued Wallet Attestation.
+/// Its private key remains behind the opaque WSCD key reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalletAttestationUsagePolicy {
+    /// A WIA may authorize only one credential-issuance session in total.
+    ///
+    /// TS3's optional per-provider status-entry reuse requires a durable provider-to-status-entry
+    /// entitlement mapping and an explicit privacy-policy disclosure. That optional mode is not
+    /// represented until both contracts can be supplied; callers therefore cannot accidentally
+    /// select hash-only reuse that would not satisfy TS3.
+    SingleIssuance,
+}
+
+pub struct ClientAttestationKeyBinding {
+    authorization_server: HttpsIdentifier,
+    credential_issuer: HttpsIdentifier,
+    key_ref: KeyRef,
+    public_jwk: Es256PublicJwk,
+    usage_policy: WalletAttestationUsagePolicy,
+}
+
+impl ClientAttestationKeyBinding {
+    pub fn new(
+        authorization_server: &str,
+        credential_issuer: &str,
+        key_ref: KeyRef,
+        public_jwk: Es256PublicJwk,
+        usage_policy: WalletAttestationUsagePolicy,
+    ) -> Result<Self, AuthorizationError> {
+        if !valid_bounded_text(&key_ref.0, 1_024, false) {
+            return Err(AuthorizationError::InvalidConfiguration);
+        }
+        let authorization_server = HttpsIdentifier::parse(authorization_server)
+            .map_err(|_| AuthorizationError::InvalidConfiguration)?;
+        let credential_issuer = HttpsIdentifier::parse(credential_issuer)
+            .map_err(|_| AuthorizationError::InvalidConfiguration)?;
+        Ok(Self {
+            authorization_server,
+            credential_issuer,
+            key_ref,
+            public_jwk,
+            usage_policy,
+        })
+    }
+}
+
+impl fmt::Debug for ClientAttestationKeyBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientAttestationKeyBinding")
+            .field("authorization_server", &"[REDACTED]")
+            .field("credential_issuer", &"[REDACTED]")
+            .field("key_ref", &"[REDACTED]")
+            .field("public_jwk", &"[REDACTED]")
+            .field("usage_policy", &self.usage_policy)
             .finish()
     }
 }
@@ -277,11 +395,14 @@ pub struct AuthorizationFlowConfig {
     authorization_endpoint: HttpsEndpoint,
     token_endpoint: HttpsEndpoint,
     par_endpoint: HttpsEndpoint,
+    attestation_challenge_endpoint: Option<HttpsEndpoint>,
+    preferred_client_status_period: Option<u64>,
     scope: String,
     client_id: String,
     redirect_uri: HttpsIdentifier,
     issuer_state: Option<SecretString>,
     dpop_key: DpopKeyBinding,
+    client_attestation_key: ClientAttestationKeyBinding,
 }
 
 impl fmt::Debug for AuthorizationFlowConfig {
@@ -296,11 +417,20 @@ impl fmt::Debug for AuthorizationFlowConfig {
             .field("authorization_endpoint", &self.authorization_endpoint)
             .field("token_endpoint", &self.token_endpoint)
             .field("par_endpoint", &self.par_endpoint)
+            .field(
+                "attestation_challenge_endpoint",
+                &self.attestation_challenge_endpoint,
+            )
+            .field(
+                "preferred_client_status_period",
+                &self.preferred_client_status_period,
+            )
             .field("scope", &self.scope)
             .field("client_id", &self.client_id)
             .field("redirect_uri", &self.redirect_uri)
             .field("issuer_state", &"[REDACTED]")
             .field("dpop_key", &self.dpop_key)
+            .field("client_attestation_key", &self.client_attestation_key)
             .finish()
     }
 }
@@ -312,6 +442,7 @@ impl AuthorizationFlowConfig {
         client_id: &str,
         redirect_uri: &str,
         dpop_key: DpopKeyBinding,
+        client_attestation_key: ClientAttestationKeyBinding,
     ) -> Result<Self, AuthorizationError> {
         if offer.credential_issuer != plan.credential_issuer
             || !offer.authorization_code_eligible()
@@ -336,6 +467,7 @@ impl AuthorizationFlowConfig {
             client_id,
             redirect_uri,
             dpop_key,
+            client_attestation_key,
         )
     }
 
@@ -345,8 +477,14 @@ impl AuthorizationFlowConfig {
         client_id: &str,
         redirect_uri: &str,
         dpop_key: DpopKeyBinding,
+        client_attestation_key: ClientAttestationKeyBinding,
     ) -> Result<Self, AuthorizationError> {
-        if !valid_bounded_text(client_id, MAX_CLIENT_ID_BYTES, false) || !valid_scope(&plan.scope) {
+        if !valid_bounded_text(client_id, MAX_CLIENT_ID_BYTES, false)
+            || !valid_scope(&plan.scope)
+            || plan
+                .preferred_client_status_period
+                .is_some_and(|period| period > MAX_PREFERRED_CLIENT_STATUS_PERIOD_SECONDS)
+        {
             return Err(AuthorizationError::InvalidConfiguration);
         }
         let redirect_uri = HttpsIdentifier::parse(redirect_uri)
@@ -356,6 +494,13 @@ impl AuthorizationFlowConfig {
         }
         if plan.authorization_endpoint.as_str().contains('?') {
             // The browser request is deliberately restricted to exactly client_id + request_uri.
+            return Err(AuthorizationError::InvalidConfiguration);
+        }
+        if dpop_key.key_ref == client_attestation_key.key_ref
+            || dpop_key.public_jwk == client_attestation_key.public_jwk
+            || client_attestation_key.authorization_server != plan.authorization_server
+            || client_attestation_key.credential_issuer != plan.credential_issuer
+        {
             return Err(AuthorizationError::InvalidConfiguration);
         }
         let issuer_state = issuer_state
@@ -377,38 +522,27 @@ impl AuthorizationFlowConfig {
             authorization_endpoint: plan.authorization_endpoint.clone(),
             token_endpoint: plan.token_endpoint.clone(),
             par_endpoint: plan.pushed_authorization_request_endpoint.clone(),
+            attestation_challenge_endpoint: plan.attestation_challenge_endpoint.clone(),
+            preferred_client_status_period: plan.preferred_client_status_period,
             scope: plan.scope.clone(),
             client_id: client_id.to_owned(),
             redirect_uri,
             issuer_state,
             dpop_key,
+            client_attestation_key,
         })
     }
 }
 
-/// The shell must obtain fresh Wallet Attestation client-auth material for this exact request.
-/// `audience` is the selected Authorization Server identifier; `endpoint` and method bind the PoP
-/// JWT request. The WIA slice is responsible for producing and validating these JWTs.
-pub struct WalletClientAuthenticationRequest {
+/// Draft-07 challenge retrieval is an unauthenticated POST with no request body.
+pub struct AttestationChallengeRequest {
     request_id: CorrelationId,
-    purpose: EndpointPurpose,
-    client_id: String,
-    audience: String,
     endpoint: String,
 }
 
-impl WalletClientAuthenticationRequest {
+impl AttestationChallengeRequest {
     pub fn request_id(&self) -> CorrelationId {
         self.request_id
-    }
-    pub fn purpose(&self) -> EndpointPurpose {
-        self.purpose
-    }
-    pub fn client_id(&self) -> &str {
-        &self.client_id
-    }
-    pub fn audience(&self) -> &str {
-        &self.audience
     }
     pub fn endpoint(&self) -> &str {
         &self.endpoint
@@ -416,69 +550,296 @@ impl WalletClientAuthenticationRequest {
     pub fn method(&self) -> &'static str {
         "POST"
     }
+    pub fn accept(&self) -> &'static str {
+        "application/json"
+    }
+    pub fn accept_encoding(&self) -> &'static str {
+        "identity"
+    }
 }
 
-impl fmt::Debug for WalletClientAuthenticationRequest {
+impl fmt::Debug for AttestationChallengeRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("WalletClientAuthenticationRequest")
+            .debug_struct("AttestationChallengeRequest")
             .field("request_id", &self.request_id)
-            .field("purpose", &self.purpose)
-            .field("client_id", &self.client_id)
-            .field("audience", &self.audience)
             .field("endpoint", &self.endpoint)
             .field("method", &"POST")
             .finish()
     }
 }
 
-/// Fresh, externally minted Wallet Attestation client authentication. Binding fields are repeated
-/// so stale results from another flow or endpoint are rejected before a request is emitted.
-pub struct WalletClientAuthentication {
+/// Backend request for one Wallet Attestation bound to a locally generated Client Instance Key.
+///
+/// The stable local `KeyRef`, Authorization Server, Credential Issuer, and issuance-session
+/// identifier are intentionally absent. The backend receives only the public key and the minimum
+/// profile information needed to mint or select a conforming WIA. In particular, it cannot use
+/// this request to serialize or persist a hardware key handle.
+pub struct WalletAttestationRequest {
     request_id: CorrelationId,
-    purpose: EndpointPurpose,
     client_id: String,
-    audience: String,
-    endpoint: String,
-    attestation: SecretString,
-    proof_of_possession: SecretString,
+    public_jwk: Es256PublicJwk,
+    force_fresh_attestation: bool,
+    required_client_status_period_seconds: u64,
 }
 
-impl WalletClientAuthentication {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        request_id: CorrelationId,
-        purpose: EndpointPurpose,
-        client_id: &str,
-        audience: &str,
-        endpoint: &str,
-        attestation: &str,
-        proof_of_possession: &str,
+impl WalletAttestationRequest {
+    pub fn request_id(&self) -> CorrelationId {
+        self.request_id
+    }
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+    pub fn public_jwk(&self) -> &Es256PublicJwk {
+        &self.public_jwk
+    }
+    pub fn force_fresh_attestation(&self) -> bool {
+        self.force_fresh_attestation
+    }
+    /// Effective TS3 lower bound, including the unconditional 31-day floor and any larger
+    /// Credential Issuer metadata preference.
+    pub fn required_client_status_period_seconds(&self) -> u64 {
+        self.required_client_status_period_seconds
+    }
+    /// TS3 requires a WIA's technical lifetime to be strictly less than this value. If the
+    /// optional JWT `iat` claim is absent, the Wallet Provider still has to enforce this issuance
+    /// contract; the recipient independently bounds the remaining lifetime.
+    pub fn lifetime_must_be_less_than_seconds(&self) -> u64 {
+        MAX_WALLET_ATTESTATION_LIFETIME_SECONDS as u64
+    }
+}
+
+impl fmt::Debug for WalletAttestationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WalletAttestationRequest")
+            .field("request_id", &self.request_id)
+            .field("client_id", &"[REDACTED]")
+            .field("public_jwk", &"[REDACTED]")
+            .field("force_fresh_attestation", &self.force_fresh_attestation)
+            .field(
+                "required_client_status_period_seconds",
+                &self.required_client_status_period_seconds,
+            )
+            .finish()
+    }
+}
+
+/// Opaque identifier for one credential-issuance session. It is generated inside the core and is
+/// shared only with the local durable WIA-usage ledger.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct WalletAttestationIssuanceId([u8; 32]);
+
+impl WalletAttestationIssuanceId {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for WalletAttestationIssuanceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("WalletAttestationIssuanceId([REDACTED])")
+    }
+}
+
+/// Request to an application-owned, process-durable atomic WIA usage ledger.
+///
+/// Before returning a committed result, the ledger MUST atomically bind both the WIA hash and its
+/// canonical status-entry hash to the exact provider and issuance session. `SingleIssuance`
+/// permits only a first reservation of either hash (apart from an idempotent replay of the same
+/// provider/session). Existing records with a different provider, session, or policy MUST be
+/// rejected. This prevents minting a differently signed WIA that silently reuses the same status
+/// entry across issuance sessions.
+/// The core does not emit the WIA in PAR or Token traffic before it receives that durable commit.
+pub struct WalletAttestationUsageReservationRequest {
+    request_id: CorrelationId,
+    wallet_attestation_hash: [u8; 32],
+    client_status_reference_hash: [u8; 32],
+    credential_issuer: HttpsIdentifier,
+    authorization_server: HttpsIdentifier,
+    issuance_id: WalletAttestationIssuanceId,
+    policy: WalletAttestationUsagePolicy,
+}
+
+impl WalletAttestationUsageReservationRequest {
+    pub fn request_id(&self) -> CorrelationId {
+        self.request_id
+    }
+    pub fn wallet_attestation_hash(&self) -> &[u8; 32] {
+        &self.wallet_attestation_hash
+    }
+    pub fn client_status_reference_hash(&self) -> &[u8; 32] {
+        &self.client_status_reference_hash
+    }
+    pub fn credential_issuer(&self) -> &str {
+        self.credential_issuer.as_str()
+    }
+    pub fn authorization_server(&self) -> &str {
+        self.authorization_server.as_str()
+    }
+    pub fn issuance_id(&self) -> WalletAttestationIssuanceId {
+        self.issuance_id
+    }
+    pub fn policy(&self) -> WalletAttestationUsagePolicy {
+        self.policy
+    }
+}
+
+impl fmt::Debug for WalletAttestationUsageReservationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WalletAttestationUsageReservationRequest")
+            .field("request_id", &self.request_id)
+            .field("wallet_attestation_hash", &"[REDACTED]")
+            .field("client_status_reference_hash", &"[REDACTED]")
+            .field("credential_issuer", &"[REDACTED]")
+            .field("authorization_server", &"[REDACTED]")
+            .field("issuance_id", &self.issuance_id)
+            .field("policy", &self.policy)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WalletAttestationUsageReservationDecision {
+    Committed,
+    Rejected,
+}
+
+/// Exact acknowledgement from the durable WIA-usage ledger. Construct this only after the ledger
+/// transaction has durably committed, or use `rejected` on any conflict/storage failure.
+pub struct WalletAttestationUsageReservationResult {
+    request_id: CorrelationId,
+    wallet_attestation_hash: [u8; 32],
+    client_status_reference_hash: [u8; 32],
+    credential_issuer: HttpsIdentifier,
+    authorization_server: HttpsIdentifier,
+    issuance_id: WalletAttestationIssuanceId,
+    policy: WalletAttestationUsagePolicy,
+    decision: WalletAttestationUsageReservationDecision,
+}
+
+impl WalletAttestationUsageReservationResult {
+    pub fn committed(request: &WalletAttestationUsageReservationRequest) -> Self {
+        Self::from_request(
+            request,
+            WalletAttestationUsageReservationDecision::Committed,
+        )
+    }
+
+    pub fn rejected(request: &WalletAttestationUsageReservationRequest) -> Self {
+        Self::from_request(request, WalletAttestationUsageReservationDecision::Rejected)
+    }
+
+    fn from_request(
+        request: &WalletAttestationUsageReservationRequest,
+        decision: WalletAttestationUsageReservationDecision,
     ) -> Self {
         Self {
-            request_id,
-            purpose,
-            client_id: client_id.to_owned(),
-            audience: audience.to_owned(),
-            endpoint: endpoint.to_owned(),
-            attestation: SecretString::from_str(attestation),
-            proof_of_possession: SecretString::from_str(proof_of_possession),
+            request_id: request.request_id,
+            wallet_attestation_hash: request.wallet_attestation_hash,
+            client_status_reference_hash: request.client_status_reference_hash,
+            credential_issuer: request.credential_issuer.clone(),
+            authorization_server: request.authorization_server.clone(),
+            issuance_id: request.issuance_id,
+            policy: request.policy,
+            decision,
         }
     }
 }
 
-impl fmt::Debug for WalletClientAuthentication {
+impl fmt::Debug for WalletAttestationUsageReservationResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("WalletClientAuthentication")
+            .debug_struct("WalletAttestationUsageReservationResult")
+            .field("request_id", &self.request_id)
+            .field("scope", &"[REDACTED]")
+            .field("decision", &self.decision)
+            .finish()
+    }
+}
+
+/// A backend-issued Wallet Attestation. The core parses its protected header and claims and
+/// verifies that `sub` and `cnf.jwk` bind to the requested client and local WSCD key.
+pub struct WalletAttestation {
+    request_id: CorrelationId,
+    jwt: SecretString,
+}
+
+impl WalletAttestation {
+    pub fn new(request_id: CorrelationId, jwt: &str) -> Self {
+        Self {
+            request_id,
+            jwt: SecretString::from_str(jwt),
+        }
+    }
+}
+
+impl fmt::Debug for WalletAttestation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("WalletAttestation([REDACTED])")
+    }
+}
+
+/// Exact Client Attestation PoP signing input constructed in core and signed by the WSCD-bound
+/// Client Instance Key from the Wallet Attestation `cnf` claim.
+pub struct ClientAttestationPopSigningRequest {
+    request_id: CorrelationId,
+    purpose: EndpointPurpose,
+    key_ref: KeyRef,
+    signing_input: SecretBytes,
+}
+
+impl ClientAttestationPopSigningRequest {
+    pub fn request_id(&self) -> CorrelationId {
+        self.request_id
+    }
+    pub fn purpose(&self) -> EndpointPurpose {
+        self.purpose
+    }
+    pub fn key_ref(&self) -> &KeyRef {
+        &self.key_ref
+    }
+    pub fn algorithm(&self) -> Alg {
+        Alg::Es256
+    }
+    pub fn signing_input(&self) -> &[u8] {
+        self.signing_input.expose()
+    }
+}
+
+impl fmt::Debug for ClientAttestationPopSigningRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientAttestationPopSigningRequest")
             .field("request_id", &self.request_id)
             .field("purpose", &self.purpose)
-            .field("client_id", &"[REDACTED]")
-            .field("audience", &"[REDACTED]")
-            .field("endpoint", &"[REDACTED]")
-            .field("attestation", &"[REDACTED]")
-            .field("proof_of_possession", &"[REDACTED]")
+            .field("key_ref", &"[REDACTED]")
+            .field("algorithm", &Alg::Es256)
+            .field("signing_input", &"[REDACTED]")
             .finish()
+    }
+}
+
+pub struct ClientAttestationPopSignature {
+    request_id: CorrelationId,
+    signing_input: SecretBytes,
+    signature: SecretBytes,
+}
+
+impl ClientAttestationPopSignature {
+    pub fn new(request_id: CorrelationId, signing_input: Vec<u8>, signature: Vec<u8>) -> Self {
+        Self {
+            request_id,
+            signing_input: SecretBytes::new(signing_input),
+            signature: SecretBytes::new(signature),
+        }
+    }
+}
+
+impl fmt::Debug for ClientAttestationPopSignature {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ClientAttestationPopSignature([REDACTED])")
     }
 }
 
@@ -552,8 +913,17 @@ impl ParRequest {
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
+    pub fn method(&self) -> &'static str {
+        "POST"
+    }
     pub fn content_type(&self) -> &'static str {
         "application/x-www-form-urlencoded"
+    }
+    pub fn accept(&self) -> &'static str {
+        "application/json"
+    }
+    pub fn accept_encoding(&self) -> &'static str {
+        "identity"
     }
     pub fn body(&self) -> &[u8] {
         self.body.expose()
@@ -588,6 +958,12 @@ pub struct AuthorizationRequest {
 impl AuthorizationRequest {
     pub fn url(&self) -> &str {
         &self.url
+    }
+    pub fn method(&self) -> &'static str {
+        "GET"
+    }
+    pub fn accept_encoding(&self) -> &'static str {
+        "identity"
     }
 
     /// The shell must dispatch the browser request no later than this time. The deadline applies
@@ -626,8 +1002,17 @@ impl TokenRequest {
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
+    pub fn method(&self) -> &'static str {
+        "POST"
+    }
     pub fn content_type(&self) -> &'static str {
         "application/x-www-form-urlencoded"
+    }
+    pub fn accept(&self) -> &'static str {
+        "application/json"
+    }
+    pub fn accept_encoding(&self) -> &'static str {
+        "identity"
     }
     pub fn body(&self) -> &[u8] {
         self.body.expose()
@@ -659,7 +1044,10 @@ impl fmt::Debug for TokenRequest {
 }
 
 pub enum AuthorizationEffect {
-    AcquireWalletClientAuthentication(WalletClientAuthenticationRequest),
+    FetchAttestationChallenge(AttestationChallengeRequest),
+    AcquireWalletAttestation(WalletAttestationRequest),
+    ReserveWalletAttestationUsage(WalletAttestationUsageReservationRequest),
+    SignClientAttestationPop(ClientAttestationPopSigningRequest),
     SignDpop(DpopSigningRequest),
     SendPar(ParRequest),
     OpenAuthorization(AuthorizationRequest),
@@ -669,7 +1057,10 @@ pub enum AuthorizationEffect {
 impl fmt::Debug for AuthorizationEffect {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AcquireWalletClientAuthentication(value) => value.fmt(formatter),
+            Self::FetchAttestationChallenge(value) => value.fmt(formatter),
+            Self::AcquireWalletAttestation(value) => value.fmt(formatter),
+            Self::ReserveWalletAttestationUsage(value) => value.fmt(formatter),
+            Self::SignClientAttestationPop(value) => value.fmt(formatter),
             Self::SignDpop(value) => value.fmt(formatter),
             Self::SendPar(value) => value.fmt(formatter),
             Self::OpenAuthorization(value) => value.fmt(formatter),
@@ -683,10 +1074,12 @@ pub struct EndpointResponse {
     endpoint: String,
     method: String,
     status: u16,
-    content_type: String,
+    content_type_headers: Vec<String>,
     cache_control_headers: Vec<String>,
     pragma_headers: Vec<String>,
+    content_encoding_headers: Vec<String>,
     dpop_nonce_headers: Vec<String>,
+    attestation_challenge_headers: Vec<String>,
     body: SecretBytes,
 }
 
@@ -699,10 +1092,12 @@ impl EndpointResponse {
         endpoint: &str,
         method: &str,
         status: u16,
-        content_type: &str,
+        content_type_headers: Vec<String>,
         cache_control_headers: Vec<String>,
         pragma_headers: Vec<String>,
+        content_encoding_headers: Vec<String>,
         dpop_nonce_headers: Vec<String>,
+        attestation_challenge_headers: Vec<String>,
         body: Vec<u8>,
     ) -> Self {
         Self {
@@ -710,12 +1105,21 @@ impl EndpointResponse {
             endpoint: endpoint.to_owned(),
             method: method.to_owned(),
             status,
-            content_type: content_type.to_owned(),
+            content_type_headers,
             cache_control_headers,
             pragma_headers,
+            content_encoding_headers,
             dpop_nonce_headers,
+            attestation_challenge_headers,
             body: SecretBytes::new(body),
         }
+    }
+
+    /// Replace the raw `OAuth-Client-Attestation-Challenge` field-line bag. No values are
+    /// collapsed; duplicate/ambiguous values are rejected by the protocol parser.
+    pub fn with_attestation_challenge_headers(mut self, values: Vec<String>) -> Self {
+        self.attestation_challenge_headers = values;
+        self
     }
 }
 
@@ -727,10 +1131,7 @@ impl fmt::Debug for EndpointResponse {
             .field("endpoint", &"[REDACTED]")
             .field("method", &"[REDACTED]")
             .field("status", &self.status)
-            .field("content_type", &"[REDACTED]")
-            .field("cache_control_headers", &"[REDACTED]")
-            .field("pragma_headers", &"[REDACTED]")
-            .field("dpop_nonce_headers", &"[REDACTED]")
+            .field("headers", &"[REDACTED]")
             .field("body", &"[REDACTED]")
             .finish()
     }
@@ -761,7 +1162,10 @@ impl fmt::Debug for AuthorizationRedirect {
 }
 
 pub enum AuthorizationInput {
-    WalletClientAuthentication(WalletClientAuthentication),
+    AttestationChallengeResponse(EndpointResponse),
+    WalletAttestation(WalletAttestation),
+    WalletAttestationUsageReservation(WalletAttestationUsageReservationResult),
+    ClientAttestationPopSignature(ClientAttestationPopSignature),
     DpopSignature(DpopSignature),
     ParResponse(EndpointResponse),
     AuthorizationRedirect(AuthorizationRedirect),
@@ -771,7 +1175,12 @@ pub enum AuthorizationInput {
 impl fmt::Debug for AuthorizationInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::WalletClientAuthentication(_) => "WalletClientAuthentication([REDACTED])",
+            Self::AttestationChallengeResponse(_) => "AttestationChallengeResponse([REDACTED])",
+            Self::WalletAttestation(_) => "WalletAttestation([REDACTED])",
+            Self::WalletAttestationUsageReservation(_) => {
+                "WalletAttestationUsageReservation([REDACTED])"
+            }
+            Self::ClientAttestationPopSignature(_) => "ClientAttestationPopSignature([REDACTED])",
             Self::DpopSignature(_) => "DpopSignature([REDACTED])",
             Self::ParResponse(_) => "ParResponse([REDACTED])",
             Self::AuthorizationRedirect(_) => "AuthorizationRedirect([REDACTED])",
@@ -793,6 +1202,8 @@ pub struct AccessTokenGrant {
     credential_endpoint: HttpsEndpoint,
     nonce_endpoint: HttpsEndpoint,
     dpop_key: DpopKeyBinding,
+    client_attestation_key_ref: KeyRef,
+    client_attestation_public_jwk: Es256PublicJwk,
 }
 
 impl AccessTokenGrant {
@@ -837,6 +1248,14 @@ impl AccessTokenGrant {
     pub fn dpop_public_jwk(&self) -> &Es256PublicJwk {
         &self.dpop_key.public_jwk
     }
+    /// Local-only Client Instance key identity for cross-role alias rejection by the credential
+    /// flow. This opaque handle is never exposed to the Wallet Provider backend.
+    pub fn client_attestation_key_ref(&self) -> &KeyRef {
+        &self.client_attestation_key_ref
+    }
+    pub fn client_attestation_public_jwk(&self) -> &Es256PublicJwk {
+        &self.client_attestation_public_jwk
+    }
 }
 
 impl fmt::Debug for AccessTokenGrant {
@@ -868,6 +1287,8 @@ impl fmt::Debug for AccessTokenGrant {
             .field("credential_endpoint", &self.credential_endpoint)
             .field("nonce_endpoint", &self.nonce_endpoint)
             .field("dpop_key", &self.dpop_key)
+            .field("client_attestation_key_ref", &"[REDACTED]")
+            .field("client_attestation_public_jwk", &"[REDACTED]")
             .finish()
     }
 }
@@ -881,18 +1302,25 @@ struct Context {
     authorization_endpoint: HttpsEndpoint,
     token_endpoint: HttpsEndpoint,
     par_endpoint: HttpsEndpoint,
+    attestation_challenge_endpoint: Option<HttpsEndpoint>,
+    preferred_client_status_period: Option<u64>,
     scope: String,
     client_id: String,
     redirect_uri: HttpsIdentifier,
     issuer_state: Option<SecretString>,
     dpop_key: DpopKeyBinding,
+    client_attestation_key: ClientAttestationKeyBinding,
     pkce_verifier: SecretString,
     pkce_challenge: String,
     state: SecretString,
     dpop_jkt: String,
+    wallet_attestation_issuance_id: WalletAttestationIssuanceId,
     token_endpoint_nonce: Option<SecretString>,
     retired_token_endpoint_nonces: Vec<SecretString>,
-    used_client_auth_pop_hashes: Vec<[u8; 32]>,
+    wallet_attestation: Option<BoundWalletAttestation>,
+    next_attestation_challenge: Option<SecretString>,
+    retired_attestation_challenges: Vec<SecretString>,
+    used_wallet_attestation_hashes: Vec<[u8; 32]>,
     used_random_values: Vec<[u8; 32]>,
     last_now_epoch_seconds: i64,
 }
@@ -902,36 +1330,76 @@ impl Drop for Context {
         for value in &mut self.used_random_values {
             value.fill(0);
         }
-        for value in &mut self.used_client_auth_pop_hashes {
+        for value in &mut self.used_wallet_attestation_hashes {
             value.fill(0);
         }
     }
 }
 
+/// Locally signature-verified and key-bound, but not Wallet-Provider authenticated. Trust-path
+/// resolution, revocation, and Wallet Provider authorization remain external WIA policy gates.
+struct BoundWalletAttestation {
+    jwt: SecretString,
+}
+
+struct ClientAuthenticationMaterial {
+    attestation: SecretString,
+    proof_of_possession: SecretString,
+}
+
 enum Stage {
-    AwaitingClientAuthentication {
+    AwaitingAttestationChallenge {
         purpose: EndpointPurpose,
         request_id: CorrelationId,
         authorization_code: Option<SecretString>,
-        nonce_retry_count: u8,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
+        force_fresh_attestation: bool,
+    },
+    AwaitingWalletAttestation {
+        purpose: EndpointPurpose,
+        request_id: CorrelationId,
+        authorization_code: Option<SecretString>,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
+    },
+    AwaitingWalletAttestationUsageReservation {
+        purpose: EndpointPurpose,
+        request_id: CorrelationId,
+        wallet_attestation_hash: [u8; 32],
+        client_status_reference_hash: [u8; 32],
+        authorization_code: Option<SecretString>,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
+    },
+    SigningClientAttestationPop {
+        purpose: EndpointPurpose,
+        request_id: CorrelationId,
+        signing_input: SecretBytes,
+        authorization_code: Option<SecretString>,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
     },
     SigningDpop {
         request_id: CorrelationId,
         signing_input: SecretBytes,
-        client_auth: WalletClientAuthentication,
+        client_auth: ClientAuthenticationMaterial,
         authorization_code: SecretString,
-        nonce_retry_count: u8,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
     },
     AwaitingParResponse {
         request_id: CorrelationId,
+        attestation_retry_count: u8,
     },
     AwaitingAuthorization,
     AwaitingTokenResponse {
         request_id: CorrelationId,
         authorization_code: SecretString,
-        nonce_retry_count: u8,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
     },
-    Complete(AccessTokenGrant),
+    Complete(Box<AccessTokenGrant>),
     Failed(AuthorizationError),
 }
 
@@ -955,6 +1423,7 @@ impl fmt::Debug for AuthorizationFlow {
 pub struct AuthorizationEnvironment<'a> {
     pub random: &'a dyn Random,
     pub digest: &'a dyn Digest,
+    pub verifier: &'a dyn Verifier,
     pub now_epoch_seconds: i64,
 }
 
@@ -967,6 +1436,8 @@ impl AuthorizationFlow {
         let mut used_random_values = Vec::new();
         let verifier_entropy = fresh_random(environment.random, &mut used_random_values)?;
         let state_entropy = fresh_random(environment.random, &mut used_random_values)?;
+        let wallet_attestation_issuance_id =
+            WalletAttestationIssuanceId(fresh_random(environment.random, &mut used_random_values)?);
         let pkce_verifier = base64url(&verifier_entropy);
         let state = base64url(&state_entropy);
         if pkce_verifier.len() != PKCE_VERIFIER_CHARS || state.len() != STATE_CHARS {
@@ -983,18 +1454,25 @@ impl AuthorizationFlow {
             authorization_endpoint: config.authorization_endpoint,
             token_endpoint: config.token_endpoint,
             par_endpoint: config.par_endpoint,
+            attestation_challenge_endpoint: config.attestation_challenge_endpoint,
+            preferred_client_status_period: config.preferred_client_status_period,
             scope: config.scope,
             client_id: config.client_id,
             redirect_uri: config.redirect_uri,
             issuer_state: config.issuer_state,
             dpop_key: config.dpop_key,
+            client_attestation_key: config.client_attestation_key,
             pkce_verifier: SecretString::from_string(pkce_verifier),
             pkce_challenge,
             state: SecretString::from_string(state),
             dpop_jkt,
+            wallet_attestation_issuance_id,
             token_endpoint_nonce: None,
             retired_token_endpoint_nonces: Vec::new(),
-            used_client_auth_pop_hashes: Vec::new(),
+            wallet_attestation: None,
+            next_attestation_challenge: None,
+            retired_attestation_challenges: Vec::new(),
+            used_wallet_attestation_hashes: Vec::new(),
             used_random_values,
             last_now_epoch_seconds: environment.now_epoch_seconds,
         };
@@ -1004,15 +1482,24 @@ impl AuthorizationFlow {
             stage: placeholder,
         };
         let (stage, effect) =
-            flow.client_auth_stage(EndpointPurpose::Par, None, 0, environment.random)?;
+            flow.authenticated_request_stage(EndpointPurpose::Par, None, 0, 0, false, environment)?;
         flow.stage = stage;
         Ok((flow, effect))
     }
 
     pub fn status(&self) -> FlowStatus {
         match self.stage {
-            Stage::AwaitingClientAuthentication { purpose, .. } => {
-                FlowStatus::AwaitingClientAuthentication(purpose)
+            Stage::AwaitingAttestationChallenge { purpose, .. } => {
+                FlowStatus::AwaitingAttestationChallenge(purpose)
+            }
+            Stage::AwaitingWalletAttestation { purpose, .. } => {
+                FlowStatus::AwaitingWalletAttestation(purpose)
+            }
+            Stage::AwaitingWalletAttestationUsageReservation { purpose, .. } => {
+                FlowStatus::AwaitingWalletAttestationUsageReservation(purpose)
+            }
+            Stage::SigningClientAttestationPop { purpose, .. } => {
+                FlowStatus::AwaitingClientAttestationPopSignature(purpose)
             }
             Stage::SigningDpop { .. } => FlowStatus::AwaitingDpopSignature,
             Stage::AwaitingParResponse { .. } => FlowStatus::AwaitingParResponse,
@@ -1032,7 +1519,7 @@ impl AuthorizationFlow {
 
     pub fn into_token(self) -> Result<AccessTokenGrant, AuthorizationError> {
         match self.stage {
-            Stage::Complete(grant) => Ok(grant),
+            Stage::Complete(grant) => Ok(*grant),
             Stage::Failed(error) => Err(error),
             _ => Err(AuthorizationError::UnexpectedInput),
         }
@@ -1080,19 +1567,83 @@ impl AuthorizationFlow {
     ) -> Result<(Stage, Vec<AuthorizationEffect>), AuthorizationError> {
         match (stage, input) {
             (
-                Stage::AwaitingClientAuthentication {
+                Stage::AwaitingAttestationChallenge {
                     purpose,
                     request_id,
                     authorization_code,
-                    nonce_retry_count,
+                    dpop_nonce_retry_count,
+                    attestation_retry_count,
+                    force_fresh_attestation,
                 },
-                AuthorizationInput::WalletClientAuthentication(client_auth),
-            ) => self.accept_client_authentication(
+                AuthorizationInput::AttestationChallengeResponse(response),
+            ) => self.accept_attestation_challenge_response(
                 purpose,
                 request_id,
                 authorization_code,
-                nonce_retry_count,
-                client_auth,
+                dpop_nonce_retry_count,
+                attestation_retry_count,
+                force_fresh_attestation,
+                response,
+                environment,
+            ),
+            (
+                Stage::AwaitingWalletAttestation {
+                    purpose,
+                    request_id,
+                    authorization_code,
+                    dpop_nonce_retry_count,
+                    attestation_retry_count,
+                },
+                AuthorizationInput::WalletAttestation(attestation),
+            ) => self.accept_wallet_attestation(
+                purpose,
+                request_id,
+                authorization_code,
+                dpop_nonce_retry_count,
+                attestation_retry_count,
+                attestation,
+                environment,
+            ),
+            (
+                Stage::AwaitingWalletAttestationUsageReservation {
+                    purpose,
+                    request_id,
+                    wallet_attestation_hash,
+                    client_status_reference_hash,
+                    authorization_code,
+                    dpop_nonce_retry_count,
+                    attestation_retry_count,
+                },
+                AuthorizationInput::WalletAttestationUsageReservation(result),
+            ) => self.accept_wallet_attestation_usage_reservation(
+                purpose,
+                request_id,
+                wallet_attestation_hash,
+                client_status_reference_hash,
+                authorization_code,
+                dpop_nonce_retry_count,
+                attestation_retry_count,
+                result,
+                environment,
+            ),
+            (
+                Stage::SigningClientAttestationPop {
+                    purpose,
+                    request_id,
+                    signing_input,
+                    authorization_code,
+                    dpop_nonce_retry_count,
+                    attestation_retry_count,
+                },
+                AuthorizationInput::ClientAttestationPopSignature(signature),
+            ) => self.accept_client_attestation_pop_signature(
+                purpose,
+                request_id,
+                signing_input,
+                authorization_code,
+                dpop_nonce_retry_count,
+                attestation_retry_count,
+                signature,
                 environment,
             ),
             (
@@ -1101,7 +1652,8 @@ impl AuthorizationFlow {
                     signing_input,
                     client_auth,
                     authorization_code,
-                    nonce_retry_count,
+                    dpop_nonce_retry_count,
+                    attestation_retry_count,
                 },
                 AuthorizationInput::DpopSignature(signature),
             ) => self.accept_dpop_signature(
@@ -1109,28 +1661,36 @@ impl AuthorizationFlow {
                 signing_input,
                 client_auth,
                 authorization_code,
-                nonce_retry_count,
+                dpop_nonce_retry_count,
+                attestation_retry_count,
                 signature,
-                environment.random,
+                environment,
             ),
             (
-                Stage::AwaitingParResponse { request_id },
+                Stage::AwaitingParResponse {
+                    request_id,
+                    attestation_retry_count,
+                },
                 AuthorizationInput::ParResponse(response),
-            ) => self.accept_par_response(request_id, response, environment.now_epoch_seconds),
+            ) => {
+                self.accept_par_response(request_id, attestation_retry_count, response, environment)
+            }
             (Stage::AwaitingAuthorization, AuthorizationInput::AuthorizationRedirect(redirect)) => {
-                self.accept_authorization_redirect(redirect, environment.random)
+                self.accept_authorization_redirect(redirect, environment)
             }
             (
                 Stage::AwaitingTokenResponse {
                     request_id,
                     authorization_code,
-                    nonce_retry_count,
+                    dpop_nonce_retry_count,
+                    attestation_retry_count,
                 },
                 AuthorizationInput::TokenResponse(response),
             ) => self.accept_token_response(
                 request_id,
                 authorization_code,
-                nonce_retry_count,
+                dpop_nonce_retry_count,
+                attestation_retry_count,
                 response,
                 environment,
             ),
@@ -1138,84 +1698,199 @@ impl AuthorizationFlow {
         }
     }
 
-    fn client_auth_stage(
+    #[allow(clippy::too_many_arguments)]
+    fn authenticated_request_stage(
         &mut self,
         purpose: EndpointPurpose,
         authorization_code: Option<SecretString>,
-        nonce_retry_count: u8,
-        random: &dyn Random,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
+        force_fresh_attestation: bool,
+        environment: &AuthorizationEnvironment<'_>,
     ) -> Result<(Stage, AuthorizationEffect), AuthorizationError> {
-        let request_id = CorrelationId(fresh_random(random, &mut self.context.used_random_values)?);
-        let endpoint = self.endpoint(purpose).to_owned();
-        let request = WalletClientAuthenticationRequest {
-            request_id,
-            purpose,
-            client_id: self.context.client_id.clone(),
-            audience: self.context.authorization_server.as_str().to_owned(),
-            endpoint,
-        };
-        Ok((
-            Stage::AwaitingClientAuthentication {
-                purpose,
-                request_id,
-                authorization_code,
-                nonce_retry_count,
-            },
-            AuthorizationEffect::AcquireWalletClientAuthentication(request),
-        ))
-    }
-
-    fn endpoint(&self, purpose: EndpointPurpose) -> &str {
-        match purpose {
-            EndpointPurpose::Par => self.context.par_endpoint.as_str(),
-            EndpointPurpose::Token => self.context.token_endpoint.as_str(),
+        if self.context.attestation_challenge_endpoint.is_some()
+            && self.context.next_attestation_challenge.is_none()
+        {
+            let request_id = CorrelationId(fresh_random(
+                environment.random,
+                &mut self.context.used_random_values,
+            )?);
+            let endpoint = self
+                .context
+                .attestation_challenge_endpoint
+                .as_ref()
+                .ok_or(AuthorizationError::InvalidConfiguration)?
+                .as_str()
+                .to_owned();
+            return Ok((
+                Stage::AwaitingAttestationChallenge {
+                    purpose,
+                    request_id,
+                    authorization_code,
+                    dpop_nonce_retry_count,
+                    attestation_retry_count,
+                    force_fresh_attestation,
+                },
+                AuthorizationEffect::FetchAttestationChallenge(AttestationChallengeRequest {
+                    request_id,
+                    endpoint,
+                }),
+            ));
         }
+        if force_fresh_attestation || self.context.wallet_attestation.is_none() {
+            return self.wallet_attestation_stage(
+                purpose,
+                authorization_code,
+                dpop_nonce_retry_count,
+                attestation_retry_count,
+                force_fresh_attestation,
+                environment.random,
+            );
+        }
+        self.client_attestation_pop_stage(
+            purpose,
+            authorization_code,
+            dpop_nonce_retry_count,
+            attestation_retry_count,
+            environment,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn accept_client_authentication(
+    fn wallet_attestation_stage(
+        &mut self,
+        purpose: EndpointPurpose,
+        authorization_code: Option<SecretString>,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
+        force_fresh_attestation: bool,
+        random: &dyn Random,
+    ) -> Result<(Stage, AuthorizationEffect), AuthorizationError> {
+        let request_id = CorrelationId(fresh_random(random, &mut self.context.used_random_values)?);
+        let force_fresh_attestation = force_fresh_attestation
+            || self.context.client_attestation_key.usage_policy
+                == WalletAttestationUsagePolicy::SingleIssuance;
+        let request = WalletAttestationRequest {
+            request_id,
+            client_id: self.context.client_id.clone(),
+            public_jwk: self.context.client_attestation_key.public_jwk.clone(),
+            force_fresh_attestation,
+            required_client_status_period_seconds: required_client_status_period(
+                self.context.preferred_client_status_period,
+            ),
+        };
+        Ok((
+            Stage::AwaitingWalletAttestation {
+                purpose,
+                request_id,
+                authorization_code,
+                dpop_nonce_retry_count,
+                attestation_retry_count,
+            },
+            AuthorizationEffect::AcquireWalletAttestation(request),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn client_attestation_pop_stage(
+        &mut self,
+        purpose: EndpointPurpose,
+        authorization_code: Option<SecretString>,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
+        environment: &AuthorizationEnvironment<'_>,
+    ) -> Result<(Stage, AuthorizationEffect), AuthorizationError> {
+        if self.context.wallet_attestation.is_none() {
+            return Err(AuthorizationError::UnexpectedInput);
+        }
+        let request_id = CorrelationId(fresh_random(
+            environment.random,
+            &mut self.context.used_random_values,
+        )?);
+        let jti = base64url(&fresh_random(
+            environment.random,
+            &mut self.context.used_random_values,
+        )?);
+        let challenge = self.consume_attestation_challenge()?;
+        let signing_input = self.build_client_attestation_pop_signing_input(
+            &jti,
+            environment.now_epoch_seconds,
+            challenge.as_ref(),
+        )?;
+        let effect = ClientAttestationPopSigningRequest {
+            request_id,
+            purpose,
+            key_ref: self.context.client_attestation_key.key_ref.clone(),
+            signing_input: SecretBytes::new(signing_input.expose().to_vec()),
+        };
+        Ok((
+            Stage::SigningClientAttestationPop {
+                purpose,
+                request_id,
+                signing_input,
+                authorization_code,
+                dpop_nonce_retry_count,
+                attestation_retry_count,
+            },
+            AuthorizationEffect::SignClientAttestationPop(effect),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accept_client_attestation_pop_signature(
         &mut self,
         purpose: EndpointPurpose,
         request_id: CorrelationId,
+        signing_input: SecretBytes,
         authorization_code: Option<SecretString>,
-        nonce_retry_count: u8,
-        client_auth: WalletClientAuthentication,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
+        signature: ClientAttestationPopSignature,
         environment: &AuthorizationEnvironment<'_>,
     ) -> Result<(Stage, Vec<AuthorizationEffect>), AuthorizationError> {
-        if !ct_eq(&request_id.0, &client_auth.request_id.0) {
-            return Err(AuthorizationError::CorrelationMismatch);
-        }
-        if client_auth.purpose != purpose
-            || client_auth.client_id != self.context.client_id
-            || client_auth.audience != self.context.authorization_server.as_str()
-            || client_auth.endpoint != self.endpoint(purpose)
+        if !ct_eq(&request_id.0, &signature.request_id.0)
+            || !ct_eq(signing_input.expose(), signature.signing_input.expose())
         {
-            return Err(AuthorizationError::ClientAuthenticationBindingMismatch);
+            return Err(AuthorizationError::ClientAttestationPopSigningResultMismatch);
         }
-        validate_compact_jwt(
-            client_auth.attestation.expose(),
-            MAX_WALLET_ATTESTATION_BYTES,
-        )?;
-        validate_compact_jwt(
-            client_auth.proof_of_possession.expose(),
-            MAX_WALLET_ATTESTATION_POP_BYTES,
-        )?;
-        let pop_hash = environment
-            .digest
-            .sha256(client_auth.proof_of_possession.expose().as_bytes());
-        if self
+        if signature.signature.expose().len() != 64 {
+            return Err(AuthorizationError::ClientAttestationPopSignatureInvalid);
+        }
+        let public_key = self
             .context
-            .used_client_auth_pop_hashes
-            .iter()
-            .any(|seen| ct_eq(seen, &pop_hash))
-        {
-            return Err(AuthorizationError::ClientAuthenticationReused);
+            .client_attestation_key
+            .public_jwk
+            .uncompressed_point()?;
+        environment
+            .verifier
+            .verify(
+                Alg::Es256,
+                &public_key,
+                signing_input.expose(),
+                signature.signature.expose(),
+            )
+            .map_err(|_| AuthorizationError::ClientAttestationPopSignatureInvalid)?;
+        let mut proof = signing_input.expose().to_vec();
+        proof.push(b'.');
+        proof.extend_from_slice(base64url(signature.signature.expose()).as_bytes());
+        let proof = String::from_utf8(proof)
+            .map_err(|_| AuthorizationError::ClientAttestationPopSignatureInvalid)?;
+        if proof.len() > MAX_WALLET_ATTESTATION_POP_BYTES {
+            return Err(AuthorizationError::ClientAttestationPopSignatureInvalid);
         }
-        self.context.used_client_auth_pop_hashes.push(pop_hash);
-
+        let client_auth = ClientAuthenticationMaterial {
+            attestation: self
+                .context
+                .wallet_attestation
+                .as_ref()
+                .ok_or(AuthorizationError::UnexpectedInput)?
+                .jwt
+                .duplicate(),
+            proof_of_possession: SecretString::from_string(proof),
+        };
         match purpose {
             EndpointPurpose::Par => {
-                if authorization_code.is_some() || nonce_retry_count != 0 {
+                if authorization_code.is_some() || dpop_nonce_retry_count != 0 {
                     return Err(AuthorizationError::UnexpectedInput);
                 }
                 let request_id = CorrelationId(fresh_random(
@@ -1224,7 +1899,10 @@ impl AuthorizationFlow {
                 )?);
                 let request = self.build_par_request(request_id, client_auth)?;
                 Ok((
-                    Stage::AwaitingParResponse { request_id },
+                    Stage::AwaitingParResponse {
+                        request_id,
+                        attestation_retry_count,
+                    },
                     vec![AuthorizationEffect::SendPar(request)],
                 ))
             }
@@ -1255,7 +1933,8 @@ impl AuthorizationFlow {
                         signing_input,
                         client_auth,
                         authorization_code,
-                        nonce_retry_count,
+                        dpop_nonce_retry_count,
+                        attestation_retry_count,
                     },
                     vec![AuthorizationEffect::SignDpop(effect)],
                 ))
@@ -1263,10 +1942,247 @@ impl AuthorizationFlow {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn accept_attestation_challenge_response(
+        &mut self,
+        purpose: EndpointPurpose,
+        request_id: CorrelationId,
+        authorization_code: Option<SecretString>,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
+        force_fresh_attestation: bool,
+        response: EndpointResponse,
+        environment: &AuthorizationEnvironment<'_>,
+    ) -> Result<(Stage, Vec<AuthorizationEffect>), AuthorizationError> {
+        let endpoint = self
+            .context
+            .attestation_challenge_endpoint
+            .as_ref()
+            .ok_or(AuthorizationError::InvalidConfiguration)?;
+        validate_transport_binding(request_id, endpoint.as_str(), "POST", &response)?;
+        validate_json_transport(&response)?;
+        if response.status != 200
+            || !cache_control_has(&response.cache_control_headers, "no-store")?
+        {
+            return Err(AuthorizationError::AttestationChallengeInvalid);
+        }
+        let body_challenge = parse_attestation_challenge_response(response.body.expose())?;
+        if parse_single_attestation_challenge(&response.attestation_challenge_headers)?.is_some() {
+            // Draft-07 independently says the required body challenge and any response-header
+            // challenge are both for the next PoP, but defines no precedence or multi-challenge
+            // representation. Do not guess, equate, or silently discard either value.
+            return Err(AuthorizationError::AttestationChallengeInvalid);
+        }
+        self.rotate_attestation_challenge(body_challenge)?;
+        let (stage, effect) =
+            if force_fresh_attestation || self.context.wallet_attestation.is_none() {
+                self.wallet_attestation_stage(
+                    purpose,
+                    authorization_code,
+                    dpop_nonce_retry_count,
+                    attestation_retry_count,
+                    force_fresh_attestation,
+                    environment.random,
+                )?
+            } else {
+                self.client_attestation_pop_stage(
+                    purpose,
+                    authorization_code,
+                    dpop_nonce_retry_count,
+                    attestation_retry_count,
+                    environment,
+                )?
+            };
+        Ok((stage, vec![effect]))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accept_wallet_attestation(
+        &mut self,
+        purpose: EndpointPurpose,
+        request_id: CorrelationId,
+        authorization_code: Option<SecretString>,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
+        attestation: WalletAttestation,
+        environment: &AuthorizationEnvironment<'_>,
+    ) -> Result<(Stage, Vec<AuthorizationEffect>), AuthorizationError> {
+        if !ct_eq(&request_id.0, &attestation.request_id.0) {
+            return Err(AuthorizationError::CorrelationMismatch);
+        }
+        let parsed = parse_and_bind_wallet_attestation(
+            attestation.jwt.expose(),
+            &self.context.client_id,
+            &self.context.client_attestation_key.public_jwk,
+            environment.now_epoch_seconds,
+            required_client_status_period(self.context.preferred_client_status_period),
+            environment.digest,
+            environment.verifier,
+        )?;
+        if self
+            .context
+            .used_wallet_attestation_hashes
+            .iter()
+            .any(|seen| ct_eq(seen, &parsed.replay_hash))
+        {
+            return Err(AuthorizationError::ClientAuthenticationReused);
+        }
+        if self.context.used_wallet_attestation_hashes.len()
+            > usize::from(MAX_CLIENT_ATTESTATION_RETRIES)
+        {
+            return Err(AuthorizationError::AttestationChallengeRetryLimit);
+        }
+        self.context
+            .used_wallet_attestation_hashes
+            .push(parsed.replay_hash);
+        self.context.wallet_attestation = Some(BoundWalletAttestation {
+            jwt: attestation.jwt,
+        });
+        let reservation_id = CorrelationId(fresh_random(
+            environment.random,
+            &mut self.context.used_random_values,
+        )?);
+        let request = WalletAttestationUsageReservationRequest {
+            request_id: reservation_id,
+            wallet_attestation_hash: parsed.replay_hash,
+            client_status_reference_hash: parsed.client_status_reference_hash,
+            credential_issuer: self.context.credential_issuer.clone(),
+            authorization_server: self.context.authorization_server.clone(),
+            issuance_id: self.context.wallet_attestation_issuance_id,
+            policy: self.context.client_attestation_key.usage_policy,
+        };
+        Ok((
+            Stage::AwaitingWalletAttestationUsageReservation {
+                purpose,
+                request_id: reservation_id,
+                wallet_attestation_hash: parsed.replay_hash,
+                client_status_reference_hash: parsed.client_status_reference_hash,
+                authorization_code,
+                dpop_nonce_retry_count,
+                attestation_retry_count,
+            },
+            vec![AuthorizationEffect::ReserveWalletAttestationUsage(request)],
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accept_wallet_attestation_usage_reservation(
+        &mut self,
+        purpose: EndpointPurpose,
+        request_id: CorrelationId,
+        wallet_attestation_hash: [u8; 32],
+        client_status_reference_hash: [u8; 32],
+        authorization_code: Option<SecretString>,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
+        result: WalletAttestationUsageReservationResult,
+        environment: &AuthorizationEnvironment<'_>,
+    ) -> Result<(Stage, Vec<AuthorizationEffect>), AuthorizationError> {
+        if !ct_eq(&request_id.0, &result.request_id.0)
+            || !ct_eq(&wallet_attestation_hash, &result.wallet_attestation_hash)
+            || !ct_eq(
+                &client_status_reference_hash,
+                &result.client_status_reference_hash,
+            )
+            || result.credential_issuer != self.context.credential_issuer
+            || result.authorization_server != self.context.authorization_server
+            || !ct_eq(
+                self.context.wallet_attestation_issuance_id.as_bytes(),
+                result.issuance_id.as_bytes(),
+            )
+            || result.policy != self.context.client_attestation_key.usage_policy
+        {
+            return Err(AuthorizationError::ClientAuthenticationReservationMismatch);
+        }
+        if result.decision != WalletAttestationUsageReservationDecision::Committed {
+            return Err(AuthorizationError::ClientAuthenticationReservationRejected);
+        }
+        let (stage, effect) = self.client_attestation_pop_stage(
+            purpose,
+            authorization_code,
+            dpop_nonce_retry_count,
+            attestation_retry_count,
+            environment,
+        )?;
+        Ok((stage, vec![effect]))
+    }
+
+    fn build_client_attestation_pop_signing_input(
+        &self,
+        jti: &str,
+        iat: i64,
+        challenge: Option<&SecretString>,
+    ) -> Result<SecretBytes, AuthorizationError> {
+        let header = br#"{"alg":"ES256","typ":"oauth-client-attestation-pop+jwt"}"#;
+        let payload = match challenge {
+            Some(challenge) => serde_json::json!({
+                "iss": self.context.client_id,
+                "aud": self.context.authorization_server.as_str(),
+                "jti": jti,
+                "iat": iat,
+                "challenge": challenge.expose(),
+            }),
+            None => serde_json::json!({
+                "iss": self.context.client_id,
+                "aud": self.context.authorization_server.as_str(),
+                "jti": jti,
+                "iat": iat,
+            }),
+        };
+        let payload =
+            serde_json::to_vec(&payload).map_err(|_| AuthorizationError::InvalidConfiguration)?;
+        let signing_input = format!("{}.{}", base64url(header), base64url(&payload));
+        if signing_input.len() > MAX_CLIENT_ATTESTATION_POP_SIGNING_INPUT_BYTES {
+            return Err(AuthorizationError::InvalidConfiguration);
+        }
+        Ok(SecretBytes::new(signing_input.into_bytes()))
+    }
+
+    fn consume_attestation_challenge(
+        &mut self,
+    ) -> Result<Option<SecretString>, AuthorizationError> {
+        let challenge = self.context.next_attestation_challenge.take();
+        if self.context.attestation_challenge_endpoint.is_some() && challenge.is_none() {
+            return Err(AuthorizationError::AttestationChallengeInvalid);
+        }
+        if let Some(value) = &challenge {
+            if self.context.retired_attestation_challenges.len() >= 16 {
+                return Err(AuthorizationError::AttestationChallengeRetryLimit);
+            }
+            self.context
+                .retired_attestation_challenges
+                .push(value.duplicate());
+        }
+        Ok(challenge)
+    }
+
+    fn rotate_attestation_challenge(
+        &mut self,
+        challenge: SecretString,
+    ) -> Result<(), AuthorizationError> {
+        let duplicate_current = self
+            .context
+            .next_attestation_challenge
+            .as_ref()
+            .is_some_and(|current| {
+                ct_eq(current.expose().as_bytes(), challenge.expose().as_bytes())
+            });
+        let retired = self
+            .context
+            .retired_attestation_challenges
+            .iter()
+            .any(|value| ct_eq(value.expose().as_bytes(), challenge.expose().as_bytes()));
+        if duplicate_current || retired {
+            return Err(AuthorizationError::AttestationChallengeStale);
+        }
+        self.context.next_attestation_challenge = Some(challenge);
+        Ok(())
+    }
+
     fn build_par_request(
         &self,
         request_id: CorrelationId,
-        client_auth: WalletClientAuthentication,
+        client_auth: ClientAuthenticationMaterial,
     ) -> Result<ParRequest, AuthorizationError> {
         let mut fields = vec![
             ("response_type", "code"),
@@ -1332,11 +2248,12 @@ impl AuthorizationFlow {
         &mut self,
         request_id: CorrelationId,
         signing_input: SecretBytes,
-        client_auth: WalletClientAuthentication,
+        client_auth: ClientAuthenticationMaterial,
         authorization_code: SecretString,
-        nonce_retry_count: u8,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
         signature: DpopSignature,
-        random: &dyn Random,
+        environment: &AuthorizationEnvironment<'_>,
     ) -> Result<(Stage, Vec<AuthorizationEffect>), AuthorizationError> {
         if !ct_eq(&request_id.0, &signature.request_id.0)
             || !ct_eq(signing_input.expose(), signature.signing_input.expose())
@@ -1346,12 +2263,25 @@ impl AuthorizationFlow {
         if signature.signature.expose().len() != 64 {
             return Err(AuthorizationError::DpopSignatureInvalid);
         }
+        let public_key = self.context.dpop_key.public_jwk.uncompressed_point()?;
+        environment
+            .verifier
+            .verify(
+                Alg::Es256,
+                &public_key,
+                signing_input.expose(),
+                signature.signature.expose(),
+            )
+            .map_err(|_| AuthorizationError::DpopSignatureInvalid)?;
         let mut proof = signing_input.expose().to_vec();
         proof.push(b'.');
         proof.extend_from_slice(base64url(signature.signature.expose()).as_bytes());
         let proof =
             String::from_utf8(proof).map_err(|_| AuthorizationError::DpopSignatureInvalid)?;
-        let request_id = CorrelationId(fresh_random(random, &mut self.context.used_random_values)?);
+        let request_id = CorrelationId(fresh_random(
+            environment.random,
+            &mut self.context.used_random_values,
+        )?);
         let request = self.build_token_request(
             request_id,
             &authorization_code,
@@ -1362,7 +2292,8 @@ impl AuthorizationFlow {
             Stage::AwaitingTokenResponse {
                 request_id,
                 authorization_code,
-                nonce_retry_count,
+                dpop_nonce_retry_count,
+                attestation_retry_count,
             },
             vec![AuthorizationEffect::SendToken(request)],
         ))
@@ -1372,7 +2303,7 @@ impl AuthorizationFlow {
         &self,
         request_id: CorrelationId,
         authorization_code: &SecretString,
-        client_auth: WalletClientAuthentication,
+        client_auth: ClientAuthenticationMaterial,
         dpop_proof: SecretString,
     ) -> Result<TokenRequest, AuthorizationError> {
         let fields = [
@@ -1394,8 +2325,9 @@ impl AuthorizationFlow {
     fn accept_par_response(
         &mut self,
         request_id: CorrelationId,
+        attestation_retry_count: u8,
         response: EndpointResponse,
-        now_epoch_seconds: i64,
+        environment: &AuthorizationEnvironment<'_>,
     ) -> Result<(Stage, Vec<AuthorizationEffect>), AuthorizationError> {
         validate_transport_binding(
             request_id,
@@ -1405,15 +2337,29 @@ impl AuthorizationFlow {
         )?;
         validate_json_transport(&response)?;
         let nonce = parse_single_dpop_nonce(&response.dpop_nonce_headers)?;
+        let attestation_challenge =
+            parse_single_attestation_challenge(&response.attestation_challenge_headers)?;
         if response.status != 201 {
-            parse_oauth_error(response.body.expose(), PAR_JSON_LIMITS)
+            let error = parse_oauth_error(response.body.expose(), PAR_JSON_LIMITS)
                 .map_err(|_| AuthorizationError::InvalidParResponse)?;
+            if matches!(
+                error,
+                OAuthError::UseAttestationChallenge | OAuthError::UseFreshAttestation
+            ) {
+                return self.retry_client_attestation(
+                    EndpointPurpose::Par,
+                    None,
+                    0,
+                    attestation_retry_count,
+                    error,
+                    attestation_challenge,
+                    environment,
+                );
+            }
             return Err(AuthorizationError::ParRejected);
         }
-        if !cache_control_has(&response.cache_control_headers, "no-store")?
-            || !cache_control_has(&response.cache_control_headers, "no-cache")?
-        {
-            return Err(AuthorizationError::CachePolicyMissing);
+        if let Some(challenge) = attestation_challenge {
+            self.rotate_attestation_challenge(challenge)?;
         }
         let par = parse_par_response(response.body.expose())?;
         if let Some(nonce) = nonce {
@@ -1424,7 +2370,8 @@ impl AuthorizationFlow {
             &self.context.client_id,
             &par.request_uri,
         );
-        let request_uri_expires_at_epoch_seconds = now_epoch_seconds
+        let request_uri_expires_at_epoch_seconds = environment
+            .now_epoch_seconds
             .checked_add(i64::from(par.expires_in))
             .ok_or(AuthorizationError::InvalidParResponse)?;
         Ok((
@@ -1441,7 +2388,7 @@ impl AuthorizationFlow {
     fn accept_authorization_redirect(
         &mut self,
         redirect: AuthorizationRedirect,
-        random: &dyn Random,
+        environment: &AuthorizationEnvironment<'_>,
     ) -> Result<(Stage, Vec<AuthorizationEffect>), AuthorizationError> {
         if redirect.redirect_uri != self.context.redirect_uri.as_str() {
             return Err(AuthorizationError::RedirectMismatch);
@@ -1460,8 +2407,14 @@ impl AuthorizationFlow {
             CallbackResult::Code(code) => SecretString::from_string(code),
             CallbackResult::Error => return Err(AuthorizationError::AuthorizationDenied),
         };
-        let (stage, effect) =
-            self.client_auth_stage(EndpointPurpose::Token, Some(authorization_code), 0, random)?;
+        let (stage, effect) = self.authenticated_request_stage(
+            EndpointPurpose::Token,
+            Some(authorization_code),
+            0,
+            0,
+            false,
+            environment,
+        )?;
         Ok((stage, vec![effect]))
     }
 
@@ -1469,7 +2422,8 @@ impl AuthorizationFlow {
         &mut self,
         request_id: CorrelationId,
         authorization_code: SecretString,
-        nonce_retry_count: u8,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
         response: EndpointResponse,
         environment: &AuthorizationEnvironment<'_>,
     ) -> Result<(Stage, Vec<AuthorizationEffect>), AuthorizationError> {
@@ -1481,22 +2435,43 @@ impl AuthorizationFlow {
         )?;
         validate_json_transport(&response)?;
         let nonce = parse_single_dpop_nonce(&response.dpop_nonce_headers)?;
-        if response.status == 400 {
+        let attestation_challenge =
+            parse_single_attestation_challenge(&response.attestation_challenge_headers)?;
+        if matches!(response.status, 400 | 401) {
             let error = parse_oauth_error(response.body.expose(), TOKEN_JSON_LIMITS)
                 .map_err(|_| AuthorizationError::InvalidTokenResponse)?;
             if error == OAuthError::UseDpopNonce {
                 let nonce = nonce.ok_or(AuthorizationError::DpopNonceInvalid)?;
-                if nonce_retry_count >= MAX_DPOP_NONCE_RETRIES {
+                if dpop_nonce_retry_count >= MAX_DPOP_NONCE_RETRIES {
                     return Err(AuthorizationError::DpopNonceRetryLimit);
                 }
                 self.rotate_token_endpoint_nonce(nonce)?;
-                let (stage, effect) = self.client_auth_stage(
+                if let Some(challenge) = attestation_challenge {
+                    self.rotate_attestation_challenge(challenge)?;
+                }
+                let (stage, effect) = self.authenticated_request_stage(
                     EndpointPurpose::Token,
                     Some(authorization_code),
-                    nonce_retry_count + 1,
-                    environment.random,
+                    dpop_nonce_retry_count + 1,
+                    attestation_retry_count,
+                    false,
+                    environment,
                 )?;
                 return Ok((stage, vec![effect]));
+            }
+            if matches!(
+                error,
+                OAuthError::UseAttestationChallenge | OAuthError::UseFreshAttestation
+            ) {
+                return self.retry_client_attestation(
+                    EndpointPurpose::Token,
+                    Some(authorization_code),
+                    dpop_nonce_retry_count,
+                    attestation_retry_count,
+                    error,
+                    attestation_challenge,
+                    environment,
+                );
             }
             return Err(AuthorizationError::TokenRejected);
         }
@@ -1510,6 +2485,9 @@ impl AuthorizationFlow {
         }
         if let Some(nonce) = nonce {
             self.rotate_token_endpoint_nonce(nonce)?;
+        }
+        if let Some(challenge) = attestation_challenge {
+            self.rotate_attestation_challenge(challenge)?;
         }
         let parsed = parse_access_token_response(
             response.body.expose(),
@@ -1534,8 +2512,42 @@ impl AuthorizationFlow {
             credential_endpoint: self.context.credential_endpoint.clone(),
             nonce_endpoint: self.context.nonce_endpoint.clone(),
             dpop_key: self.context.dpop_key.duplicate(),
+            client_attestation_key_ref: self.context.client_attestation_key.key_ref.clone(),
+            client_attestation_public_jwk: self.context.client_attestation_key.public_jwk.clone(),
         };
-        Ok((Stage::Complete(grant), Vec::new()))
+        Ok((Stage::Complete(Box::new(grant)), Vec::new()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn retry_client_attestation(
+        &mut self,
+        purpose: EndpointPurpose,
+        authorization_code: Option<SecretString>,
+        dpop_nonce_retry_count: u8,
+        attestation_retry_count: u8,
+        error: OAuthError,
+        challenge: Option<SecretString>,
+        environment: &AuthorizationEnvironment<'_>,
+    ) -> Result<(Stage, Vec<AuthorizationEffect>), AuthorizationError> {
+        if attestation_retry_count >= MAX_CLIENT_ATTESTATION_RETRIES {
+            return Err(AuthorizationError::AttestationChallengeRetryLimit);
+        }
+        if error == OAuthError::UseAttestationChallenge && challenge.is_none() {
+            return Err(AuthorizationError::AttestationChallengeInvalid);
+        }
+        if let Some(challenge) = challenge {
+            self.rotate_attestation_challenge(challenge)?;
+        }
+        let force_fresh_attestation = error == OAuthError::UseFreshAttestation;
+        let (stage, effect) = self.authenticated_request_stage(
+            purpose,
+            authorization_code,
+            dpop_nonce_retry_count,
+            attestation_retry_count + 1,
+            force_fresh_attestation,
+            environment,
+        )?;
+        Ok((stage, vec![effect]))
     }
 
     fn rotate_token_endpoint_nonce(
@@ -1639,6 +2651,9 @@ fn parse_authorization_callback(input: &[u8]) -> Result<AuthorizationCallback, A
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OAuthError {
     UseDpopNonce,
+    UseAttestationChallenge,
+    UseFreshAttestation,
+    InvalidClientAttestation,
     Other,
 }
 
@@ -1652,11 +2667,292 @@ fn parse_oauth_error(input: &[u8], limits: JsonLimits) -> Result<OAuthError, Jso
     if object.contains_key("access_token") || object.contains_key("request_uri") {
         return Err(JsonBoundaryError::InvalidJson);
     }
-    Ok(if error == "use_dpop_nonce" {
-        OAuthError::UseDpopNonce
-    } else {
-        OAuthError::Other
+    Ok(match error {
+        "use_dpop_nonce" => OAuthError::UseDpopNonce,
+        "use_attestation_challenge" => OAuthError::UseAttestationChallenge,
+        "use_fresh_attestation" => OAuthError::UseFreshAttestation,
+        "invalid_client_attestation" => OAuthError::InvalidClientAttestation,
+        _ => OAuthError::Other,
     })
+}
+
+fn parse_attestation_challenge_response(input: &[u8]) -> Result<SecretString, AuthorizationError> {
+    let object = bounded_json::parse_object(input, ATTESTATION_CHALLENGE_JSON_LIMITS)
+        .map_err(|_| AuthorizationError::AttestationChallengeInvalid)?;
+    let challenge = object
+        .get("attestation_challenge")
+        .and_then(Value::as_str)
+        .filter(|value| valid_attestation_challenge(value))
+        .ok_or(AuthorizationError::AttestationChallengeInvalid)?;
+    Ok(SecretString::from_str(challenge))
+}
+
+/// Validate the protected HAIP Wallet Attestation shape, verify its compact JWS with the leaf
+/// certificate from `x5c`, and bind `sub`/`cnf` to local inputs. Certificate path construction,
+/// trust-anchor exclusion, issuer authorization, revocation, and ecosystem policy remain the
+/// external WIA trust boundary; successful leaf verification alone does not establish trust.
+struct ParsedWalletAttestation {
+    replay_hash: [u8; 32],
+    client_status_reference_hash: [u8; 32],
+}
+
+fn parse_and_bind_wallet_attestation(
+    jwt: &str,
+    expected_client_id: &str,
+    expected_public_jwk: &Es256PublicJwk,
+    now_epoch_seconds: i64,
+    required_client_status_period: u64,
+    digest: &dyn Digest,
+    verifier: &dyn Verifier,
+) -> Result<ParsedWalletAttestation, AuthorizationError> {
+    validate_compact_jwt(jwt, MAX_WALLET_ATTESTATION_BYTES)?;
+    let mut segments = jwt.split('.');
+    let header_segment = segments
+        .next()
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let claims_segment = segments
+        .next()
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let signature_segment = segments
+        .next()
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let header_bytes = Base64UrlUnpadded::decode_vec(header_segment)
+        .map_err(|_| AuthorizationError::ClientAuthenticationInvalid)?;
+    let claims_bytes = Base64UrlUnpadded::decode_vec(claims_segment)
+        .map_err(|_| AuthorizationError::ClientAuthenticationInvalid)?;
+    let signature = Base64UrlUnpadded::decode_vec(signature_segment)
+        .map_err(|_| AuthorizationError::ClientAuthenticationInvalid)?;
+    if signature.len() != 64 {
+        return Err(AuthorizationError::ClientAuthenticationInvalid);
+    }
+    let signing_input = format!("{header_segment}.{claims_segment}");
+    let header = bounded_json::parse_object(&header_bytes, WALLET_ATTESTATION_JSON_LIMITS)
+        .map_err(|_| AuthorizationError::ClientAuthenticationInvalid)?;
+    if header.get("typ").and_then(Value::as_str) != Some("oauth-client-attestation+jwt")
+        || header.get("alg").and_then(Value::as_str) != Some("ES256")
+        || ["jwk", "jku", "x5u", "crit", "b64"]
+            .iter()
+            .any(|name| header.contains_key(*name))
+    {
+        return Err(AuthorizationError::ClientAuthenticationInvalid);
+    }
+    let leaf_public_key = parse_wallet_attestation_x5c(&header)?;
+    verifier
+        .verify(
+            Alg::Es256,
+            &leaf_public_key,
+            signing_input.as_bytes(),
+            &signature,
+        )
+        .map_err(|_| AuthorizationError::ClientAuthenticationInvalid)?;
+    let claims = bounded_json::parse_object(&claims_bytes, WALLET_ATTESTATION_JSON_LIMITS)
+        .map_err(|_| AuthorizationError::ClientAuthenticationInvalid)?;
+    // TS3 1.5.2 deliberately omits `iss`: Wallet Provider identity is derived only by the
+    // external x5c path/trusted-list authorization gate. Never treat an unverified claim as that
+    // identity. `sub` remains the Appendix-E client_id binding.
+    if claims.get("sub").and_then(Value::as_str) != Some(expected_client_id) {
+        return Err(AuthorizationError::ClientAuthenticationBindingMismatch);
+    }
+    require_bounded_claim_text(&claims, "wallet_name", MAX_WALLET_NAME_BYTES)?;
+    require_bounded_claim_text(&claims, "wallet_version", MAX_WALLET_VERSION_BYTES)?;
+    validate_wallet_solution_certification_information(&claims)?;
+
+    let exp = claims
+        .get("exp")
+        .and_then(Value::as_i64)
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let latest_acceptable_expiry = now_epoch_seconds
+        .checked_add(MAX_WALLET_ATTESTATION_LIFETIME_SECONDS)
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    if exp <= now_epoch_seconds.saturating_sub(CLOCK_SKEW_SECONDS)
+        || exp >= latest_acceptable_expiry
+    {
+        return Err(AuthorizationError::ClientAuthenticationInvalid);
+    }
+    let iat = optional_i64_claim(&claims, "iat")?;
+    let nbf = optional_i64_claim(&claims, "nbf")?;
+    if iat.is_some_and(|value| {
+        value > now_epoch_seconds.saturating_add(CLOCK_SKEW_SECONDS)
+            || exp.checked_sub(value).is_none_or(|lifetime| {
+                lifetime <= 0 || lifetime >= MAX_WALLET_ATTESTATION_LIFETIME_SECONDS
+            })
+    }) || nbf.is_some_and(|value| {
+        value > now_epoch_seconds.saturating_add(CLOCK_SKEW_SECONDS) || value > exp
+    }) {
+        return Err(AuthorizationError::ClientAuthenticationInvalid);
+    }
+
+    let client_status = claims
+        .get("client_status")
+        .and_then(Value::as_object)
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let (client_status_uri, client_status_index) = parse_token_status_list_reference(
+        client_status
+            .get("status")
+            .ok_or(AuthorizationError::ClientAuthenticationInvalid)?,
+    )?;
+    let client_status_exp = client_status
+        .get("exp")
+        .and_then(Value::as_i64)
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let remaining_client_status_period = client_status_exp
+        .checked_sub(now_epoch_seconds)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    if remaining_client_status_period < required_client_status_period {
+        return Err(AuthorizationError::ClientAuthenticationInvalid);
+    }
+
+    let cnf = claims
+        .get("cnf")
+        .and_then(Value::as_object)
+        .filter(|cnf| cnf.len() == 1)
+        .ok_or(AuthorizationError::ClientAuthenticationBindingMismatch)?;
+    let jwk = cnf
+        .get("jwk")
+        .and_then(Value::as_object)
+        .ok_or(AuthorizationError::ClientAuthenticationBindingMismatch)?;
+    if jwk.get("kty").and_then(Value::as_str) != Some("EC")
+        || jwk.get("crv").and_then(Value::as_str) != Some("P-256")
+        || jwk.get("x").and_then(Value::as_str) != Some(expected_public_jwk.x())
+        || jwk.get("y").and_then(Value::as_str) != Some(expected_public_jwk.y())
+        || ["d", "k", "p", "q", "dp", "dq", "qi", "oth"]
+            .iter()
+            .any(|name| jwk.contains_key(*name))
+    {
+        return Err(AuthorizationError::ClientAuthenticationBindingMismatch);
+    }
+    // Hash the protected signing input, rather than its potentially randomized ECDSA signature,
+    // so a nominally fresh response cannot replay identical attestation claims with a new
+    // signature encoding.
+    let client_status_reference = format!("{client_status_uri}\0{client_status_index}");
+    Ok(ParsedWalletAttestation {
+        replay_hash: digest.sha256(signing_input.as_bytes()),
+        client_status_reference_hash: digest.sha256(client_status_reference.as_bytes()),
+    })
+}
+
+fn require_bounded_claim_text(
+    claims: &Map<String, Value>,
+    name: &str,
+    max_bytes: usize,
+) -> Result<(), AuthorizationError> {
+    claims
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|value| valid_bounded_text(value, max_bytes, false))
+        .map(|_| ())
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)
+}
+
+fn validate_wallet_solution_certification_information(
+    claims: &Map<String, Value>,
+) -> Result<(), AuthorizationError> {
+    let value = claims
+        .get("wallet_solution_certification_information")
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let valid = match value {
+        Value::String(value) => valid_bounded_text(
+            value,
+            MAX_WALLET_SOLUTION_CERTIFICATION_INFORMATION_BYTES,
+            false,
+        ),
+        Value::Object(object) => {
+            !object.is_empty()
+                && serde_json::to_vec(value).is_ok_and(|encoded| {
+                    encoded.len() <= MAX_WALLET_SOLUTION_CERTIFICATION_INFORMATION_BYTES
+                })
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(AuthorizationError::ClientAuthenticationInvalid);
+    }
+    Ok(())
+}
+
+fn parse_token_status_list_reference(value: &Value) -> Result<(String, u64), AuthorizationError> {
+    let status = value
+        .as_object()
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let status_list = status
+        .get("status_list")
+        .and_then(Value::as_object)
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let index = status_list
+        .get("idx")
+        .and_then(Value::as_u64)
+        .filter(|idx| *idx <= MAX_TOKEN_STATUS_LIST_INDEX)
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let uri = status_list
+        .get("uri")
+        .and_then(Value::as_str)
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let uri =
+        HttpsEndpoint::parse(uri).map_err(|_| AuthorizationError::ClientAuthenticationInvalid)?;
+    Ok((uri.as_str().to_owned(), index))
+}
+
+fn required_client_status_period(preferred: Option<u64>) -> u64 {
+    preferred
+        .unwrap_or(MIN_CLIENT_STATUS_MAINTENANCE_SECONDS)
+        .max(MIN_CLIENT_STATUS_MAINTENANCE_SECONDS)
+}
+
+fn parse_wallet_attestation_x5c(
+    header: &Map<String, Value>,
+) -> Result<Vec<u8>, AuthorizationError> {
+    let certificates = header
+        .get("x5c")
+        .and_then(Value::as_array)
+        .filter(|certificates| {
+            !certificates.is_empty()
+                && certificates.len() <= MAX_WALLET_ATTESTATION_X5C_CERTIFICATES
+        })
+        .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+    let mut seen_der = Vec::<Vec<u8>>::with_capacity(certificates.len());
+    let mut leaf_public_key = None;
+    for certificate in certificates {
+        let encoded = certificate
+            .as_str()
+            .filter(|value| {
+                !value.is_empty() && value.len() <= MAX_WALLET_ATTESTATION_X5C_CERTIFICATE_BYTES
+            })
+            .ok_or(AuthorizationError::ClientAuthenticationInvalid)?;
+        let der = Base64::decode_vec(encoded)
+            .map_err(|_| AuthorizationError::ClientAuthenticationInvalid)?;
+        if der.is_empty()
+            || Base64::encode_string(&der) != encoded
+            || seen_der.iter().any(|seen| ct_eq(seen, &der))
+        {
+            return Err(AuthorizationError::ClientAuthenticationInvalid);
+        }
+        let parsed =
+            x509::parse_cert(&der).map_err(|_| AuthorizationError::ClientAuthenticationInvalid)?;
+        if leaf_public_key.is_none() {
+            // HAIP requires ES256 support for Wallet Attestations. The strict X.509 parser admits
+            // a 65-byte uncompressed point only for P-256.
+            if parsed.public_key_raw.len() != 65 || parsed.public_key_raw.first() != Some(&0x04) {
+                return Err(AuthorizationError::ClientAuthenticationInvalid);
+            }
+            leaf_public_key = Some(parsed.public_key_raw.clone());
+        }
+        seen_der.push(der);
+    }
+    leaf_public_key.ok_or(AuthorizationError::ClientAuthenticationInvalid)
+}
+
+fn optional_i64_claim(
+    claims: &Map<String, Value>,
+    name: &str,
+) -> Result<Option<i64>, AuthorizationError> {
+    match claims.get(name) {
+        Some(value) => value
+            .as_i64()
+            .map(Some)
+            .ok_or(AuthorizationError::ClientAuthenticationInvalid),
+        None => Ok(None),
+    }
 }
 
 struct ParsedAccessTokenGrant {
@@ -1683,7 +2979,7 @@ fn parse_access_token_response(
     }
     let token_type = take_required_string(&mut object, "token_type", 16)
         .map_err(|_| AuthorizationError::InvalidTokenResponse)?;
-    if token_type != "DPoP" {
+    if !token_type.eq_ignore_ascii_case("DPoP") {
         return Err(AuthorizationError::TokenTypeDowngrade);
     }
     let expires_in_seconds = match object.remove("expires_in") {
@@ -1818,10 +3114,16 @@ fn validate_transport_binding(
 }
 
 fn validate_json_transport(response: &EndpointResponse) -> Result<(), AuthorizationError> {
-    if valid_json_content_type(&response.content_type) {
-        Ok(())
-    } else {
-        Err(AuthorizationError::InvalidMediaType)
+    match response.content_type_headers.as_slice() {
+        [value] if valid_raw_header_value(value) && valid_json_content_type(value) => {}
+        _ => return Err(AuthorizationError::InvalidMediaType),
+    }
+    match response.content_encoding_headers.as_slice() {
+        [] => Ok(()),
+        [value] if valid_raw_header_value(value) && value.eq_ignore_ascii_case("identity") => {
+            Ok(())
+        }
+        _ => Err(AuthorizationError::InvalidContentEncoding),
     }
 }
 
@@ -1885,18 +3187,20 @@ fn pragma_has_no_cache(header_values: &[String]) -> Result<bool, AuthorizationEr
 fn validate_raw_header_values(values: &[String]) -> Result<(), AuthorizationError> {
     if values.is_empty()
         || values.len() > 8
-        || values.iter().any(|value| {
-            value.is_empty()
-                || value.len() > 1_024
-                || !value.is_ascii()
-                || value
-                    .bytes()
-                    .any(|byte| byte != b'\t' && !(0x20..=0x7e).contains(&byte))
-        })
+        || values.iter().any(|value| !valid_raw_header_value(value))
     {
         return Err(AuthorizationError::CachePolicyMissing);
     }
     Ok(())
+}
+
+fn valid_raw_header_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 1_024
+        && value.is_ascii()
+        && !value
+            .bytes()
+            .any(|byte| byte != b'\t' && !(0x20..=0x7e).contains(&byte))
 }
 
 fn parse_single_dpop_nonce(values: &[String]) -> Result<Option<SecretString>, AuthorizationError> {
@@ -1911,6 +3215,23 @@ fn parse_single_dpop_nonce(values: &[String]) -> Result<Option<SecretString>, Au
         }
         _ => Err(AuthorizationError::DpopNonceInvalid),
     }
+}
+
+fn parse_single_attestation_challenge(
+    values: &[String],
+) -> Result<Option<SecretString>, AuthorizationError> {
+    match values {
+        [] => Ok(None),
+        [value] if valid_attestation_challenge(value) => Ok(Some(SecretString::from_str(value))),
+        _ => Err(AuthorizationError::AttestationChallengeInvalid),
+    }
+}
+
+fn valid_attestation_challenge(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ATTESTATION_CHALLENGE_BYTES
+        && value.bytes().all(is_nqchar)
+        && !value.contains(',')
 }
 
 fn build_authorization_url(endpoint: &str, client_id: &str, request_uri: &str) -> String {

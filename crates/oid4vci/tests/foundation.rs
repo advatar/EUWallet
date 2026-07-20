@@ -9,6 +9,7 @@ use oid4vci::foundation::{
     OfferError, OfferGrantSource, PidProviderTrust, ProfileSelectionError,
     TransactionCodeInputMode, UrlSyntaxError, MAX_AUTHORIZATION_SERVERS, MAX_CONFIGURATIONS,
     MAX_CONFIGURATION_IDS, MAX_CONFIGURATION_ID_BYTES, MAX_ENDPOINT_BYTES, MAX_OPAQUE_VALUE_BYTES,
+    MAX_PREFERRED_CLIENT_STATUS_PERIOD_SECONDS, MAX_PREFERRED_KEY_STORAGE_STATUS_PERIOD_SECONDS,
     MAX_SCOPE_BYTES, MDOC_PID_DOCTYPE, SD_JWT_PID_VCT,
 };
 use serde_json::{json, Value};
@@ -361,7 +362,8 @@ fn sd_configuration() -> Value {
                 "proof_signing_alg_values_supported": ["ES256"],
                 "key_attestations_required": {
                     "key_storage": ["iso_18045_high"],
-                    "user_authentication": ["iso_18045_high", "iso_18045_moderate"]
+                    "user_authentication": ["iso_18045_high", "iso_18045_moderate"],
+                    "preferred_key_storage_status_period": 3456000
                 }
             },
             "attestation": {
@@ -384,6 +386,13 @@ fn mdoc_configuration() -> Value {
         "credential_signing_alg_values_supported": [-7],
         "proof_types_supported": {
             "jwt": {
+                "proof_signing_alg_values_supported": ["ES256"],
+                "key_attestations_required": {
+                    "key_storage": ["iso_18045_high"],
+                    "user_authentication": ["iso_18045_high"]
+                }
+            },
+            "attestation": {
                 "proof_signing_alg_values_supported": ["ES256"],
                 "key_attestations_required": {
                     "key_storage": ["iso_18045_high"],
@@ -413,11 +422,15 @@ fn authorization_server_metadata(issuer: &str) -> Value {
         "authorization_endpoint": format!("{issuer}/authorize"),
         "token_endpoint": format!("{issuer}/token"),
         "pushed_authorization_request_endpoint": format!("{issuer}/par"),
+        "challenge_endpoint": format!("{issuer}/challenge"),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "scopes_supported": ["pid_sd", "pid_mdoc"],
         "code_challenge_methods_supported": ["S256"],
         "dpop_signing_alg_values_supported": ["ES256"],
+        "token_endpoint_auth_methods_supported": ["attest_jwt_client_auth"],
+        "client_attestation_signing_alg_values_supported": ["ES256"],
+        "client_attestation_pop_signing_alg_values_supported": ["ES256"],
         "authorization_response_iss_parameter_supported": true,
         "require_pushed_authorization_requests": true
     })
@@ -451,6 +464,16 @@ fn issuer_and_as_metadata_parse_exact_identifiers_endpoints_and_features() {
     assert!(server.features.pkce_s256);
     assert!(server.features.dpop_es256);
     assert!(server.features.authorization_response_issuer);
+    assert!(server.features.attestation_client_auth);
+    assert!(server.features.client_attestation_es256);
+    assert!(server.features.client_attestation_pop_es256);
+    assert_eq!(
+        server
+            .challenge_endpoint
+            .as_ref()
+            .map(HttpsEndpoint::as_str),
+        Some("https://as-one.example/tenant/challenge")
+    );
 }
 
 #[test]
@@ -545,6 +568,103 @@ fn metadata_semantic_collection_and_text_caps_are_hard() {
     );
 }
 
+#[test]
+fn preferred_client_status_period_is_bounded_and_carried_into_the_pid_plan() {
+    let base = issuer_metadata("pid-sd", sd_configuration());
+    assert_eq!(parse_issuer(&base).preferred_client_status_period, None);
+
+    for period in [0, MAX_PREFERRED_CLIENT_STATUS_PERIOD_SECONDS] {
+        let mut value = base.clone();
+        value["preferred_client_status_period"] = json!(period);
+        assert_eq!(
+            parse_issuer(&value).preferred_client_status_period,
+            Some(period)
+        );
+    }
+
+    for invalid in [
+        json!(MAX_PREFERRED_CLIENT_STATUS_PERIOD_SECONDS + 1),
+        json!(-1),
+        json!(1.5),
+        json!("2678400"),
+    ] {
+        let mut value = base.clone();
+        value["preferred_client_status_period"] = invalid;
+        assert_eq!(
+            parse_credential_issuer_metadata(&serde_json::to_vec(&value).unwrap(), ISSUER),
+            Err(MetadataError::InvalidField(
+                "preferred_client_status_period"
+            ))
+        );
+    }
+
+    let preferred = 45 * 24 * 60 * 60;
+    let mut value = base;
+    value["preferred_client_status_period"] = json!(preferred);
+    let issuer = parse_issuer(&value);
+    let offer = parse_offer(&authorization_offer(ISSUER, "pid-sd"));
+    let server = parse_as(&authorization_server_metadata(AS_ONE), AS_ONE);
+    let plan = select_german_first_enrolment(&offer, &issuer, &[server], "pid-sd").unwrap();
+    assert_eq!(plan.preferred_client_status_period, Some(preferred));
+}
+
+#[test]
+fn preferred_key_storage_status_period_is_bounded_preserved_and_selected() {
+    let base = issuer_metadata("pid-sd", sd_configuration());
+    let parsed = parse_issuer(&base);
+    let requirement = parsed.credential_configurations_supported["pid-sd"]
+        .proof_types_supported
+        .as_ref()
+        .unwrap()["jwt"]
+        .key_attestations_required
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        requirement.preferred_key_storage_status_period,
+        Some(3_456_000)
+    );
+
+    for period in [0, MAX_PREFERRED_KEY_STORAGE_STATUS_PERIOD_SECONDS] {
+        let mut value = base.clone();
+        value["credential_configurations_supported"]["pid-sd"]["proof_types_supported"]["jwt"]
+            ["key_attestations_required"]["preferred_key_storage_status_period"] = json!(period);
+        let issuer = parse_issuer(&value);
+        assert_eq!(
+            issuer.credential_configurations_supported["pid-sd"]
+                .proof_types_supported
+                .as_ref()
+                .unwrap()["jwt"]
+                .key_attestations_required
+                .as_ref()
+                .unwrap()
+                .preferred_key_storage_status_period,
+            Some(period)
+        );
+    }
+
+    for invalid in [
+        json!(MAX_PREFERRED_KEY_STORAGE_STATUS_PERIOD_SECONDS + 1),
+        json!(-1),
+        json!(1.5),
+        json!("2678400"),
+    ] {
+        let mut value = base.clone();
+        value["credential_configurations_supported"]["pid-sd"]["proof_types_supported"]["jwt"]
+            ["key_attestations_required"]["preferred_key_storage_status_period"] = invalid;
+        assert_eq!(
+            parse_credential_issuer_metadata(&serde_json::to_vec(&value).unwrap(), ISSUER),
+            Err(MetadataError::InvalidField(
+                "preferred_key_storage_status_period"
+            ))
+        );
+    }
+
+    let offer = parse_offer(&authorization_offer(ISSUER, "pid-sd"));
+    let server = parse_as(&authorization_server_metadata(AS_ONE), AS_ONE);
+    let plan = select_german_first_enrolment(&offer, &parsed, &[server], "pid-sd").unwrap();
+    assert_eq!(plan.preferred_key_storage_status_period, Some(3_456_000));
+}
+
 fn valid_setup(
     configuration_id: &str,
     configuration: Value,
@@ -572,6 +692,7 @@ fn german_first_enrolment_selects_only_exact_current_pid_profiles() {
     );
     assert_eq!(plan.scope, "pid_sd");
     assert_eq!(plan.pid_provider_trust, PidProviderTrust::Unresolved);
+    assert_eq!(plan.preferred_key_storage_status_period, Some(3_456_000));
 
     let (offer, issuer, server) = valid_setup("pid-mdoc", mdoc_configuration());
     let plan = select_german_first_enrolment(&offer, &issuer, &[server], "pid-mdoc").unwrap();
@@ -743,6 +864,26 @@ fn pid_configuration_capability_matrix_is_typed_and_fail_closed() {
         (
             {
                 let mut value = sd_configuration();
+                value["proof_types_supported"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("attestation");
+                value
+            },
+            ProfileSelectionError::AttestationProofMissing,
+        ),
+        (
+            {
+                let mut value = sd_configuration();
+                value["proof_types_supported"]["attestation"]
+                    ["proof_signing_alg_values_supported"] = json!(["ES384"]);
+                value
+            },
+            ProfileSelectionError::AttestationProofAlgorithmMissing,
+        ),
+        (
+            {
+                let mut value = sd_configuration();
                 value["proof_types_supported"]["jwt"]
                     .as_object_mut()
                     .unwrap()
@@ -750,6 +891,17 @@ fn pid_configuration_capability_matrix_is_typed_and_fail_closed() {
                 value
             },
             ProfileSelectionError::KeyAttestationMissing,
+        ),
+        (
+            {
+                let mut value = sd_configuration();
+                value["proof_types_supported"]["attestation"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("key_attestations_required");
+                value
+            },
+            ProfileSelectionError::AttestationKeyAttestationMissing,
         ),
         (
             {
@@ -763,11 +915,29 @@ fn pid_configuration_capability_matrix_is_typed_and_fail_closed() {
         (
             {
                 let mut value = sd_configuration();
+                value["proof_types_supported"]["attestation"]["key_attestations_required"]
+                    ["key_storage"] = json!(["iso_18045_moderate"]);
+                value
+            },
+            ProfileSelectionError::AttestationHighKeyStorageMissing,
+        ),
+        (
+            {
+                let mut value = sd_configuration();
                 value["proof_types_supported"]["jwt"]["key_attestations_required"]
                     ["user_authentication"] = json!(["iso_18045_moderate"]);
                 value
             },
             ProfileSelectionError::HighUserAuthenticationMissing,
+        ),
+        (
+            {
+                let mut value = sd_configuration();
+                value["proof_types_supported"]["attestation"]["key_attestations_required"]
+                    ["user_authentication"] = json!(["iso_18045_moderate"]);
+                value
+            },
+            ProfileSelectionError::AttestationHighUserAuthenticationMissing,
         ),
     ];
     for (configuration, expected) in cases {
@@ -820,7 +990,7 @@ fn issuer_required_nonce_and_encryption_capabilities_fail_closed() {
 #[test]
 fn authorization_server_capability_matrix_is_typed_and_fail_closed() {
     let (offer, issuer, _) = valid_setup("pid", sd_configuration());
-    let cases: [(&str, Option<Value>, ProfileSelectionError); 9] = [
+    let cases: [(&str, Option<Value>, ProfileSelectionError); 12] = [
         (
             "grant_types_supported",
             Some(json!(["client_credentials"])),
@@ -860,6 +1030,21 @@ fn authorization_server_capability_matrix_is_typed_and_fail_closed() {
             "authorization_response_iss_parameter_supported",
             Some(json!(false)),
             ProfileSelectionError::AuthorizationResponseIssuerUnsupported,
+        ),
+        (
+            "token_endpoint_auth_methods_supported",
+            Some(json!(["none"])),
+            ProfileSelectionError::AttestationClientAuthenticationUnsupported,
+        ),
+        (
+            "client_attestation_signing_alg_values_supported",
+            Some(json!(["ES384"])),
+            ProfileSelectionError::ClientAttestationAlgorithmUnsupported,
+        ),
+        (
+            "client_attestation_pop_signing_alg_values_supported",
+            Some(json!(["ES384"])),
+            ProfileSelectionError::ClientAttestationPopAlgorithmUnsupported,
         ),
         (
             "scopes_supported",

@@ -196,38 +196,69 @@ operational solution needed to enter those processes.
   - [ ] Implement authorization-code issuance with PAR, PKCE S256, RFC 9207 issuer binding, exact
         redirect/state correlation, DPoP and DPoP-Nonce, final token/nonce/proofs/credentials wire
         models and typed native effects.
-    - [ ] Add and harden the isolated OpenID4VCI 1.0 Final/HAIP authorization transport machine.
-          The imported implementation has bounded injected PKCE/state generation; exact PAR,
+    - [x] Add and harden the isolated OpenID4VCI 1.0 Final/HAIP authorization transport machine.
+          The reviewed implementation has bounded injected PKCE/state generation; exact PAR,
           browser callback and token contracts; request-bound Wallet Attestation/PoP inputs; RFC
           9207 issuer/redirect binding; token-only ES256 DPoP signing effects and nonce retry;
-          duplicate-aware bounded JSON; and replay/downgrade/secret-redaction tests, but remains
-          unchecked until the remediation below passes review and full gates. Credential/Nonce
-          Endpoint transport, trusted WIA minting, native-shell wiring and PID-provider trust
-          resolution remain separate work.
+          duplicate-aware bounded JSON; and replay/downgrade/secret-redaction tests. Production
+          aggregate integration, external Wallet Provider/PID-provider trust and native-shell
+          wiring remain separate work.
     - [ ] Integrate the reviewed sans-I/O authorization/credential transport only after its P1
           conformance, device-binding, replay and privacy defects are closed; green isolated tests
           are not sufficient to mark either transport complete.
-      - [ ] Implement the pinned Wallet Attestation challenge protocol and construct/verify local,
+      - [x] Implement the pinned Wallet Attestation challenge protocol and construct/verify local,
             WSCD-key-bound client-attestation PoP instead of accepting two opaque remote JWTs.
-      - [ ] Accept RFC 9449 header-only and mixed DPoP nonce challenges, case-insensitive token
-            types and conforming cache headers; add bounded `invalid_nonce` recovery with atomic,
-            durable nonce reservation before credential-proof signing.
-      - [ ] Enforce distinct DPoP and credential keys, minimise the key-attestation backend request,
-            and remove the incorrect SD-JWT `iss == credential_issuer` transport gate in favour of
-            verified-ingestion `x5c`/issuer-path authorization.
+      - [x] Accept RFC 9449 header-only and mixed DPoP nonce challenges, case-insensitive token
+            types and conforming cache headers; require atomic durable `c_nonce` reservation before
+            credential-proof signing and fail closed with a typed fresh-key requirement after any
+            Credential Endpoint nonce challenge instead of replaying a burned key/attestation.
+      - [x] Enforce distinct Client Instance, DPoP and credential keys, minimise Wallet/Key
+            Attestation backend requests, and remove the incorrect SD-JWT
+            `iss == credential_issuer` transport gate in favour of verified-ingestion
+            `x5c`/issuer-path authorization.
       - [ ] Require native adapters to enforce streaming body/header/decompression limits before
             allocation, exact final URL/method correlation, disabled redirects, deadlines,
             cancellation and secret-safe logging; add the missing hostile/conformance vectors.
-    - [ ] Add and harden the isolated final Nonce/Credential Endpoint transport machine that
-          consumes the sender-constrained authorization grant; obtains bounded `c_nonce`; requires exact
-          request-bound key-attestation acquisition and ES256 credential-proof signing; sends an
-          `ath`-bound DPoP request with a finite resource-server nonce retry; and accepts only one
-          immediate, unencrypted German PID credential in the selected format while preserving its
-          raw bytes for the verified-ingestion boundary.
+      - [ ] Replace wallet-core's legacy issuance machine with a Rust-owned production aggregate
+            that performs bounded offer/issuer/AS discovery, resolves PID-provider trust, owns the
+            reviewed authorization and credential flows, and never exposes tokens, grants or an
+            `UnverifiedCredential` through UniFFI or UI DTOs.
+      - [ ] Introduce strict correlated native effects for lossless protocol HTTP responses,
+            browser authorization, WIA/KA acquisition, atomic reservations and ES256 key/signing
+            operations; preserve duplicate security headers and enforce three non-aliasable Client
+            Instance, DPoP and per-credential holder-key namespaces on both platforms.
+      - [ ] Add checkpoint schema v2 and a bounded crash-safe outbox/inbox: commit intent before
+            browser, signing or network effects; durably retain bounded results before transition;
+            persist c_nonce, WIA, KA and public-key reservations across abort/restart; fail closed
+            on unknown HTTP completion or full ledgers; never serialize private keys.
+      - [ ] Wire the new effects through iOS and Android production transports, durable stores,
+            hardware-key managers and Wallet Provider services, then route successful transport
+            output immediately through versioned PID mdoc/draft-13 SD-JWT VC verified ingestion.
+            Deliver any credential notification only from a post-ingestion durable outbox.
+    - [x] Add and harden the isolated final Nonce/Credential Endpoint transport machine that
+          consumes the sender-constrained authorization grant; obtains bounded `c_nonce`; requires
+          exact request-bound key-attestation acquisition and ES256 credential-proof signing;
+          sends an `ath`-bound DPoP request; and accepts only one immediate, unencrypted German PID
+          credential in the selected format while preserving its raw bytes for the
+          verified-ingestion boundary.
           Trusted WIA/KA minting, native-shell wiring, verified ingestion and PID-provider trust
           resolution remain separate work.
   - [ ] Replace the custom WUA gate with TS3 1.5.2 WIA + KA transport, Wallet Provider trust,
         one-use/privacy rules, WSCD key binding and client/key-storage status maintenance.
+    - [x] Accept the TS3 1.5.2 x5c-derived Wallet Provider identity without a non-standard `iss`
+          requirement; verify each compact WIA locally; require bounded wallet name/version,
+          solution-certification and client-status claims; enforce the sub-24-hour WIA lifetime,
+          effective client-status maintenance period and safe single-issuance policy.
+    - [x] Accept TS3 1.5.2 key attestations without leaking the issuance `c_nonce` to the attestation
+          provider; verify required certification and key-storage status, preferred status periods
+          and German PID WSCD assurance; atomically reserve each key-attestation and public key for
+          one use, and require a genuinely new credential key after `invalid_nonce` instead of
+          minting another attestation for the same key.
+    - [x] Preserve Client Instance, DPoP and credential-holder key identities across the transport
+          hand-off and reject reference or canonical-JWK aliasing between all three roles.
+    - [ ] Build external WIA/KA PKI path construction, trust-anchor exclusion, revocation and live
+          Token Status List resolution; authorize Wallet/PID Providers against ecosystem trusted
+          lists; wire the policy and attestation services through both native clients.
   - [ ] Add and test a secret-safe native `GermanEidClient` seam; then integrate the official
         AusweisApp SDK on iOS and Android against the accepted PID Provider's authenticated TcToken
         and secure-return contract, with identity attributes available only at the provider backend.

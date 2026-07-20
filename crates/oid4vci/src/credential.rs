@@ -2,25 +2,28 @@
 //!
 //! This is a sans-I/O continuation of [`crate::authorization`]. It consumes that machine's
 //! DPoP-bound access-token grant, obtains `c_nonce` from the unprotected Nonce Endpoint, requests
-//! a fresh key attestation for the exact holder key and nonce, builds both ES256 signing inputs in
-//! Rust, and emits one DPoP-protected Credential request. Only one immediate, unencrypted PID
-//! credential is admitted.
+//! an atomic durable reservation of that nonce, durably burns the holder-key thumbprint before
+//! requesting a fresh Key Attestation, then burns the validated compact KA before building either
+//! ES256 signing input. The `c_nonce` appears only in the JWT proof payload. Exactly one
+//! DPoP-protected Credential request is emitted; any endpoint retry requires a new holder key.
 //!
 //! A structurally valid key-attestation JWT is not treated as trusted here. The selected German
 //! ecosystem/TS3 certificate and Wallet Provider trust profile is still unresolved. The mandatory
 //! [`KeyAttestationRequest`] effect carries the exact binding and assurance requirements; its
-//! result is structurally checked and passed to the PID Provider, which must validate its signature
-//! and trust chain. Likewise, [`IssuedCredential`] is only transport/profile checked. Its exact raw
-//! bytes must still cross the existing verified-ingestion boundary before durable storage.
+//! result is locally signature-checked against its x5c leaf and passed to the PID Provider, while
+//! ecosystem path authorization and status verification remain external. Likewise,
+//! [`UnverifiedCredential`] is only transport/profile checked. Its exact
+//! raw bytes must still cross a verified-ingestion boundary before durable storage or use.
 
 use crate::authorization::{AccessTokenGrant, CorrelationId, Es256PublicJwk};
 use crate::bounded_json::{self, JsonLimits};
 use crate::foundation::{
     CredentialSigningAlgorithm, GermanPidFormat, GermanPidIssuancePlan, HolderBindingMethod,
-    HttpsEndpoint, HttpsIdentifier, MDOC_PID_DOCTYPE, SD_JWT_PID_VCT,
+    HttpsEndpoint, HttpsIdentifier, MAX_PREFERRED_KEY_STORAGE_STATUS_PERIOD_SECONDS,
+    MDOC_PID_DOCTYPE, SD_JWT_PID_VCT,
 };
 use base64ct::{Base64, Base64UrlUnpadded, Encoding};
-use crypto_traits::{Alg, Digest, KeyRef, Random};
+use crypto_traits::{Alg, Digest, KeyRef, Random, Verifier};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -34,7 +37,10 @@ pub const MAX_KEY_ATTESTATION_BYTES: usize = 64 * 1024;
 pub const MAX_KEY_ATTESTATION_SEGMENT_BYTES: usize = 32 * 1024;
 pub const MAX_SIGNING_INPUT_BYTES: usize = 128 * 1024;
 pub const MAX_CREDENTIAL_REQUEST_BYTES: usize = 160 * 1024;
-pub const MAX_RESOURCE_DPOP_NONCE_RETRIES: u8 = 1;
+pub const MAX_NOTIFICATION_ID_BYTES: usize = 2_048;
+pub const MAX_KEY_ATTESTATION_CLOCK_SKEW_SECONDS: i64 = 60;
+/// TS3 requires this maintenance-status expiry floor independently of the JWT's technical `exp`.
+pub const MIN_KEY_STORAGE_STATUS_REMAINING_SECONDS: u64 = 31 * 24 * 60 * 60;
 const MAX_SD_JWT_COMPONENT_SEPARATORS: usize = 257;
 
 const NONCE_JSON_LIMITS: JsonLimits = JsonLimits {
@@ -77,11 +83,20 @@ pub enum CredentialError {
     InvalidContentEncoding,
     InvalidNonceResponse,
     CNonceReplayed,
+    CNonceReservationMismatch,
+    CNonceReservationFailed,
     DpopNonceInvalid,
     DpopNonceStale,
-    DpopNonceRetryLimit,
     KeyAttestationBindingMismatch,
     KeyAttestationInvalid,
+    CredentialKeyReservationMismatch,
+    CredentialKeyReservationFailed,
+    CredentialKeyAlreadyAttested,
+    KeyAttestationReservationMismatch,
+    KeyAttestationReservationFailed,
+    KeyAttestationReplayed,
+    CredentialKeyRotationRequired,
+    KeySeparationViolation,
     CredentialProofSigningMismatch,
     CredentialProofSignatureInvalid,
     DpopSigningMismatch,
@@ -89,7 +104,6 @@ pub enum CredentialError {
     CredentialRejected,
     DeferredIssuanceUnsupported,
     BatchIssuanceUnsupported,
-    NotificationUnsupported,
     ReissuanceUnsupported,
     ResponseEncryptionUnsupported,
     InvalidCredentialResponse,
@@ -99,7 +113,10 @@ pub enum CredentialError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlowStatus {
     AwaitingNonceResponse,
+    AwaitingCNonceReservation,
+    AwaitingCredentialKeyReservation,
     AwaitingKeyAttestation,
+    AwaitingKeyAttestationReservation,
     AwaitingCredentialProofSignature,
     AwaitingDpopSignature,
     AwaitingCredentialResponse,
@@ -151,10 +168,6 @@ impl SecretString {
         Self(value.into_bytes())
     }
 
-    fn duplicate(&self) -> Self {
-        Self(self.0.clone())
-    }
-
     fn expose(&self) -> &str {
         core::str::from_utf8(&self.0).unwrap_or("")
     }
@@ -202,7 +215,7 @@ impl fmt::Debug for CredentialKeyBinding {
         formatter
             .debug_struct("CredentialKeyBinding")
             .field("key_ref", &"[REDACTED]")
-            .field("public_jwk", &self.public_jwk)
+            .field("public_jwk", &"[REDACTED]")
             .finish()
     }
 }
@@ -222,6 +235,7 @@ pub struct CredentialFlowConfig {
     dpop_public_jwk: Es256PublicJwk,
     credential_key_ref: KeyRef,
     credential_public_jwk: Es256PublicJwk,
+    preferred_key_storage_status_period: Option<u64>,
 }
 
 impl fmt::Debug for CredentialFlowConfig {
@@ -241,9 +255,13 @@ impl fmt::Debug for CredentialFlowConfig {
             .field("nonce_endpoint", &self.nonce_endpoint)
             .field("request_target", &"[REDACTED]")
             .field("dpop_key_ref", &"[REDACTED]")
-            .field("dpop_public_jwk", &self.dpop_public_jwk)
+            .field("dpop_public_jwk", &"[REDACTED]")
             .field("credential_key_ref", &"[REDACTED]")
-            .field("credential_public_jwk", &self.credential_public_jwk)
+            .field("credential_public_jwk", &"[REDACTED]")
+            .field(
+                "preferred_key_storage_status_period",
+                &self.preferred_key_storage_status_period,
+            )
             .finish()
     }
 }
@@ -265,6 +283,17 @@ impl CredentialFlowConfig {
             || !valid_pid_plan(plan)
         {
             return Err(CredentialError::PlanGrantMismatch);
+        }
+        // KeyRef equality catches accidental reuse of the same non-exportable hardware key.
+        // Canonical JWK equality also catches aliases that point at the same public key through
+        // different handles. Either form of reuse would correlate OAuth traffic with the
+        // long-lived Credential and violates the wallet's key-separation boundary.
+        if grant.dpop_key_ref() == &credential_key.key_ref
+            || grant.dpop_public_jwk() == &credential_key.public_jwk
+            || grant.client_attestation_key_ref() == &credential_key.key_ref
+            || grant.client_attestation_public_jwk() == &credential_key.public_jwk
+        {
+            return Err(CredentialError::KeySeparationViolation);
         }
         let authorized_identifiers: Vec<String> =
             grant.credential_identifiers().map(str::to_owned).collect();
@@ -300,21 +329,24 @@ impl CredentialFlowConfig {
             dpop_public_jwk: grant.dpop_public_jwk().clone(),
             credential_key_ref: credential_key.key_ref,
             credential_public_jwk: credential_key.public_jwk,
+            preferred_key_storage_status_period: plan.preferred_key_storage_status_period,
         })
     }
 }
 
 fn valid_pid_plan(plan: &GermanPidIssuancePlan) -> bool {
-    match plan.format {
-        GermanPidFormat::MsoMdoc => {
-            plan.holder_binding == HolderBindingMethod::CoseKey
-                && plan.credential_signing_algorithm == CredentialSigningAlgorithm::CoseEs256
+    plan.preferred_key_storage_status_period
+        .is_none_or(|period| period <= MAX_PREFERRED_KEY_STORAGE_STATUS_PERIOD_SECONDS)
+        && match plan.format {
+            GermanPidFormat::MsoMdoc => {
+                plan.holder_binding == HolderBindingMethod::CoseKey
+                    && plan.credential_signing_algorithm == CredentialSigningAlgorithm::CoseEs256
+            }
+            GermanPidFormat::DcSdJwt => {
+                plan.holder_binding == HolderBindingMethod::Jwk
+                    && plan.credential_signing_algorithm == CredentialSigningAlgorithm::JoseEs256
+            }
         }
-        GermanPidFormat::DcSdJwt => {
-            plan.holder_binding == HolderBindingMethod::Jwk
-                && plan.credential_signing_algorithm == CredentialSigningAlgorithm::JoseEs256
-        }
-    }
 }
 
 pub struct NonceRequest {
@@ -361,39 +393,252 @@ impl fmt::Debug for NonceRequest {
     }
 }
 
-/// Mandatory external acquisition request for an Appendix-D JWT key attestation. The external
-/// provider must authenticate the platform evidence and sign with an ecosystem-trusted key; this
-/// module only checks the returned JWT's bounded shape and exact public binding.
-pub struct KeyAttestationRequest {
-    request_id: CorrelationId,
-    credential_issuer: String,
-    credential_endpoint: String,
-    key_ref: KeyRef,
-    public_jwk: Es256PublicJwk,
-    c_nonce: SecretString,
+/// Outcome of the shell's atomic compare-and-insert operation for a `c_nonce` reservation.
+///
+/// `Reserved` is only valid after the reservation is durably committed. A process-local cache or
+/// a read-then-write sequence is not sufficient because two issuance flows can race.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CNonceReservationOutcome {
+    Reserved,
+    AlreadyReserved,
+    StorageFailure,
 }
 
-impl KeyAttestationRequest {
+/// Mandatory transaction request emitted before any key attestation or Credential proof signing.
+///
+/// The shell MUST atomically compare-and-insert `(credential_issuer, c_nonce_hash)` in durable
+/// replay storage. It MUST acknowledge `Reserved` only after the transaction is committed. The
+/// reservation is intentionally never rolled back: a failed issuance burns the nonce safely.
+/// `reserved_at_epoch_seconds` supports bounded accounting, but it is not an eviction deadline:
+/// only an issuer/profile-authoritative maximum nonce lifetime can make time-based pruning safe.
+/// Until that policy is wired, adapters MUST bound each issuer ledger and fail closed when full.
+pub struct CNonceReservationRequest {
+    request_id: CorrelationId,
+    credential_issuer: String,
+    c_nonce_hash: [u8; 32],
+    reserved_at_epoch_seconds: i64,
+}
+
+impl CNonceReservationRequest {
     pub fn request_id(&self) -> CorrelationId {
         self.request_id
     }
     pub fn credential_issuer(&self) -> &str {
         &self.credential_issuer
     }
-    pub fn credential_endpoint(&self) -> &str {
-        &self.credential_endpoint
+    pub fn c_nonce_hash(&self) -> &[u8; 32] {
+        &self.c_nonce_hash
     }
-    pub fn method(&self) -> &'static str {
-        "POST"
+    pub fn reserved_at_epoch_seconds(&self) -> i64 {
+        self.reserved_at_epoch_seconds
     }
-    pub fn key_ref(&self) -> &KeyRef {
-        &self.key_ref
+    pub fn requires_atomic_compare_and_insert(&self) -> bool {
+        true
+    }
+    pub fn requires_durable_commit_before_acknowledgement(&self) -> bool {
+        true
+    }
+    pub fn requires_bounded_per_issuer_ledger(&self) -> bool {
+        true
+    }
+    pub fn requires_issuer_authoritative_retention_policy(&self) -> bool {
+        true
+    }
+}
+
+impl Drop for CNonceReservationRequest {
+    fn drop(&mut self) {
+        self.c_nonce_hash.fill(0);
+    }
+}
+
+impl fmt::Debug for CNonceReservationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CNonceReservationRequest")
+            .field("request_id", &self.request_id)
+            .field("credential_issuer", &self.credential_issuer)
+            .field("c_nonce_hash", &"[REDACTED]")
+            .field("reserved_at_epoch_seconds", &self.reserved_at_epoch_seconds)
+            .field("transaction", &"ATOMIC_DURABLE_COMPARE_AND_INSERT")
+            .finish()
+    }
+}
+
+/// Bound acknowledgement for [`CNonceReservationRequest`].
+pub struct CNonceReservationResult {
+    request_id: CorrelationId,
+    credential_issuer: String,
+    c_nonce_hash: [u8; 32],
+    reserved_at_epoch_seconds: i64,
+    outcome: CNonceReservationOutcome,
+}
+
+impl CNonceReservationResult {
+    pub fn new(
+        request_id: CorrelationId,
+        credential_issuer: &str,
+        c_nonce_hash: [u8; 32],
+        reserved_at_epoch_seconds: i64,
+        outcome: CNonceReservationOutcome,
+    ) -> Self {
+        Self {
+            request_id,
+            credential_issuer: credential_issuer.to_owned(),
+            c_nonce_hash,
+            reserved_at_epoch_seconds,
+            outcome,
+        }
+    }
+}
+
+impl Drop for CNonceReservationResult {
+    fn drop(&mut self) {
+        self.c_nonce_hash.fill(0);
+    }
+}
+
+impl fmt::Debug for CNonceReservationResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CNonceReservationResult")
+            .field("request_id", &self.request_id)
+            .field("credential_issuer", &self.credential_issuer)
+            .field("c_nonce_hash", &"[REDACTED]")
+            .field("reserved_at_epoch_seconds", &self.reserved_at_epoch_seconds)
+            .field("outcome", &self.outcome)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialKeyReservationOutcome {
+    Reserved,
+    AlreadyReserved,
+    StorageFailure,
+}
+
+/// First crash-order gate for TS3's one-public-key/one-Key-Attestation rule.
+///
+/// Before contacting a Wallet Provider, the shell MUST atomically and durably compare-and-insert
+/// the public-key thumbprint in one global wallet ledger (the issuer is audit context, not key
+/// scope). A repeated request with the same `request_id` and exact fields may be
+/// acknowledged idempotently as `Reserved`; a different request for an existing thumbprint is
+/// `AlreadyReserved`. The entry can only be pruned after verified destruction of the corresponding
+/// non-exportable private key. An unknown provider completion therefore burns the key safely.
+pub struct CredentialKeyReservationRequest {
+    request_id: CorrelationId,
+    credential_issuer: String,
+    public_key_thumbprint: [u8; 32],
+    reserved_at_epoch_seconds: i64,
+}
+
+impl CredentialKeyReservationRequest {
+    pub fn request_id(&self) -> CorrelationId {
+        self.request_id
+    }
+    pub fn credential_issuer(&self) -> &str {
+        &self.credential_issuer
+    }
+    pub fn public_key_thumbprint(&self) -> &[u8; 32] {
+        &self.public_key_thumbprint
+    }
+    pub fn reserved_at_epoch_seconds(&self) -> i64 {
+        self.reserved_at_epoch_seconds
+    }
+    pub fn requires_atomic_compare_and_insert(&self) -> bool {
+        true
+    }
+    pub fn requires_durable_commit_before_acknowledgement(&self) -> bool {
+        true
+    }
+    pub fn requires_idempotent_request_replay(&self) -> bool {
+        true
+    }
+    pub fn requires_verified_key_destruction_before_pruning(&self) -> bool {
+        true
+    }
+    pub fn uniqueness_scope_is_global_across_issuers(&self) -> bool {
+        true
+    }
+}
+
+impl Drop for CredentialKeyReservationRequest {
+    fn drop(&mut self) {
+        self.public_key_thumbprint.fill(0);
+    }
+}
+
+impl fmt::Debug for CredentialKeyReservationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialKeyReservationRequest")
+            .field("request_id", &self.request_id)
+            .field("credential_issuer", &self.credential_issuer)
+            .field("public_key_thumbprint", &"[REDACTED]")
+            .field("reserved_at_epoch_seconds", &self.reserved_at_epoch_seconds)
+            .finish()
+    }
+}
+
+pub struct CredentialKeyReservationResult {
+    request_id: CorrelationId,
+    credential_issuer: String,
+    public_key_thumbprint: [u8; 32],
+    reserved_at_epoch_seconds: i64,
+    outcome: CredentialKeyReservationOutcome,
+}
+
+impl CredentialKeyReservationResult {
+    pub fn new(
+        request_id: CorrelationId,
+        credential_issuer: &str,
+        public_key_thumbprint: [u8; 32],
+        reserved_at_epoch_seconds: i64,
+        outcome: CredentialKeyReservationOutcome,
+    ) -> Self {
+        Self {
+            request_id,
+            credential_issuer: credential_issuer.to_owned(),
+            public_key_thumbprint,
+            reserved_at_epoch_seconds,
+            outcome,
+        }
+    }
+}
+
+impl Drop for CredentialKeyReservationResult {
+    fn drop(&mut self) {
+        self.public_key_thumbprint.fill(0);
+    }
+}
+
+impl fmt::Debug for CredentialKeyReservationResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CredentialKeyReservationResult([REDACTED])")
+    }
+}
+
+/// External acquisition request for an Appendix-D JWT Key Attestation.
+///
+/// Only the public JWK and requested assurances cross this trust boundary. The local hardware
+/// handle and the Credential proof's `c_nonce` deliberately do not: TS3 JWT proof mode carries the
+/// nonce only in the proof payload and binds that proof to `attested_keys[0]`.
+pub struct KeyAttestationRequest {
+    request_id: CorrelationId,
+    public_jwk: Es256PublicJwk,
+    minimum_key_storage_status_period: u64,
+}
+
+impl KeyAttestationRequest {
+    pub fn request_id(&self) -> CorrelationId {
+        self.request_id
     }
     pub fn public_jwk(&self) -> &Es256PublicJwk {
         &self.public_jwk
     }
-    pub fn c_nonce(&self) -> &str {
-        self.c_nonce.expose()
+    pub fn minimum_key_storage_status_period(&self) -> u64 {
+        self.minimum_key_storage_status_period
     }
     pub fn algorithm(&self) -> Alg {
         Alg::Es256
@@ -407,7 +652,21 @@ impl KeyAttestationRequest {
     pub fn jwt_type(&self) -> &'static str {
         "key-attestation+jwt"
     }
+    pub fn certification_required(&self) -> bool {
+        true
+    }
+    pub fn key_storage_status_required(&self) -> bool {
+        true
+    }
     pub fn require_x5c_without_trust_anchor(&self) -> bool {
+        true
+    }
+    /// KA acquisition is not an idempotent backend call: an unknown completion may already have
+    /// placed this public key in a KA. The adapter must abandon the key instead of retrying.
+    pub fn must_not_retry_after_dispatch(&self) -> bool {
+        true
+    }
+    pub fn unknown_completion_requires_new_credential_key(&self) -> bool {
         true
     }
 }
@@ -417,11 +676,11 @@ impl fmt::Debug for KeyAttestationRequest {
         formatter
             .debug_struct("KeyAttestationRequest")
             .field("request_id", &self.request_id)
-            .field("credential_issuer", &self.credential_issuer)
-            .field("credential_endpoint", &self.credential_endpoint)
-            .field("key_ref", &"[REDACTED]")
-            .field("public_jwk", &self.public_jwk)
-            .field("c_nonce", &"[REDACTED]")
+            .field("public_jwk", &"[REDACTED]")
+            .field(
+                "minimum_key_storage_status_period",
+                &self.minimum_key_storage_status_period,
+            )
             .field("algorithm", &Alg::Es256)
             .field("key_storage", &"iso_18045_high")
             .field("user_authentication", &"iso_18045_high")
@@ -432,32 +691,13 @@ impl fmt::Debug for KeyAttestationRequest {
 
 pub struct KeyAttestation {
     request_id: CorrelationId,
-    credential_issuer: String,
-    credential_endpoint: String,
-    key_ref: KeyRef,
-    public_jwk: Es256PublicJwk,
-    c_nonce: SecretString,
     jwt: SecretString,
 }
 
 impl KeyAttestation {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        request_id: CorrelationId,
-        credential_issuer: &str,
-        credential_endpoint: &str,
-        key_ref: KeyRef,
-        public_jwk: Es256PublicJwk,
-        c_nonce: &str,
-        jwt: &str,
-    ) -> Self {
+    pub fn new(request_id: CorrelationId, jwt: &str) -> Self {
         Self {
             request_id,
-            credential_issuer: credential_issuer.to_owned(),
-            credential_endpoint: credential_endpoint.to_owned(),
-            key_ref,
-            public_jwk,
-            c_nonce: SecretString::from_str(c_nonce),
             jwt: SecretString::from_str(jwt),
         }
     }
@@ -466,6 +706,122 @@ impl KeyAttestation {
 impl fmt::Debug for KeyAttestation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("KeyAttestation([REDACTED])")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyAttestationReservationOutcome {
+    Reserved,
+    AlreadyReserved,
+    CredentialKeyNotReserved,
+    StorageFailure,
+}
+
+/// Second crash-order gate, emitted after local KA validation and before proof signing.
+///
+/// The shell MUST atomically bind a previously reserved public-key thumbprint to a new compact-KA
+/// hash and commit it durably. Exact retries for the same `request_id` are idempotent; any different
+/// request using either an existing globally scoped KA hash or an unreserved key fails closed. The
+/// issuer is audit context, not uniqueness scope. A committed entry is never rolled back because
+/// an unknown Credential Endpoint completion consumes the KA safely.
+pub struct KeyAttestationReservationRequest {
+    request_id: CorrelationId,
+    credential_issuer: String,
+    public_key_thumbprint: [u8; 32],
+    key_attestation_hash: [u8; 32],
+    key_attestation_expires_at_epoch_seconds: i64,
+    reserved_at_epoch_seconds: i64,
+}
+
+impl KeyAttestationReservationRequest {
+    pub fn request_id(&self) -> CorrelationId {
+        self.request_id
+    }
+    pub fn credential_issuer(&self) -> &str {
+        &self.credential_issuer
+    }
+    pub fn public_key_thumbprint(&self) -> &[u8; 32] {
+        &self.public_key_thumbprint
+    }
+    pub fn key_attestation_hash(&self) -> &[u8; 32] {
+        &self.key_attestation_hash
+    }
+    pub fn key_attestation_expires_at_epoch_seconds(&self) -> i64 {
+        self.key_attestation_expires_at_epoch_seconds
+    }
+    pub fn reserved_at_epoch_seconds(&self) -> i64 {
+        self.reserved_at_epoch_seconds
+    }
+    pub fn requires_atomic_key_binding_and_compare_insert(&self) -> bool {
+        true
+    }
+    pub fn requires_durable_commit_before_acknowledgement(&self) -> bool {
+        true
+    }
+    pub fn requires_idempotent_request_replay(&self) -> bool {
+        true
+    }
+    pub fn uniqueness_scope_is_global_across_issuers(&self) -> bool {
+        true
+    }
+}
+
+impl Drop for KeyAttestationReservationRequest {
+    fn drop(&mut self) {
+        self.public_key_thumbprint.fill(0);
+        self.key_attestation_hash.fill(0);
+    }
+}
+
+impl fmt::Debug for KeyAttestationReservationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("KeyAttestationReservationRequest([REDACTED])")
+    }
+}
+
+pub struct KeyAttestationReservationResult {
+    request_id: CorrelationId,
+    credential_issuer: String,
+    public_key_thumbprint: [u8; 32],
+    key_attestation_hash: [u8; 32],
+    key_attestation_expires_at_epoch_seconds: i64,
+    reserved_at_epoch_seconds: i64,
+    outcome: KeyAttestationReservationOutcome,
+}
+
+impl KeyAttestationReservationResult {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        request_id: CorrelationId,
+        credential_issuer: &str,
+        public_key_thumbprint: [u8; 32],
+        key_attestation_hash: [u8; 32],
+        key_attestation_expires_at_epoch_seconds: i64,
+        reserved_at_epoch_seconds: i64,
+        outcome: KeyAttestationReservationOutcome,
+    ) -> Self {
+        Self {
+            request_id,
+            credential_issuer: credential_issuer.to_owned(),
+            public_key_thumbprint,
+            key_attestation_hash,
+            key_attestation_expires_at_epoch_seconds,
+            reserved_at_epoch_seconds,
+            outcome,
+        }
+    }
+}
+
+impl Drop for KeyAttestationReservationResult {
+    fn drop(&mut self) {
+        self.public_key_thumbprint.fill(0);
+        self.key_attestation_hash.fill(0);
+    }
+}
+
+impl fmt::Debug for KeyAttestationReservationResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("KeyAttestationReservationResult([REDACTED])")
     }
 }
 
@@ -560,6 +916,13 @@ impl CredentialRequest {
     pub fn body(&self) -> &[u8] {
         self.body.expose()
     }
+    /// The body has presented a single-use KA. HTTP middleware must never transparently replay it.
+    pub fn must_not_retry_after_dispatch(&self) -> bool {
+        true
+    }
+    pub fn unknown_completion_requires_new_credential_key(&self) -> bool {
+        true
+    }
 }
 
 impl fmt::Debug for CredentialRequest {
@@ -579,7 +942,10 @@ impl fmt::Debug for CredentialRequest {
 
 pub enum CredentialEffect {
     SendNonce(NonceRequest),
+    ReserveCNonce(CNonceReservationRequest),
+    ReserveCredentialKey(CredentialKeyReservationRequest),
     AcquireKeyAttestation(KeyAttestationRequest),
+    ReserveKeyAttestation(KeyAttestationReservationRequest),
     SignCredentialProof(SigningRequest),
     SignDpop(SigningRequest),
     SendCredential(CredentialRequest),
@@ -589,7 +955,10 @@ impl fmt::Debug for CredentialEffect {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SendNonce(value) => value.fmt(formatter),
+            Self::ReserveCNonce(value) => value.fmt(formatter),
+            Self::ReserveCredentialKey(value) => value.fmt(formatter),
             Self::AcquireKeyAttestation(value) => value.fmt(formatter),
+            Self::ReserveKeyAttestation(value) => value.fmt(formatter),
             Self::SignCredentialProof(value) | Self::SignDpop(value) => value.fmt(formatter),
             Self::SendCredential(value) => value.fmt(formatter),
         }
@@ -658,7 +1027,10 @@ impl fmt::Debug for EndpointResponse {
 
 pub enum CredentialInput {
     NonceResponse(EndpointResponse),
+    CNonceReservation(CNonceReservationResult),
+    CredentialKeyReservation(CredentialKeyReservationResult),
     KeyAttestation(KeyAttestation),
+    KeyAttestationReservation(KeyAttestationReservationResult),
     CredentialProofSignature(SignatureResult),
     DpopSignature(SignatureResult),
     CredentialResponse(EndpointResponse),
@@ -668,7 +1040,10 @@ impl fmt::Debug for CredentialInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::NonceResponse(_) => "NonceResponse([REDACTED])",
+            Self::CNonceReservation(_) => "CNonceReservation([REDACTED])",
+            Self::CredentialKeyReservation(_) => "CredentialKeyReservation([REDACTED])",
             Self::KeyAttestation(_) => "KeyAttestation([REDACTED])",
+            Self::KeyAttestationReservation(_) => "KeyAttestationReservation([REDACTED])",
             Self::CredentialProofSignature(_) => "CredentialProofSignature([REDACTED])",
             Self::DpopSignature(_) => "DpopSignature([REDACTED])",
             Self::CredentialResponse(_) => "CredentialResponse([REDACTED])",
@@ -676,15 +1051,20 @@ impl fmt::Debug for CredentialInput {
     }
 }
 
-/// Transport/profile-checked credential bytes. Signature, trust, status, validity and device-key
-/// binding are deliberately still the responsibility of the verified-ingestion boundary.
-pub struct IssuedCredential {
+/// Transport/profile-checked, but cryptographically unverified Credential bytes.
+///
+/// This type is deliberately named to prevent transport success from being confused with
+/// issuance trust. Signature, issuer trust, status, validity, disclosure integrity and holder-key
+/// binding MUST be checked by the format-specific verified-ingestion boundary before these bytes
+/// are stored, displayed or presented.
+pub struct UnverifiedCredential {
     format: GermanPidFormat,
     raw: Vec<u8>,
     c_nonce_hash: [u8; 32],
+    notification_id: Option<SecretString>,
 }
 
-impl IssuedCredential {
+impl UnverifiedCredential {
     pub fn format(&self) -> GermanPidFormat {
         self.format
     }
@@ -694,25 +1074,35 @@ impl IssuedCredential {
     pub fn c_nonce_hash(&self) -> &[u8; 32] {
         &self.c_nonce_hash
     }
-    pub fn into_raw(mut self) -> Vec<u8> {
+    pub fn notification_id(&self) -> Option<&str> {
+        self.notification_id.as_ref().map(SecretString::expose)
+    }
+    pub fn requires_verified_ingestion(&self) -> bool {
+        true
+    }
+    pub fn into_unverified_raw(mut self) -> Vec<u8> {
         core::mem::take(&mut self.raw)
     }
 }
 
-impl Drop for IssuedCredential {
+impl Drop for UnverifiedCredential {
     fn drop(&mut self) {
         self.raw.fill(0);
         self.c_nonce_hash.fill(0);
     }
 }
 
-impl fmt::Debug for IssuedCredential {
+impl fmt::Debug for UnverifiedCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("IssuedCredential")
+            .debug_struct("UnverifiedCredential")
             .field("format", &self.format)
             .field("raw", &"[REDACTED]")
             .field("c_nonce_hash", &"[REDACTED]")
+            .field(
+                "notification_id",
+                &self.notification_id.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("verified_ingestion", &"REQUIRED")
             .finish()
     }
@@ -721,10 +1111,8 @@ impl fmt::Debug for IssuedCredential {
 pub struct CredentialEnvironment<'a> {
     pub random: &'a dyn Random,
     pub digest: &'a dyn Digest,
+    pub verifier: &'a dyn Verifier,
     pub now_epoch_seconds: i64,
-    /// SHA-256 values of previously consumed `c_nonce` strings. The caller persists this replay
-    /// state only after verified ingestion succeeds.
-    pub seen_c_nonce_hashes: &'a [[u8; 32]],
 }
 
 struct Context {
@@ -740,6 +1128,7 @@ struct Context {
     dpop_public_jwk: Es256PublicJwk,
     credential_key_ref: KeyRef,
     credential_public_jwk: Es256PublicJwk,
+    preferred_key_storage_status_period: Option<u64>,
     credential_endpoint_nonce: Option<SecretString>,
     retired_credential_endpoint_nonces: Vec<SecretString>,
     used_random_values: Vec<[u8; 32]>,
@@ -758,10 +1147,34 @@ enum Stage {
     AwaitingNonceResponse {
         request_id: CorrelationId,
     },
+    AwaitingCNonceReservation {
+        request_id: CorrelationId,
+        c_nonce: SecretString,
+        c_nonce_hash: [u8; 32],
+        reserved_at_epoch_seconds: i64,
+    },
+    AwaitingCredentialKeyReservation {
+        request_id: CorrelationId,
+        c_nonce: SecretString,
+        c_nonce_hash: [u8; 32],
+        public_key_thumbprint: [u8; 32],
+        reserved_at_epoch_seconds: i64,
+    },
     AwaitingKeyAttestation {
         request_id: CorrelationId,
         c_nonce: SecretString,
         c_nonce_hash: [u8; 32],
+        public_key_thumbprint: [u8; 32],
+    },
+    AwaitingKeyAttestationReservation {
+        request_id: CorrelationId,
+        c_nonce: SecretString,
+        c_nonce_hash: [u8; 32],
+        public_key_thumbprint: [u8; 32],
+        key_attestation_hash: [u8; 32],
+        key_attestation: SecretString,
+        key_attestation_expires_at_epoch_seconds: i64,
+        reserved_at_epoch_seconds: i64,
     },
     SigningCredentialProof {
         request_id: CorrelationId,
@@ -773,15 +1186,12 @@ enum Stage {
         c_nonce_hash: [u8; 32],
         credential_proof: SecretString,
         signing_input: SecretBytes,
-        nonce_retry_count: u8,
     },
     AwaitingCredentialResponse {
         request_id: CorrelationId,
         c_nonce_hash: [u8; 32],
-        credential_proof: SecretString,
-        nonce_retry_count: u8,
     },
-    Complete(IssuedCredential),
+    Complete(UnverifiedCredential),
     Failed(CredentialError),
 }
 
@@ -833,6 +1243,7 @@ impl CredentialFlow {
             dpop_public_jwk: config.dpop_public_jwk,
             credential_key_ref: config.credential_key_ref,
             credential_public_jwk: config.credential_public_jwk,
+            preferred_key_storage_status_period: config.preferred_key_storage_status_period,
             credential_endpoint_nonce: None,
             retired_credential_endpoint_nonces: Vec::new(),
             used_random_values,
@@ -850,7 +1261,14 @@ impl CredentialFlow {
     pub fn status(&self) -> FlowStatus {
         match self.stage {
             Stage::AwaitingNonceResponse { .. } => FlowStatus::AwaitingNonceResponse,
+            Stage::AwaitingCNonceReservation { .. } => FlowStatus::AwaitingCNonceReservation,
+            Stage::AwaitingCredentialKeyReservation { .. } => {
+                FlowStatus::AwaitingCredentialKeyReservation
+            }
             Stage::AwaitingKeyAttestation { .. } => FlowStatus::AwaitingKeyAttestation,
+            Stage::AwaitingKeyAttestationReservation { .. } => {
+                FlowStatus::AwaitingKeyAttestationReservation
+            }
             Stage::SigningCredentialProof { .. } => FlowStatus::AwaitingCredentialProofSignature,
             Stage::SigningDpop { .. } => FlowStatus::AwaitingDpopSignature,
             Stage::AwaitingCredentialResponse { .. } => FlowStatus::AwaitingCredentialResponse,
@@ -866,7 +1284,7 @@ impl CredentialFlow {
         }
     }
 
-    pub fn into_credential(self) -> Result<IssuedCredential, CredentialError> {
+    pub fn into_unverified_credential(self) -> Result<UnverifiedCredential, CredentialError> {
         match self.stage {
             Stage::Complete(credential) => Ok(credential),
             Stage::Failed(error) => Err(error),
@@ -926,17 +1344,77 @@ impl CredentialFlow {
                 CredentialInput::NonceResponse(response),
             ) => self.accept_nonce_response(request_id, response, environment),
             (
+                Stage::AwaitingCNonceReservation {
+                    request_id,
+                    c_nonce,
+                    c_nonce_hash,
+                    reserved_at_epoch_seconds,
+                },
+                CredentialInput::CNonceReservation(reservation),
+            ) => self.accept_c_nonce_reservation(
+                request_id,
+                c_nonce,
+                c_nonce_hash,
+                reserved_at_epoch_seconds,
+                reservation,
+                environment,
+            ),
+            (
+                Stage::AwaitingCredentialKeyReservation {
+                    request_id,
+                    c_nonce,
+                    c_nonce_hash,
+                    public_key_thumbprint,
+                    reserved_at_epoch_seconds,
+                },
+                CredentialInput::CredentialKeyReservation(reservation),
+            ) => self.accept_credential_key_reservation(
+                request_id,
+                c_nonce,
+                c_nonce_hash,
+                public_key_thumbprint,
+                reserved_at_epoch_seconds,
+                reservation,
+                environment,
+            ),
+            (
                 Stage::AwaitingKeyAttestation {
                     request_id,
                     c_nonce,
                     c_nonce_hash,
+                    public_key_thumbprint,
                 },
                 CredentialInput::KeyAttestation(attestation),
             ) => self.accept_key_attestation(
                 request_id,
                 c_nonce,
                 c_nonce_hash,
+                public_key_thumbprint,
                 attestation,
+                environment,
+            ),
+            (
+                Stage::AwaitingKeyAttestationReservation {
+                    request_id,
+                    c_nonce,
+                    c_nonce_hash,
+                    public_key_thumbprint,
+                    key_attestation_hash,
+                    key_attestation,
+                    key_attestation_expires_at_epoch_seconds,
+                    reserved_at_epoch_seconds,
+                },
+                CredentialInput::KeyAttestationReservation(reservation),
+            ) => self.accept_key_attestation_reservation(
+                request_id,
+                c_nonce,
+                c_nonce_hash,
+                public_key_thumbprint,
+                key_attestation_hash,
+                key_attestation,
+                key_attestation_expires_at_epoch_seconds,
+                reserved_at_epoch_seconds,
+                reservation,
                 environment,
             ),
             (
@@ -959,7 +1437,6 @@ impl CredentialFlow {
                     c_nonce_hash,
                     credential_proof,
                     signing_input,
-                    nonce_retry_count,
                 },
                 CredentialInput::DpopSignature(signature),
             ) => self.accept_dpop_signature(
@@ -967,26 +1444,16 @@ impl CredentialFlow {
                 c_nonce_hash,
                 credential_proof,
                 signing_input,
-                nonce_retry_count,
                 signature,
-                environment.random,
+                environment,
             ),
             (
                 Stage::AwaitingCredentialResponse {
                     request_id,
                     c_nonce_hash,
-                    credential_proof,
-                    nonce_retry_count,
                 },
                 CredentialInput::CredentialResponse(response),
-            ) => self.accept_credential_response(
-                request_id,
-                c_nonce_hash,
-                credential_proof,
-                nonce_retry_count,
-                response,
-                environment,
-            ),
+            ) => self.accept_credential_response(request_id, c_nonce_hash, response, environment),
             _ => Err(CredentialError::UnexpectedInput),
         }
     }
@@ -1006,7 +1473,7 @@ impl CredentialFlow {
         if response.body.expose().len() > MAX_NONCE_RESPONSE_BYTES {
             return Err(CredentialError::InvalidNonceResponse);
         }
-        validate_common_response_headers(&response, true)?;
+        validate_json_response_headers(&response, CachePolicy::RequireNoStore)?;
         if !(200..=299).contains(&response.status) {
             return Err(CredentialError::InvalidStatus);
         }
@@ -1018,31 +1485,123 @@ impl CredentialFlow {
         }
         let c_nonce = parse_nonce_response(response.body.expose())?;
         let c_nonce_hash = environment.digest.sha256(c_nonce.as_bytes());
-        if environment
-            .seen_c_nonce_hashes
-            .iter()
-            .any(|seen| ct_eq(seen, &c_nonce_hash))
-        {
-            return Err(CredentialError::CNonceReplayed);
-        }
         let c_nonce = SecretString::from_string(c_nonce);
+        let reservation_request_id = CorrelationId::from_bytes(fresh_random(
+            environment.random,
+            &mut self.context.used_random_values,
+        )?);
+        let request = CNonceReservationRequest {
+            request_id: reservation_request_id,
+            credential_issuer: self.context.credential_issuer.as_str().to_owned(),
+            c_nonce_hash,
+            reserved_at_epoch_seconds: environment.now_epoch_seconds,
+        };
+        Ok((
+            Stage::AwaitingCNonceReservation {
+                request_id: reservation_request_id,
+                c_nonce,
+                c_nonce_hash,
+                reserved_at_epoch_seconds: environment.now_epoch_seconds,
+            },
+            vec![CredentialEffect::ReserveCNonce(request)],
+        ))
+    }
+
+    fn accept_c_nonce_reservation(
+        &mut self,
+        request_id: CorrelationId,
+        c_nonce: SecretString,
+        c_nonce_hash: [u8; 32],
+        reserved_at_epoch_seconds: i64,
+        reservation: CNonceReservationResult,
+        environment: &CredentialEnvironment<'_>,
+    ) -> Result<(Stage, Vec<CredentialEffect>), CredentialError> {
+        if !ct_eq(request_id.as_bytes(), reservation.request_id.as_bytes())
+            || reservation.credential_issuer != self.context.credential_issuer.as_str()
+            || !ct_eq(&c_nonce_hash, &reservation.c_nonce_hash)
+            || reservation.reserved_at_epoch_seconds != reserved_at_epoch_seconds
+        {
+            return Err(CredentialError::CNonceReservationMismatch);
+        }
+        match reservation.outcome {
+            CNonceReservationOutcome::AlreadyReserved => {
+                return Err(CredentialError::CNonceReplayed);
+            }
+            CNonceReservationOutcome::StorageFailure => {
+                return Err(CredentialError::CNonceReservationFailed);
+            }
+            CNonceReservationOutcome::Reserved => {}
+        }
+        let public_key_thumbprint =
+            public_jwk_thumbprint(&self.context.credential_public_jwk, environment.digest);
+        let key_reservation_request_id = CorrelationId::from_bytes(fresh_random(
+            environment.random,
+            &mut self.context.used_random_values,
+        )?);
+        let request = CredentialKeyReservationRequest {
+            request_id: key_reservation_request_id,
+            credential_issuer: self.context.credential_issuer.as_str().to_owned(),
+            public_key_thumbprint,
+            reserved_at_epoch_seconds: environment.now_epoch_seconds,
+        };
+        Ok((
+            Stage::AwaitingCredentialKeyReservation {
+                request_id: key_reservation_request_id,
+                c_nonce,
+                c_nonce_hash,
+                public_key_thumbprint,
+                reserved_at_epoch_seconds: environment.now_epoch_seconds,
+            },
+            vec![CredentialEffect::ReserveCredentialKey(request)],
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accept_credential_key_reservation(
+        &mut self,
+        request_id: CorrelationId,
+        c_nonce: SecretString,
+        c_nonce_hash: [u8; 32],
+        public_key_thumbprint: [u8; 32],
+        reserved_at_epoch_seconds: i64,
+        reservation: CredentialKeyReservationResult,
+        environment: &CredentialEnvironment<'_>,
+    ) -> Result<(Stage, Vec<CredentialEffect>), CredentialError> {
+        if !ct_eq(request_id.as_bytes(), reservation.request_id.as_bytes())
+            || reservation.credential_issuer != self.context.credential_issuer.as_str()
+            || !ct_eq(&public_key_thumbprint, &reservation.public_key_thumbprint)
+            || reservation.reserved_at_epoch_seconds != reserved_at_epoch_seconds
+        {
+            return Err(CredentialError::CredentialKeyReservationMismatch);
+        }
+        match reservation.outcome {
+            CredentialKeyReservationOutcome::AlreadyReserved => {
+                return Err(CredentialError::CredentialKeyAlreadyAttested);
+            }
+            CredentialKeyReservationOutcome::StorageFailure => {
+                return Err(CredentialError::CredentialKeyReservationFailed);
+            }
+            CredentialKeyReservationOutcome::Reserved => {}
+        }
         let attestation_request_id = CorrelationId::from_bytes(fresh_random(
             environment.random,
             &mut self.context.used_random_values,
         )?);
         let request = KeyAttestationRequest {
             request_id: attestation_request_id,
-            credential_issuer: self.context.credential_issuer.as_str().to_owned(),
-            credential_endpoint: self.context.credential_endpoint.as_str().to_owned(),
-            key_ref: self.context.credential_key_ref.clone(),
             public_jwk: self.context.credential_public_jwk.clone(),
-            c_nonce: c_nonce.duplicate(),
+            minimum_key_storage_status_period: self
+                .context
+                .preferred_key_storage_status_period
+                .unwrap_or_default()
+                .max(MIN_KEY_STORAGE_STATUS_REMAINING_SECONDS),
         };
         Ok((
             Stage::AwaitingKeyAttestation {
                 request_id: attestation_request_id,
                 c_nonce,
                 c_nonce_hash,
+                public_key_thumbprint,
             },
             vec![CredentialEffect::AcquireKeyAttestation(request)],
         ))
@@ -1053,32 +1612,88 @@ impl CredentialFlow {
         request_id: CorrelationId,
         c_nonce: SecretString,
         c_nonce_hash: [u8; 32],
+        public_key_thumbprint: [u8; 32],
         attestation: KeyAttestation,
         environment: &CredentialEnvironment<'_>,
     ) -> Result<(Stage, Vec<CredentialEffect>), CredentialError> {
-        if !ct_eq(request_id.as_bytes(), attestation.request_id.as_bytes())
-            || attestation.credential_issuer != self.context.credential_issuer.as_str()
-            || attestation.credential_endpoint != self.context.credential_endpoint.as_str()
-            || attestation.key_ref != self.context.credential_key_ref
-            || attestation.public_jwk != self.context.credential_public_jwk
-            || !ct_eq(
-                attestation.c_nonce.expose().as_bytes(),
-                c_nonce.expose().as_bytes(),
-            )
-        {
+        if !ct_eq(request_id.as_bytes(), attestation.request_id.as_bytes()) {
             return Err(CredentialError::KeyAttestationBindingMismatch);
         }
-        validate_key_attestation(
+        let validated = validate_key_attestation(
             attestation.jwt.expose(),
-            c_nonce.expose(),
             &self.context.credential_public_jwk,
+            self.context.preferred_key_storage_status_period,
             environment.now_epoch_seconds,
+            environment.verifier,
         )?;
+        let key_attestation_hash = environment
+            .digest
+            .sha256(attestation.jwt.expose().as_bytes());
+        let reservation_request_id = CorrelationId::from_bytes(fresh_random(
+            environment.random,
+            &mut self.context.used_random_values,
+        )?);
+        let request = KeyAttestationReservationRequest {
+            request_id: reservation_request_id,
+            credential_issuer: self.context.credential_issuer.as_str().to_owned(),
+            public_key_thumbprint,
+            key_attestation_hash,
+            key_attestation_expires_at_epoch_seconds: validated.expires_at_epoch_seconds,
+            reserved_at_epoch_seconds: environment.now_epoch_seconds,
+        };
+        Ok((
+            Stage::AwaitingKeyAttestationReservation {
+                request_id: reservation_request_id,
+                c_nonce,
+                c_nonce_hash,
+                public_key_thumbprint,
+                key_attestation_hash,
+                key_attestation: attestation.jwt,
+                key_attestation_expires_at_epoch_seconds: validated.expires_at_epoch_seconds,
+                reserved_at_epoch_seconds: environment.now_epoch_seconds,
+            },
+            vec![CredentialEffect::ReserveKeyAttestation(request)],
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accept_key_attestation_reservation(
+        &mut self,
+        request_id: CorrelationId,
+        c_nonce: SecretString,
+        c_nonce_hash: [u8; 32],
+        public_key_thumbprint: [u8; 32],
+        key_attestation_hash: [u8; 32],
+        key_attestation: SecretString,
+        key_attestation_expires_at_epoch_seconds: i64,
+        reserved_at_epoch_seconds: i64,
+        reservation: KeyAttestationReservationResult,
+        environment: &CredentialEnvironment<'_>,
+    ) -> Result<(Stage, Vec<CredentialEffect>), CredentialError> {
+        if !ct_eq(request_id.as_bytes(), reservation.request_id.as_bytes())
+            || reservation.credential_issuer != self.context.credential_issuer.as_str()
+            || !ct_eq(&public_key_thumbprint, &reservation.public_key_thumbprint)
+            || !ct_eq(&key_attestation_hash, &reservation.key_attestation_hash)
+            || reservation.key_attestation_expires_at_epoch_seconds
+                != key_attestation_expires_at_epoch_seconds
+            || reservation.reserved_at_epoch_seconds != reserved_at_epoch_seconds
+        {
+            return Err(CredentialError::KeyAttestationReservationMismatch);
+        }
+        match reservation.outcome {
+            KeyAttestationReservationOutcome::AlreadyReserved => {
+                return Err(CredentialError::KeyAttestationReplayed);
+            }
+            KeyAttestationReservationOutcome::CredentialKeyNotReserved
+            | KeyAttestationReservationOutcome::StorageFailure => {
+                return Err(CredentialError::KeyAttestationReservationFailed);
+            }
+            KeyAttestationReservationOutcome::Reserved => {}
+        }
         let signing_input = build_credential_proof_signing_input(
             self.context.credential_issuer.as_str(),
             c_nonce.expose(),
-            &self.context.credential_public_jwk,
-            attestation.jwt.expose(),
+            key_attestation.expose(),
             environment.now_epoch_seconds,
         )?;
         let signing_request_id = CorrelationId::from_bytes(fresh_random(
@@ -1117,11 +1732,17 @@ impl CredentialFlow {
         if signature.signature.expose().len() != 64 {
             return Err(CredentialError::CredentialProofSignatureInvalid);
         }
+        verify_es256_signature(
+            environment.verifier,
+            &self.context.credential_public_jwk,
+            signing_input.expose(),
+            signature.signature.expose(),
+            CredentialError::CredentialProofSignatureInvalid,
+        )?;
         let credential_proof = assemble_compact_jwt(&signing_input, &signature.signature)?;
         let (stage, effect) = self.dpop_signing_stage(
             c_nonce_hash,
             SecretString::from_string(credential_proof),
-            0,
             environment,
         )?;
         Ok((stage, vec![effect]))
@@ -1131,7 +1752,6 @@ impl CredentialFlow {
         &mut self,
         c_nonce_hash: [u8; 32],
         credential_proof: SecretString,
-        nonce_retry_count: u8,
         environment: &CredentialEnvironment<'_>,
     ) -> Result<(Stage, CredentialEffect), CredentialError> {
         let jti = base64url(&fresh_random(
@@ -1162,22 +1782,19 @@ impl CredentialFlow {
                 c_nonce_hash,
                 credential_proof,
                 signing_input,
-                nonce_retry_count,
             },
             CredentialEffect::SignDpop(effect),
         ))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn accept_dpop_signature(
         &mut self,
         request_id: CorrelationId,
         c_nonce_hash: [u8; 32],
         credential_proof: SecretString,
         signing_input: SecretBytes,
-        nonce_retry_count: u8,
         signature: SignatureResult,
-        random: &dyn Random,
+        environment: &CredentialEnvironment<'_>,
     ) -> Result<(Stage, Vec<CredentialEffect>), CredentialError> {
         if !ct_eq(request_id.as_bytes(), signature.request_id.as_bytes())
             || signing_input.expose().len() != signature.signing_input.expose().len()
@@ -1188,11 +1805,20 @@ impl CredentialFlow {
         if signature.signature.expose().len() != 64 {
             return Err(CredentialError::DpopSignatureInvalid);
         }
+        verify_es256_signature(
+            environment.verifier,
+            &self.context.dpop_public_jwk,
+            signing_input.expose(),
+            signature.signature.expose(),
+            CredentialError::DpopSignatureInvalid,
+        )?;
         let dpop_proof = assemble_compact_jwt(&signing_input, &signature.signature)
             .map_err(|_| CredentialError::DpopSignatureInvalid)?;
         let body = build_credential_request_body(&self.context.request_target, &credential_proof)?;
-        let request_id =
-            CorrelationId::from_bytes(fresh_random(random, &mut self.context.used_random_values)?);
+        let request_id = CorrelationId::from_bytes(fresh_random(
+            environment.random,
+            &mut self.context.used_random_values,
+        )?);
         let request = CredentialRequest {
             request_id,
             endpoint: self.context.credential_endpoint.as_str().to_owned(),
@@ -1207,22 +1833,17 @@ impl CredentialFlow {
             Stage::AwaitingCredentialResponse {
                 request_id,
                 c_nonce_hash,
-                credential_proof,
-                nonce_retry_count,
             },
             vec![CredentialEffect::SendCredential(request)],
         ))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn accept_credential_response(
         &mut self,
         request_id: CorrelationId,
         c_nonce_hash: [u8; 32],
-        credential_proof: SecretString,
-        nonce_retry_count: u8,
         response: EndpointResponse,
-        environment: &CredentialEnvironment<'_>,
+        _environment: &CredentialEnvironment<'_>,
     ) -> Result<(Stage, Vec<CredentialEffect>), CredentialError> {
         validate_transport_binding(
             request_id,
@@ -1233,24 +1854,19 @@ impl CredentialFlow {
         if response.body.expose().len() > MAX_CREDENTIAL_RESPONSE_BYTES {
             return Err(CredentialError::InvalidCredentialResponse);
         }
-        validate_common_response_headers(&response, true)?;
+        // RFC 9449 resource challenges are defined entirely by the status and authentication
+        // headers. Recognize them before attempting to validate an optional JSON body or cache
+        // metadata; a conforming 401 challenge may be header-only and may coexist with Bearer or
+        // other authentication challenges.
         let nonce = parse_single_dpop_nonce(&response.dpop_nonce_headers)?;
         if response.status == 401
             && is_use_dpop_nonce_challenge(&response.www_authenticate_headers)?
         {
             let nonce = nonce.ok_or(CredentialError::DpopNonceInvalid)?;
-            parse_use_dpop_nonce_body(response.body.expose())?;
-            if nonce_retry_count >= MAX_RESOURCE_DPOP_NONCE_RETRIES {
-                return Err(CredentialError::DpopNonceRetryLimit);
-            }
             self.rotate_credential_endpoint_nonce(nonce)?;
-            let (stage, effect) = self.dpop_signing_stage(
-                c_nonce_hash,
-                credential_proof,
-                nonce_retry_count + 1,
-                environment,
-            )?;
-            return Ok((stage, vec![effect]));
+            // The Credential request has already presented its KA. TS3 permits no redispatch of
+            // that KA, proof, public key or c_nonce, even when RFC 9449 asks for a fresh DPoP proof.
+            return Err(CredentialError::CredentialKeyRotationRequired);
         }
         if !response.www_authenticate_headers.is_empty() {
             return Err(CredentialError::CredentialRejected);
@@ -1258,22 +1874,25 @@ impl CredentialFlow {
         if let Some(nonce) = nonce {
             self.rotate_credential_endpoint_nonce(nonce)?;
         }
+        validate_json_response_headers(&response, CachePolicy::Unconstrained)?;
         if response.status == 202 {
             return Err(CredentialError::DeferredIssuanceUnsupported);
+        }
+        if response.status == 400
+            && credential_error_code(response.body.expose())? == "invalid_nonce"
+        {
+            return Err(CredentialError::CredentialKeyRotationRequired);
         }
         if response.status != 200 {
             return Err(CredentialError::CredentialRejected);
         }
-        let raw = parse_immediate_credential(
-            response.body.expose(),
-            self.context.format,
-            self.context.credential_issuer.as_str(),
-        )?;
+        let parsed = parse_immediate_credential(response.body.expose(), self.context.format)?;
         Ok((
-            Stage::Complete(IssuedCredential {
+            Stage::Complete(UnverifiedCredential {
                 format: self.context.format,
-                raw,
+                raw: parsed.raw,
                 c_nonce_hash,
+                notification_id: parsed.notification_id,
             }),
             Vec::new(),
         ))
@@ -1342,17 +1961,23 @@ fn validate_transport_binding(
     }
 }
 
-fn validate_common_response_headers(
+#[derive(Clone, Copy)]
+enum CachePolicy {
+    RequireNoStore,
+    Unconstrained,
+}
+
+fn validate_json_response_headers(
     response: &EndpointResponse,
-    require_no_store: bool,
+    cache_policy: CachePolicy,
 ) -> Result<(), CredentialError> {
     let content_type = parse_single_header(&response.content_type_headers)
         .ok_or(CredentialError::InvalidMediaType)?;
     if !valid_json_content_type(content_type) {
         return Err(CredentialError::InvalidMediaType);
     }
-    validate_header_values(&response.cache_control_headers)?;
-    if require_no_store
+    validate_header_values(&response.cache_control_headers, true)?;
+    if matches!(cache_policy, CachePolicy::RequireNoStore)
         && !response.cache_control_headers.iter().any(|value| {
             value
                 .split(',')
@@ -1362,31 +1987,10 @@ fn validate_common_response_headers(
     {
         return Err(CredentialError::CachePolicyMissing);
     }
-    if response.cache_control_headers.iter().any(|value| {
-        value.split(',').map(str::trim).any(|directive| {
-            let name = directive
-                .split_once('=')
-                .map_or(directive, |(name, _)| name)
-                .trim();
-            name.eq_ignore_ascii_case("public")
-                || name.eq_ignore_ascii_case("max-age")
-                || name.eq_ignore_ascii_case("s-maxage")
-                || name.eq_ignore_ascii_case("immutable")
-        })
-    }) {
-        return Err(CredentialError::CachePolicyMissing);
-    }
-    if !response.pragma_headers.is_empty() {
-        validate_header_values(&response.pragma_headers)?;
-        if !response.pragma_headers.iter().all(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .all(|directive| directive.eq_ignore_ascii_case("no-cache"))
-        }) {
-            return Err(CredentialError::CachePolicyMissing);
-        }
-    }
+    // OpenID4VCI mandates `no-store` for Nonce responses, but does not make any Cache-Control or
+    // Pragma directive a validity condition for Credential responses. Retain strict header shape
+    // checks without inventing response rejection rules.
+    validate_header_values(&response.pragma_headers, true)?;
     match response.content_encoding_headers.as_slice() {
         [] => {}
         [value] if valid_header_value(value) && value.eq_ignore_ascii_case("identity") => {}
@@ -1402,8 +2006,8 @@ fn parse_single_header(values: &[String]) -> Option<&str> {
     }
 }
 
-fn validate_header_values(values: &[String]) -> Result<(), CredentialError> {
-    if values.is_empty()
+fn validate_header_values(values: &[String], allow_empty: bool) -> Result<(), CredentialError> {
+    if (!allow_empty && values.is_empty())
         || values.len() > 8
         || values.iter().any(|value| !valid_header_value(value))
     {
@@ -1480,12 +2084,17 @@ fn parse_nonce_response(input: &[u8]) -> Result<String, CredentialError> {
     }
 }
 
+struct ValidatedKeyAttestation {
+    expires_at_epoch_seconds: i64,
+}
+
 fn validate_key_attestation(
     compact: &str,
-    expected_nonce: &str,
     expected_jwk: &Es256PublicJwk,
+    preferred_status_period: Option<u64>,
     now: i64,
-) -> Result<(), CredentialError> {
+    verifier: &dyn Verifier,
+) -> Result<ValidatedKeyAttestation, CredentialError> {
     let DecodedCompactJwt {
         header: header_bytes,
         payload: payload_bytes,
@@ -1501,7 +2110,8 @@ fn validate_key_attestation(
     }
     let header = bounded_json::parse_object(&header_bytes, JWT_JSON_LIMITS)
         .map_err(|_| CredentialError::KeyAttestationInvalid)?;
-    if header.get("alg").and_then(Value::as_str) != Some("ES256")
+    if header.len() != 3
+        || header.get("alg").and_then(Value::as_str) != Some("ES256")
         || header.get("typ").and_then(Value::as_str) != Some("key-attestation+jwt")
     {
         return Err(CredentialError::KeyAttestationInvalid);
@@ -1511,7 +2121,8 @@ fn validate_key_attestation(
         .and_then(Value::as_array)
         .filter(|certificates| !certificates.is_empty() && certificates.len() <= 8)
         .ok_or(CredentialError::KeyAttestationInvalid)?;
-    let mut parsed_certificates = Vec::with_capacity(certificates.len());
+    let mut seen_certificates = Vec::<Vec<u8>>::with_capacity(certificates.len());
+    let mut leaf_public_key = None;
     for certificate in certificates {
         let certificate = certificate
             .as_str()
@@ -1519,21 +2130,38 @@ fn validate_key_attestation(
             .ok_or(CredentialError::KeyAttestationInvalid)?;
         let decoded =
             Base64::decode_vec(certificate).map_err(|_| CredentialError::KeyAttestationInvalid)?;
-        if decoded.is_empty() || Base64::encode_string(&decoded) != certificate {
+        if decoded.is_empty()
+            || Base64::encode_string(&decoded) != certificate
+            || seen_certificates.iter().any(|seen| ct_eq(seen, &decoded))
+        {
             return Err(CredentialError::KeyAttestationInvalid);
         }
-        parsed_certificates
-            .push(x509::parse_cert(&decoded).map_err(|_| CredentialError::KeyAttestationInvalid)?);
+        let parsed =
+            x509::parse_cert(&decoded).map_err(|_| CredentialError::KeyAttestationInvalid)?;
+        if leaf_public_key.is_none() {
+            if parsed.public_key_raw.len() != 65 || parsed.public_key_raw.first() != Some(&0x04) {
+                return Err(CredentialError::KeyAttestationInvalid);
+            }
+            leaf_public_key = Some(parsed.public_key_raw);
+        }
+        seen_certificates.push(decoded);
     }
-    // HAIP forbids a self-signed signing certificate and forbids carrying the trust anchor. A
-    // self-issued certificate anywhere in this bounded x5c list is therefore rejected. Full path,
-    // EKU/policy and anchor authorization remain the explicitly unresolved ecosystem trust step.
-    if parsed_certificates
-        .iter()
-        .any(|certificate| certificate.subject == certificate.issuer)
-    {
-        return Err(CredentialError::KeyAttestationInvalid);
-    }
+    let signing_input = compact
+        .rsplit_once('.')
+        .map(|(input, _)| input)
+        .ok_or(CredentialError::KeyAttestationInvalid)?;
+    verifier
+        .verify(
+            Alg::Es256,
+            leaf_public_key
+                .as_deref()
+                .ok_or(CredentialError::KeyAttestationInvalid)?,
+            signing_input.as_bytes(),
+            &signature,
+        )
+        .map_err(|_| CredentialError::KeyAttestationInvalid)?;
+    // Local verification proves that the compact KA was signed by its x5c leaf. Ecosystem path
+    // authorization, revocation/status resolution, and HAIP trust-anchor policy remain external.
 
     let payload = bounded_json::parse_object(&payload_bytes, JWT_JSON_LIMITS)
         .map_err(|_| CredentialError::KeyAttestationInvalid)?;
@@ -1546,6 +2174,12 @@ fn validate_key_attestation(
     }) {
         return Err(CredentialError::KeyAttestationInvalid);
     }
+    let certification = payload
+        .get("certification")
+        .and_then(Value::as_str)
+        .filter(|value| valid_bounded_text(value, 2_048))
+        .ok_or(CredentialError::KeyAttestationInvalid)?;
+    HttpsEndpoint::parse(certification).map_err(|_| CredentialError::KeyAttestationInvalid)?;
     let issued_at = payload
         .get("iat")
         .and_then(Value::as_i64)
@@ -1554,13 +2188,19 @@ fn validate_key_attestation(
         .get("exp")
         .and_then(Value::as_i64)
         .ok_or(CredentialError::KeyAttestationInvalid)?;
-    if issued_at <= 0 || issued_at > now || expires_at <= now || expires_at <= issued_at {
+    let latest_issued_at = now
+        .checked_add(MAX_KEY_ATTESTATION_CLOCK_SKEW_SECONDS)
+        .ok_or(CredentialError::KeyAttestationInvalid)?;
+    if issued_at <= 0
+        || issued_at > latest_issued_at
+        || expires_at <= now
+        || expires_at <= issued_at
+    {
         return Err(CredentialError::KeyAttestationInvalid);
     }
-    if !payload
-        .get("nonce")
-        .and_then(Value::as_str)
-        .is_some_and(|nonce| ct_eq(nonce.as_bytes(), expected_nonce.as_bytes()))
+    // In TS3 JWT proof mode the c_nonce is carried only by the proof payload. A nonce-bearing KA is
+    // the separate attestation-proof mode and must not be silently accepted here.
+    if payload.contains_key("nonce")
         || !string_array_contains(&payload, "key_storage", "iso_18045_high")
         || !string_array_contains(&payload, "user_authentication", "iso_18045_high")
     {
@@ -1574,11 +2214,72 @@ fn validate_key_attestation(
     let key = keys[0]
         .as_object()
         .ok_or(CredentialError::KeyAttestationInvalid)?;
-    if key.get("kty").and_then(Value::as_str) != Some("EC")
+    // RFC 7517 JWKs are extensible. Bind the RFC 7638 public EC members and tolerate bounded
+    // public metadata (for example `alg` or `kid`), but never accept private key material in an
+    // attestation payload that crosses this trust boundary.
+    if ["d", "p", "q", "dp", "dq", "qi", "oth", "k"]
+        .iter()
+        .any(|member| key.contains_key(*member))
+        || key.get("kty").and_then(Value::as_str) != Some("EC")
         || key.get("crv").and_then(Value::as_str) != Some("P-256")
         || key.get("x").and_then(Value::as_str) != Some(expected_jwk.x())
         || key.get("y").and_then(Value::as_str) != Some(expected_jwk.y())
     {
+        return Err(CredentialError::KeyAttestationInvalid);
+    }
+    validate_key_storage_status(&payload, preferred_status_period, now)?;
+    Ok(ValidatedKeyAttestation {
+        expires_at_epoch_seconds: expires_at,
+    })
+}
+
+fn validate_key_storage_status(
+    payload: &Map<String, Value>,
+    preferred_status_period: Option<u64>,
+    now: i64,
+) -> Result<(), CredentialError> {
+    let key_storage_status = payload
+        .get("key_storage_status")
+        .and_then(Value::as_object)
+        .filter(|object| object.len() == 2)
+        .ok_or(CredentialError::KeyAttestationInvalid)?;
+    let expires_at = key_storage_status
+        .get("exp")
+        .and_then(Value::as_i64)
+        .ok_or(CredentialError::KeyAttestationInvalid)?;
+    let status = key_storage_status
+        .get("status")
+        .and_then(Value::as_object)
+        .filter(|object| object.len() == 1)
+        .ok_or(CredentialError::KeyAttestationInvalid)?;
+    let status_list = status
+        .get("status_list")
+        .and_then(Value::as_object)
+        .filter(|object| object.len() == 2)
+        .ok_or(CredentialError::KeyAttestationInvalid)?;
+    status_list
+        .get("idx")
+        .and_then(Value::as_u64)
+        .filter(|index| *index <= u64::from(u32::MAX))
+        .ok_or(CredentialError::KeyAttestationInvalid)?;
+    let uri = status_list
+        .get("uri")
+        .and_then(Value::as_str)
+        .filter(|value| valid_bounded_text(value, 2_048))
+        .ok_or(CredentialError::KeyAttestationInvalid)?;
+    HttpsEndpoint::parse(uri).map_err(|_| CredentialError::KeyAttestationInvalid)?;
+    let minimum_period = preferred_status_period
+        .unwrap_or_default()
+        .max(MIN_KEY_STORAGE_STATUS_REMAINING_SECONDS);
+    if minimum_period > MAX_PREFERRED_KEY_STORAGE_STATUS_PERIOD_SECONDS {
+        return Err(CredentialError::InvalidConfiguration);
+    }
+    let minimum_period =
+        i64::try_from(minimum_period).map_err(|_| CredentialError::InvalidConfiguration)?;
+    let required_expiry = now
+        .checked_add(minimum_period)
+        .ok_or(CredentialError::KeyAttestationInvalid)?;
+    if expires_at < required_expiry {
         return Err(CredentialError::KeyAttestationInvalid);
     }
     Ok(())
@@ -1598,21 +2299,24 @@ fn string_array_contains(object: &Map<String, Value>, field: &str, expected: &st
         })
 }
 
+fn public_jwk_thumbprint(jwk: &Es256PublicJwk, digest: &dyn Digest) -> [u8; 32] {
+    // RFC 7638 canonical member set and lexicographic order for an EC public JWK.
+    let canonical = format!(
+        "{{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"{}\",\"y\":\"{}\"}}",
+        jwk.x(),
+        jwk.y()
+    );
+    digest.sha256(canonical.as_bytes())
+}
+
 fn build_credential_proof_signing_input(
     credential_issuer: &str,
     c_nonce: &str,
-    jwk: &Es256PublicJwk,
     key_attestation: &str,
     iat: i64,
 ) -> Result<SecretBytes, CredentialError> {
     let header = serde_json::json!({
         "alg": "ES256",
-        "jwk": {
-            "crv": "P-256",
-            "kty": "EC",
-            "x": jwk.x(),
-            "y": jwk.y(),
-        },
         "key_attestation": key_attestation,
         "typ": "openid4vci-proof+jwt",
     });
@@ -1722,19 +2426,155 @@ fn assemble_compact_jwt(
 }
 
 fn is_use_dpop_nonce_challenge(values: &[String]) -> Result<bool, CredentialError> {
-    let challenge = match values {
-        [value] if valid_header_value(value) => value,
-        [] => return Ok(false),
-        _ => return Err(CredentialError::DpopNonceInvalid),
-    };
-    let (scheme, parameters) = challenge
-        .split_once(char::is_whitespace)
-        .ok_or(CredentialError::DpopNonceInvalid)?;
+    if values.len() > 8 || values.iter().any(|value| !valid_header_value(value)) {
+        return Err(CredentialError::DpopNonceInvalid);
+    }
+    let mut challenge_count = 0usize;
+    let mut dpop_challenge_count = 0usize;
+    let mut use_dpop_nonce_count = 0usize;
+    for value in values {
+        let mut current: Option<(String, String)> = None;
+        for (index, fragment) in split_unquoted_commas(value)?.into_iter().enumerate() {
+            let fragment = fragment.trim();
+            if fragment.is_empty() {
+                return Err(CredentialError::DpopNonceInvalid);
+            }
+            let starts_challenge = index == 0 || challenge_scheme(fragment).is_some();
+            if starts_challenge {
+                if let Some((scheme, parameters)) = current.take() {
+                    inspect_dpop_challenge(
+                        &scheme,
+                        &parameters,
+                        &mut dpop_challenge_count,
+                        &mut use_dpop_nonce_count,
+                    )?;
+                    challenge_count += 1;
+                }
+                let (scheme, parameters) = parse_challenge_start(fragment)?;
+                current = Some((scheme.to_owned(), parameters.to_owned()));
+            } else {
+                let (_, parameters) = current.as_mut().ok_or(CredentialError::DpopNonceInvalid)?;
+                if !parameters.is_empty() {
+                    parameters.push(',');
+                }
+                parameters.push_str(fragment);
+            }
+        }
+        if let Some((scheme, parameters)) = current.take() {
+            inspect_dpop_challenge(
+                &scheme,
+                &parameters,
+                &mut dpop_challenge_count,
+                &mut use_dpop_nonce_count,
+            )?;
+            challenge_count += 1;
+        }
+        if challenge_count > 16 {
+            return Err(CredentialError::DpopNonceInvalid);
+        }
+    }
+    if dpop_challenge_count > 1 || use_dpop_nonce_count > 1 {
+        return Err(CredentialError::DpopNonceInvalid);
+    }
+    Ok(use_dpop_nonce_count == 1)
+}
+
+fn split_unquoted_commas(input: &str) -> Result<Vec<&str>, CredentialError> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, byte) in input.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b',' if !quoted => {
+                parts.push(&input[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if quoted || escaped {
+        return Err(CredentialError::DpopNonceInvalid);
+    }
+    parts.push(&input[start..]);
+    if parts.len() > 32 {
+        return Err(CredentialError::DpopNonceInvalid);
+    }
+    Ok(parts)
+}
+
+fn challenge_scheme(input: &str) -> Option<&str> {
+    let trimmed = input.trim_start();
+    let end = trimmed.find(char::is_whitespace)?;
+    let scheme = &trimmed[..end];
+    let remainder = trimmed[end..].trim_start();
+    if valid_http_token(scheme) && !remainder.is_empty() && !remainder.starts_with('=') {
+        Some(scheme)
+    } else {
+        None
+    }
+}
+
+fn parse_challenge_start(input: &str) -> Result<(&str, &str), CredentialError> {
+    let input = input.trim();
+    if let Some(scheme) = challenge_scheme(input) {
+        let parameters = input[scheme.len()..].trim_start();
+        return Ok((scheme, parameters));
+    }
+    if valid_http_token(input) {
+        return Ok((input, ""));
+    }
+    Err(CredentialError::DpopNonceInvalid)
+}
+
+fn inspect_dpop_challenge(
+    scheme: &str,
+    parameters: &str,
+    dpop_challenge_count: &mut usize,
+    use_dpop_nonce_count: &mut usize,
+) -> Result<(), CredentialError> {
     if !scheme.eq_ignore_ascii_case("DPoP") {
-        return Ok(false);
+        return Ok(());
+    }
+    *dpop_challenge_count += 1;
+    if parameters.is_empty() {
+        return Ok(());
     }
     let parameters = parse_auth_parameters(parameters)?;
-    Ok(parameters.get("error").map(String::as_str) == Some("use_dpop_nonce"))
+    if parameters.get("error").map(String::as_str) == Some("use_dpop_nonce") {
+        *use_dpop_nonce_count += 1;
+    }
+    Ok(())
+}
+
+fn valid_http_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 fn parse_auth_parameters(input: &str) -> Result<BTreeMap<String, String>, CredentialError> {
@@ -1828,21 +2668,26 @@ fn parse_auth_parameter_value(value: &str) -> Result<String, CredentialError> {
     }
 }
 
-fn parse_use_dpop_nonce_body(input: &[u8]) -> Result<(), CredentialError> {
+fn credential_error_code(input: &[u8]) -> Result<String, CredentialError> {
     let object = bounded_json::parse_object(input, NONCE_JSON_LIMITS)
-        .map_err(|_| CredentialError::DpopNonceInvalid)?;
-    if object.get("error").and_then(Value::as_str) == Some("use_dpop_nonce") {
-        Ok(())
-    } else {
-        Err(CredentialError::DpopNonceInvalid)
-    }
+        .map_err(|_| CredentialError::CredentialRejected)?;
+    object
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|value| valid_bounded_text(value, 128) && value.is_ascii())
+        .map(str::to_owned)
+        .ok_or(CredentialError::CredentialRejected)
+}
+
+struct ParsedImmediateCredential {
+    raw: Vec<u8>,
+    notification_id: Option<SecretString>,
 }
 
 fn parse_immediate_credential(
     input: &[u8],
     format: GermanPidFormat,
-    expected_issuer: &str,
-) -> Result<Vec<u8>, CredentialError> {
+) -> Result<ParsedImmediateCredential, CredentialError> {
     let object = bounded_json::parse_object(input, CREDENTIAL_JSON_LIMITS)
         .map_err(|_| CredentialError::InvalidCredentialResponse)?;
     if object.contains_key("transaction_id")
@@ -1850,9 +2695,6 @@ fn parse_immediate_credential(
         || object.contains_key("acceptance_token")
     {
         return Err(CredentialError::DeferredIssuanceUnsupported);
-    }
-    if object.contains_key("notification_id") {
-        return Err(CredentialError::NotificationUnsupported);
     }
     if object.contains_key("refresh_token") || object.contains_key("reissuance") {
         return Err(CredentialError::ReissuanceUnsupported);
@@ -1876,13 +2718,24 @@ fn parse_immediate_credential(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty() && value.len() <= MAX_CREDENTIAL_BYTES)
         .ok_or(CredentialError::InvalidCredentialResponse)?;
-    match format {
-        GermanPidFormat::DcSdJwt => validate_sd_jwt_pid(credential, expected_issuer),
+    let notification_id = match object.get("notification_id") {
+        None => None,
+        Some(Value::String(value)) if valid_bounded_text(value, MAX_NOTIFICATION_ID_BYTES) => {
+            Some(SecretString::from_str(value))
+        }
+        Some(_) => return Err(CredentialError::InvalidCredentialResponse),
+    };
+    let raw = match format {
+        GermanPidFormat::DcSdJwt => validate_sd_jwt_pid(credential),
         GermanPidFormat::MsoMdoc => validate_mdoc_pid(credential),
-    }
+    }?;
+    Ok(ParsedImmediateCredential {
+        raw,
+        notification_id,
+    })
 }
 
-fn validate_sd_jwt_pid(compact: &str, expected_issuer: &str) -> Result<Vec<u8>, CredentialError> {
+fn validate_sd_jwt_pid(compact: &str) -> Result<Vec<u8>, CredentialError> {
     let separators = compact.bytes().filter(|byte| *byte == b'~').count();
     if !(1..=MAX_SD_JWT_COMPONENT_SEPARATORS).contains(&separators) {
         return Err(CredentialError::CredentialFormatMismatch);
@@ -1912,8 +2765,18 @@ fn validate_sd_jwt_pid(compact: &str, expected_issuer: &str) -> Result<Vec<u8>, 
     if header.get("alg").and_then(Value::as_str) != Some("ES256")
         || header.get("typ").and_then(Value::as_str) != Some("dc+sd-jwt")
         || payload.get("vct").and_then(Value::as_str) != Some(SD_JWT_PID_VCT)
-        || payload.get("iss").and_then(Value::as_str) != Some(expected_issuer)
     {
+        return Err(CredentialError::CredentialFormatMismatch);
+    }
+    // The transport layer deliberately does not authenticate `iss`: the profiled SD-JWT VC
+    // version permits it to be absent and HAIP commonly conveys issuer trust through `x5c`.
+    // Signature/path validation and the resulting issuer identity are mandatory work for the
+    // `UnverifiedCredential` ingestion boundary.
+    if payload.get("iss").is_some_and(|value| {
+        !value
+            .as_str()
+            .is_some_and(|value| valid_bounded_text(value, 2_048))
+    }) {
         return Err(CredentialError::CredentialFormatMismatch);
     }
     Ok(compact.as_bytes().to_vec())
@@ -1987,6 +2850,27 @@ fn split_compact_jwt(
 
 fn dpop_htu(endpoint: &str) -> &str {
     endpoint.split_once('?').map_or(endpoint, |(base, _)| base)
+}
+
+fn verify_es256_signature(
+    verifier: &dyn Verifier,
+    jwk: &Es256PublicJwk,
+    signing_input: &[u8],
+    signature: &[u8],
+    error: CredentialError,
+) -> Result<(), CredentialError> {
+    let x = Base64UrlUnpadded::decode_vec(jwk.x()).map_err(|_| error)?;
+    let y = Base64UrlUnpadded::decode_vec(jwk.y()).map_err(|_| error)?;
+    if x.len() != 32 || y.len() != 32 {
+        return Err(error);
+    }
+    let mut public_key = [0u8; 65];
+    public_key[0] = 0x04;
+    public_key[1..33].copy_from_slice(&x);
+    public_key[33..].copy_from_slice(&y);
+    verifier
+        .verify(Alg::Es256, &public_key, signing_input, signature)
+        .map_err(|_| error)
 }
 
 fn validate_clock(now: i64) -> Result<(), CredentialError> {
