@@ -13,6 +13,16 @@ and [HAIP 1.0 Final](https://openid.net/specs/openid4vc-high-assurance-interoper
 Its current PID profile is only `mso_mdoc` with doctype `eu.europa.ec.eudi.pid.1`, or
 `dc+sd-jwt` with VCT `urn:eudi:pid:1`.
 
+The isolated authorization transport implements the authorization-code path only. HAIP client
+authentication is represented as fresh, externally acquired `OAuth-Client-Attestation` and
+`OAuth-Client-Attestation-PoP` headers at both PAR and token endpoints; it is not replaced by DPoP.
+RFC 9449 DPoP is emitted for the token request, with a PAR-supplied nonce allowed to seed the token
+proof and bounded token-endpoint nonce retries. A PAR handle is exposed with its dispatch deadline
+(`expires_in` is restricted to 1–599 seconds), after which the native shell must not open it.
+OpenID4VCI 1.0 Final obtains `c_nonce` from the separate Nonce Endpoint, so legacy token-response
+`c_nonce` values are not promoted into credential-proof state. Trusted Wallet Attestation minting,
+the Nonce/Credential Endpoints, native transport and provider trust remain open launch work.
+
 These documents specify protocol and credential behavior; they do not by themselves authorize a
 provider to issue German PID. PID-provider authorization remains a separate trusted-list and
 governance input, distinct from WebPKI and successful metadata parsing.

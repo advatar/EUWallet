@@ -196,12 +196,14 @@ operational solution needed to enter those processes.
   - [ ] Implement authorization-code issuance with PAR, PKCE S256, RFC 9207 issuer binding, exact
         redirect/state correlation, DPoP and DPoP-Nonce, final token/nonce/proofs/credentials wire
         models and typed native effects.
-    - [ ] Add an isolated OpenID4VCI 1.0 Final/HAIP authorization transport machine: bounded
-          injected PKCE/state generation; exact PAR, browser callback and token form contracts;
-          RFC 9207 issuer and redirect binding; ES256 DPoP signing effects with endpoint/method,
-          nonce and returned-proof verification; duplicate-aware bounded PAR/token JSON parsing;
-          and replay/concurrency/downgrade/secret-redaction tests. Credential-request transport,
-          native-shell wiring and PID-provider trust resolution remain separate work.
+    - [ ] Add and harden the isolated OpenID4VCI 1.0 Final/HAIP authorization transport machine.
+          The imported implementation has bounded injected PKCE/state generation; exact PAR,
+          browser callback and token contracts; request-bound Wallet Attestation/PoP inputs; RFC
+          9207 issuer/redirect binding; token-only ES256 DPoP signing effects and nonce retry;
+          duplicate-aware bounded JSON; and replay/downgrade/secret-redaction tests, but remains
+          unchecked until the remediation below passes review and full gates. Credential/Nonce
+          Endpoint transport, trusted WIA minting, native-shell wiring and PID-provider trust
+          resolution remain separate work.
     - [ ] Integrate the reviewed sans-I/O authorization/credential transport only after its P1
           conformance, device-binding, replay and privacy defects are closed; green isolated tests
           are not sufficient to mark either transport complete.
