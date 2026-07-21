@@ -5,7 +5,7 @@ import Foundation
 /// protocol as-is; a mock conforms for on-host tests. See docs/IMPLEMENTATION_PLAN.md Section 3.
 public protocol WalletEngineDriving: AnyObject {
     /// Drive one event (JSON) → a JSON array of effects (or a `{"error":...}` object).
-    func handleEventJson(eventJson: String) -> String
+    func handleEventJson(eventJson: String) throws -> String
 }
 
 /// Failures at the JSON boundary with the Rust core. A core error object and malformed output are
@@ -140,25 +140,6 @@ public enum WalletEffect: Decodable {
     private enum CodingKeys: String, CodingKey {
         case type, clientId, nonce, screen, keyRef, payload, url, body, proofJwt, offeredKey
         case uri, operationId, resultType, profile, authorizationHash
-    }
-
-    private struct CoreErrorEnvelope: Decodable {
-        let error: String
-    }
-
-    /// Decode the core's complete response. The response must be either an effect array or the
-    /// documented `{ "error": "..." }` envelope; unknown effect types are malformed contract data.
-    public static func decodeCoreOutput(_ json: String) throws -> [WalletEffect] {
-        let data = Data(json.utf8)
-        let decoder = JSONDecoder()
-        if let envelope = try? decoder.decode(CoreErrorEnvelope.self, from: data) {
-            throw FfiContractError.coreRejected(envelope.error)
-        }
-        do {
-            return try decoder.decode([WalletEffect].self, from: data)
-        } catch {
-            throw FfiContractError.malformedCoreOutput(String(describing: error))
-        }
     }
 
     private struct CoreErrorEnvelope: Decodable {

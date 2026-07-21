@@ -285,6 +285,8 @@ extension HttpClientError: LocalizedError {
 /// A stopped effect cascade. Infrastructure failures are never translated into semantic wallet
 /// events such as `userDeclined` or `presentationDelivered`.
 public enum EffectExecutorError: Error, Equatable {
+    case coreInvocationFailed
+    case noPendingDurableCommit
     case ffi(FfiContractError)
     case signingFailed(String)
     case storageFailed(String)
@@ -300,6 +302,8 @@ public enum EffectExecutorError: Error, Equatable {
 extension EffectExecutorError: LocalizedError {
     public var errorDescription: String? {
         switch self {
+        case .coreInvocationFailed: return "Durable core invocation failed"
+        case .noPendingDurableCommit: return "No pending durable commit"
         case .ffi(let error): return error.localizedDescription
         case .signingFailed(let reason): return "Device signing failed: \(reason)"
         case .storageFailed(let reason): return "Secure storage failed: \(reason)"
@@ -361,6 +365,7 @@ public final class EffectExecutor {
     private let transferOffers: TransferOfferPublisher?
     private let presentationRedirectHandler: OpenID4VPRedirectHandler?
     private let render: (UInt64?, Data?, ScreenDescription) throws -> Void
+    private var pendingDurableEvent: String?
 
     public init(
         engine: WalletEngineDriving,
@@ -389,7 +394,14 @@ public final class EffectExecutor {
     /// Send one JSON event and fully drain the resulting effect cascade.
     @discardableResult
     public func send(eventJson: String) async throws -> EffectCascadeOutcome {
-        var queue = try decode(engine.handleEventJson(eventJson: eventJson))
+        if engine is DurableLifecycleRetrying { pendingDurableEvent = eventJson }
+        let coreOutput: String
+        do {
+            coreOutput = try engine.handleEventJson(eventJson: eventJson)
+        } catch {
+            throw EffectExecutorError.coreInvocationFailed
+        }
+        var queue = try decode(coreOutput)
         let initialEventType = Self.eventType(eventJson)
         var acknowledged = false
         var renderedInput = false
@@ -451,6 +463,30 @@ public final class EffectExecutor {
             return .idle
         }
         return .aborted(.missingTerminalOutcome)
+    }
+
+    /// Release effects retained by the durable coordinator after a persistence failure without
+    /// invoking the Rust core a second time.
+    @discardableResult
+    public func retryPendingDurableCommit() async throws -> EffectCascadeOutcome {
+        guard let eventJson = pendingDurableEvent,
+              let durable = engine as? DurableLifecycleRetrying else {
+            throw EffectExecutorError.noPendingDurableCommit
+        }
+        let output: String
+        do {
+            output = try durable.retryPendingEvent(eventJson: eventJson)
+        } catch let error as DurableLifecycleError where error == .noPendingCommit {
+            throw EffectExecutorError.noPendingDurableCommit
+        } catch {
+            throw EffectExecutorError.coreInvocationFailed
+        }
+        let effects = try decode(output)
+        for effect in effects {
+            _ = try await execute(effect)
+        }
+        pendingDurableEvent = nil
+        return .awaitingInput
     }
 
     private static func eventType(_ json: String) -> String? {
