@@ -11,3 +11,7 @@
 - Other agents may be working in the same repo; mind your own business and avoid unrelated investigation or edits.
 - When you have unchecked tasks, complete them one by one after passing tests, do not stop
 - When adding new functionality add unit tests
+- Whenever Rust/UniFFI APIs change, regenerate `ios/Generated/wallet_core.swift`,
+  `ios/Generated/wallet_coreFFI.h`, and the local `ios/WalletCore.xcframework`
+  with `ios/build-rust-xcframework.sh` before building Xcode; run
+  `ios/verify-rust-xcframework.sh` and commit the tracked generated bindings.
