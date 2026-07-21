@@ -11,11 +11,21 @@ import org.junit.Test
 class WalletEventJsonTest {
     @Test
     fun emitsFullUInt64AsJsonNumberRatherThanString() {
-        val root = parse(WalletEventJson.tokenReceived(TokenResult(true, ULong.MAX_VALUE)))
+        val root = parse(WalletEventJson.tokenReceived(7, TokenResult(true, ULong.MAX_VALUE)))
         val nonce = root["cNonce"] as JsonPrimitive
 
         assertFalse(nonce.isString)
         assertEquals(ULong.MAX_VALUE.toString(), nonce.content)
+    }
+
+    @Test
+    fun approvalEchoesOperationAndAuthorizationHash() {
+        val hash = ByteArray(32) { it.toByte() }
+        val root = parse(WalletEventJson.userConsented(42, hash))
+
+        assertEquals("42", (root["operationId"] as JsonPrimitive).content)
+        val emitted = root["authorizationHash"] as JsonArray
+        assertEquals((0..31).map(Int::toString), emitted.map { (it as JsonPrimitive).content })
     }
 
     @Test

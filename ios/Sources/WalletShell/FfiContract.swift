@@ -5,7 +5,7 @@ import Foundation
 /// protocol as-is; a mock conforms for on-host tests. See docs/IMPLEMENTATION_PLAN.md Section 3.
 public protocol WalletEngineDriving: AnyObject {
     /// Drive one event (JSON) → a JSON array of effects (or a `{"error":...}` object).
-    func handleEventJson(eventJson: String) throws -> String
+    func handleEventJson(eventJson: String) -> String
 }
 
 /// Failures at the JSON boundary with the Rust core. A core error object and malformed output are
@@ -119,12 +119,7 @@ public enum WalletEffect: Decodable {
     case persistNonce(operationId: UInt64, nonce: UInt64)
     case render(operationId: UInt64?, authorizationHash: [UInt8]?, screen: ScreenDescription)
     case sign(operationId: UInt64, keyRef: String, payload: [UInt8])
-    case http(
-        operationId: UInt64,
-        resultType: HttpResultType,
-        profile: HttpDeliveryProfile,
-        url: String,
-        body: [UInt8])
+    case http(operationId: UInt64, resultType: HttpResultType, url: String, body: [UInt8])
     // --- Issuance (OpenID4VCI) ---
     case pushPar(operationId: UInt64)
     case openAuthBrowser(operationId: UInt64)
@@ -139,7 +134,7 @@ public enum WalletEffect: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case type, clientId, nonce, screen, keyRef, payload, url, body, proofJwt, offeredKey
-        case uri, operationId, resultType, profile, authorizationHash
+        case uri, operationId, resultType, authorizationHash
     }
 
     private struct CoreErrorEnvelope: Decodable {
@@ -201,18 +196,9 @@ public enum WalletEffect: Decodable {
                 keyRef: try c.decode(String.self, forKey: .keyRef),
                 payload: try c.decode([UInt8].self, forKey: .payload))
         case "http":
-            let resultType = try c.decode(HttpResultType.self, forKey: .resultType)
-            let profile = try c.decode(HttpDeliveryProfile.self, forKey: .profile)
-            guard profile.resultType == resultType else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .profile,
-                    in: c,
-                    debugDescription: "HTTP delivery profile does not match resultType")
-            }
             self = .http(
                 operationId: try c.decode(UInt64.self, forKey: .operationId),
-                resultType: resultType,
-                profile: profile,
+                resultType: try c.decode(HttpResultType.self, forKey: .resultType),
                 url: try c.decode(String.self, forKey: .url),
                 body: try c.decode([UInt8].self, forKey: .body))
         case "pushPar":
@@ -249,22 +235,6 @@ public enum HttpResultType: String, Decodable, Equatable {
     case presentationDelivered
     case paymentAuthorizationDelivered
     case qesAuthorizationDelivered
-}
-
-/// Closed protocol-delivery discriminator emitted by the Rust core. It prevents opaque POST bytes
-/// from being interpreted under a different protocol's success contract.
-public enum HttpDeliveryProfile: String, Decodable, Equatable, Sendable {
-    case openid4vpDirectPost
-    case paymentAuthorization
-    case qesAuthorization
-
-    public var resultType: HttpResultType {
-        switch self {
-        case .openid4vpDirectPost: return .presentationDelivered
-        case .paymentAuthorization: return .paymentAuthorizationDelivered
-        case .qesAuthorization: return .qesAuthorizationDelivered
-        }
-    }
 }
 
 public enum WalletOperationFailure: String {
@@ -327,19 +297,6 @@ public enum WalletEventJSON {
     }
     public static func qesDeclined(operationId: UInt64) -> String {
         #"{"type":"qesDeclined","operationId":\#(operationId)}"#
-    }
-
-    /// Replace one audit-log entry with a chain-preserving tombstone. This mutation must travel
-    /// through the durable lifecycle just like protocol events so it cannot be resurrected after
-    /// a restart from an older checkpoint.
-    public static func historyRedaction(seq: UInt64) -> String {
-        #"{"type":"redactTransaction","seq":\#(seq)}"#
-    }
-
-    /// Erase the audit log through the durable lifecycle. Core admits this only while no protocol
-    /// operation is active, then returns an empty effect batch after applying the mutation.
-    public static func historyWipe() -> String {
-        #"{"type":"wipeTransactionLog"}"#
     }
 
     // --- Issuance (OpenID4VCI) ---

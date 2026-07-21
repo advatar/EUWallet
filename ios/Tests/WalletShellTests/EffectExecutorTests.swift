@@ -4,11 +4,9 @@ import XCTest
 /// A scripted engine standing in for the Rust WalletEngine over the JSON contract. It returns the
 /// same effect sequence the real core does, so the shell's dispatch and fail-closed boundaries can
 /// be tested on the host without linking the xcframework.
-final class MockEngine: DurableWalletEngineDriving {
+final class MockEngine: WalletEngineDriving {
     private let response: (String) -> String
     private(set) var receivedEvents: [String] = []
-    private(set) var exportedGenerations: [UInt64] = []
-    private(set) var preparationCount = 0
 
     init(response: @escaping (String) -> String = MockEngine.happyPathResponse) {
         self.response = response
@@ -18,19 +16,6 @@ final class MockEngine: DurableWalletEngineDriving {
         receivedEvents.append(eventJson)
         return response(eventJson)
     }
-
-    func prepareForDurableRestore(environment: CoreDurableEnvironment) {
-        preparationCount += 1
-    }
-
-    func makeDurableCheckpoint(generation: UInt64) -> CoreDurableCheckpoint {
-        exportedGenerations.append(generation)
-        var encodedGeneration = generation.bigEndian
-        let bytes = withUnsafeBytes(of: &encodedGeneration) { Data($0) }
-        return CoreDurableCheckpoint(generation: generation, bytes: bytes)
-    }
-
-    func restoreDurableCheckpointRecord(_ checkpoint: CoreDurableCheckpoint) {}
 
     private static func happyPathResponse(_ eventJson: String) -> String {
         if eventJson.contains("\"authorizationRequestReceived\"") {
@@ -43,7 +28,7 @@ final class MockEngine: DurableWalletEngineDriving {
             return #"[{"type":"sign","operationId":4,"resultType":"deviceSignatureProduced","keyRef":"device-key","payload":[1,2,3]}]"#
         }
         if eventJson.contains("\"deviceSignatureProduced\"") {
-            return #"[{"type":"http","operationId":5,"resultType":"presentationDelivered","profile":"openid4vpDirectPost","url":"https://rp.example/response","body":[9,9,9]}]"#
+            return #"[{"type":"http","operationId":5,"resultType":"presentationDelivered","url":"https://rp.example/response","body":[9,9,9]}]"#
         }
         if eventJson.contains("\"presentationDelivered\"") {
             return #"[{"type":"close"}]"#
@@ -64,31 +49,6 @@ final class MockEngine: DurableWalletEngineDriving {
             return #"[{"type":"render","screen":{"screen":"error","code":"operation_failed","message":"Operation failed"}},{"type":"close"}]"#
         }
         return "[]"
-    }
-}
-
-private final class ExecutorTestDurableStore: DurableStateStore {
-    private(set) var record: DurableStateRecord?
-
-    func load(context: DurableStateContext) -> DurableStateLoadResult {
-        record.map(DurableStateLoadResult.record) ?? .empty
-    }
-
-    func commit(
-        expectedGeneration: UInt64,
-        nextGeneration: UInt64,
-        plaintext: Data,
-        context: DurableStateContext
-    ) throws -> DurableStateRecord {
-        let actual = record?.generation ?? 0
-        guard actual == expectedGeneration else {
-            throw DurableStateStoreError.generationConflict(
-                expected: expectedGeneration,
-                actual: actual)
-        }
-        let committed = DurableStateRecord(generation: nextGeneration, plaintext: plaintext)
-        record = committed
-        return committed
     }
 }
 
@@ -117,16 +77,6 @@ private final class FailingIssuer: IssuerResponder {
     }
 }
 
-private final class FixedCredentialIssuer: IssuerResponder {
-    func token() async -> (bound: Bool, cNonce: UInt64) {
-        (true, 1)
-    }
-
-    func credential(proofJwt: Data) async -> (format: String, bytes: Data) {
-        ("dc+sd-jwt", Data("issuer-credential".utf8))
-    }
-}
-
 private final class FixedHttpClient: HttpClient {
     enum Outcome {
         case response(HttpResponse)
@@ -136,14 +86,7 @@ private final class FixedHttpClient: HttpClient {
     private let outcome: Outcome
     init(_ outcome: Outcome) { self.outcome = outcome }
 
-    private(set) var postedProfiles: [HttpDeliveryProfile] = []
-
-    func post(
-        url: String,
-        body: Data,
-        profile: HttpDeliveryProfile
-    ) async throws -> HttpResponse {
-        postedProfiles.append(profile)
+    func post(url: String, body: Data) async throws -> HttpResponse {
         switch outcome {
         case .response(let response): return response
         case .failure(let error): throw error
@@ -176,55 +119,21 @@ private final class RecordingTransferOfferPublisher: TransferOfferPublisher {
     }
 }
 
-private final class RecordingRedirectHandler: OpenID4VPRedirectHandler {
-    private let shouldFail: Bool
-    private let onHandle: () -> Void
-    private(set) var redirects: [URL] = []
-
-    init(shouldFail: Bool = false, onHandle: @escaping () -> Void = {}) {
-        self.shouldFail = shouldFail
-        self.onHandle = onHandle
-    }
-
-    func handle(redirectUri: URL) async throws {
-        onHandle()
-        if shouldFail { throw ExpectedFailure.failure }
-        redirects.append(redirectUri)
-    }
-}
-
 final class EffectExecutorTests: XCTestCase {
     private static let authorizationHash = Data(repeating: 0, count: 32)
 
     private func makeExecutor(
         engine: MockEngine = MockEngine(),
-        durableStore: ExecutorTestDurableStore = ExecutorTestDurableStore(),
         signer: Signer = StubSigner(),
         http: HttpClient = StubHttpClient(),
         storage: SecureStorage = InMemoryStorage(),
         statusLists: StatusListResolver? = nil,
         issuer: IssuerResponder? = nil,
         transferOffers: TransferOfferPublisher? = nil,
-        presentationRedirectHandler: OpenID4VPRedirectHandler? = nil,
         render: @escaping (UInt64?, Data?, ScreenDescription) throws -> Void = { _, _, _ in }
     ) -> EffectExecutor {
-        let context = try! DurableLifecycleContextFactory.make(
-            applicationIdentifier: "eu.advatar.wallet.tests",
-            walletClientId: "wallet.test",
-            deviceKeyReference: "device-test-key")
-        let lifecycle = DurableLifecycleCoordinator(
+        EffectExecutor(
             engine: engine,
-            store: durableStore,
-            context: context)
-        try! lifecycle.bootstrap(environment: CoreDurableEnvironment(
-            clockEpoch: 1_790_000_000,
-            signedTrustList: Data([1]),
-            operatorPublicKey: Data([2]),
-            devicePublicKey: Data([3]),
-            wuaJwt: Data([4]),
-            wuaProviderPublicKey: Data([5])))
-        return EffectExecutor(
-            lifecycle: lifecycle,
             signer: signer,
             http: http,
             storage: storage,
@@ -232,7 +141,6 @@ final class EffectExecutorTests: XCTestCase {
             statusLists: statusLists,
             issuer: issuer,
             transferOffers: transferOffers,
-            presentationRedirectHandler: presentationRedirectHandler,
             render: render)
     }
 
@@ -249,47 +157,6 @@ final class EffectExecutorTests: XCTestCase {
             "Infrastructure failure became presentationDelivered",
             file: file,
             line: line)
-    }
-
-    func testExecutorCommitsThroughConcreteLifecycleBeforeRendering() async throws {
-        let engine = MockEngine { _ in
-            #"[{"type":"render","screen":{"screen":"loading"}}]"#
-        }
-        let store = ExecutorTestDurableStore()
-        var rendered = false
-        let executor = makeExecutor(engine: engine, durableStore: store) { _, _, _ in
-            rendered = true
-        }
-
-        let outcome = try await executor.send(eventJson: #"{"type":"start"}"#)
-
-        XCTAssertEqual(outcome, .awaitingInput)
-        XCTAssertTrue(rendered)
-        XCTAssertEqual(engine.preparationCount, 1)
-        XCTAssertEqual(engine.exportedGenerations, [1])
-        XCTAssertEqual(store.record?.generation, 1)
-    }
-
-    func testHistoryMaintenanceEventsAreDurablyCommittedIdleTransitions() async throws {
-        let engine = MockEngine { _ in "[]" }
-        let store = ExecutorTestDurableStore()
-        let executor = makeExecutor(engine: engine, durableStore: store)
-
-        let redactionOutcome = try await executor.send(
-            eventJson: WalletEventJSON.historyRedaction(seq: 7))
-        let wipeOutcome = try await executor.send(eventJson: WalletEventJSON.historyWipe())
-
-        XCTAssertEqual(redactionOutcome, .idle)
-        XCTAssertEqual(wipeOutcome, .idle)
-
-        XCTAssertEqual(
-            engine.receivedEvents,
-            [
-                #"{"type":"redactTransaction","seq":7}"#,
-                #"{"type":"wipeTransactionLog"}"#,
-            ])
-        XCTAssertEqual(engine.exportedGenerations, [1, 2])
-        XCTAssertEqual(store.record?.generation, 2)
     }
 
     func testRequestRendersConsentScreen() async throws {
@@ -330,7 +197,6 @@ final class EffectExecutorTests: XCTestCase {
         XCTAssertEqual(http.posted.count, 1)
         XCTAssertEqual(http.posted.first?.0, "https://rp.example/response")
         XCTAssertEqual(http.posted.first?.1, Data([9, 9, 9]))
-        XCTAssertEqual(http.posted.first?.2, .openid4vpDirectPost)
         XCTAssertEqual(outcome, .succeeded)
     }
 
@@ -355,7 +221,7 @@ final class EffectExecutorTests: XCTestCase {
                 return #"[{"type":"sign","operationId":11,"resultType":"deviceSignatureProduced","keyRef":"device-key","payload":[7,7,7]}]"#
             }
             if event.contains("\"deviceSignatureProduced\"") {
-                return #"[{"type":"http","operationId":12,"resultType":"paymentAuthorizationDelivered","profile":"paymentAuthorization","url":"https://psp.example/authorize","body":[8,8,8]}]"#
+                return #"[{"type":"http","operationId":12,"resultType":"paymentAuthorizationDelivered","url":"https://psp.example/authorize","body":[8,8,8]}]"#
             }
             if event.contains("\"paymentAuthorizationDelivered\"") {
                 return #"[{"type":"close"}]"#
@@ -382,7 +248,6 @@ final class EffectExecutorTests: XCTestCase {
                 authorizationHash: Self.authorizationHash))
         XCTAssertEqual(signer.signedPayloads.first, Data([7, 7, 7]))
         XCTAssertEqual(http.posted.first?.0, "https://psp.example/authorize")
-        XCTAssertEqual(http.posted.first?.2, .paymentAuthorization)
         XCTAssertTrue(engine.receivedEvents.contains {
             $0.contains("\"type\":\"paymentAuthorizationDelivered\"")
                 && $0.contains("\"operationId\":12")
@@ -396,18 +261,6 @@ final class EffectExecutorTests: XCTestCase {
         let shortHash = #"[{"type":"render","operationId":1,"authorizationHash":[0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[]}}]"#
         for output in [missingId, shortHash] {
             XCTAssertThrowsError(try WalletEffect.decodeCoreOutput(output))
-        }
-    }
-
-    func testHttpDecoderRejectsUnknownOrMismatchedDeliveryProfiles() {
-        let outputs = [
-            #"[{"type":"http","operationId":1,"resultType":"presentationDelivered","url":"https://rp.example","body":[]}]"#,
-            #"[{"type":"http","operationId":1,"resultType":"presentationDelivered","profile":"futureProfile","url":"https://rp.example","body":[]}]"#,
-            #"[{"type":"http","operationId":1,"resultType":"presentationDelivered","profile":"paymentAuthorization","url":"https://rp.example","body":[]}]"#,
-            #"[{"type":"http","operationId":1,"resultType":"qesAuthorizationDelivered","profile":"openid4vpDirectPost","url":"https://rp.example","body":[]}]"#,
-        ]
-        for output in outputs {
-            XCTAssertThrowsError(try WalletEffect.decodeCoreOutput(output), output)
         }
     }
 
@@ -575,7 +428,7 @@ final class EffectExecutorTests: XCTestCase {
         XCTAssertEqual(afterCloseOutcome, .aborted(.effectAfterClose))
     }
 
-    func testMalformedCoreOutputIsRejectedByLifecycleBeforeCommit() async {
+    func testMalformedCoreOutputThrowsTypedError() async {
         let engine = MockEngine { _ in "not-json" }
         let executor = makeExecutor(engine: engine)
 
@@ -585,10 +438,13 @@ final class EffectExecutorTests: XCTestCase {
                     operationId: 1,
                     authorizationHash: Self.authorizationHash))
             XCTFail("expected malformed core output to fail")
+        } catch let error as EffectExecutorError {
+            guard case .ffi(.malformedCoreOutput) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
         } catch {
-            XCTAssertEqual(error as? DurableLifecycleError, .malformedCoreOutput)
+            XCTFail("untyped error: \(error)")
         }
-        XCTAssertTrue(engine.exportedGenerations.isEmpty)
         assertNoSemanticSuccessOrDecline(engine.receivedEvents)
     }
 
@@ -660,170 +516,6 @@ final class EffectExecutorTests: XCTestCase {
         assertNoSemanticSuccessOrDecline(engine.receivedEvents)
     }
 
-    func testOpenId4VpResponseRequiresExactStatusMimeObjectUtf8AndBounds() async throws {
-        let invalidResponses: [(String, HttpResponse)] = [
-            ("201", HttpResponse(
-                statusCode: 201,
-                body: Data("{}".utf8),
-                contentType: "application/json")),
-            ("204", HttpResponse(
-                statusCode: 204,
-                body: Data("{}".utf8),
-                contentType: "application/json")),
-            ("missing MIME", HttpResponse(statusCode: 200, body: Data("{}".utf8))),
-            ("wrong MIME", HttpResponse(
-                statusCode: 200,
-                body: Data("{}".utf8),
-                contentType: "text/html")),
-            ("ambiguous MIME", HttpResponse(
-                statusCode: 200,
-                body: Data("{}".utf8),
-                contentType: "application/json, text/html")),
-            ("array", HttpResponse(
-                statusCode: 200,
-                body: Data("[]".utf8),
-                contentType: "application/json")),
-            ("scalar", HttpResponse(
-                statusCode: 200,
-                body: Data("true".utf8),
-                contentType: "application/json")),
-            ("invalid JSON", HttpResponse(
-                statusCode: 200,
-                body: Data("{".utf8),
-                contentType: "application/json")),
-            ("non-UTF8", HttpResponse(
-                statusCode: 200,
-                body: Data([0xff]),
-                contentType: "application/json")),
-            ("oversize", HttpResponse(
-                statusCode: 200,
-                body: Data(
-                    repeating: UInt8(ascii: " "),
-                    count: OpenID4VPDirectPostResponse.maximumResponseBytes + 1),
-                contentType: "application/json")),
-        ]
-
-        for (name, response) in invalidResponses {
-            let engine = MockEngine()
-            let executor = makeExecutor(
-                engine: engine,
-                http: FixedHttpClient(.response(response)))
-            let outcome = try await executor.send(
-                eventJson: WalletEventJSON.userConsented(
-                    operationId: 3,
-                    authorizationHash: Self.authorizationHash))
-
-            XCTAssertEqual(
-                outcome,
-                .aborted(.coreError(code: "operation_failed", message: "Operation failed")),
-                name)
-            assertNoSemanticSuccessOrDecline(engine.receivedEvents)
-        }
-    }
-
-    func testOpenId4VpRedirectUriRejectsAmbiguousAndMalformedValues() async throws {
-        let oversized = "wallet:" + String(
-            repeating: "a",
-            count: OpenID4VPDirectPostResponse.maximumRedirectUriBytes)
-        let invalidBodies = [
-            #"{"redirect_uri":7}"#,
-            #"{"redirect_uri":"relative/path"}"#,
-            #"{"redirect_uri":"https://client.example/%zz"}"#,
-            try XCTUnwrap(
-                String(data: try JSONEncoder().encode(["redirect_uri": oversized]), encoding: .utf8)),
-            #"{"redirect_uri":"https://one.example","redirect_uri":"https://two.example"}"#,
-            #"{"redirect_uri":"https://one.example","\u0072edirect_uri":"https://two.example"}"#,
-        ]
-
-        for body in invalidBodies {
-            let engine = MockEngine()
-            let response = HttpResponse(
-                statusCode: 200,
-                body: Data(body.utf8),
-                contentType: "application/json")
-            let executor = makeExecutor(
-                engine: engine,
-                http: FixedHttpClient(.response(response)),
-                presentationRedirectHandler: RecordingRedirectHandler())
-
-            _ = try await executor.send(
-                eventJson: WalletEventJSON.userConsented(
-                    operationId: 3,
-                    authorizationHash: Self.authorizationHash))
-            assertNoSemanticSuccessOrDecline(engine.receivedEvents)
-        }
-    }
-
-    func testOpenId4VpUnknownMembersAreIgnoredAndOpaqueRedirectUsesOnlyInjectedHandler() async throws {
-        let engine = MockEngine()
-        var acknowledgedBeforeHandler = false
-        let redirectHandler = RecordingRedirectHandler {
-            acknowledgedBeforeHandler = engine.receivedEvents.contains {
-                $0.contains("presentationDelivered")
-            }
-        }
-        let response = HttpResponse(
-            statusCode: 200,
-            body: Data(
-                #"{"future":{"nested":[1,2,3]},"redirect_uri":"wallet:continue?response_code=abc"}"#.utf8),
-            contentType: "Application/JSON; charset=UTF-8")
-        let executor = makeExecutor(
-            engine: engine,
-            http: FixedHttpClient(.response(response)),
-            presentationRedirectHandler: redirectHandler)
-
-        let outcome = try await executor.send(
-            eventJson: WalletEventJSON.userConsented(
-                operationId: 3,
-                authorizationHash: Self.authorizationHash))
-
-        XCTAssertEqual(outcome, .succeeded)
-        XCTAssertFalse(acknowledgedBeforeHandler)
-        XCTAssertEqual(redirectHandler.redirects.map(\.absoluteString), [
-            "wallet:continue?response_code=abc",
-        ])
-    }
-
-    func testOpenId4VpRedirectRequiresAHandlerAndRefusalNeverAcknowledges() async throws {
-        let response = HttpResponse(
-            statusCode: 200,
-            body: Data(#"{"redirect_uri":"https://client.example/cb#code=abc"}"#.utf8),
-            contentType: "application/json")
-        for handler in [nil, RecordingRedirectHandler(shouldFail: true)] as [
-            OpenID4VPRedirectHandler?
-        ] {
-            let engine = MockEngine()
-            let executor = makeExecutor(
-                engine: engine,
-                http: FixedHttpClient(.response(response)),
-                presentationRedirectHandler: handler)
-
-            _ = try await executor.send(
-                eventJson: WalletEventJSON.userConsented(
-                    operationId: 3,
-                    authorizationHash: Self.authorizationHash))
-            assertNoSemanticSuccessOrDecline(engine.receivedEvents)
-        }
-    }
-
-    func testOpenId4VpRequestBodyMustBeUtf8BeforeTransport() async throws {
-        let engine = MockEngine { event in
-            if event.contains("operationFailed") {
-                return #"[{"type":"render","screen":{"screen":"error","code":"operation_failed","message":"Operation failed"}},{"type":"close"}]"#
-            }
-            return #"[{"type":"http","operationId":31,"resultType":"presentationDelivered","profile":"openid4vpDirectPost","url":"https://rp.example/response","body":[255]}]"#
-        }
-        let http = FixedHttpClient(.response(HttpResponse(
-            statusCode: 200,
-            body: Data("{}".utf8),
-            contentType: "application/json")))
-
-        _ = try await makeExecutor(engine: engine, http: http).send(eventJson: "{}")
-
-        XCTAssertTrue(http.postedProfiles.isEmpty)
-        assertNoSemanticSuccessOrDecline(engine.receivedEvents)
-    }
-
     func testTransportFailureDoesNotBecomePresentationDelivered() async throws {
         let engine = MockEngine()
         let executor = makeExecutor(
@@ -875,46 +567,6 @@ final class EffectExecutorTests: XCTestCase {
             .aborted(.coreError(code: "operation_failed", message: "Operation failed")))
         XCTAssertTrue(engine.receivedEvents.contains { $0.contains("\"failure\":\"issuer\"") })
         assertNoSemanticSuccessOrDecline(engine.receivedEvents)
-    }
-
-    func testCredentialCallbackAcknowledgesOnlyCoreAcceptedCompletion() async throws {
-        let rejectedEngine = MockEngine { event in
-            if event.contains("\"credentialReceived\"") {
-                return #"[{"type":"render","screen":{"screen":"error","code":"credential_issuance_rejected","message":"Credential rejected"}},{"type":"close"}]"#
-            }
-            return #"[{"type":"requestCredential","operationId":25,"proofJwt":[1,2,3]}]"#
-        }
-        let rejectedExecutor = makeExecutor(
-            engine: rejectedEngine,
-            issuer: FixedCredentialIssuer())
-
-        let rejectedOutcome = try await rejectedExecutor.send(eventJson: "{}")
-
-        XCTAssertEqual(
-            rejectedOutcome,
-            .aborted(.coreError(
-                code: "credential_issuance_rejected",
-                message: "Credential rejected")))
-
-        let acceptedEngine = MockEngine { event in
-            if event.contains("\"credentialReceived\"") {
-                return #"[{"type":"close"}]"#
-            }
-            return #"[{"type":"requestCredential","operationId":26,"proofJwt":[4,5,6]}]"#
-        }
-        let acceptedExecutor = makeExecutor(
-            engine: acceptedEngine,
-            issuer: FixedCredentialIssuer())
-
-        let acceptedOutcome = try await acceptedExecutor.send(eventJson: "{}")
-
-        XCTAssertEqual(acceptedOutcome, .succeeded)
-        XCTAssertTrue(rejectedEngine.receivedEvents.contains {
-            $0.contains("\"type\":\"credentialReceived\"")
-        })
-        XCTAssertTrue(acceptedEngine.receivedEvents.contains {
-            $0.contains("\"type\":\"credentialReceived\"")
-        })
     }
 
     func testUnimplementedProtocolEffectFailsExplicitly() async throws {

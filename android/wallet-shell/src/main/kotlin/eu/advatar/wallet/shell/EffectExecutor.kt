@@ -1,6 +1,29 @@
 package eu.advatar.wallet.shell
 
 import java.util.ArrayDeque
+import org.json.JSONObject
+
+sealed interface EffectAbortReason {
+    data class CoreError(val code: String, val message: String) : EffectAbortReason
+
+    data object ClosedWithoutSuccess : EffectAbortReason
+
+    data object MissingTerminalOutcome : EffectAbortReason
+
+    data object EffectAfterClose : EffectAbortReason
+}
+
+sealed interface EffectCascadeOutcome {
+    data object Idle : EffectCascadeOutcome
+
+    data object AwaitingInput : EffectCascadeOutcome
+
+    data object Succeeded : EffectCascadeOutcome
+
+    data object Declined : EffectCascadeOutcome
+
+    data class Aborted(val reason: EffectAbortReason) : EffectCascadeOutcome
+}
 
 /**
  * Drains the sans-I/O core's effect cascade. Infrastructure failures stop the cascade and are
@@ -14,19 +37,66 @@ class EffectExecutor(
     private val trustResolver: TrustResolver,
     private val renderer: ScreenRenderer,
     private val issuerResponder: IssuerResponder? = null,
+    private val statusListResolver: StatusListResolver? = null,
+    private val transferOfferPublisher: TransferOfferPublisher? = null,
 ) {
-    fun send(eventJson: String) {
+    fun send(eventJson: String): EffectCascadeOutcome {
         val queue = ArrayDeque(invokeCore(eventJson))
+        val initialEventType = eventType(eventJson)
         var executedEffects = 0
+        var acknowledged = false
+        var renderedInput = false
+        var awaitingExternalInput = false
+        var abortReason: EffectAbortReason? = null
+        var closed = false
 
         while (queue.isNotEmpty()) {
             executedEffects += 1
             if (executedEffects > MAX_EFFECTS_PER_CASCADE) {
                 throw WalletShellException.EffectCascadeLimitExceeded(MAX_EFFECTS_PER_CASCADE)
             }
-            val followUp = execute(queue.removeFirst()) ?: continue
+            val effect = queue.removeFirst()
+            if (closed) {
+                return EffectCascadeOutcome.Aborted(EffectAbortReason.EffectAfterClose)
+            }
+            when (effect) {
+                is WalletEffect.Render -> when (val screen = effect.screen) {
+                    is WalletScreen.Error -> {
+                        abortReason = EffectAbortReason.CoreError(screen.code, screen.message)
+                    }
+                    else -> renderedInput = true
+                }
+                WalletEffect.Close -> closed = true
+                else -> Unit
+            }
+            val followUp = execute(effect) ?: continue
+            if (eventType(followUp) in COMPLETION_EVENT_TYPES) {
+                acknowledged = true
+            }
+            if (
+                effect is WalletEffect.PublishTransferOffer &&
+                eventType(followUp) == "operationSucceeded"
+            ) {
+                awaitingExternalInput = true
+            }
             queue.addAll(invokeCore(followUp))
         }
+
+        return when {
+            abortReason != null -> EffectCascadeOutcome.Aborted(abortReason)
+            closed && initialEventType in DECLINE_EVENT_TYPES -> EffectCascadeOutcome.Declined
+            closed && acknowledged -> EffectCascadeOutcome.Succeeded
+            closed -> EffectCascadeOutcome.Aborted(EffectAbortReason.ClosedWithoutSuccess)
+            renderedInput || awaitingExternalInput -> EffectCascadeOutcome.AwaitingInput
+            initialEventType in IDLE_EVENT_TYPES -> EffectCascadeOutcome.Idle
+            else -> EffectCascadeOutcome.Aborted(EffectAbortReason.MissingTerminalOutcome)
+        }
+    }
+
+    private fun eventType(eventJson: String): String? = try {
+        JSONObject(eventJson).optString("type").takeIf(String::isNotEmpty)
+    } catch (_: Exception) {
+        null
     }
 
     private fun invokeCore(eventJson: String): List<WalletEffect> {
@@ -40,93 +110,171 @@ class EffectExecutor(
 
     private fun execute(effect: WalletEffect): String? = when (effect) {
         is WalletEffect.ResolveRpTrust -> {
-            val resolution = wrap(
-                failure = ::trustFailure,
-                action = { trustResolver.resolve(effect.clientId) },
-            )
-            WalletEventJson.rpCertChainResolved(resolution)
+            try {
+                val resolution = trustResolver.resolve(effect.clientId)
+                WalletEventJson.rpCertChainResolved(effect.operationId, resolution)
+            } catch (error: Exception) {
+                operationFailure(effect.operationId, WalletOperationFailure.TRUST, error)
+            }
         }
         is WalletEffect.PersistNonce -> {
-            wrap(
-                failure = ::storageFailure,
-                action = { storage.put("nonce:${effect.nonce}", ByteArray(0)) },
-            )
-            null
+            try {
+                storage.put("nonce:${effect.nonce}", ByteArray(0))
+                WalletEventJson.operationSucceeded(effect.operationId)
+            } catch (error: Exception) {
+                operationFailure(effect.operationId, WalletOperationFailure.STORAGE, error)
+            }
         }
         is WalletEffect.Render -> {
-            wrap(
-                failure = ::renderingFailure,
-                action = { renderer.render(effect.screen) },
-            )
-            null
+            try {
+                renderer.render(effect.operationId, effect.authorizationHash, effect.screen)
+                null
+            } catch (error: Exception) {
+                effect.operationId?.let {
+                    operationFailure(it, WalletOperationFailure.RENDERING, error)
+                } ?: throw WalletShellException.RenderingFailure(error)
+            }
         }
         is WalletEffect.Sign -> {
-            val signature = wrap(
-                failure = ::signingFailure,
-                action = { signer.sign(effect.keyRef, effect.payload) },
-            )
-            WalletEventJson.deviceSignatureProduced(signature)
-        }
-        is WalletEffect.Http -> {
-            val response = wrap(
-                failure = ::transportFailure,
-                action = { httpClient.post(effect.url, effect.body) },
-            )
-            if (response.statusCode !in 200..299) {
-                throw WalletShellException.HttpStatusFailure(response.statusCode, response.body)
+            try {
+                val signature = signer.sign(effect.keyRef, effect.payload)
+                WalletEventJson.deviceSignatureProduced(effect.operationId, signature)
+            } catch (error: Exception) {
+                operationFailure(effect.operationId, WalletOperationFailure.SIGNING, error)
             }
-            WalletEventJson.presentationDelivered()
         }
-        WalletEffect.RequestToken -> {
-            val issuer = issuerResponder
-                ?: throw WalletShellException.MissingDependency("requestToken")
-            val result = wrap(
-                failure = ::issuerFailure,
-                action = issuer::token,
+        is WalletEffect.Http -> try {
+            val response =
+                httpClient.post(effect.url, effect.body)
+            if (response.statusCode !in 200..299) {
+                WalletEventJson.operationFailed(
+                    effect.operationId,
+                    WalletOperationFailure.HTTP_STATUS,
+                )
+            } else {
+                when (effect.resultType) {
+                    HttpResultType.PRESENTATION_DELIVERED ->
+                        WalletEventJson.presentationDelivered(effect.operationId)
+                    HttpResultType.PAYMENT_AUTHORIZATION_DELIVERED ->
+                        WalletEventJson.paymentAuthorizationDelivered(effect.operationId)
+                    HttpResultType.QES_AUTHORIZATION_DELIVERED ->
+                        WalletEventJson.qesAuthorizationDelivered(effect.operationId)
+                }
+            }
+        } catch (error: Exception) {
+            operationFailure(
+                effect.operationId,
+                WalletOperationFailure.TRANSPORT,
+                error,
             )
-            WalletEventJson.tokenReceived(result)
+        }
+        is WalletEffect.RequestToken -> {
+            val issuer = issuerResponder
+            if (issuer == null) {
+                WalletEventJson.operationFailed(
+                    effect.operationId,
+                    WalletOperationFailure.MISSING_DEPENDENCY,
+                )
+            } else try {
+                WalletEventJson.tokenReceived(effect.operationId, issuer.token())
+            } catch (error: Exception) {
+                operationFailure(effect.operationId, WalletOperationFailure.ISSUER, error)
+            }
         }
         is WalletEffect.RequestCredential -> {
             val issuer = issuerResponder
-                ?: throw WalletShellException.MissingDependency("requestCredential")
-            val result = wrap(
-                failure = ::issuerFailure,
-                action = { issuer.credential(effect.proofJwt) },
-            )
-            WalletEventJson.credentialReceived(result)
+            if (issuer == null) {
+                WalletEventJson.operationFailed(
+                    effect.operationId,
+                    WalletOperationFailure.MISSING_DEPENDENCY,
+                )
+            } else try {
+                WalletEventJson.credentialReceived(
+                    effect.operationId,
+                    issuer.credential(effect.proofJwt),
+                )
+            } catch (error: Exception) {
+                operationFailure(effect.operationId, WalletOperationFailure.ISSUER, error)
+            }
         }
-        WalletEffect.PushPar -> unsupported("pushPar")
-        WalletEffect.OpenAuthBrowser -> unsupported("openAuthBrowser")
-        WalletEffect.PromptTxCode -> unsupported("promptTxCode")
-        is WalletEffect.PublishTransferOffer -> unsupported("publishTransferOffer")
+        is WalletEffect.FetchStatusList -> statusListResult(effect.operationId, effect.uri)
+        is WalletEffect.PushPar -> WalletEventJson.operationFailed(
+            effect.operationId,
+            WalletOperationFailure.UNSUPPORTED,
+        )
+        is WalletEffect.OpenAuthBrowser -> WalletEventJson.operationFailed(
+            effect.operationId,
+            WalletOperationFailure.UNSUPPORTED,
+        )
+        is WalletEffect.PromptTxCode -> WalletEventJson.operationFailed(
+            effect.operationId,
+            WalletOperationFailure.UNSUPPORTED,
+        )
+        is WalletEffect.PublishTransferOffer -> {
+            val publisher = transferOfferPublisher
+            if (publisher == null) {
+                WalletEventJson.operationFailed(
+                    effect.operationId,
+                    WalletOperationFailure.MISSING_DEPENDENCY,
+                )
+            } else try {
+                publisher.publish(effect.offeredKey)
+                WalletEventJson.operationSucceeded(effect.operationId)
+            } catch (error: Exception) {
+                operationFailure(effect.operationId, WalletOperationFailure.TRANSPORT, error)
+            }
+        }
         WalletEffect.Close -> null
     }
 
-    private inline fun <T> wrap(
-        failure: (Exception) -> WalletShellException,
-        action: () -> T,
-    ): T = try {
-        action()
-    } catch (error: Exception) {
-        throw failure(error)
+    private fun operationFailure(
+        operationId: Long,
+        failure: WalletOperationFailure,
+        error: Exception,
+    ): String = if (
+        error is InterruptedException || error is java.util.concurrent.CancellationException
+    ) {
+        if (error is InterruptedException) Thread.currentThread().interrupt()
+        WalletEventJson.operationCancelled(operationId)
+    } else {
+        WalletEventJson.operationFailed(operationId, failure)
     }
 
-    private fun unsupported(type: String): Nothing =
-        throw WalletShellException.UnsupportedEffect(type)
-
-    private fun signingFailure(error: Exception) = WalletShellException.SigningFailure(error)
-
-    private fun storageFailure(error: Exception) = WalletShellException.StorageFailure(error)
-
-    private fun transportFailure(error: Exception) = WalletShellException.TransportFailure(error)
-
-    private fun trustFailure(error: Exception) = WalletShellException.TrustResolutionFailure(error)
-
-    private fun renderingFailure(error: Exception) = WalletShellException.RenderingFailure(error)
-
-    private fun issuerFailure(error: Exception) = WalletShellException.IssuerFailure(error)
+    private fun statusListResult(operationId: Long, uri: String): String {
+        val resolution = try {
+            statusListResolver?.fetch(uri)
+        } catch (error: Exception) {
+            return operationFailure(operationId, WalletOperationFailure.STATUS, error)
+        }
+        val response = resolution?.response
+        val validStatus = response != null && response.statusCode in 0..UShort.MAX_VALUE.toInt()
+        val validBody = response != null && response.body.size <= MAX_STATUS_LIST_TOKEN_BYTES
+        return if (resolution != null && response != null && validStatus && validBody) {
+            WalletEventJson.statusListReceived(
+                operationId = operationId,
+                uri = uri,
+                httpStatus = response.statusCode,
+                token = response.body,
+                providerCertificateChain = resolution.providerCertificateChain,
+            )
+        } else {
+            WalletEventJson.operationFailed(
+                operationId,
+                WalletOperationFailure.STATUS,
+            )
+        }
+    }
 
     private companion object {
         const val MAX_EFFECTS_PER_CASCADE = 1_024
+        const val MAX_STATUS_LIST_TOKEN_BYTES = 2 * 1_024 * 1_024
+        val DECLINE_EVENT_TYPES = setOf("userDeclined", "paymentDeclined", "qesDeclined")
+        val IDLE_EVENT_TYPES = setOf("setClock")
+        val COMPLETION_EVENT_TYPES = setOf(
+            "presentationDelivered",
+            "paymentAuthorizationDelivered",
+            "qesAuthorizationDelivered",
+            "credentialReceived",
+        )
     }
 }

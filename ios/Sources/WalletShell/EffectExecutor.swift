@@ -12,241 +12,6 @@ public struct HttpResponse: Equatable {
     }
 }
 
-/// The only platform action permitted after a successful OpenID4VP `direct_post`. The host owns
-/// browser/app routing and its scheme/origin policy; the shell passes one parsed absolute URI.
-public protocol OpenID4VPRedirectHandler {
-    func handle(redirectUri: URL) async throws
-}
-
-public struct OpenID4VPDirectPostResponse: Equatable {
-    public static let maximumResponseBytes = 64 * 1_024
-    public static let maximumRedirectUriBytes = 4_096
-
-    public let redirectUri: URL?
-
-    static func parse(_ response: HttpResponse) throws -> OpenID4VPDirectPostResponse {
-        guard response.statusCode == 200 else {
-            throw HttpClientError.invalidProtocolResponse(
-                "OpenID4VP direct_post requires HTTP 200")
-        }
-        guard response.body.count <= maximumResponseBytes else {
-            throw HttpClientError.responseTooLarge(limit: maximumResponseBytes)
-        }
-        guard normalizedMediaType(response.contentType) == "application/json" else {
-            throw HttpClientError.unacceptableContentType(
-                expected: ["application/json"], actual: response.contentType)
-        }
-        guard let jsonText = String(data: response.body, encoding: .utf8) else {
-            throw HttpClientError.invalidProtocolResponse(
-                "OpenID4VP direct_post response is not UTF-8 JSON")
-        }
-        let value: Any
-        do {
-            value = try JSONSerialization.jsonObject(with: response.body)
-        } catch {
-            throw HttpClientError.invalidProtocolResponse(
-                "OpenID4VP direct_post response is not JSON")
-        }
-        guard let object = value as? [String: Any] else {
-            throw HttpClientError.invalidProtocolResponse(
-                "OpenID4VP direct_post response must be a JSON object")
-        }
-        guard hasUniqueRedirectUriKey(jsonText) else {
-            throw HttpClientError.invalidProtocolResponse(
-                "OpenID4VP direct_post response contains duplicate redirect_uri members")
-        }
-        guard let rawRedirect = object["redirect_uri"] else {
-            return OpenID4VPDirectPostResponse(redirectUri: nil)
-        }
-        guard let redirect = rawRedirect as? String,
-              let redirectUri = absoluteUri(redirect)
-        else {
-            throw HttpClientError.invalidProtocolResponse(
-                "OpenID4VP redirect_uri must be a bounded absolute URI")
-        }
-        return OpenID4VPDirectPostResponse(redirectUri: redirectUri)
-    }
-
-    static func isUtf8(_ body: Data) -> Bool {
-        String(data: body, encoding: .utf8) != nil
-    }
-
-    private static func normalizedMediaType(_ raw: String?) -> String? {
-        guard let raw, !raw.contains(",") else { return nil }
-        let base = raw.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)[0]
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return base.isEmpty ? nil : base
-    }
-
-    private static func absoluteUri(_ value: String) -> URL? {
-        guard !value.isEmpty,
-              value.utf8.count <= maximumRedirectUriBytes,
-              value.utf8.allSatisfy({ $0 >= 0x21 && $0 <= 0x7e }),
-              !value.contains("\\"),
-              hasValidPercentEscapes(value.utf8),
-              let colon = value.firstIndex(of: ":")
-        else { return nil }
-        let scheme = value[..<colon]
-        guard let first = scheme.utf8.first,
-              (first >= UInt8(ascii: "A") && first <= UInt8(ascii: "Z")) ||
-                (first >= UInt8(ascii: "a") && first <= UInt8(ascii: "z")),
-              scheme.utf8.dropFirst().allSatisfy({ byte in
-                  (byte >= UInt8(ascii: "A") && byte <= UInt8(ascii: "Z")) ||
-                    (byte >= UInt8(ascii: "a") && byte <= UInt8(ascii: "z")) ||
-                    (byte >= UInt8(ascii: "0") && byte <= UInt8(ascii: "9")) ||
-                    byte == UInt8(ascii: "+") || byte == UInt8(ascii: "-") ||
-                    byte == UInt8(ascii: ".")
-              }),
-              let url = URL(string: value),
-              url.scheme != nil
-        else { return nil }
-        return url
-    }
-
-    private static func hasValidPercentEscapes(_ bytes: String.UTF8View) -> Bool {
-        let bytes = Array(bytes)
-        var index = 0
-        while index < bytes.count {
-            if bytes[index] == UInt8(ascii: "%") {
-                guard index + 2 < bytes.count,
-                      bytes[index + 1].isAsciiHexDigit,
-                      bytes[index + 2].isAsciiHexDigit
-                else { return false }
-                index += 3
-            } else {
-                index += 1
-            }
-        }
-        return true
-    }
-
-    /// Foundation's JSON parser intentionally applies last-member-wins semantics. Navigation is a
-    /// security-relevant action, so scan the already-validated, bounded top-level object and reject
-    /// duplicate spellings, including escaped equivalents such as `\u0072edirect_uri`.
-    private static func hasUniqueRedirectUriKey(_ json: String) -> Bool {
-        let bytes = Array(json.utf8)
-        var index = 0
-
-        func skipWhitespace() {
-            while index < bytes.count,
-                  bytes[index] == 0x20 || bytes[index] == 0x09 ||
-                    bytes[index] == 0x0a || bytes[index] == 0x0d {
-                index += 1
-            }
-        }
-
-        func consumeStringToken() -> Range<Int>? {
-            guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") else { return nil }
-            let start = index
-            index += 1
-            var escaped = false
-            while index < bytes.count {
-                let byte = bytes[index]
-                index += 1
-                if escaped {
-                    escaped = false
-                } else if byte == UInt8(ascii: "\\") {
-                    escaped = true
-                } else if byte == UInt8(ascii: "\"") {
-                    return start..<index
-                }
-            }
-            return nil
-        }
-
-        func skipValue() -> Bool {
-            var objectDepth = 0
-            var arrayDepth = 0
-            var inString = false
-            var escaped = false
-            while index < bytes.count {
-                let byte = bytes[index]
-                if inString {
-                    index += 1
-                    if escaped {
-                        escaped = false
-                    } else if byte == UInt8(ascii: "\\") {
-                        escaped = true
-                    } else if byte == UInt8(ascii: "\"") {
-                        inString = false
-                    }
-                    continue
-                }
-                switch byte {
-                case UInt8(ascii: "\""):
-                    inString = true
-                    index += 1
-                case UInt8(ascii: "{"):
-                    objectDepth += 1
-                    index += 1
-                case UInt8(ascii: "["):
-                    arrayDepth += 1
-                    index += 1
-                case UInt8(ascii: "}"):
-                    if objectDepth == 0 && arrayDepth == 0 { return true }
-                    objectDepth -= 1
-                    if objectDepth < 0 { return false }
-                    index += 1
-                case UInt8(ascii: "]"):
-                    arrayDepth -= 1
-                    if arrayDepth < 0 { return false }
-                    index += 1
-                case UInt8(ascii: ",") where objectDepth == 0 && arrayDepth == 0:
-                    return true
-                default:
-                    index += 1
-                }
-            }
-            return false
-        }
-
-        skipWhitespace()
-        guard index < bytes.count, bytes[index] == UInt8(ascii: "{") else { return false }
-        index += 1
-        skipWhitespace()
-        if index < bytes.count, bytes[index] == UInt8(ascii: "}") { return true }
-
-        var redirectCount = 0
-        while index < bytes.count {
-            skipWhitespace()
-            guard let keyRange = consumeStringToken(),
-                  let key = try? JSONDecoder().decode(
-                      String.self,
-                      from: Data(bytes[keyRange]))
-            else { return false }
-            if key == "redirect_uri" {
-                redirectCount += 1
-                if redirectCount > 1 { return false }
-            }
-            skipWhitespace()
-            guard index < bytes.count, bytes[index] == UInt8(ascii: ":") else { return false }
-            index += 1
-            skipWhitespace()
-            guard skipValue() else { return false }
-            skipWhitespace()
-            guard index < bytes.count else { return false }
-            if bytes[index] == UInt8(ascii: ",") {
-                index += 1
-                continue
-            }
-            guard bytes[index] == UInt8(ascii: "}") else { return false }
-            index += 1
-            skipWhitespace()
-            return index == bytes.count
-        }
-        return false
-    }
-}
-
-private extension UInt8 {
-    var isAsciiHexDigit: Bool {
-        (self >= UInt8(ascii: "0") && self <= UInt8(ascii: "9")) ||
-            (self >= UInt8(ascii: "A") && self <= UInt8(ascii: "F")) ||
-            (self >= UInt8(ascii: "a") && self <= UInt8(ascii: "f"))
-    }
-}
-
 public enum HttpClientError: Error, Equatable {
     case invalidUrl(String)
     case unsafeDestination(String)
@@ -254,9 +19,6 @@ public enum HttpClientError: Error, Equatable {
     case responseTooLarge(limit: Int)
     case redirectRejected(location: String?)
     case unacceptableContentType(expected: [String], actual: String?)
-    case invalidProtocolBody(String)
-    case invalidProtocolResponse(String)
-    case unsupportedDeliveryProfile(HttpDeliveryProfile)
     case transport(String)
 }
 
@@ -272,11 +34,6 @@ extension HttpClientError: LocalizedError {
             return "HTTP redirect was rejected\(location.map { ": \($0)" } ?? "")"
         case .unacceptableContentType(let expected, let actual):
             return "Unexpected HTTP content type \(actual ?? "<missing>"); expected \(expected.joined(separator: ", "))"
-        case .invalidProtocolBody(let message): return "Invalid HTTP protocol body: \(message)"
-        case .invalidProtocolResponse(let message):
-            return "Invalid HTTP protocol response: \(message)"
-        case .unsupportedDeliveryProfile(let profile):
-            return "No production HTTP adapter is configured for \(profile.rawValue)"
         case .transport(let message): return "HTTP transport failed: \(message)"
         }
     }
@@ -286,9 +43,6 @@ extension HttpClientError: LocalizedError {
 /// events such as `userDeclined` or `presentationDelivered`.
 public enum EffectExecutorError: Error, Equatable {
     case ffi(FfiContractError)
-    case coreInvocationFailed
-    case noPendingDurableCommit
-    case durableRetryUnavailable
     case signingFailed(String)
     case storageFailed(String)
     case transportFailed(HttpClientError)
@@ -304,9 +58,6 @@ extension EffectExecutorError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .ffi(let error): return error.localizedDescription
-        case .coreInvocationFailed: return "Wallet core invocation failed"
-        case .noPendingDurableCommit: return "No durable wallet transition is awaiting retry"
-        case .durableRetryUnavailable: return "The wallet engine has no durable retry seam"
         case .signingFailed(let reason): return "Device signing failed: \(reason)"
         case .storageFailed(let reason): return "Secure storage failed: \(reason)"
         case .transportFailed(let error): return error.localizedDescription
@@ -365,9 +116,7 @@ public final class EffectExecutor {
     private let statusLists: StatusListResolver?
     private let issuer: IssuerResponder?
     private let transferOffers: TransferOfferPublisher?
-    private let presentationRedirectHandler: OpenID4VPRedirectHandler?
     private let render: (UInt64?, Data?, ScreenDescription) throws -> Void
-    private var pendingDurableEventJson: String?
 
     public init(
         engine: WalletEngineDriving,
@@ -378,7 +127,6 @@ public final class EffectExecutor {
         statusLists: StatusListResolver? = nil,
         issuer: IssuerResponder? = nil,
         transferOffers: TransferOfferPublisher? = nil,
-        presentationRedirectHandler: OpenID4VPRedirectHandler? = nil,
         render: @escaping (UInt64?, Data?, ScreenDescription) throws -> Void
     ) {
         self.engine = engine
@@ -389,47 +137,14 @@ public final class EffectExecutor {
         self.statusLists = statusLists
         self.issuer = issuer
         self.transferOffers = transferOffers
-        self.presentationRedirectHandler = presentationRedirectHandler
         self.render = render
     }
 
     /// Send one JSON event and fully drain the resulting effect cascade.
     @discardableResult
     public func send(eventJson: String) async throws -> EffectCascadeOutcome {
-        let output = try invokeCore(eventJson)
-        return try await drain(
-            initialCoreOutput: output,
-            initialEventType: Self.eventType(eventJson))
-    }
-
-    /// Retry the exact Core transition whose durable commit blocked this executor. The lifecycle
-    /// coordinator commits its retained checkpoint and returns its retained effect batch without
-    /// invoking Core again; draining then continues from that batch.
-    @discardableResult
-    public func retryPendingDurableCommit() async throws -> EffectCascadeOutcome {
-        guard let eventJson = pendingDurableEventJson else {
-            throw EffectExecutorError.noPendingDurableCommit
-        }
-        guard let retrying = engine as? any DurableLifecycleRetrying else {
-            throw EffectExecutorError.durableRetryUnavailable
-        }
-        let output: String
-        do {
-            output = try retrying.retryPendingEvent(eventJson: eventJson)
-        } catch {
-            throw EffectExecutorError.coreInvocationFailed
-        }
-        pendingDurableEventJson = nil
-        return try await drain(
-            initialCoreOutput: output,
-            initialEventType: Self.eventType(eventJson))
-    }
-
-    private func drain(
-        initialCoreOutput: String,
-        initialEventType: String?
-    ) async throws -> EffectCascadeOutcome {
-        var queue = try decode(initialCoreOutput)
+        var queue = try decode(engine.handleEventJson(eventJson: eventJson))
+        let initialEventType = Self.eventType(eventJson)
         var acknowledged = false
         var renderedInput = false
         var awaitingExternalInput = false
@@ -470,7 +185,7 @@ public final class EffectExecutor {
                    followUpType == "operationSucceeded" {
                     awaitingExternalInput = true
                 }
-                queue.append(contentsOf: try decode(invokeCore(followUp)))
+                queue.append(contentsOf: try decode(engine.handleEventJson(eventJson: followUp)))
             }
         }
 
@@ -490,20 +205,6 @@ public final class EffectExecutor {
             return .idle
         }
         return .aborted(.missingTerminalOutcome)
-    }
-
-    private func invokeCore(_ eventJson: String) throws -> String {
-        pendingDurableEventJson = eventJson
-        do {
-            let output = try engine.handleEventJson(eventJson: eventJson)
-            pendingDurableEventJson = nil
-            return output
-        } catch {
-            // Retain only the exact event in process memory so the durable coordinator can retry
-            // its already-computed checkpoint/effects. Never attach the event or source error to a
-            // diagnostic value.
-            throw EffectExecutorError.coreInvocationFailed
-        }
     }
 
     private static func eventType(_ json: String) -> String? {
@@ -553,67 +254,26 @@ public final class EffectExecutor {
                 return WalletEventJSON.operationFailed(
                     operationId: operationId, failure: .signing)
             }
-        case .http(let operationId, let resultType, let profile, let url, let body):
-            guard profile.resultType == resultType else {
-                return WalletEventJSON.operationFailed(
-                    operationId: operationId, failure: .unsupported)
-            }
-            if profile == .openid4vpDirectPost,
-               !OpenID4VPDirectPostResponse.isUtf8(Data(body)) {
-                return WalletEventJSON.operationFailed(
-                    operationId: operationId, failure: .transport)
-            }
+        case .http(let operationId, let resultType, let url, let body):
             let response: HttpResponse
             do {
-                response = try await http.post(
-                    url: url,
-                    body: Data(body),
-                    profile: profile)
+                response = try await http.post(url: url, body: Data(body))
             } catch is CancellationError {
                 return WalletEventJSON.operationCancelled(operationId: operationId)
             } catch {
                 return WalletEventJSON.operationFailed(
                     operationId: operationId, failure: .transport)
             }
-            switch profile {
-            case .openid4vpDirectPost:
-                guard response.statusCode == 200 else {
-                    return WalletEventJSON.operationFailed(
-                        operationId: operationId, failure: .httpStatus)
-                }
-                let parsed: OpenID4VPDirectPostResponse
-                do {
-                    parsed = try OpenID4VPDirectPostResponse.parse(response)
-                } catch {
-                    return WalletEventJSON.operationFailed(
-                        operationId: operationId, failure: .transport)
-                }
-                if let redirectUri = parsed.redirectUri {
-                    guard let presentationRedirectHandler else {
-                        return WalletEventJSON.operationFailed(
-                            operationId: operationId, failure: .missingDependency)
-                    }
-                    do {
-                        try await presentationRedirectHandler.handle(redirectUri: redirectUri)
-                    } catch is CancellationError {
-                        return WalletEventJSON.operationCancelled(operationId: operationId)
-                    } catch {
-                        return WalletEventJSON.operationFailed(
-                            operationId: operationId, failure: .transport)
-                    }
-                }
+            guard (200...299).contains(response.statusCode) else {
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .httpStatus)
+            }
+            switch resultType {
+            case .presentationDelivered:
                 return WalletEventJSON.presentationDelivered(operationId: operationId)
-            case .paymentAuthorization:
-                guard (200...299).contains(response.statusCode) else {
-                    return WalletEventJSON.operationFailed(
-                        operationId: operationId, failure: .httpStatus)
-                }
+            case .paymentAuthorizationDelivered:
                 return WalletEventJSON.paymentAuthorizationDelivered(operationId: operationId)
-            case .qesAuthorization:
-                guard (200...299).contains(response.statusCode) else {
-                    return WalletEventJSON.operationFailed(
-                        operationId: operationId, failure: .httpStatus)
-                }
+            case .qesAuthorizationDelivered:
                 return WalletEventJSON.qesAuthorizationDelivered(operationId: operationId)
             }
         case .resolveRpTrust(let operationId, let clientId):
@@ -713,11 +373,7 @@ public final class EffectExecutor {
 }
 
 public protocol HttpClient {
-    func post(
-        url: String,
-        body: Data,
-        profile: HttpDeliveryProfile
-    ) async throws -> HttpResponse
+    func post(url: String, body: Data) async throws -> HttpResponse
 }
 
 public protocol SecureStorage {

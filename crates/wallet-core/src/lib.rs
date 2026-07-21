@@ -10,10 +10,9 @@
 //! backend ([`crypto_backend::AwsLc`]). Device-bound signing is an [`Effect::Sign`] the shell
 //! fulfils with the Secure Enclave — the private key never enters the core.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use catalogue::IssuerTrustDomain;
 use crypto_backend::AwsLc;
 use crypto_traits::{Alg, Digest, Random};
 use oid4vp::{AbortReason, Env, Input, ResolvedTrust, SelectedCredential, State};
@@ -116,7 +115,6 @@ uniffi::setup_scaffolding!();
 mod demo;
 pub use demo::{DemoScenario, DemoWallet, IssuanceScenario};
 
-pub mod durable;
 pub mod export;
 
 /// Verify a wallet export bundle's integrity hash (TS10). Callable from the shell before re-import.
@@ -165,22 +163,17 @@ fn operation_id_seed() -> u64 {
 /// Convert an already authenticated SD-JWT VC into the wallet's presentation holding.
 fn held_credential_from_verified_sd(
     sd: &sdjwt::SdJwtVc,
-    processed: &sdjwt::ProcessedSdJwt,
     status: Option<StatusReference>,
 ) -> Result<HeldCredential, CredentialIngestionError> {
     let mut disclosures_by_claim = BTreeMap::new();
-    for disclosure in &processed.disclosures {
-        // Preserve the established public fixture/card API only for unambiguous top-level object
-        // members. Production selection consumes `ProcessedSdJwt` directly and never flattens a
-        // nested path or silently drops an array disclosure into this compatibility view.
-        let [sdjwt::ClaimPathElement::Name(name)] = disclosure.path.as_slice() else {
-            continue;
-        };
-        if disclosures_by_claim
-            .insert(name.clone(), disclosure.raw.clone())
-            .is_some()
-        {
-            return Err(CredentialIngestionError::DuplicateClaim);
+    for raw in &sd.disclosures {
+        let d = sdjwt::Disclosure::parse(raw)
+            .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+        // Object-member disclosures ([salt, name, value]) are the claims a wallet holds.
+        if let Some(name) = d.name {
+            if disclosures_by_claim.insert(name, raw.clone()).is_some() {
+                return Err(CredentialIngestionError::DuplicateClaim);
+            }
         }
     }
     Ok(HeldCredential {
@@ -188,70 +181,6 @@ fn held_credential_from_verified_sd(
         disclosures_by_claim,
         status,
     })
-}
-
-const SDJWT_CONTROL_CLAIMS: [&str; 8] = [
-    "iss",
-    "vct",
-    "cnf",
-    "iat",
-    "nbf",
-    "exp",
-    "status",
-    "vct#integrity",
-];
-
-fn contains_sdjwt_placeholder(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Object(object) => {
-            object.contains_key("_sd")
-                || object.contains_key("...")
-                || object.values().any(contains_sdjwt_placeholder)
-        }
-        serde_json::Value::Array(values) => values.iter().any(contains_sdjwt_placeholder),
-        _ => false,
-    }
-}
-
-fn validate_sdjwt_issuer_profile(
-    sd: &sdjwt::SdJwtVc,
-    issuer_payload: &serde_json::Map<String, serde_json::Value>,
-    processed: &sdjwt::ProcessedSdJwt,
-) -> Result<(), CredentialIngestionError> {
-    // Credential ingestion accepts an Issued SD-JWT only. A pre-existing KB-JWT is a holder
-    // presentation from some other transaction and must never become a reusable wallet holding.
-    if sd.key_binding_jwt.is_some() {
-        return Err(CredentialIngestionError::MalformedCredential);
-    }
-
-    for required in ["iss", "vct", "cnf"] {
-        if !issuer_payload.contains_key(required) || !processed.claims.contains_key(required) {
-            return Err(CredentialIngestionError::MalformedCredential);
-        }
-    }
-
-    for control in SDJWT_CONTROL_CLAIMS {
-        let issuer_value = issuer_payload.get(control);
-        let processed_value = processed.claims.get(control);
-        if issuer_value.is_none() && processed_value.is_none() {
-            continue;
-        }
-        let Some(issuer_value) = issuer_value else {
-            return Err(CredentialIngestionError::MalformedCredential);
-        };
-        if processed_value != Some(issuer_value) || contains_sdjwt_placeholder(issuer_value) {
-            return Err(CredentialIngestionError::MalformedCredential);
-        }
-        if processed.disclosures.iter().any(|disclosure| {
-            matches!(
-                disclosure.path.first(),
-                Some(sdjwt::ClaimPathElement::Name(name)) if name == control
-            )
-        }) {
-            return Err(CredentialIngestionError::MalformedCredential);
-        }
-    }
-    Ok(())
 }
 
 /// Decode the OpenID4VCI representation of an mdoc (`base64url(IssuerSigned CBOR)`).
@@ -262,24 +191,6 @@ fn decode_mdoc_credential(bytes: &[u8]) -> Result<mdoc::IssuerSigned, Credential
     let cbor = Base64UrlUnpadded::decode_vec(compact.trim())
         .map_err(|_| CredentialIngestionError::MalformedCredential)?;
     mdoc::IssuerSigned::parse(&cbor).map_err(|_| CredentialIngestionError::MalformedCredential)
-}
-
-/// Extract bounded RFC 9360 issuer-certificate evidence from the credential itself. The COSE
-/// parser has already rejected malformed, colliding and over-budget header values; this function
-/// deliberately does not fall back to a path supplied alongside the credential.
-fn embedded_mdoc_issuer_chain(
-    issuer_signed: &mdoc::IssuerSigned,
-) -> Result<Vec<Vec<u8>>, CredentialIngestionError> {
-    let chain = issuer_signed
-        .issuer_auth
-        .x5chain()
-        .map_err(|_| CredentialIngestionError::MalformedCredential)?
-        .ok_or(CredentialIngestionError::UntrustedIssuer)?;
-    Ok(chain
-        .certificates()
-        .into_iter()
-        .map(<[u8]>::to_vec)
-        .collect())
 }
 
 fn json_epoch_claim(
@@ -469,26 +380,86 @@ fn mdoc_device_binding_matches(device_key: &cose::cbor::Value, key: &[u8]) -> bo
         && matches!(y, Some(Value::Bytes(bytes)) if bytes.as_slice() == &key[33..65])
 }
 
+/// Parse the simplified mdoc profile's canonical UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`).
+fn mdoc_datetime_epoch(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
+        return None;
+    }
+    let number = |start: usize, end: usize| -> Option<i64> {
+        bytes[start..end].iter().try_fold(0i64, |n, b| {
+            b.is_ascii_digit().then_some(n * 10 + i64::from(b - b'0'))
+        })
+    };
+    let (year, month, day, hour, minute, second) = (
+        number(0, 4)?,
+        number(5, 7)?,
+        number(8, 10)?,
+        number(11, 13)?,
+        number(14, 16)?,
+        number(17, 19)?,
+    );
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if !(1970..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || day < 1
+        || day > month_days[(month - 1) as usize]
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    // Howard Hinnant's civil-date conversion, with the supported years constrained to positive
+    // values above. The constant makes 1970-01-01 day zero.
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year / 400;
+    let year_of_era = adjusted_year - era * 400;
+    let shifted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
 fn mdoc_validity(
     validity: &mdoc::ValidityInfo,
     now: i64,
 ) -> Result<CredentialValidity, CredentialIngestionError> {
-    let signed = mdoc::TDate::parse(&validity.signed)
+    let signed = mdoc_datetime_epoch(&validity.signed)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
-    let valid_from = mdoc::TDate::parse(&validity.valid_from)
+    let valid_from = mdoc_datetime_epoch(&validity.valid_from)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
-    let valid_until = mdoc::TDate::parse(&validity.valid_until)
+    let valid_until = mdoc_datetime_epoch(&validity.valid_until)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
     if signed > valid_until || valid_from > valid_until {
         return Err(CredentialIngestionError::MalformedCredential);
     }
     let validity = CredentialValidity {
-        // The shell clock has whole-second precision. Ceiling fractional bounds preserves exact
-        // `TDate` semantics: an instant at `...00.5` is still future at `...00` and expires before
-        // `...01`, while an integral timestamp remains unchanged.
-        issued_at: Some(signed.unix_seconds_ceil()),
-        not_before: Some(valid_from.unix_seconds_ceil()),
-        expires_at: Some(valid_until.unix_seconds_ceil()),
+        issued_at: Some(signed),
+        not_before: Some(valid_from),
+        expires_at: Some(valid_until),
     };
     validity.validate_at(now)?;
     Ok(validity)
@@ -506,38 +477,6 @@ fn cbor_value_display(v: &cose::cbor::Value) -> String {
     }
 }
 
-fn cbor_value_matches_json(cbor: &cose::cbor::Value, json: &serde_json::Value) -> bool {
-    use cose::cbor::Value as Cbor;
-    match (cbor, json) {
-        (Cbor::Text(left), serde_json::Value::String(right)) => left == right,
-        (Cbor::Bool(left), serde_json::Value::Bool(right)) => left == right,
-        (Cbor::Uint(left), serde_json::Value::Number(right)) => right.as_u64() == Some(*left),
-        (Cbor::Nint(argument), serde_json::Value::Number(right)) => right
-            .as_i64()
-            .is_some_and(|right| i128::from(right) == -1 - i128::from(*argument)),
-        (Cbor::Null, serde_json::Value::Null) => true,
-        (Cbor::Array(left), serde_json::Value::Array(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .zip(right)
-                    .all(|(left, right)| cbor_value_matches_json(left, right))
-        }
-        (Cbor::Map(left), serde_json::Value::Object(right)) => {
-            left.len() == right.len()
-                && left.iter().all(|(key, value)| {
-                    let Cbor::Text(key) = key else {
-                        return false;
-                    };
-                    right
-                        .get(key)
-                        .is_some_and(|right| cbor_value_matches_json(value, right))
-                })
-        }
-        _ => false,
-    }
-}
-
 /// The disclosed value of an SD-JWT disclosure `base64url([salt, name, value])`.
 fn sd_disclosure_value(b64: &str) -> Option<serde_json::Value> {
     use base64ct::{Base64UrlUnpadded, Encoding};
@@ -546,308 +485,42 @@ fn sd_disclosure_value(b64: &str) -> Option<serde_json::Value> {
     arr.into_iter().nth(2)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum RequestedSdJwtPathElement {
-    Name(String),
-    Index(usize),
-    AnyIndex,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SdJwtDisclosureSelection {
-    disclosures: Vec<String>,
-    revealed_claims: Vec<String>,
-}
-
-fn requested_sdjwt_path(path: &[serde_json::Value]) -> Option<Vec<RequestedSdJwtPathElement>> {
-    if path.is_empty() {
-        return None;
-    }
-    path.iter()
-        .map(|element| match element {
-            serde_json::Value::String(name) if !name.is_empty() => {
-                Some(RequestedSdJwtPathElement::Name(name.clone()))
-            }
-            serde_json::Value::Number(index) => index
-                .as_u64()
-                .and_then(|index| usize::try_from(index).ok())
-                .map(RequestedSdJwtPathElement::Index),
-            serde_json::Value::Null => Some(RequestedSdJwtPathElement::AnyIndex),
-            _ => None,
-        })
-        .collect()
-}
-
-fn collect_matching_json_paths(
-    value: &serde_json::Value,
-    requested: &[RequestedSdJwtPathElement],
-    current: &mut Vec<sdjwt::ClaimPathElement>,
-    matches: &mut Vec<(Vec<sdjwt::ClaimPathElement>, serde_json::Value)>,
-) {
-    let Some((head, tail)) = requested.split_first() else {
-        matches.push((current.clone(), value.clone()));
-        return;
-    };
-    match (head, value) {
-        (RequestedSdJwtPathElement::Name(name), serde_json::Value::Object(object)) => {
-            if let Some(child) = object.get(name) {
-                current.push(sdjwt::ClaimPathElement::Name(name.clone()));
-                collect_matching_json_paths(child, tail, current, matches);
-                current.pop();
-            }
-        }
-        (RequestedSdJwtPathElement::Index(index), serde_json::Value::Array(array)) => {
-            if let Some(child) = array.get(*index) {
-                current.push(sdjwt::ClaimPathElement::Index(*index));
-                collect_matching_json_paths(child, tail, current, matches);
-                current.pop();
-            }
-        }
-        (RequestedSdJwtPathElement::AnyIndex, serde_json::Value::Array(array)) => {
-            for (index, child) in array.iter().enumerate() {
-                current.push(sdjwt::ClaimPathElement::Index(index));
-                collect_matching_json_paths(child, tail, current, matches);
-                current.pop();
-            }
-        }
-        _ => {}
+/// Render a JSON value the way [`cbor_value_display`] renders CBOR (strings unquoted), so a DCQL
+/// `values` constraint can be compared against an mdoc element value.
+fn json_value_display(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
 }
 
-fn matching_sdjwt_values(
-    authenticated: &AuthenticatedSdJwtHolding,
-    requested: &[RequestedSdJwtPathElement],
-) -> Vec<(Vec<sdjwt::ClaimPathElement>, serde_json::Value)> {
-    let root = serde_json::Value::Object(authenticated.processed.claims.clone());
-    let mut matches = Vec::new();
-    collect_matching_json_paths(&root, requested, &mut Vec::new(), &mut matches);
-    matches
-}
-
-fn claim_path_is_prefix(
-    prefix: &[sdjwt::ClaimPathElement],
-    path: &[sdjwt::ClaimPathElement],
-) -> bool {
-    prefix.len() <= path.len() && prefix.iter().zip(path).all(|(left, right)| left == right)
-}
-
-fn add_sdjwt_disclosure_dependencies(
-    authenticated: &AuthenticatedSdJwtHolding,
-    selected: &mut BTreeSet<String>,
-) -> bool {
-    let mut changed = false;
-    let selected_now: Vec<String> = selected.iter().cloned().collect();
-    for digest in selected_now {
-        let Some(disclosure) = authenticated
-            .processed
-            .disclosures
-            .iter()
-            .find(|candidate| candidate.digest == digest)
-        else {
-            continue;
-        };
-        if let Some(parent) = &disclosure.parent_digest {
-            changed |= selected.insert(parent.clone());
-        }
-    }
-    changed
-}
-
-fn sdjwt_path_string(path: &[sdjwt::ClaimPathElement]) -> String {
-    let mut rendered = String::new();
-    for element in path {
-        match element {
-            sdjwt::ClaimPathElement::Name(name) => {
-                // Preserve familiar dotted labels for simple claim names, but use JSON-escaped
-                // bracket notation whenever punctuation could collide with nesting or an array
-                // index (for example literal `a.b` versus path `["a", "b"]`).
-                let simple = !name.is_empty()
-                    && name
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
-                if simple {
-                    if !rendered.is_empty() {
-                        rendered.push('.');
-                    }
-                    rendered.push_str(name);
-                } else {
-                    rendered.push('[');
-                    rendered.push_str(
-                        &serde_json::to_string(name)
-                            .expect("serializing a JSON object key cannot fail"),
-                    );
-                    rendered.push(']');
-                }
-            }
-            sdjwt::ClaimPathElement::Index(index) => {
-                rendered.push('[');
-                rendered.push_str(&index.to_string());
-                rendered.push(']');
-            }
-        }
-    }
-    rendered
-}
-
-fn collect_json_leaf_paths(
-    value: &serde_json::Value,
-    path: &mut Vec<sdjwt::ClaimPathElement>,
-    leaves: &mut Vec<Vec<sdjwt::ClaimPathElement>>,
-) {
-    match value {
-        serde_json::Value::Object(object) if !object.is_empty() => {
-            for (name, child) in object {
-                path.push(sdjwt::ClaimPathElement::Name(name.clone()));
-                collect_json_leaf_paths(child, path, leaves);
-                path.pop();
-            }
-        }
-        serde_json::Value::Array(array) if !array.is_empty() => {
-            for (index, child) in array.iter().enumerate() {
-                path.push(sdjwt::ClaimPathElement::Index(index));
-                collect_json_leaf_paths(child, path, leaves);
-                path.pop();
-            }
-        }
-        _ if !path.is_empty() => leaves.push(path.clone()),
-        _ => {}
-    }
-}
-
-fn visible_sdjwt_claims(
-    authenticated: &AuthenticatedSdJwtHolding,
-    selected: &BTreeSet<String>,
-) -> Vec<String> {
-    let mut leaves = Vec::new();
-    collect_json_leaf_paths(
-        &serde_json::Value::Object(authenticated.processed.claims.clone()),
-        &mut Vec::new(),
-        &mut leaves,
-    );
-    let mut visible = Vec::new();
-    for path in leaves {
-        let Some(sdjwt::ClaimPathElement::Name(root_name)) = path.first() else {
-            continue;
-        };
-        if SDJWT_CONTROL_CLAIMS.contains(&root_name.as_str()) || root_name == "_sd_alg" {
-            continue;
-        }
-        let all_enclosing_disclosures_selected = authenticated
-            .processed
-            .disclosures
-            .iter()
-            .filter(|disclosure| claim_path_is_prefix(&disclosure.path, &path))
-            .all(|disclosure| selected.contains(&disclosure.digest));
-        if all_enclosing_disclosures_selected {
-            let rendered = sdjwt_path_string(&path);
-            if !visible.contains(&rendered) {
-                visible.push(rendered);
-            }
-        }
-    }
-    visible
-}
-
-fn select_authenticated_sdjwt_disclosures(
-    authenticated: &AuthenticatedSdJwtHolding,
-    requested_paths: &[Vec<RequestedSdJwtPathElement>],
-) -> Option<SdJwtDisclosureSelection> {
-    let mut matched_paths = Vec::new();
-    for requested in requested_paths {
-        let matches = matching_sdjwt_values(authenticated, requested);
-        if matches.is_empty() {
-            return None;
-        }
-        for (matched_path, _) in matches {
-            if !matched_paths.contains(&matched_path) {
-                matched_paths.push(matched_path);
-            }
-        }
-    }
-    Some(select_authenticated_sdjwt_disclosures_for_paths(
-        authenticated,
-        &matched_paths,
-    ))
-}
-
-fn select_authenticated_sdjwt_disclosures_for_paths(
-    authenticated: &AuthenticatedSdJwtHolding,
-    matched_paths: &[Vec<sdjwt::ClaimPathElement>],
-) -> SdJwtDisclosureSelection {
-    let mut selected = BTreeSet::new();
-    for matched_path in matched_paths {
-        for disclosure in &authenticated.processed.disclosures {
-            // Ancestors are needed to reach a selected leaf. When the requested value is itself an
-            // object/array, descendants are needed to reconstruct that complete value rather than
-            // return an accidentally partial object.
-            if claim_path_is_prefix(&disclosure.path, matched_path)
-                || claim_path_is_prefix(matched_path, &disclosure.path)
-            {
-                selected.insert(disclosure.digest.clone());
-            }
-        }
-    }
-    while add_sdjwt_disclosure_dependencies(authenticated, &mut selected) {}
-    SdJwtDisclosureSelection {
-        disclosures: authenticated
-            .processed
-            .disclosures
-            .iter()
-            .filter(|disclosure| selected.contains(&disclosure.digest))
-            .map(|disclosure| disclosure.raw.clone())
-            .collect(),
-        revealed_claims: visible_sdjwt_claims(authenticated, &selected),
-    }
-}
-
-fn requested_mdoc_path(path: &[serde_json::Value]) -> Option<(String, String)> {
-    let [serde_json::Value::String(namespace), serde_json::Value::String(element)] = path else {
-        return None;
-    };
-    if namespace.is_empty() || element.is_empty() {
-        return None;
-    }
-    Some((namespace.clone(), element.clone()))
-}
-
-/// Find an mdoc element's value by its exact typed `[namespace, element]` path.
-fn mdoc_value_at<'a>(
-    issued: &'a mdoc::IssuerSigned,
-    path: &(String, String),
-) -> Option<&'a cose::cbor::Value> {
-    issued.name_spaces.iter().find_map(|(namespace, items)| {
-        if namespace != &path.0 {
-            return None;
-        }
+/// Find an mdoc element's value by its namespaced path (`<namespace>.<element>`).
+fn mdoc_value_at<'a>(issued: &'a mdoc::IssuerSigned, path: &str) -> Option<&'a cose::cbor::Value> {
+    issued.name_spaces.iter().find_map(|(ns, items)| {
         items
             .iter()
-            .find(|item| item.element_id == path.1)
-            .map(|item| &item.element_value)
+            .find(|it| format!("{ns}.{}", it.element_id) == path)
+            .map(|it| &it.element_value)
     })
 }
 
 /// Drop the issuer-signed items a request did not ask for (mdoc data minimisation). The MSO
 /// (`issuerAuth`) is left intact; a verifier checks each *presented* item's digest against it, so
 /// omitting items is valid and reveals only the requested-and-held subset.
-fn minimise_mdoc(
-    issued: &mdoc::IssuerSigned,
-    requested_claims: &[(String, String)],
-) -> mdoc::IssuerSigned {
+fn minimise_mdoc(issued: &mdoc::IssuerSigned, requested_claims: &[String]) -> mdoc::IssuerSigned {
+    // mdoc DCQL claim paths are `[namespace, element]`, rendered "<namespace>.<element>". Match the
+    // issuer-signed items against that namespaced identity.
+    let all: Vec<String> = mdoc_claim_ids(issued);
+    let keep = minimum_claim_set(requested_claims, &all);
     let name_spaces = issued
         .name_spaces
         .iter()
-        .map(|(namespace, items)| {
+        .map(|(ns, items)| {
             (
-                namespace.clone(),
+                ns.clone(),
                 items
                     .iter()
-                    .filter(|item| {
-                        requested_claims
-                            .iter()
-                            .any(|(requested_ns, requested_element)| {
-                                requested_ns == namespace && requested_element == &item.element_id
-                            })
-                    })
+                    .filter(|it| keep.contains(&format!("{ns}.{}", it.element_id)))
                     .cloned()
                     .collect(),
             )
@@ -857,6 +530,19 @@ fn minimise_mdoc(
         name_spaces,
         issuer_auth: issued.issuer_auth.clone(),
     }
+}
+
+/// The namespaced claim identities (`<namespace>.<element>`) an mdoc holding carries.
+fn mdoc_claim_ids(issued: &mdoc::IssuerSigned) -> Vec<String> {
+    issued
+        .name_spaces
+        .iter()
+        .flat_map(|(ns, items)| {
+            items
+                .iter()
+                .map(move |it| format!("{ns}.{}", it.element_id))
+        })
+        .collect()
 }
 
 /// A deterministic `mdoc_generated_nonce` derived from the request nonce. The sans-IO core has no
@@ -957,32 +643,8 @@ pub struct MdocHolding {
 struct CredentialProvenance {
     format: oid4vci::CredentialFormat,
     raw_credential: Vec<u8>,
-    issuer: CredentialIssuerEvidence,
-}
-
-/// Path- and profile-validated issuer evidence retained with a verified holding. The service
-/// domain is selected by catalogue policy and was never inferred from shell metadata.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CredentialIssuerEvidence {
-    identity: String,
-    service: IssuerTrustDomain,
-    public_key_raw: Vec<u8>,
-    certificate_path: Vec<Vec<u8>>,
-    not_before: i64,
-    not_after: i64,
-}
-
-impl CredentialIssuerEvidence {
-    fn is_internally_consistent(&self) -> bool {
-        !self.identity.is_empty()
-            && !self.public_key_raw.is_empty()
-            && !self.certificate_path.is_empty()
-            && self.not_before <= self.not_after
-            && matches!(
-                self.service,
-                IssuerTrustDomain::Pid | IssuerTrustDomain::Attestation
-            )
-    }
+    issuer_cert_chain: Vec<Vec<u8>>,
+    issuer_id: String,
 }
 
 /// The explicitly named Rust-only fixture loaders remain source-compatible for existing tests;
@@ -993,19 +655,9 @@ enum StoredProvenance {
     TestFixture,
 }
 
-/// Private authenticated SD-JWT representation. Unlike [`HeldCredential`], this retains the
-/// processed document, typed object/array paths, raw disclosures and parent digest dependencies.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AuthenticatedSdJwtHolding {
-    processed: sdjwt::ProcessedSdJwt,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StoredSdJwtCredential {
     holding: HeldCredential,
-    /// Always `Some` for production ingestion. `None` exists solely for the explicit Rust fixture
-    /// API, whose flat map remains source-compatible with older tests.
-    authenticated: Option<AuthenticatedSdJwtHolding>,
     validity: CredentialValidity,
     provenance: StoredProvenance,
 }
@@ -1027,7 +679,6 @@ pub enum CredentialIngestionError {
     UnsupportedAlgorithm,
     SignatureInvalid,
     IssuerMismatch,
-    IssuerServiceMismatch,
     UnknownCredentialType,
     CredentialTypeFormatMismatch,
     IssuerNotAllowedForType,
@@ -1055,7 +706,6 @@ pub enum StatusLoadError {
 enum VerifiedCredential {
     SdJwt {
         holding: HeldCredential,
-        authenticated: AuthenticatedSdJwtHolding,
         validity: CredentialValidity,
     },
     Mdoc {
@@ -1081,10 +731,7 @@ struct AuthenticatedCredential {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PresentationCredentialReference {
-    SdJwt {
-        holding: HeldCredential,
-        authenticated: Option<AuthenticatedSdJwtHolding>,
-    },
+    SdJwt(HeldCredential),
     Mdoc(MdocHolding),
 }
 
@@ -1101,9 +748,6 @@ enum PresentationEligibilityError {
 struct PreparedPresentationCredential {
     selected: SelectedCredential,
     source: PresentationCredentialReference,
-    /// Every holder-visible claim path that the resulting presentation reveals, including
-    /// permanent PII and incidental values exposed by disclosure dependencies.
-    revealed_claims: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1126,8 +770,8 @@ pub struct WalletConfig {
 struct SessionInfo {
     rp_client_id: String,
     purpose: String,
-    /// Every declared DCQL path, or the legacy flat claims when DCQL is absent. DCQL consent uses
-    /// `selected_revealed_claims`; only the legacy selector reads this field directly.
+    /// The union of requested claim paths across all DCQL queries — drives the consent screen and
+    /// the legacy (no-DCQL) single-credential selection. Per-query selection reads `dcql` instead.
     requested_claims: Vec<String>,
     /// The request nonce, needed to bind the mdoc OpenID4VP SessionTranscript.
     nonce: u64,
@@ -1136,15 +780,13 @@ struct SessionInfo {
     response_mode: String,
     /// The verifier's response-encryption key (uncompressed P-256), present iff `direct_post.jwt`.
     response_encryption_key: Option<Vec<u8>>,
-    /// The full DCQL query when present. Its set planner selects the complete required subset and
-    /// omits optional sets without holder opt-in, with at most one held credential per supported
-    /// query until `multiple=true` lands.
+    /// The full DCQL query when present — one credential query per credential the RP wants, so the
+    /// wallet can select and present ONE credential per query (multi-credential presentation).
     dcql: Option<oid4vp::dcql::DcqlQuery>,
     /// Exact credentials selected before consent. Later phases revalidate these values instead of
     /// silently switching to a different holding after the user approved the screen.
     selected_credentials: Vec<SelectedCredential>,
     selected_sources: Vec<PresentationCredentialReference>,
-    selected_revealed_claims: Vec<String>,
     /// RP certificate path + request-verification key retained for current-time revalidation.
     rp_provenance: Option<RelyingPartyProvenance>,
     /// The consent hash + the exact claim paths shown on the consent screen, captured when it is
@@ -1262,17 +904,6 @@ pub enum Event {
 }
 
 /// Everything the core asks the shell to do (serialised to JSON at the FFI boundary).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum HttpDeliveryProfile {
-    /// OpenID4VP 1.0 `direct_post` and `direct_post.jwt` response delivery.
-    Openid4vpDirectPost,
-    /// A payment authorization destined for a dedicated PSP adapter.
-    PaymentAuthorization,
-    /// A QES authorization destined for a dedicated CSC/QTSP adapter.
-    QesAuthorization,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 // See the note on `Event`: `rename_all_fields` makes struct-variant fields (`client_id` ->
 // `clientId`, `key_ref` -> `keyRef`) camelCase so the shell's `WalletEffect` decoder matches.
@@ -1290,13 +921,8 @@ pub enum Effect {
     Render { screen: ScreenDescription },
     /// Sign `payload` with the device key (Secure Enclave), then send back `DeviceSignatureProduced`.
     Sign { key_ref: String, payload: Vec<u8> },
-    /// Deliver a protocol response through the profile-specific native adapter. The profile is
-    /// checked against the active flow before this effect crosses the JSON boundary.
-    Http {
-        profile: HttpDeliveryProfile,
-        url: String,
-        body: Vec<u8>,
-    },
+    /// Perform an HTTP POST (TLS handled by the OS), then send back `PresentationDelivered`.
+    Http { url: String, body: Vec<u8> },
     // --- Issuance (OID4VCI) actions ---
     /// Push a PAR request, then send back `ParPushed`.
     PushPar,
@@ -1371,14 +997,11 @@ pub struct Core {
     device_public_key: Vec<u8>,
     wua: Option<wua::WalletUnitAttestation>,
     issuer_trusted_current: bool,
-    /// Authenticated certificate identity used by the issuance machine and audit log.
     issuer_id_current: String,
     /// Full issuer path retained for revalidation throughout issuance and credential provenance.
     issuer_cert_chain_current: Vec<Vec<u8>>,
-    /// Original shell assertion, retained only so the credential response can re-check it.
-    issuer_id_assertion_current: String,
-    /// Service-scoped path/profile results for the active issuer chain.
-    issuer_candidates_current: Vec<CredentialIssuerEvidence>,
+    /// Public key from the leaf of the currently validated issuer path.
+    issuer_public_key_current: Vec<u8>,
     /// Parsed credential that crossed the authentication/policy boundary for this response.
     pending_verified_credential: Option<AuthenticatedCredential>,
     last_credential_ingestion_error: Option<CredentialIngestionError>,
@@ -1388,11 +1011,6 @@ pub struct Core {
     pending_status_references: Vec<StatusReference>,
     // Transaction (audit) log: privacy-preserving, tamper-evident record of completed flows (TS06).
     log: txnlog::TransactionLog,
-    /// Process-local safety latch: once an interaction cannot be recorded, later auditable flows
-    /// stay blocked until the holder explicitly wipes/resets the incomplete history. The eventual
-    /// #16 checkpoint must restore/revalidate the log and external anchor; this flag is not durable
-    /// rollback protection by itself.
-    audit_log_available: bool,
     // Payment details captured at the confirmation screen, recorded into the log on authorization.
     pay_summary: Option<txnlog::PaymentSummary>,
     pay_consent_hash: [u8; 32],
@@ -1435,14 +1053,12 @@ impl Core {
             issuer_trusted_current: false,
             issuer_id_current: String::new(),
             issuer_cert_chain_current: Vec::new(),
-            issuer_id_assertion_current: String::new(),
-            issuer_candidates_current: Vec::new(),
+            issuer_public_key_current: Vec::new(),
             pending_verified_credential: None,
             last_credential_ingestion_error: None,
             status_lists: BTreeMap::new(),
             pending_status_references: Vec::new(),
             log: txnlog::TransactionLog::new(),
-            audit_log_available: true,
             pay_summary: None,
             pay_consent_hash: [0u8; 32],
             catalogue: catalogue::default_catalogue(),
@@ -1474,7 +1090,7 @@ impl Core {
                     .map(|c| {
                         format!(
                             r#"{{"path":{:?},"displayName":{:?},"mandatory":{}}}"#,
-                            c.path.request_path(), c.display_name, c.mandatory
+                            c.path, c.display_name, c.mandatory
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1497,12 +1113,6 @@ impl Core {
     /// The transaction (audit) log — completed presentations, payments, and issuances.
     pub fn transaction_log(&self) -> &txnlog::TransactionLog {
         &self.log
-    }
-
-    /// Whether new auditable operations may start. False means a prior append failed or the log
-    /// cannot reserve one maximum-sized entry; the core fails before consent/signing/delivery.
-    pub fn audit_log_available(&self) -> bool {
-        self.audit_log_available && self.log.can_guarantee_max_entry()
     }
 
     /// The transaction log as a JSON array (what the iOS history screen renders). Records claim
@@ -1545,8 +1155,8 @@ impl Core {
 
     /// Erase one transaction-log entry's content (data-subject right to erasure, TS07). Leaves a
     /// tamper-evident tombstone: the chain stays intact and the deletion is auditable, but the
-    /// original time, kind, outcome, counterparty, claim paths, consent hash and payment detail are
-    /// replaced by deterministic blank values. Returns whether `seq` existed.
+    /// counterparty / claim paths / consent hash / payment detail are gone. Returns whether `seq`
+    /// existed.
     pub fn redact_transaction(&mut self, seq: u64) -> bool {
         self.log.redact(seq)
     }
@@ -1554,7 +1164,6 @@ impl Core {
     /// Erase the entire transaction log (full erasure / reset).
     pub fn wipe_transaction_log(&mut self) {
         self.log.wipe();
-        self.audit_log_available = true;
     }
 
     /// A portable, integrity-protected export of the holder's own wallet data (TS10): the held
@@ -1640,7 +1249,7 @@ impl Core {
             return StatusGate::Indeterminate;
         };
         for source in &session.selected_sources {
-            let PresentationCredentialReference::SdJwt { holding, .. } = source else {
+            let PresentationCredentialReference::SdJwt(holding) = source else {
                 continue;
             };
             if let Some(reference) = &holding.status {
@@ -1773,7 +1382,6 @@ impl Core {
         {
             self.credentials.push(StoredSdJwtCredential {
                 holding: credential,
-                authenticated: None,
                 validity: CredentialValidity::default(),
                 provenance: StoredProvenance::TestFixture,
             });
@@ -1797,26 +1405,19 @@ impl Core {
     }
 
     fn store_verified_credential(&mut self, authenticated: AuthenticatedCredential) {
-        debug_assert!(authenticated.provenance.issuer.is_internally_consistent());
         let provenance = StoredProvenance::Authenticated(authenticated.provenance);
         match authenticated.credential {
-            VerifiedCredential::SdJwt {
-                holding,
-                authenticated,
-                validity,
-            } => {
+            VerifiedCredential::SdJwt { holding, validity } => {
                 if let Some(stored) = self
                     .credentials
                     .iter_mut()
                     .find(|stored| stored.holding == holding)
                 {
-                    stored.authenticated = Some(authenticated);
                     stored.validity = validity;
                     stored.provenance = provenance;
                 } else {
                     self.credentials.push(StoredSdJwtCredential {
                         holding,
-                        authenticated: Some(authenticated),
                         validity,
                         provenance,
                     });
@@ -1846,51 +1447,25 @@ impl Core {
         format: oid4vci::CredentialFormat,
         bytes: &[u8],
         issuer_cert_chain: &[Vec<u8>],
-        issuer_id_assertion: &str,
+        issuer_id: &str,
     ) -> Result<AuthenticatedCredential, CredentialIngestionError> {
-        if self.now_epoch <= 0 {
-            return Err(CredentialIngestionError::ClockNotSet);
-        }
-        if self.device_public_key.is_empty() {
-            return Err(CredentialIngestionError::DeviceBindingMissing);
-        }
-
-        let (credential, issuer) = match format {
-            oid4vci::CredentialFormat::DcSdJwt => {
-                // SD-JWT VC has no COSE issuerAuth header, so its authenticated transport/restore
-                // boundary still supplies the issuer certificate bundle explicitly.
-                let issuers = self.resolve_credential_issuers(issuer_cert_chain);
-                if !Self::issuer_candidates_are_consistent(&issuers) {
-                    return Err(CredentialIngestionError::UntrustedIssuer);
-                }
-                self.verify_sdjwt_credential(bytes, &issuers, issuer_id_assertion)?
-            }
-            oid4vci::CredentialFormat::MsoMdoc => {
-                // For mdoc, the credential's own bounded x5chain is the sole certificate evidence
-                // used to authenticate issuerAuth. A caller path can neither rescue nor replace it.
-                let issuer_signed = decode_mdoc_credential(bytes)?;
-                let embedded_chain = embedded_mdoc_issuer_chain(&issuer_signed)?;
-                let issuers = self.resolve_credential_issuers(&embedded_chain);
-                if !Self::issuer_candidates_are_consistent(&issuers) {
-                    return Err(CredentialIngestionError::UntrustedIssuer);
-                }
-                self.verify_mdoc_credential(issuer_signed, &issuers, issuer_id_assertion)?
-            }
-        };
+        let issuer_key = self
+            .resolve_issuer_key(issuer_cert_chain)
+            .ok_or(CredentialIngestionError::UntrustedIssuer)?;
+        let credential = self.verify_received_credential(format, bytes, &issuer_key, issuer_id)?;
         Ok(AuthenticatedCredential {
             credential,
             provenance: CredentialProvenance {
                 format,
                 raw_credential: bytes.to_vec(),
-                issuer,
+                issuer_cert_chain: issuer_cert_chain.to_vec(),
+                issuer_id: issuer_id.to_string(),
             },
         })
     }
 
     /// Authenticate, validate and store a credential obtained outside the active issuance
     /// session (for example during a verified restore). This is the production storage boundary.
-    /// `issuer_cert_chain` authenticates SD-JWT VC inputs; an mdoc is authenticated exclusively
-    /// with the bounded `x5chain` embedded in its `issuerAuth` COSE header.
     pub fn ingest_credential(
         &mut self,
         format: &str,
@@ -1920,13 +1495,7 @@ impl Core {
             .iter()
             .map(|stored| {
                 let c = &stored.holding;
-                let (vct, jwt_issuer) = credential_vct_and_issuer(&c.issuer_jwt);
-                let issuer = match &stored.provenance {
-                    StoredProvenance::Authenticated(provenance) => {
-                        provenance.issuer.identity.as_str()
-                    }
-                    StoredProvenance::TestFixture => &jwt_issuer,
-                };
+                let (vct, iss) = credential_vct_and_issuer(&c.issuer_jwt);
                 let disclosures = c
                     .disclosures_by_claim
                     .iter()
@@ -1935,7 +1504,7 @@ impl Core {
                     .join(",");
                 format!(
                     r#"{{"vct":{:?},"issuer":{:?},"format":"dc+sd-jwt","disclosuresByClaim":{{{}}}}}"#,
-                    vct, issuer, disclosures
+                    vct, iss, disclosures
                 )
             })
             .collect();
@@ -1943,10 +1512,6 @@ impl Core {
         // `claims` so the shell renders the card; `disclosuresByClaim` stays empty for this format.
         for stored in &self.mdoc_holdings {
             let h = &stored.holding;
-            let issuer = match &stored.provenance {
-                StoredProvenance::Authenticated(provenance) => provenance.issuer.identity.as_str(),
-                StoredProvenance::TestFixture => "ISO 18013-5 mdoc",
-            };
             let claims = h
                 .issuer_signed
                 .name_spaces
@@ -1962,8 +1527,8 @@ impl Core {
                 .collect::<Vec<_>>()
                 .join(",");
             items.push(format!(
-                r#"{{"vct":{:?},"issuer":{:?},"format":"mso_mdoc","claims":{{{}}},"disclosuresByClaim":{{}}}}"#,
-                h.doctype, issuer, claims
+                r#"{{"vct":{:?},"issuer":"ISO 18013-5 mdoc","format":"mso_mdoc","claims":{{{}}},"disclosuresByClaim":{{}}}}"#,
+                h.doctype, claims
             ));
         }
         format!("[{}]", items.join(","))
@@ -1996,7 +1561,7 @@ impl Core {
                 self.issuer_trusted_current = false;
                 self.issuer_id_current.clear();
                 self.issuer_cert_chain_current.clear();
-                self.issuer_candidates_current.clear();
+                self.issuer_public_key_current.clear();
                 self.pending_verified_credential = None;
             }
             ActiveFlow::Qes => {
@@ -2042,7 +1607,7 @@ impl Core {
                 self.issuer_trusted_current = false;
                 self.issuer_id_current.clear();
                 self.issuer_cert_chain_current.clear();
-                self.issuer_candidates_current.clear();
+                self.issuer_public_key_current.clear();
                 self.pending_verified_credential = None;
             }
             ActiveFlow::Qes => {
@@ -2114,91 +1679,8 @@ impl Core {
         ]
     }
 
-    fn audited_flow_started_by(event: &Event) -> Option<ActiveFlow> {
-        match event {
-            Event::AuthorizationRequestReceived { .. } => Some(ActiveFlow::Presentation),
-            Event::PaymentAuthorizationRequestReceived { .. } => Some(ActiveFlow::Payment),
-            Event::CredentialOfferReceived { .. } => Some(ActiveFlow::Issuance),
-            Event::WalletTransferOfferCreated | Event::WalletTransferReceived { .. } => {
-                Some(ActiveFlow::WalletTransfer)
-            }
-            _ => None,
-        }
-    }
-
-    fn terminate_audited_flow(
-        &mut self,
-        flow: ActiveFlow,
-        code: &'static str,
-        message: &'static str,
-    ) -> Vec<Effect> {
-        if self.active != ActiveFlow::None && self.active != flow {
-            self.reset_flow(self.active);
-        }
-        self.reset_flow(flow);
-        vec![
-            Effect::Render {
-                screen: ScreenDescription::Error {
-                    code: code.into(),
-                    message: message.into(),
-                },
-            },
-            Effect::Close,
-        ]
-    }
-
-    fn audit_log_fault_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
-        self.audit_log_available = false;
-        self.terminate_audited_flow(
-            flow,
-            "audit_log_unavailable",
-            "The wallet cannot securely record this operation. No further auditable operation is allowed until the wallet history is repaired or reset.",
-        )
-    }
-
-    fn audit_log_capacity_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
-        self.terminate_audited_flow(
-            flow,
-            "audit_log_capacity_exhausted",
-            "The wallet history does not have enough capacity for this operation. Review or erase history before trying again.",
-        )
-    }
-
-    fn audit_log_candidate_rejection_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
-        self.terminate_audited_flow(
-            flow,
-            "audit_log_entry_invalid",
-            "This operation contains activity details that cannot be recorded safely.",
-        )
-    }
-
-    fn append_audit_entry(&mut self, entry: txnlog::NewEntry) -> Result<(), txnlog::Error> {
-        // Each auditable flow reserved MAX_ENTRY_BYTES at admission and checked its exact variable
-        // fields before its first consequential effect. A post-ack error is therefore an internal
-        // invariant/storage-coordination fault, not a recoverable capacity condition.
-        match self.log.append(&AwsLc, entry) {
-            Ok(_) => Ok(()),
-            Err(error) => {
-                self.audit_log_available = false;
-                Err(error)
-            }
-        }
-    }
-
-    fn check_audit_entry(&self, entry: &txnlog::NewEntry) -> Result<(), txnlog::Error> {
-        self.log.check_append(entry)
-    }
-
     /// The single entry point. Same state + same event ⇒ same effects (I/O is all in the shell).
     pub fn handle_event(&mut self, event: Event) -> Vec<Effect> {
-        if let Some(flow) = Self::audited_flow_started_by(&event) {
-            if !self.audit_log_available {
-                return self.audit_log_fault_effects(flow);
-            }
-            if !self.log.can_guarantee_max_entry() {
-                return self.audit_log_capacity_effects(flow);
-            }
-        }
         match event {
             Event::SetClock { epoch } => {
                 // `now_epoch` is a process-local high-water mark. A backwards update must never
@@ -2306,9 +1788,7 @@ impl Core {
                 {
                     return Vec::new();
                 }
-                if self.record_payment().is_err() {
-                    return self.audit_log_fault_effects(ActiveFlow::Payment);
-                }
+                self.record_payment();
                 self.finish_flow(ActiveFlow::Payment);
                 vec![Effect::Close]
             }
@@ -2351,18 +1831,6 @@ impl Core {
             Event::QesAuthorized => self.drive_qes(qes::Input::UserAuthorized),
             Event::QesDeclined => self.drive_qes(qes::Input::UserDeclined),
             Event::WalletTransferOfferCreated => {
-                let audit_candidate = txnlog::NewEntry {
-                    epoch: self.now_epoch,
-                    kind: txnlog::Kind::Transfer,
-                    counterparty: "peer-wallet".into(),
-                    consent_hash: [0u8; 32],
-                    claim_paths: Vec::new(),
-                    outcome: txnlog::Outcome::Completed,
-                    payment: None,
-                };
-                if self.check_audit_entry(&audit_candidate).is_err() {
-                    return self.audit_log_candidate_rejection_effects(ActiveFlow::WalletTransfer);
-                }
                 self.begin_flow(ActiveFlow::WalletTransfer);
                 self.drive_w2w(w2w::Input::CreateOffer)
             }
@@ -2404,21 +1872,13 @@ impl Core {
                 // machine to Idle so a wallet can be issued several credentials in one lifetime.
                 // Replay protection (`iss_seen_c_nonces`) deliberately persists across sessions.
                 self.issuance = oid4vci::State::Idle;
+                // Issuer trust is decided in-core against the trusted list (PID/attestation CAs).
                 self.issuer_cert_chain_current = issuer_cert_chain;
-                // Resolve each trusted-list service separately. The shell value is only a
-                // compatibility assertion; proof audience and audit identity come from the
-                // authenticated leaf URI and a mismatch keeps the issuance machine fail-closed.
-                let issuers = self.resolve_credential_issuers(&self.issuer_cert_chain_current);
-                let authenticated_identity = issuers
-                    .first()
-                    .map(|issuer| issuer.identity.clone())
+                self.issuer_public_key_current = self
+                    .resolve_issuer_key(&self.issuer_cert_chain_current)
                     .unwrap_or_default();
-                let consistent_path = Self::issuer_candidates_are_consistent(&issuers);
-                self.issuer_trusted_current =
-                    !issuers.is_empty() && consistent_path && issuer_id == authenticated_identity;
-                self.issuer_id_current = authenticated_identity;
-                self.issuer_id_assertion_current = issuer_id;
-                self.issuer_candidates_current = if consistent_path { issuers } else { Vec::new() };
+                self.issuer_trusted_current = !self.issuer_public_key_current.is_empty();
+                self.issuer_id_current = issuer_id;
                 self.pending_verified_credential = None;
                 self.last_credential_ingestion_error = None;
                 self.drive_issuance(oid4vci::Input::CredentialOffer(offer))
@@ -2447,7 +1907,7 @@ impl Core {
                     f,
                     &bytes,
                     &self.issuer_cert_chain_current,
-                    &self.issuer_id_assertion_current,
+                    &self.issuer_id_current,
                 ) {
                     Ok(verified) => {
                         self.pending_verified_credential = Some(verified);
@@ -2691,32 +2151,12 @@ impl Core {
             Effect::ResolveRpTrust { .. } => OperationResultKind::RpCertChain,
             Effect::PersistNonce { .. } => OperationResultKind::Persisted,
             Effect::Sign { .. } => OperationResultKind::Signature,
-            Effect::Http { profile, .. } => {
-                let (expected_profile, result) = match self.active {
-                    ActiveFlow::Presentation => (
-                        HttpDeliveryProfile::Openid4vpDirectPost,
-                        OperationResultKind::PresentationDelivery,
-                    ),
-                    ActiveFlow::Payment => (
-                        HttpDeliveryProfile::PaymentAuthorization,
-                        OperationResultKind::PaymentDelivery,
-                    ),
-                    ActiveFlow::Qes => (
-                        HttpDeliveryProfile::QesAuthorization,
-                        OperationResultKind::QesDelivery,
-                    ),
-                    flow => {
-                        return Err(format!("HTTP effect emitted for unsupported flow {flow:?}"))
-                    }
-                };
-                if *profile != expected_profile {
-                    return Err(format!(
-                        "HTTP delivery profile {profile:?} does not match active flow {:?}",
-                        self.active
-                    ));
-                }
-                result
-            }
+            Effect::Http { .. } => match self.active {
+                ActiveFlow::Presentation => OperationResultKind::PresentationDelivery,
+                ActiveFlow::Payment => OperationResultKind::PaymentDelivery,
+                ActiveFlow::Qes => OperationResultKind::QesDelivery,
+                flow => return Err(format!("HTTP effect emitted for unsupported flow {flow:?}")),
+            },
             Effect::PushPar => OperationResultKind::Par,
             Effect::OpenAuthBrowser => OperationResultKind::AuthorizationCode,
             Effect::PromptTxCode => OperationResultKind::TransactionCode,
@@ -2821,7 +2261,7 @@ impl Core {
     }
 
     fn drive(&mut self, input: Input) -> Vec<Effect> {
-        // For consent, compute the complete data-minimised DCQL set plan.
+        // For consent, compute the data-minimised selection — one credential per DCQL query.
         let selected = self.select_credentials_for(&input);
 
         let verifier = AwsLc;
@@ -2863,7 +2303,6 @@ impl Core {
                 dcql: req.dcql.clone(),
                 selected_credentials: Vec::new(),
                 selected_sources: Vec::new(),
-                selected_revealed_claims: Vec::new(),
                 rp_provenance: self.pending_rp_provenance.clone(),
                 consent_hash: [0u8; 32],
                 shared_claims: Vec::new(),
@@ -2873,24 +2312,6 @@ impl Core {
             // protocol outputs produced alongside it).
             if let Err(error) = self.prepare_presentation_selection() {
                 return self.abort_presentation_eligibility(error);
-            }
-            // Admission happens before the RP trust effect and before any consent/sign/delivery.
-            // The consent hash has fixed width and is filled after rendering; every variable-sized
-            // field is already exact here.
-            let audit_candidate = self.session.as_ref().map(|session| txnlog::NewEntry {
-                epoch: self.now_epoch,
-                kind: txnlog::Kind::Presentation,
-                counterparty: session.rp_client_id.clone(),
-                consent_hash: [0u8; 32],
-                claim_paths: session.selected_revealed_claims.clone(),
-                outcome: txnlog::Outcome::Completed,
-                payment: None,
-            });
-            if audit_candidate
-                .as_ref()
-                .is_some_and(|entry| self.check_audit_entry(entry).is_err())
-            {
-                return self.audit_log_candidate_rejection_effects(ActiveFlow::Presentation);
             }
         }
 
@@ -2909,8 +2330,8 @@ impl Core {
         }
 
         // Record a completed presentation the moment the machine reaches Done (once).
-        if !was_done && matches!(self.vp, State::Done) && self.record_presentation().is_err() {
-            return self.audit_log_fault_effects(ActiveFlow::Presentation);
+        if !was_done && matches!(self.vp, State::Done) {
+            self.record_presentation();
         }
         effects
     }
@@ -3035,68 +2456,22 @@ impl Core {
         }
     }
 
-    /// Resolve a credential issuer independently in each catalogue-supported trust domain. The
-    /// returned values retain authenticated identity, leaf key and validity provenance; roots are
-    /// never unioned, and the signed credential type later selects exactly one required service.
-    fn resolve_credential_issuers(&self, chain: &[Vec<u8>]) -> Vec<CredentialIssuerEvidence> {
-        [IssuerTrustDomain::Pid, IssuerTrustDomain::Attestation]
-            .into_iter()
-            .filter_map(|service| {
-                let trust_service = match service {
-                    IssuerTrustDomain::Pid => ServiceType::PidProvider,
-                    IssuerTrustDomain::Attestation => ServiceType::AttestationProvider,
-                };
-                let anchors = self
-                    .trust_store
-                    .parsed_anchors_at(trust_service, self.now_epoch);
-                if anchors.is_empty() {
-                    return None;
-                }
-                x509::check_credential_issuer(chain, &anchors, self.now_epoch, &AwsLc)
-                    .ok()
-                    .map(|validated| CredentialIssuerEvidence {
-                        identity: validated.identity,
-                        service,
-                        public_key_raw: validated.public_key_raw,
-                        certificate_path: chain.to_vec(),
-                        not_before: validated.not_before,
-                        not_after: validated.not_after,
-                    })
-            })
-            .collect()
-    }
-
-    fn issuer_for_type<'a>(
-        &self,
-        issuers: &'a [CredentialIssuerEvidence],
-        credential_type: &str,
-    ) -> Result<&'a CredentialIssuerEvidence, CredentialIngestionError> {
-        let service = self
-            .catalogue
-            .issuer_trust_domain(credential_type)
-            .ok_or(CredentialIngestionError::UnknownCredentialType)?;
-        issuers
-            .iter()
-            .find(|issuer| issuer.service == service)
-            .ok_or(CredentialIngestionError::IssuerServiceMismatch)
-    }
-
-    /// Every service candidate comes from the same bounded certificate bundle. Reject any
-    /// ambiguity before a credential verifier is allowed to use one candidate's key and another
-    /// candidate's policy domain.
-    fn issuer_candidates_are_consistent(issuers: &[CredentialIssuerEvidence]) -> bool {
-        let Some(first) = issuers.first() else {
-            return false;
-        };
-        first.is_internally_consistent()
-            && issuers.iter().all(|issuer| {
-                issuer.is_internally_consistent()
-                    && issuer.identity == first.identity
-                    && issuer.public_key_raw == first.public_key_raw
-                    && issuer.certificate_path == first.certificate_path
-                    && issuer.not_before == first.not_before
-                    && issuer.not_after == first.not_after
-            })
+    /// Validate the issuer path against PID/attestation anchors and return only the authenticated
+    /// leaf key. A caller cannot accidentally use a key from an unvalidated chain.
+    fn resolve_issuer_key(&self, chain: &[Vec<u8>]) -> Option<Vec<u8>> {
+        let mut anchors = self
+            .trust_store
+            .parsed_anchors_at(ServiceType::PidProvider, self.now_epoch);
+        anchors.extend(
+            self.trust_store
+                .parsed_anchors_at(ServiceType::AttestationProvider, self.now_epoch),
+        );
+        if anchors.is_empty() {
+            return None;
+        }
+        x509::validate_path(chain, &anchors, self.now_epoch, &AwsLc)
+            .ok()
+            .and_then(|path| path.first().map(|leaf| leaf.public_key_raw.clone()))
     }
 
     /// Resolve a status-signing key only through anchors authorised for the StatusProvider
@@ -3117,12 +2492,38 @@ impl Core {
             })
     }
 
+    fn verify_received_credential(
+        &self,
+        format: oid4vci::CredentialFormat,
+        bytes: &[u8],
+        issuer_public_key: &[u8],
+        issuer_id: &str,
+    ) -> Result<VerifiedCredential, CredentialIngestionError> {
+        if self.now_epoch <= 0 {
+            return Err(CredentialIngestionError::ClockNotSet);
+        }
+        if issuer_public_key.is_empty() {
+            return Err(CredentialIngestionError::UntrustedIssuer);
+        }
+        if self.device_public_key.is_empty() {
+            return Err(CredentialIngestionError::DeviceBindingMissing);
+        }
+        match format {
+            oid4vci::CredentialFormat::DcSdJwt => {
+                self.verify_sdjwt_credential(bytes, issuer_public_key, issuer_id)
+            }
+            oid4vci::CredentialFormat::MsoMdoc => {
+                self.verify_mdoc_credential(bytes, issuer_public_key, issuer_id)
+            }
+        }
+    }
+
     fn verify_sdjwt_credential(
         &self,
         bytes: &[u8],
-        issuers: &[CredentialIssuerEvidence],
-        issuer_id_assertion: &str,
-    ) -> Result<(VerifiedCredential, CredentialIssuerEvidence), CredentialIngestionError> {
+        issuer_public_key: &[u8],
+        issuer_id: &str,
+    ) -> Result<VerifiedCredential, CredentialIngestionError> {
         let compact = core::str::from_utf8(bytes)
             .map_err(|_| CredentialIngestionError::MalformedCredential)?;
         let sd = sdjwt::SdJwtVc::parse(compact)
@@ -3135,22 +2536,30 @@ impl Core {
         if alg != Alg::Es256 {
             return Err(CredentialIngestionError::UnsupportedAlgorithm);
         }
-        let processed = sd
-            .verify_and_process(&AwsLc, &AwsLc, &issuers[0].public_key_raw, alg)
-            .map_err(|error| match error {
-                sdjwt::SdJwtError::Crypto(_) => CredentialIngestionError::SignatureInvalid,
-                _ => CredentialIngestionError::MalformedCredential,
-            })?;
+        let claims = sd
+            .verify_and_disclose(&AwsLc, &AwsLc, issuer_public_key, alg)
+            .map_err(|_| CredentialIngestionError::SignatureInvalid)?;
         let issuer_payload = sd
             .issuer_payload()
             .map_err(|_| CredentialIngestionError::MalformedCredential)?;
-        validate_sdjwt_issuer_profile(&sd, &issuer_payload, &processed)?;
-        let claims = &processed.claims;
+        // These are protocol control claims, not holder-selectable attributes. Keeping them in the
+        // signed base payload ensures type selection, issuer policy and key binding still work on
+        // a data-minimised presentation that omits unrelated disclosures.
+        if !["iss", "vct", "cnf"]
+            .iter()
+            .all(|name| issuer_payload.contains_key(*name))
+            || (claims.contains_key("status") && !issuer_payload.contains_key("status"))
+        {
+            return Err(CredentialIngestionError::MalformedCredential);
+        }
 
         let issuer = claims
             .get("iss")
             .and_then(|v| v.as_str())
             .ok_or(CredentialIngestionError::MalformedCredential)?;
+        if issuer.is_empty() || issuer != issuer_id {
+            return Err(CredentialIngestionError::IssuerMismatch);
+        }
         let vct = claims
             .get("vct")
             .and_then(|v| v.as_str())
@@ -3163,53 +2572,37 @@ impl Core {
         if credential_type.format != "dc+sd-jwt" {
             return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
         }
-        let authenticated_issuer = self.issuer_for_type(issuers, vct)?;
-        if issuer.is_empty()
-            || issuer != authenticated_issuer.identity
-            || issuer_id_assertion != authenticated_issuer.identity
-        {
-            return Err(CredentialIngestionError::IssuerMismatch);
-        }
-        if !self
-            .catalogue
-            .issuer_allowed(vct, &authenticated_issuer.identity)
-        {
+        if !self.catalogue.issuer_allowed(vct, issuer) {
             return Err(CredentialIngestionError::IssuerNotAllowedForType);
         }
         let held_claims: Vec<String> = claims.keys().cloned().collect();
         if !self.catalogue.satisfies_mandatory(vct, &held_claims) {
             return Err(CredentialIngestionError::MandatoryClaimsMissing);
         }
-        let validity = json_validity(claims, self.now_epoch)?;
+        let validity = json_validity(&claims, self.now_epoch)?;
         if !claims.contains_key("cnf") {
             return Err(CredentialIngestionError::DeviceBindingMissing);
         }
-        if !sdjwt_device_binding_matches(claims, &self.device_public_key) {
+        if !sdjwt_device_binding_matches(&claims, &self.device_public_key) {
             return Err(CredentialIngestionError::DeviceBindingMismatch);
         }
-        let status = status_reference_from_claims(claims)?;
-        let holding = held_credential_from_verified_sd(&sd, &processed, status)?;
-        Ok((
-            VerifiedCredential::SdJwt {
-                holding,
-                authenticated: AuthenticatedSdJwtHolding { processed },
-                validity,
-            },
-            authenticated_issuer.clone(),
-        ))
+        let status = status_reference_from_claims(&claims)?;
+        let holding = held_credential_from_verified_sd(&sd, status)?;
+        Ok(VerifiedCredential::SdJwt { holding, validity })
     }
 
     fn verify_mdoc_credential(
         &self,
-        issuer_signed: mdoc::IssuerSigned,
-        issuers: &[CredentialIssuerEvidence],
-        issuer_id_assertion: &str,
-    ) -> Result<(VerifiedCredential, CredentialIssuerEvidence), CredentialIngestionError> {
+        bytes: &[u8],
+        issuer_public_key: &[u8],
+        issuer_id: &str,
+    ) -> Result<VerifiedCredential, CredentialIngestionError> {
+        let issuer_signed = decode_mdoc_credential(bytes)?;
         let mso = mdoc::verify_issuer_signed(
             &issuer_signed,
             &AwsLc,
             &AwsLc,
-            &issuers[0].public_key_raw,
+            issuer_public_key,
             Alg::Es256,
         )
         .map_err(|_| CredentialIngestionError::SignatureInvalid)?;
@@ -3223,25 +2616,19 @@ impl Core {
         if credential_type.format != "mso_mdoc" {
             return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
         }
-        let authenticated_issuer = self.issuer_for_type(issuers, &mso.doc_type)?;
-        if issuer_id_assertion != authenticated_issuer.identity {
-            return Err(CredentialIngestionError::IssuerMismatch);
-        }
-        if !self
-            .catalogue
-            .issuer_allowed(&mso.doc_type, &authenticated_issuer.identity)
-        {
+        if !self.catalogue.issuer_allowed(&mso.doc_type, issuer_id) {
             return Err(CredentialIngestionError::IssuerNotAllowedForType);
         }
         let mut held_claims = Vec::new();
         for (namespace, items) in &issuer_signed.name_spaces {
             for item in items {
-                held_claims.push((namespace.clone(), item.element_id.clone()));
+                held_claims.push(item.element_id.clone());
+                held_claims.push(format!("{namespace}.{}", item.element_id));
             }
         }
         if !self
             .catalogue
-            .satisfies_mandatory_mdoc(&mso.doc_type, &held_claims)
+            .satisfies_mandatory(&mso.doc_type, &held_claims)
         {
             return Err(CredentialIngestionError::MandatoryClaimsMissing);
         }
@@ -3252,16 +2639,13 @@ impl Core {
         if !mdoc_device_binding_matches(&mso.device_key, &self.device_public_key) {
             return Err(CredentialIngestionError::DeviceBindingMismatch);
         }
-        Ok((
-            VerifiedCredential::Mdoc {
-                holding: MdocHolding {
-                    doctype: mso.doc_type,
-                    issuer_signed,
-                },
-                validity,
+        Ok(VerifiedCredential::Mdoc {
+            holding: MdocHolding {
+                doctype: mso.doc_type,
+                issuer_signed,
             },
-            authenticated_issuer.clone(),
-        ))
+            validity,
+        })
     }
 
     fn drive_issuance(&mut self, input: oid4vci::Input) -> Vec<Effect> {
@@ -3278,13 +2662,9 @@ impl Core {
                 )
             })
             .unwrap_or(false);
-        let current_issuers = self.resolve_credential_issuers(&self.issuer_cert_chain_current);
-        let issuer_trusted = Self::issuer_candidates_are_consistent(&current_issuers)
-            && current_issuers == self.issuer_candidates_current
-            && current_issuers
-                .first()
-                .is_some_and(|issuer| issuer.identity == self.issuer_id_current)
-            && self.issuer_id_assertion_current == self.issuer_id_current;
+        let issuer_trusted = self
+            .resolve_issuer_key(&self.issuer_cert_chain_current)
+            .is_some_and(|key| key == self.issuer_public_key_current);
         self.issuer_trusted_current = issuer_trusted;
 
         let (next, outputs) = {
@@ -3301,31 +2681,6 @@ impl Core {
         let was_issued = matches!(self.issuance, oid4vci::State::CredentialIssued { .. });
         self.issuance = next;
 
-        let audit_format = match &self.issuance {
-            oid4vci::State::OfferParsed { format, .. }
-            | oid4vci::State::Authorizing { format }
-            | oid4vci::State::AwaitingTxCode { format }
-            | oid4vci::State::RequestingToken { format }
-            | oid4vci::State::ProvingPossession { format, .. }
-            | oid4vci::State::RequestingCredential { format }
-            | oid4vci::State::CredentialIssued { format, .. } => Some(*format),
-            oid4vci::State::Idle | oid4vci::State::Aborted(_) => None,
-        };
-        if let Some(format) = audit_format {
-            let audit_candidate = txnlog::NewEntry {
-                epoch: self.now_epoch,
-                kind: txnlog::Kind::Issuance,
-                counterparty: self.issuer_id_current.clone(),
-                consent_hash: [0u8; 32],
-                claim_paths: vec![format_name(format).to_string()],
-                outcome: txnlog::Outcome::Completed,
-                payment: None,
-            };
-            if self.check_audit_entry(&audit_candidate).is_err() {
-                return self.audit_log_candidate_rejection_effects(ActiveFlow::Issuance);
-            }
-        }
-
         let effects: Vec<Effect> = outputs
             .into_iter()
             .map(|o| self.translate_issuance(o))
@@ -3339,10 +2694,8 @@ impl Core {
                 let fmt = format_name(issued_format).to_string();
                 match self.pending_verified_credential.take() {
                     Some(verified) if verified.credential.format() == issued_format => {
-                        if self.record_issuance(fmt).is_err() {
-                            return self.audit_log_fault_effects(ActiveFlow::Issuance);
-                        }
                         self.store_verified_credential(verified);
+                        self.record_issuance(fmt);
                     }
                     _ => {
                         // Defensive invariant: the OID4VCI machine must never reach its success
@@ -3451,26 +2804,12 @@ impl Core {
                     currency: currency.clone(),
                 });
                 // Capture the payer-visible essence + the committing hash for the audit log.
-                let consent_hash = presenter::consent_hash(&AwsLc, &screen);
-                let summary = txnlog::PaymentSummary {
+                self.pay_consent_hash = presenter::consent_hash(&AwsLc, &screen);
+                self.pay_summary = Some(txnlog::PaymentSummary {
                     payee: creditor_name,
                     amount_minor,
                     currency,
-                };
-                let audit_candidate = txnlog::NewEntry {
-                    epoch: self.now_epoch,
-                    kind: txnlog::Kind::Payment,
-                    counterparty: summary.payee.clone(),
-                    consent_hash,
-                    claim_paths: Vec::new(),
-                    outcome: txnlog::Outcome::Completed,
-                    payment: Some(summary.clone()),
-                };
-                if self.check_audit_entry(&audit_candidate).is_err() {
-                    return self.audit_log_candidate_rejection_effects(ActiveFlow::Payment);
-                }
-                self.pay_consent_hash = consent_hash;
-                self.pay_summary = Some(summary);
+                });
                 vec![Effect::Render { screen }]
             }
             PO::SignAuthCode {
@@ -3486,11 +2825,7 @@ impl Core {
                     .as_ref()
                     .map(|(u, _)| u.clone())
                     .unwrap_or_default();
-                vec![Effect::Http {
-                    profile: HttpDeliveryProfile::PaymentAuthorization,
-                    url,
-                    body: code,
-                }]
+                vec![Effect::Http { url, body: code }]
             }
             // The pure payment machine closes after producing the authorization. The facade waits
             // for `PaymentAuthorizationDelivered`; a decline still closes immediately.
@@ -3566,7 +2901,6 @@ impl Core {
             }],
             // The QTSP endpoint (CSC API) is resolved by the shell; the body is the authorization.
             QO::SendToQtsp(body) => vec![Effect::Http {
-                profile: HttpDeliveryProfile::QesAuthorization,
                 url: String::new(),
                 body,
             }],
@@ -3605,21 +2939,13 @@ impl Core {
             .authenticate_received_credential(
                 provenance.format,
                 &provenance.raw_credential,
-                &provenance.issuer.certificate_path,
-                &provenance.issuer.identity,
+                &provenance.issuer_cert_chain,
+                &provenance.issuer_id,
             )
             .map_err(Self::eligibility_from_ingestion_error)?;
-        if authenticated.provenance != *provenance {
-            return Err(PresentationEligibilityError::CredentialProvenanceInvalid);
-        }
         match authenticated.credential {
-            VerifiedCredential::SdJwt {
-                holding,
-                authenticated,
-                validity,
-            } if holding == stored.holding
-                && stored.authenticated.as_ref() == Some(&authenticated)
-                && validity == stored.validity =>
+            VerifiedCredential::SdJwt { holding, validity }
+                if holding == stored.holding && validity == stored.validity =>
             {
                 Ok(())
             }
@@ -3642,13 +2968,10 @@ impl Core {
             .authenticate_received_credential(
                 provenance.format,
                 &provenance.raw_credential,
-                &provenance.issuer.certificate_path,
-                &provenance.issuer.identity,
+                &provenance.issuer_cert_chain,
+                &provenance.issuer_id,
             )
             .map_err(Self::eligibility_from_ingestion_error)?;
-        if authenticated.provenance != *provenance {
-            return Err(PresentationEligibilityError::CredentialProvenanceInvalid);
-        }
         match authenticated.credential {
             VerifiedCredential::Mdoc { holding, validity }
                 if holding == stored.holding && validity == stored.validity =>
@@ -3690,16 +3013,11 @@ impl Core {
         }
         for source in &session.selected_sources {
             match source {
-                PresentationCredentialReference::SdJwt {
-                    holding,
-                    authenticated,
-                } => {
+                PresentationCredentialReference::SdJwt(holding) => {
                     let stored = self
                         .credentials
                         .iter()
-                        .find(|stored| {
-                            stored.holding == *holding && stored.authenticated == *authenticated
-                        })
+                        .find(|stored| stored.holding == *holding)
                         .ok_or(PresentationEligibilityError::CredentialProvenanceInvalid)?;
                     self.sdjwt_credential_is_current(stored)?;
                 }
@@ -3716,7 +3034,7 @@ impl Core {
         Ok(())
     }
 
-    /// Freeze the complete, currently eligible DCQL plan before consent is rendered.
+    /// Freeze one exact, currently eligible credential for every query before consent is rendered.
     fn prepare_presentation_selection(&mut self) -> Result<(), PresentationEligibilityError> {
         let session = self
             .session
@@ -3726,45 +3044,14 @@ impl Core {
 
         let prepared = match &session.dcql {
             Some(dcql) if !dcql.credentials.is_empty() => {
-                // Evaluate every query without mutating session state, then select required
-                // Credential Set options atomically. Optional sets are omitted until the holder
-                // explicitly opts in, while a required unsatisfied set cannot leak a partial
-                // credential through consent, signing or response assembly.
-                let mut candidates = Vec::with_capacity(dcql.credentials.len());
-                let mut errors = Vec::with_capacity(dcql.credentials.len());
+                let mut ids = Vec::with_capacity(dcql.credentials.len());
+                let mut prepared = Vec::with_capacity(dcql.credentials.len());
                 for query in &dcql.credentials {
-                    match self.select_for_query(&session, query) {
-                        Ok(candidate) => {
-                            candidates.push(Some(candidate));
-                            errors.push(None);
-                        }
-                        Err(error) => {
-                            candidates.push(None);
-                            errors.push(Some(error));
-                        }
+                    if query.id.is_empty() || ids.contains(&query.id) {
+                        return Err(PresentationEligibilityError::NoEligibleCredential);
                     }
-                }
-                let satisfiable: Vec<bool> = candidates.iter().map(Option::is_some).collect();
-                let indices = dcql
-                    .credential_selection_plan(&satisfiable)
-                    .ok_or_else(|| {
-                        errors
-                            .iter()
-                            .flatten()
-                            .copied()
-                            .next()
-                            .unwrap_or(PresentationEligibilityError::NoEligibleCredential)
-                    })?;
-                if indices.is_empty() {
-                    return Err(PresentationEligibilityError::NoEligibleCredential);
-                }
-                let mut prepared = Vec::with_capacity(indices.len());
-                for index in indices {
-                    prepared.push(
-                        candidates[index]
-                            .take()
-                            .ok_or(PresentationEligibilityError::NoEligibleCredential)?,
-                    );
+                    ids.push(query.id.clone());
+                    prepared.push(self.select_for_query(&session, query)?);
                 }
                 prepared
             }
@@ -3778,12 +3065,6 @@ impl Core {
             .as_mut()
             .ok_or(PresentationEligibilityError::TrustEvidenceInvalid)?;
         target.selected_credentials = prepared.iter().map(|item| item.selected.clone()).collect();
-        target.selected_revealed_claims.clear();
-        for claim in prepared.iter().flat_map(|item| item.revealed_claims.iter()) {
-            if !target.selected_revealed_claims.contains(claim) {
-                target.selected_revealed_claims.push(claim.clone());
-            }
-        }
         target.selected_sources = prepared.into_iter().map(|item| item.source).collect();
         Ok(())
     }
@@ -3805,32 +3086,8 @@ impl Core {
         sess: &SessionInfo,
         q: &oid4vp::dcql::CredentialQuery,
     ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
-        let options = q
-            .claim_selection_options()
-            .ok_or(PresentationEligibilityError::NoEligibleCredential)?;
-        let mut first_error = None;
-        for option in options {
-            let claims: Vec<&oid4vp::dcql::ClaimQuery> =
-                option.iter().map(|index| &q.claims[*index]).collect();
-            match self.select_for_query_claims(sess, q, &claims) {
-                Ok(selected) => return Ok(selected),
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                }
-            }
-        }
-        Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
-    }
-
-    /// Select one holding for one already-resolved claim-set option. The caller tries options in
-    /// verifier preference order and commits only the first complete match.
-    fn select_for_query_claims(
-        &self,
-        sess: &SessionInfo,
-        q: &oid4vp::dcql::CredentialQuery,
-        requested_claims: &[&oid4vp::dcql::ClaimQuery],
-    ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
-        let claims: Vec<String> = requested_claims
+        let claims: Vec<String> = q
+            .claims
             .iter()
             .map(|c| c.path_string())
             .filter(|s| !s.is_empty())
@@ -3840,8 +3097,16 @@ impl Core {
         // A DCQL `values` constraint means the RP only accepts a credential whose claim value is one
         // of the listed values (e.g. `age_over_18 ∈ [true]`). A candidate that can't satisfy it is
         // not eligible — the wallet never presents a value the verifier asked to exclude.
-        let fixture_sdjwt_values_ok = |c: &HeldCredential| -> bool {
-            requested_claims.iter().all(|cq| match &cq.values {
+        let mdoc_values_ok = |issued: &mdoc::IssuerSigned| -> bool {
+            q.claims.iter().all(|cq| match &cq.values {
+                None => true,
+                Some(allowed) => mdoc_value_at(issued, &cq.path_string())
+                    .map(cbor_value_display)
+                    .is_some_and(|disp| allowed.iter().any(|a| json_value_display(a) == disp)),
+            })
+        };
+        let sdjwt_values_ok = |c: &HeldCredential| -> bool {
+            q.claims.iter().all(|cq| match &cq.values {
                 None => true,
                 Some(allowed) => c
                     .disclosures_by_claim
@@ -3852,28 +3117,6 @@ impl Core {
         };
 
         if q.format == "mso_mdoc" {
-            let requested_mdoc_paths: Vec<(String, String)> = requested_claims
-                .iter()
-                .map(|claim| requested_mdoc_path(&claim.path))
-                .collect::<Option<_>>()
-                .ok_or(PresentationEligibilityError::NoEligibleCredential)?;
-            let mdoc_claim_labels: Vec<String> = requested_mdoc_paths
-                .iter()
-                .map(|(namespace, element)| format!("{namespace}.{element}"))
-                .collect();
-            let mdoc_values_ok = |issued: &mdoc::IssuerSigned| -> bool {
-                requested_claims
-                    .iter()
-                    .zip(&requested_mdoc_paths)
-                    .all(|(claim, path)| match &claim.values {
-                        None => true,
-                        Some(allowed) => mdoc_value_at(issued, path).is_some_and(|value| {
-                            allowed
-                                .iter()
-                                .any(|allowed| cbor_value_matches_json(value, allowed))
-                        }),
-                    })
-            };
             let doctype = q
                 .meta
                 .as_ref()
@@ -3883,16 +3126,16 @@ impl Core {
             for stored in self.mdoc_holdings.iter().filter(|stored| {
                 stored.holding.doctype == doctype
                     && mdoc_values_ok(&stored.holding.issuer_signed)
-                    && requested_mdoc_paths
+                    && claims
                         .iter()
-                        .all(|path| mdoc_value_at(&stored.holding.issuer_signed, path).is_some())
+                        .all(|claim| mdoc_value_at(&stored.holding.issuer_signed, claim).is_some())
             }) {
                 if let Err(error) = self.mdoc_credential_is_current(stored) {
                     first_error.get_or_insert(error);
                     continue;
                 }
                 let holding = &stored.holding;
-                let issuer_signed = minimise_mdoc(&holding.issuer_signed, &requested_mdoc_paths);
+                let issuer_signed = minimise_mdoc(&holding.issuer_signed, &claims);
                 let mgn = mdoc_generated_nonce(sess.nonce);
                 let session_transcript = mdoc::oid4vp_session_transcript(
                     &AwsLc,
@@ -3911,7 +3154,6 @@ impl Core {
                         dcql_id,
                     },
                     source: PresentationCredentialReference::Mdoc(holding.clone()),
-                    revealed_claims: mdoc_claim_labels.clone(),
                 });
             }
             return Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential));
@@ -3920,12 +3162,6 @@ impl Core {
             return Err(PresentationEligibilityError::NoEligibleCredential);
         }
 
-        let requested_paths: Vec<Vec<RequestedSdJwtPathElement>> = requested_claims
-            .iter()
-            .map(|claim| requested_sdjwt_path(&claim.path))
-            .collect::<Option<_>>()
-            .ok_or(PresentationEligibilityError::NoEligibleCredential)?;
-
         // SD-JWT VC: a candidate must BE one of the query's `vct_values` (when given) — so a request
         // for `urn:eudi:pid:1` is answered by the PID, never an mDL that carries the same claim name.
         let vcts = q
@@ -3933,114 +3169,38 @@ impl Core {
             .as_ref()
             .map(|m| m.vct_values.clone())
             .unwrap_or_default();
+        let type_matches = |c: &HeldCredential| -> bool {
+            vcts.is_empty() || vcts.contains(&credential_vct_and_issuer(&c.issuer_jwt).0)
+        };
+        let carries_all = |c: &HeldCredential| {
+            claims
+                .iter()
+                .all(|r| c.disclosures_by_claim.contains_key(r))
+        };
         let mut first_error = None;
         for stored in &self.credentials {
             let credential = &stored.holding;
-            match (&stored.authenticated, &stored.provenance) {
-                (Some(authenticated), StoredProvenance::Authenticated(_)) => {
-                    let type_matches = vcts.is_empty()
-                        || authenticated
-                            .processed
-                            .claims
-                            .get("vct")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|vct| vcts.iter().any(|allowed| allowed == vct));
-                    if !type_matches {
-                        continue;
-                    }
-
-                    // Resolve typed paths against the authenticated recursive document. Under
-                    // DCQL, `values` filters wildcard matches: disclose only concrete paths whose
-                    // exact JSON value is allowed, and treat the claim as absent if none match.
-                    let mut selected_paths = Vec::new();
-                    let mut claims_match = true;
-                    for (claim, requested) in requested_claims.iter().zip(&requested_paths) {
-                        let matches = matching_sdjwt_values(authenticated, requested);
-                        let matching_paths: Vec<Vec<sdjwt::ClaimPathElement>> = matches
-                            .into_iter()
-                            .filter(|(_, value)| {
-                                claim
-                                    .values
-                                    .as_ref()
-                                    .is_none_or(|allowed| allowed.contains(value))
-                            })
-                            .map(|(path, _)| path)
-                            .collect();
-                        if matching_paths.is_empty() {
-                            claims_match = false;
-                            break;
-                        }
-                        for path in matching_paths {
-                            if !selected_paths.contains(&path) {
-                                selected_paths.push(path);
-                            }
-                        }
-                    }
-                    if !claims_match {
-                        continue;
-                    }
-                    let selection = select_authenticated_sdjwt_disclosures_for_paths(
-                        authenticated,
-                        &selected_paths,
-                    );
-                    if let Err(error) = self.sdjwt_credential_is_current(stored) {
-                        first_error.get_or_insert(error);
-                        continue;
-                    }
-                    return Ok(PreparedPresentationCredential {
-                        selected: SelectedCredential::SdJwt {
-                            issuer_jwt: credential.issuer_jwt.clone(),
-                            disclosures: selection.disclosures,
-                            dcql_id,
-                        },
-                        source: PresentationCredentialReference::SdJwt {
-                            holding: credential.clone(),
-                            authenticated: Some(authenticated.clone()),
-                        },
-                        revealed_claims: selection.revealed_claims,
-                    });
-                }
-                (None, StoredProvenance::TestFixture) => {
-                    let type_matches = vcts.is_empty()
-                        || vcts.contains(&credential_vct_and_issuer(&credential.issuer_jwt).0);
-                    let carries_all = claims
-                        .iter()
-                        .all(|claim| credential.disclosures_by_claim.contains_key(claim));
-                    if !type_matches
-                        || !fixture_sdjwt_values_ok(credential)
-                        || (!claims.is_empty() && !carries_all)
-                    {
-                        continue;
-                    }
-                    if let Err(error) = self.sdjwt_credential_is_current(stored) {
-                        first_error.get_or_insert(error);
-                        continue;
-                    }
-                    let held: Vec<String> =
-                        credential.disclosures_by_claim.keys().cloned().collect();
-                    let selected_claims = minimum_claim_set(&claims, &held);
-                    let disclosures = selected_claims
-                        .iter()
-                        .filter_map(|claim| credential.disclosures_by_claim.get(claim).cloned())
-                        .collect();
-                    return Ok(PreparedPresentationCredential {
-                        selected: SelectedCredential::SdJwt {
-                            issuer_jwt: credential.issuer_jwt.clone(),
-                            disclosures,
-                            dcql_id,
-                        },
-                        source: PresentationCredentialReference::SdJwt {
-                            holding: credential.clone(),
-                            authenticated: None,
-                        },
-                        revealed_claims: selected_claims,
-                    });
-                }
-                _ => {
-                    first_error
-                        .get_or_insert(PresentationEligibilityError::CredentialProvenanceInvalid);
-                }
+            if !type_matches(credential) || !sdjwt_values_ok(credential) || !carries_all(credential)
+            {
+                continue;
             }
+            if let Err(error) = self.sdjwt_credential_is_current(stored) {
+                first_error.get_or_insert(error);
+                continue;
+            }
+            let held: Vec<String> = credential.disclosures_by_claim.keys().cloned().collect();
+            let disclosures = minimum_claim_set(&claims, &held)
+                .iter()
+                .filter_map(|claim| credential.disclosures_by_claim.get(claim).cloned())
+                .collect();
+            return Ok(PreparedPresentationCredential {
+                selected: SelectedCredential::SdJwt {
+                    issuer_jwt: credential.issuer_jwt.clone(),
+                    disclosures,
+                    dcql_id,
+                },
+                source: PresentationCredentialReference::SdJwt(credential.clone()),
+            });
         }
         Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
     }
@@ -4051,81 +3211,40 @@ impl Core {
         &self,
         sess: &SessionInfo,
     ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
-        let requested_paths: Vec<Vec<RequestedSdJwtPathElement>> = sess
-            .requested_claims
-            .iter()
-            .map(|claim| vec![RequestedSdJwtPathElement::Name(claim.clone())])
-            .collect();
+        let carries_all = |c: &HeldCredential| {
+            sess.requested_claims
+                .iter()
+                .all(|r| c.disclosures_by_claim.contains_key(r))
+        };
         let mut first_error = None;
         for stored in &self.credentials {
             let credential = &stored.holding;
-            match (&stored.authenticated, &stored.provenance) {
-                (Some(authenticated), StoredProvenance::Authenticated(_)) => {
-                    let Some(selection) =
-                        select_authenticated_sdjwt_disclosures(authenticated, &requested_paths)
-                    else {
-                        continue;
-                    };
-                    if let Err(error) = self.sdjwt_credential_is_current(stored) {
-                        first_error.get_or_insert(error);
-                        continue;
-                    }
-                    return Ok(PreparedPresentationCredential {
-                        selected: SelectedCredential::SdJwt {
-                            issuer_jwt: credential.issuer_jwt.clone(),
-                            disclosures: selection.disclosures,
-                            dcql_id: None,
-                        },
-                        source: PresentationCredentialReference::SdJwt {
-                            holding: credential.clone(),
-                            authenticated: Some(authenticated.clone()),
-                        },
-                        revealed_claims: selection.revealed_claims,
-                    });
-                }
-                (None, StoredProvenance::TestFixture) => {
-                    let carries_all = sess
-                        .requested_claims
-                        .iter()
-                        .all(|claim| credential.disclosures_by_claim.contains_key(claim));
-                    if !sess.requested_claims.is_empty() && !carries_all {
-                        continue;
-                    }
-                    if let Err(error) = self.sdjwt_credential_is_current(stored) {
-                        first_error.get_or_insert(error);
-                        continue;
-                    }
-                    let held: Vec<String> =
-                        credential.disclosures_by_claim.keys().cloned().collect();
-                    let selected_claims = minimum_claim_set(&sess.requested_claims, &held);
-                    let disclosures = selected_claims
-                        .iter()
-                        .filter_map(|claim| credential.disclosures_by_claim.get(claim).cloned())
-                        .collect();
-                    return Ok(PreparedPresentationCredential {
-                        selected: SelectedCredential::SdJwt {
-                            issuer_jwt: credential.issuer_jwt.clone(),
-                            disclosures,
-                            dcql_id: None,
-                        },
-                        source: PresentationCredentialReference::SdJwt {
-                            holding: credential.clone(),
-                            authenticated: None,
-                        },
-                        revealed_claims: selected_claims,
-                    });
-                }
-                _ => {
-                    first_error
-                        .get_or_insert(PresentationEligibilityError::CredentialProvenanceInvalid);
-                }
+            if !carries_all(credential) {
+                continue;
             }
+            if let Err(error) = self.sdjwt_credential_is_current(stored) {
+                first_error.get_or_insert(error);
+                continue;
+            }
+            let held: Vec<String> = credential.disclosures_by_claim.keys().cloned().collect();
+            let disclosures = minimum_claim_set(&sess.requested_claims, &held)
+                .iter()
+                .filter_map(|claim| credential.disclosures_by_claim.get(claim).cloned())
+                .collect();
+            return Ok(PreparedPresentationCredential {
+                selected: SelectedCredential::SdJwt {
+                    issuer_jwt: credential.issuer_jwt.clone(),
+                    disclosures,
+                    dcql_id: None,
+                },
+                source: PresentationCredentialReference::SdJwt(credential.clone()),
+            });
         }
         Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
     }
 
     /// Append a completed presentation to the audit log (paths + consent hash, never values).
-    fn record_presentation(&mut self) -> Result<(), txnlog::Error> {
+    fn record_presentation(&mut self) {
         let entry = match &self.session {
             Some(sess) => txnlog::NewEntry {
                 epoch: self.now_epoch,
@@ -4136,16 +3255,16 @@ impl Core {
                 outcome: txnlog::Outcome::Completed,
                 payment: None,
             },
-            None => return Ok(()),
+            None => return,
         };
-        self.append_audit_entry(entry)
+        self.log.append(&AwsLc, entry);
     }
 
     /// Append an authorised payment to the audit log (payer-visible summary + consent hash).
-    fn record_payment(&mut self) -> Result<(), txnlog::Error> {
+    fn record_payment(&mut self) {
         let summary = match &self.pay_summary {
             Some(s) => s.clone(),
-            None => return Ok(()),
+            None => return,
         };
         let entry = txnlog::NewEntry {
             epoch: self.now_epoch,
@@ -4156,11 +3275,11 @@ impl Core {
             outcome: txnlog::Outcome::Completed,
             payment: Some(summary),
         };
-        self.append_audit_entry(entry)
+        self.log.append(&AwsLc, entry);
     }
 
     /// Append a completed issuance to the audit log (issuer identity + credential format).
-    fn record_issuance(&mut self, format: String) -> Result<(), txnlog::Error> {
+    fn record_issuance(&mut self, format: String) {
         let entry = txnlog::NewEntry {
             epoch: self.now_epoch,
             kind: txnlog::Kind::Issuance,
@@ -4170,7 +3289,7 @@ impl Core {
             outcome: txnlog::Outcome::Completed,
             payment: None,
         };
-        self.append_audit_entry(entry)
+        self.log.append(&AwsLc, entry);
     }
 
     // --- Wallet-to-wallet receive (TS09) ---
@@ -4203,9 +3322,7 @@ impl Core {
                     outcome: txnlog::Outcome::Completed,
                     payment: None,
                 };
-                if self.append_audit_entry(entry).is_err() {
-                    return self.audit_log_fault_effects(ActiveFlow::WalletTransfer);
-                }
+                self.log.append(&AwsLc, entry);
                 self.w2w_credential = Some(credential);
                 vec![]
             }
@@ -4220,36 +3337,15 @@ impl Core {
         credential: &[u8],
         issuer_chain: &[Vec<u8>],
     ) -> bool {
-        let issuers = self.resolve_credential_issuers(issuer_chain);
-        if !Self::issuer_candidates_are_consistent(&issuers) {
-            return false;
-        }
-        let Some(signing_issuer) = issuers.first() else {
+        let Some(issuer_key) = self.resolve_issuer_key(issuer_chain) else {
             return false;
         };
         core::str::from_utf8(credential)
             .ok()
             .and_then(|s| sdjwt::SdJwtVc::parse(s).ok())
-            .and_then(|vc| {
-                let alg = vc.issuer_algorithm().ok()?;
-                if alg != Alg::Es256 {
-                    return None;
-                }
-                let processed = vc
-                    .verify_and_process(&AwsLc, &AwsLc, &signing_issuer.public_key_raw, alg)
-                    .ok()?;
-                let issuer_payload = vc.issuer_payload().ok()?;
-                validate_sdjwt_issuer_profile(&vc, &issuer_payload, &processed).ok()?;
-                let claims = &processed.claims;
-                let issuer_id = claims.get("iss")?.as_str()?;
-                let credential_type = claims.get("vct")?.as_str()?;
-                let authenticated_issuer = self.issuer_for_type(&issuers, credential_type).ok()?;
-                Some(
-                    issuer_id == authenticated_issuer.identity
-                        && self
-                            .catalogue
-                            .issuer_allowed(credential_type, &authenticated_issuer.identity),
-                )
+            .map(|vc| {
+                vc.verify_and_disclose(&AwsLc, &AwsLc, &issuer_key, Alg::Es256)
+                    .is_ok()
             })
             .unwrap_or(false)
     }
@@ -4290,10 +3386,23 @@ impl Core {
                 requested_claims: Vec::new(),
             });
         };
+        // Render claims from the exact frozen holdings, never from the union of all wallet data.
+        // That keeps the screen and the later signed disclosure bound to the same credentials.
+        let mut held = Vec::new();
+        for source in &session.selected_sources {
+            match source {
+                PresentationCredentialReference::SdJwt(holding) => {
+                    held.extend(holding.disclosures_by_claim.keys().cloned());
+                }
+                PresentationCredentialReference::Mdoc(holding) => {
+                    held.extend(mdoc_claim_ids(&holding.issuer_signed));
+                }
+            }
+        }
         ScreenDescription::Consent(ConsentScreen {
             rp_display_name: session.rp_client_id.clone(),
             purpose: session.purpose.clone(),
-            requested_claims: session.selected_revealed_claims.clone(),
+            requested_claims: minimum_claim_set(&session.requested_claims, &held),
         })
     }
 
@@ -4344,11 +3453,7 @@ impl Core {
                 // verifier's key before it leaves the device. Encryption needs RNG (ephemeral key +
                 // IV), so it happens here in the facade, not in the sans-IO `oid4vp` core.
                 match sess.response_mode.as_str() {
-                    "direct_post" => vec![Effect::Http {
-                        profile: HttpDeliveryProfile::Openid4vpDirectPost,
-                        url,
-                        body,
-                    }],
+                    "direct_post" => vec![Effect::Http { url, body }],
                     "direct_post.jwt" => {
                         let Some(key) = sess.response_encryption_key.clone() else {
                             return self.abort_presentation(
@@ -4357,7 +3462,6 @@ impl Core {
                         };
                         match self.encrypt_direct_post_jwt(&body, &key) {
                             Some(encrypted) => vec![Effect::Http {
-                                profile: HttpDeliveryProfile::Openid4vpDirectPost,
                                 url,
                                 body: encrypted,
                             }],
@@ -4417,124 +3521,12 @@ impl Core {
     }
 }
 
-const MAX_DURABLE_TRUST_LIST_BYTES: usize = 4 * 1024 * 1024;
-const MAX_DURABLE_WUA_BYTES: usize = 64 * 1024;
-
-/// One canonical Core checkpoint plus the non-zero authenticated platform-envelope generation it
-/// must be committed under. The byte vector intentionally has no `Debug` implementation: native
-/// diagnostics must use [`DurableFfiError`] codes and never stringify credential-bearing state.
-#[derive(Clone, PartialEq, Eq, uniffi::Record)]
-pub struct FfiDurableCheckpoint {
-    pub generation: u64,
-    pub bytes: Vec<u8>,
-}
-
-/// Stable, low-cardinality failures for the durable UniFFI boundary.
-///
-/// No variant carries source bytes, credential details, identifiers, parser messages, sizes or
-/// generations. Generated Swift/Kotlin bindings can therefore surface the typed case without
-/// accidentally copying authenticated wallet state into logs or crash reports.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]
-pub enum DurableFfiError {
-    InvalidLifecycleState,
-    InvalidEnvironment,
-    TrustEnvironmentRejected,
-    WuaEnvironmentRejected,
-    InvalidGeneration,
-    ResourceLimit,
-    MalformedCheckpoint,
-    UnsupportedCheckpointVersion,
-    ContextRejected,
-    ClockRejected,
-    DeviceKeyRejected,
-    TrustRejected,
-    WuaRejected,
-    AuditLogRejected,
-    CredentialRejected,
-}
-
-impl DurableFfiError {
-    fn code(self) -> &'static str {
-        match self {
-            Self::InvalidLifecycleState => "invalid_lifecycle_state",
-            Self::InvalidEnvironment => "invalid_environment",
-            Self::TrustEnvironmentRejected => "trust_environment_rejected",
-            Self::WuaEnvironmentRejected => "wua_environment_rejected",
-            Self::InvalidGeneration => "invalid_generation",
-            Self::ResourceLimit => "resource_limit",
-            Self::MalformedCheckpoint => "malformed_checkpoint",
-            Self::UnsupportedCheckpointVersion => "unsupported_checkpoint_version",
-            Self::ContextRejected => "context_rejected",
-            Self::ClockRejected => "clock_rejected",
-            Self::DeviceKeyRejected => "device_key_rejected",
-            Self::TrustRejected => "trust_rejected",
-            Self::WuaRejected => "wua_rejected",
-            Self::AuditLogRejected => "audit_log_rejected",
-            Self::CredentialRejected => "credential_rejected",
-        }
-    }
-}
-
-impl core::fmt::Display for DurableFfiError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.code())
-    }
-}
-
-impl std::error::Error for DurableFfiError {}
-
-impl From<durable::DurableCheckpointError> for DurableFfiError {
-    fn from(error: durable::DurableCheckpointError) -> Self {
-        use durable::DurableCheckpointError as Error;
-        match error {
-            Error::ResourceLimit { .. } | Error::SizeOverflow => Self::ResourceLimit,
-            Error::Truncated | Error::NonCanonical | Error::Malformed => Self::MalformedCheckpoint,
-            Error::UnsupportedVersion(_) => Self::UnsupportedCheckpointVersion,
-            Error::InvalidGeneration | Error::GenerationMismatch { .. } => Self::InvalidGeneration,
-            Error::ContextMismatch(_) => Self::ContextRejected,
-            Error::ClockUnavailable | Error::ClockRollback { .. } => Self::ClockRejected,
-            Error::DeviceKeyUnavailable | Error::DeviceKeyInvalid => Self::DeviceKeyRejected,
-            Error::TrustListUnavailable
-            | Error::TrustListExpired
-            | Error::TrustListRollback { .. } => Self::TrustRejected,
-            Error::WuaUnavailable | Error::WuaInvalid => Self::WuaRejected,
-            Error::AuditLogUnavailable
-            | Error::AuditTimestampAfterClock { .. }
-            | Error::TransactionLog(_) => Self::AuditLogRejected,
-            Error::CredentialInvalid { .. }
-            | Error::CredentialEvidenceMismatch { .. }
-            | Error::DuplicateCredential => Self::CredentialRejected,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DurableEnginePhase {
-    Fresh,
-    Prepared,
-    Running,
-    Legacy,
-}
-
-struct WalletEngineInner {
-    core: Core,
-    durable_phase: DurableEnginePhase,
-}
-
-impl WalletEngineInner {
-    fn mark_legacy_if_fresh(&mut self) {
-        if self.durable_phase == DurableEnginePhase::Fresh {
-            self.durable_phase = DurableEnginePhase::Legacy;
-        }
-    }
-}
-
 /// The UniFFI-exposed handle the native shell (Swift now, Kotlin later) holds. It wraps [`Core`]
-/// behind a mutex and speaks the FFI-friendly JSON API. The durable API deliberately requires one
-/// fresh engine to be prepared with the current environment before any restore.
+/// behind a mutex and speaks the FFI-friendly JSON API. The whole native surface is intentionally
+/// tiny: construct, load a credential, and drive events.
 #[derive(uniffi::Object)]
 pub struct WalletEngine {
-    inner: Mutex<WalletEngineInner>,
+    inner: Mutex<Core>,
 }
 
 #[uniffi::export]
@@ -4543,103 +3535,16 @@ impl WalletEngine {
     #[uniffi::constructor]
     pub fn new(wallet_client_id: String, device_key_ref: String) -> Arc<Self> {
         Arc::new(WalletEngine {
-            inner: Mutex::new(WalletEngineInner {
-                core: Core::new(wallet_client_id, device_key_ref),
-                durable_phase: DurableEnginePhase::Fresh,
-            }),
+            inner: Mutex::new(Core::new(wallet_client_id, device_key_ref)),
         })
-    }
-
-    /// Prepare a fresh engine with the live, independently obtained environment required to
-    /// authenticate a durable checkpoint. All inputs are bounded before cryptographic parsing.
-    /// The staged environment replaces the engine only after clock, trust list, device key and WUA
-    /// validation all succeed; no checkpoint bytes are accepted by this method.
-    pub fn prepare_durable_environment(
-        &self,
-        clock_epoch: i64,
-        signed_trust_list: Vec<u8>,
-        operator_public_key: Vec<u8>,
-        device_public_key: Vec<u8>,
-        wua_jwt: Vec<u8>,
-        wua_provider_public_key: Vec<u8>,
-    ) -> Result<(), DurableFfiError> {
-        if clock_epoch <= 0
-            || signed_trust_list.is_empty()
-            || signed_trust_list.len() > MAX_DURABLE_TRUST_LIST_BYTES
-            || wua_jwt.is_empty()
-            || wua_jwt.len() > MAX_DURABLE_WUA_BYTES
-            || !valid_durable_public_key(&operator_public_key)
-            || !valid_durable_public_key(&device_public_key)
-            || !valid_durable_public_key(&wua_provider_public_key)
-        {
-            return Err(DurableFfiError::InvalidEnvironment);
-        }
-
-        let mut inner = self.inner.lock().expect("poisoned");
-        if inner.durable_phase != DurableEnginePhase::Fresh {
-            return Err(DurableFfiError::InvalidLifecycleState);
-        }
-
-        let mut staged = Core::new(
-            inner.core.config.wallet_client_id.clone(),
-            inner.core.config.device_key_ref.clone(),
-        );
-        let effects = staged.handle_event(Event::SetClock { epoch: clock_epoch });
-        if !effects.is_empty() {
-            return Err(DurableFfiError::InvalidEnvironment);
-        }
-        staged
-            .load_trust_list(&signed_trust_list, &operator_public_key)
-            .map_err(|_| DurableFfiError::TrustEnvironmentRejected)?;
-        staged.load_device_key(device_public_key);
-        staged
-            .load_wua(&wua_jwt, &wua_provider_public_key)
-            .map_err(|_| DurableFfiError::WuaEnvironmentRejected)?;
-
-        inner.core = staged;
-        inner.durable_phase = DurableEnginePhase::Prepared;
-        Ok(())
-    }
-
-    /// Export a bounded canonical checkpoint for the next authenticated store generation.
-    pub fn export_durable_checkpoint(
-        &self,
-        generation: u64,
-    ) -> Result<FfiDurableCheckpoint, DurableFfiError> {
-        let inner = self.inner.lock().expect("poisoned");
-        if !matches!(
-            inner.durable_phase,
-            DurableEnginePhase::Prepared | DurableEnginePhase::Running
-        ) {
-            return Err(DurableFfiError::InvalidLifecycleState);
-        }
-        let bytes = inner.core.export_durable_checkpoint(generation)?;
-        Ok(FfiDurableCheckpoint { generation, bytes })
-    }
-
-    /// Restore one authenticated platform-store record. This is legal only after the current
-    /// environment has been prepared and before any event has been driven in this process.
-    pub fn restore_durable_checkpoint(
-        &self,
-        checkpoint: FfiDurableCheckpoint,
-    ) -> Result<(), DurableFfiError> {
-        let mut inner = self.inner.lock().expect("poisoned");
-        if inner.durable_phase != DurableEnginePhase::Prepared {
-            return Err(DurableFfiError::InvalidLifecycleState);
-        }
-        inner
-            .core
-            .restore_durable_checkpoint(&checkpoint.bytes, checkpoint.generation)?;
-        inner.durable_phase = DurableEnginePhase::Running;
-        Ok(())
     }
 
     /// Install/update the signed trusted list. Returns "" on success, else an error string.
     pub fn load_trust_list(&self, signed_list: Vec<u8>, operator_public_key: Vec<u8>) -> String {
-        let mut inner = self.inner.lock().expect("poisoned");
-        inner.mark_legacy_if_fresh();
-        match inner
-            .core
+        match self
+            .inner
+            .lock()
+            .expect("poisoned")
             .load_trust_list(&signed_list, &operator_public_key)
         {
             Ok(()) => String::new(),
@@ -4649,9 +3554,10 @@ impl WalletEngine {
 
     /// Register the device public key the WUA attests (raw uncompressed point).
     pub fn load_device_key(&self, device_public_key: Vec<u8>) {
-        let mut inner = self.inner.lock().expect("poisoned");
-        inner.mark_legacy_if_fresh();
-        inner.core.load_device_key(device_public_key);
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .load_device_key(device_public_key);
     }
 
     /// Verify + cache a URI-bound Token Status List from a trusted status-provider certificate.
@@ -4662,12 +3568,11 @@ impl WalletEngine {
         token: Vec<u8>,
         provider_cert_chain: Vec<Vec<u8>>,
     ) -> String {
-        let mut inner = self.inner.lock().expect("poisoned");
-        inner.mark_legacy_if_fresh();
-        match inner
-            .core
-            .load_status_list(&uri, &token, &provider_cert_chain)
-        {
+        match self.inner.lock().expect("poisoned").load_status_list(
+            &uri,
+            &token,
+            &provider_cert_chain,
+        ) {
             Ok(()) => String::new(),
             Err(e) => format!("{e:?}"),
         }
@@ -4675,9 +3580,12 @@ impl WalletEngine {
 
     /// Verify + store the Wallet Unit Attestation. Returns "" on success, else an error string.
     pub fn load_wua(&self, wua_jwt: Vec<u8>, provider_public_key: Vec<u8>) -> String {
-        let mut inner = self.inner.lock().expect("poisoned");
-        inner.mark_legacy_if_fresh();
-        match inner.core.load_wua(&wua_jwt, &provider_public_key) {
+        match self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .load_wua(&wua_jwt, &provider_public_key)
+        {
             Ok(()) => String::new(),
             Err(e) => e,
         }
@@ -4692,12 +3600,12 @@ impl WalletEngine {
         issuer_cert_chain: Vec<Vec<u8>>,
         issuer_id: String,
     ) -> String {
-        let mut inner = self.inner.lock().expect("poisoned");
-        inner.mark_legacy_if_fresh();
-        match inner
-            .core
-            .ingest_credential(&format, &credential, &issuer_cert_chain, &issuer_id)
-        {
+        match self.inner.lock().expect("poisoned").ingest_credential(
+            &format,
+            &credential,
+            &issuer_cert_chain,
+            &issuer_id,
+        ) {
             Ok(()) => String::new(),
             Err(error) => format!("{error:?}"),
         }
@@ -4719,25 +3627,17 @@ impl WalletEngine {
     /// The transaction (audit) log as JSON — completed presentations, payments, issuances. Records
     /// claim paths + a committing consent hash, never raw claim values (TS06). For the history UI.
     pub fn transaction_log_json(&self) -> String {
-        self.inner
-            .lock()
-            .expect("poisoned")
-            .core
-            .transaction_log_json()
+        self.inner.lock().expect("poisoned").transaction_log_json()
     }
 
     /// Erase one transaction-log entry (right to erasure, TS07). Chain-preserving tombstone.
     pub fn redact_transaction(&self, seq: u64) -> bool {
-        let mut inner = self.inner.lock().expect("poisoned");
-        inner.mark_legacy_if_fresh();
-        inner.core.redact_transaction(seq)
+        self.inner.lock().expect("poisoned").redact_transaction(seq)
     }
 
     /// Erase the entire transaction log (TS07).
     pub fn wipe_transaction_log(&self) {
-        let mut inner = self.inner.lock().expect("poisoned");
-        inner.mark_legacy_if_fresh();
-        inner.core.wipe_transaction_log();
+        self.inner.lock().expect("poisoned").wipe_transaction_log();
     }
 
     /// A privacy-preserving activity report as JSON (TS08).
@@ -4745,13 +3645,12 @@ impl WalletEngine {
         self.inner
             .lock()
             .expect("poisoned")
-            .core
             .transaction_report_json()
     }
 
     /// A portable, integrity-protected export of the holder's wallet data as JSON (TS10).
     pub fn export_json(&self) -> String {
-        self.inner.lock().expect("poisoned").core.export_json()
+        self.inner.lock().expect("poisoned").export_json()
     }
 
     /// The attestation catalogue as JSON (TS11): known credential types + their claims/issuers.
@@ -4759,624 +3658,90 @@ impl WalletEngine {
         self.inner
             .lock()
             .expect("poisoned")
-            .core
             .attestation_catalogue_json()
     }
 
     /// The credentials the wallet holds as a JSON array (`[{vct, issuer, disclosuresByClaim}]`),
     /// including any just obtained via issuance. The wallet home renders these as cards.
     pub fn held_credentials_json(&self) -> String {
-        self.inner
-            .lock()
-            .expect("poisoned")
-            .core
-            .held_credentials_json()
+        self.inner.lock().expect("poisoned").held_credentials_json()
     }
 
     /// Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
     /// event, returns a `{"error": "..."}` object instead of an array.
     pub fn handle_event_json(&self, event_json: String) -> String {
-        let mut inner = self.inner.lock().expect("poisoned");
-        inner.mark_legacy_if_fresh();
-        match inner.core.handle_event_json(&event_json) {
-            Ok(effects) => {
-                if inner.durable_phase == DurableEnginePhase::Prepared {
-                    inner.durable_phase = DurableEnginePhase::Running;
-                }
-                effects
-            }
+        match self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .handle_event_json(&event_json)
+        {
+            Ok(effects) => effects,
             Err(err) => serde_json::json!({ "error": err }).to_string(),
         }
     }
 }
 
-fn valid_durable_public_key(bytes: &[u8]) -> bool {
-    bytes.len() == 65 && bytes.first() == Some(&0x04)
-}
-
 #[cfg(test)]
-mod durable_ffi_tests {
+mod operation_contract_tests {
     use super::*;
 
-    fn prepare(engine: &WalletEngine, scenario: &IssuanceScenario) {
-        engine
-            .prepare_durable_environment(
-                scenario.epoch,
-                scenario.trust_list.clone(),
-                scenario.operator_public_key.clone(),
-                scenario.device_public_key.clone(),
-                scenario.wua_jwt.clone(),
-                scenario.wallet_provider_public_key.clone(),
-            )
-            .unwrap();
-    }
-
-    #[test]
-    fn ffi_requires_prepare_before_export_or_restore() {
-        let engine = WalletEngine::new("wallet.example".into(), "device-key".into());
-        assert_eq!(
-            engine.export_durable_checkpoint(1).err().unwrap(),
-            DurableFfiError::InvalidLifecycleState
-        );
-        assert_eq!(
-            engine
-                .restore_durable_checkpoint(FfiDurableCheckpoint {
-                    generation: 1,
-                    bytes: Vec::new(),
-                })
-                .unwrap_err(),
-            DurableFfiError::InvalidLifecycleState
-        );
-    }
-
-    #[test]
-    fn environment_is_staged_atomically_and_can_only_prepare_a_fresh_engine() {
-        let wallet = DemoWallet::new();
-        let scenario = wallet.issuance_scenario();
-        let engine = WalletEngine::new("wallet.example".into(), "device-key".into());
-
-        let mut invalid_wua = scenario.wua_jwt.clone();
-        invalid_wua[0] ^= 1;
-        assert_eq!(
-            engine
-                .prepare_durable_environment(
-                    scenario.epoch,
-                    scenario.trust_list.clone(),
-                    scenario.operator_public_key.clone(),
-                    scenario.device_public_key.clone(),
-                    invalid_wua,
-                    scenario.wallet_provider_public_key.clone(),
-                )
-                .unwrap_err(),
-            DurableFfiError::WuaEnvironmentRejected
-        );
-
-        // The failed staged environment did not consume or partially mutate the fresh engine.
-        prepare(&engine, &scenario);
-        assert_eq!(
-            engine
-                .prepare_durable_environment(
-                    scenario.epoch,
-                    scenario.trust_list.clone(),
-                    scenario.operator_public_key.clone(),
-                    scenario.device_public_key.clone(),
-                    scenario.wua_jwt.clone(),
-                    scenario.wallet_provider_public_key.clone(),
-                )
-                .unwrap_err(),
-            DurableFfiError::InvalidLifecycleState
-        );
-    }
-
-    #[test]
-    fn legacy_use_cannot_be_relabelled_as_a_prepared_restore_environment() {
-        let wallet = DemoWallet::new();
-        let scenario = wallet.issuance_scenario();
-        let engine = WalletEngine::new("wallet.example".into(), "device-key".into());
-        assert_eq!(
-            engine.handle_event_json(format!(
-                r#"{{"type":"setClock","epoch":{}}}"#,
-                scenario.epoch
-            )),
-            "[]"
-        );
-        assert_eq!(
-            engine
-                .prepare_durable_environment(
-                    scenario.epoch,
-                    scenario.trust_list,
-                    scenario.operator_public_key,
-                    scenario.device_public_key,
-                    scenario.wua_jwt,
-                    scenario.wallet_provider_public_key,
-                )
-                .unwrap_err(),
-            DurableFfiError::InvalidLifecycleState
-        );
-    }
-
-    #[test]
-    fn checkpoint_record_binds_authenticated_generation_and_bounds() {
-        let wallet = DemoWallet::new();
-        let scenario = wallet.issuance_scenario();
-        let source = WalletEngine::new("wallet.example".into(), "device-key".into());
-        prepare(&source, &scenario);
-
-        assert_eq!(
-            source.export_durable_checkpoint(0).err().unwrap(),
-            DurableFfiError::InvalidGeneration
-        );
-        let checkpoint = source.export_durable_checkpoint(2).unwrap();
-        assert_eq!(checkpoint.generation, 2);
-        assert!(!checkpoint.bytes.is_empty());
-        assert!(checkpoint.bytes.len() <= durable::MAX_CHECKPOINT_BYTES);
-
-        let target = WalletEngine::new("wallet.example".into(), "device-key".into());
-        prepare(&target, &scenario);
-        assert_eq!(
-            target
-                .restore_durable_checkpoint(FfiDurableCheckpoint {
-                    generation: 1,
-                    bytes: checkpoint.bytes.clone(),
-                })
-                .unwrap_err(),
-            DurableFfiError::InvalidGeneration
-        );
-
-        // Failed restore is atomic and leaves the prepared engine able to accept the exact record.
-        target.restore_durable_checkpoint(checkpoint).unwrap();
-        assert!(target.export_durable_checkpoint(3).is_ok());
-
-        let oversized = WalletEngine::new("wallet.example".into(), "device-key".into());
-        prepare(&oversized, &scenario);
-        assert_eq!(
-            oversized
-                .restore_durable_checkpoint(FfiDurableCheckpoint {
-                    generation: 1,
-                    bytes: vec![0; durable::MAX_CHECKPOINT_BYTES + 1],
-                })
-                .unwrap_err(),
-            DurableFfiError::ResourceLimit
-        );
-    }
-
-    #[test]
-    fn ffi_restore_does_not_revive_a_process_operation_or_protocol_session() {
-        let wallet = DemoWallet::new();
-        let scenario = wallet.issuance_scenario();
-        let source = WalletEngine::new("wallet.example".into(), "device-key".into());
-        prepare(&source, &scenario);
-
-        let output =
-            source.handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#.to_string());
-        let operation_id = serde_json::from_str::<serde_json::Value>(&output)
+    fn operation_id(output: &str) -> u64 {
+        serde_json::from_str::<serde_json::Value>(output).unwrap()[0]["operationId"]
+            .as_u64()
             .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .find_map(|effect| {
-                effect
-                    .get("operationId")
-                    .and_then(serde_json::Value::as_u64)
-            })
-            .unwrap();
-        let checkpoint = source.export_durable_checkpoint(7).unwrap();
+    }
 
-        let restarted = WalletEngine::new("wallet.example".into(), "device-key".into());
-        prepare(&restarted, &scenario);
-        restarted.restore_durable_checkpoint(checkpoint).unwrap();
-        let stale = restarted.handle_event_json(format!(
-            r#"{{"type":"operationSucceeded","operationId":{operation_id}}}"#
-        ));
-        let value: serde_json::Value = serde_json::from_str(&stale).unwrap();
-        assert!(value.get("error").is_some());
+    fn emit(core: &mut Core, flow: ActiveFlow, effect: Effect) -> u64 {
+        core.active = flow;
+        let output = core.serialize_wire_effects(vec![effect]).unwrap();
+        operation_id(&output)
+    }
+
+    fn fail(core: &mut Core, operation_id: u64) -> String {
+        core.handle_event_json(&format!(
+            r#"{{"type":"operationFailed","operationId":{operation_id},"failure":"transport"}}"#
+        ))
+        .unwrap()
     }
 
     #[test]
-    fn ffi_errors_never_format_source_or_checkpoint_material() {
-        let secret = "holder-secret-credential-value";
-        for error in [
-            DurableFfiError::InvalidLifecycleState,
-            DurableFfiError::InvalidEnvironment,
-            DurableFfiError::TrustEnvironmentRejected,
-            DurableFfiError::WuaEnvironmentRejected,
-            DurableFfiError::InvalidGeneration,
-            DurableFfiError::ResourceLimit,
-            DurableFfiError::MalformedCheckpoint,
-            DurableFfiError::UnsupportedCheckpointVersion,
-            DurableFfiError::ContextRejected,
-            DurableFfiError::ClockRejected,
-            DurableFfiError::DeviceKeyRejected,
-            DurableFfiError::TrustRejected,
-            DurableFfiError::WuaRejected,
-            DurableFfiError::AuditLogRejected,
-            DurableFfiError::CredentialRejected,
-        ] {
-            let display = error.to_string();
-            let debug = format!("{error:?}");
-            assert!(!display.contains(secret));
-            assert!(!debug.contains(secret));
-            assert!(!display.contains('{'));
-            assert!(!display.contains('['));
-        }
-    }
-}
-
-#[cfg(test)]
-mod audit_log_failure_tests {
-    use super::*;
-
-    fn audit_entry(epoch: i64) -> txnlog::NewEntry {
-        txnlog::NewEntry {
-            epoch,
-            kind: txnlog::Kind::Transfer,
-            counterparty: "peer-wallet".into(),
-            consent_hash: [1u8; 32],
-            claim_paths: Vec::new(),
-            outcome: txnlog::Outcome::Completed,
-            payment: None,
-        }
-    }
-
-    fn bulky_audit_entry(epoch: i64) -> txnlog::NewEntry {
-        txnlog::NewEntry {
-            epoch,
-            kind: txnlog::Kind::Presentation,
-            counterparty: "rp.example".into(),
-            consent_hash: [1u8; 32],
-            claim_paths: (0..100)
-                .map(|index| format!("{index:03}:{}", "x".repeat(496)))
-                .collect(),
-            outcome: txnlog::Outcome::Completed,
-            payment: None,
-        }
-    }
-
-    fn near_capacity_log() -> txnlog::TransactionLog {
-        let mut log = txnlog::TransactionLog::new();
-        let mut epoch = 0i64;
-        while log.can_guarantee_max_entry() {
-            log.append(&AwsLc, bulky_audit_entry(epoch)).unwrap();
-            epoch += 1;
-        }
-        assert!(!log.is_exhausted());
-        assert!(!log.can_guarantee_max_entry());
-        log
-    }
-
-    fn has_error_code(effects: &[Effect], expected: &str) -> bool {
-        effects.iter().any(|effect| {
-            matches!(
-                effect,
-                Effect::Render {
-                    screen: ScreenDescription::Error { code, .. }
-                } if code == expected
-            )
-        })
-    }
-
-    #[test]
-    fn append_validation_failure_blocks_later_auditable_flows_without_panicking() {
+    fn missing_mismatched_and_stale_callbacks_are_rejected() {
         let mut core = Core::new("wallet.example", "device-key");
-        core.issuer_id_current = "x".repeat(txnlog::MAX_COUNTERPARTY_BYTES + 1);
-        assert!(matches!(
-            core.record_issuance("dc+sd-jwt".into()),
-            Err(txnlog::Error::FieldTooLong {
-                field: txnlog::TextField::Counterparty,
-                ..
-            })
-        ));
-        assert!(!core.audit_log_available());
-        assert!(core.transaction_log().is_empty());
-
-        let effects = core.handle_event(Event::AuthorizationRequestReceived {
-            request: Vec::new(),
-        });
-        assert!(has_error_code(&effects, "audit_log_unavailable"));
-        assert!(effects.iter().any(|effect| matches!(effect, Effect::Close)));
-        assert_eq!(core.active, ActiveFlow::None);
-    }
-
-    #[test]
-    fn explicit_history_wipe_clears_the_fault_and_allows_a_fresh_chain() {
-        let mut core = Core::new("wallet.example", "device-key");
-        core.issuer_id_current = "x".repeat(txnlog::MAX_COUNTERPARTY_BYTES + 1);
-        core.record_issuance("dc+sd-jwt".into()).unwrap_err();
-
-        core.wipe_transaction_log();
-        assert!(core.audit_log_available());
-        core.issuer_id_current = "https://issuer.example".into();
-        core.record_issuance("dc+sd-jwt".into()).unwrap();
-        assert_eq!(core.transaction_log().len(), 1);
-        assert!(core.audit_log_available());
-    }
-
-    #[test]
-    fn exhausted_history_blocks_a_transfer_before_progress_or_storage() {
-        let mut core = Core::new("wallet.example", "device-key");
-        for epoch in 0..txnlog::MAX_ENTRIES {
-            core.log
-                .append(&AwsLc, audit_entry(i64::try_from(epoch).unwrap()))
-                .unwrap();
-        }
-        assert!(core.log.is_exhausted());
-
-        let effects = core.handle_event(Event::WalletTransferOfferCreated);
-        assert!(has_error_code(&effects, "audit_log_capacity_exhausted"));
-        assert_eq!(core.active, ActiveFlow::None);
-        assert!(matches!(core.w2w, w2w::State::Idle));
-        assert!(core.w2w_credential.is_none());
-        assert_eq!(core.transaction_log().len(), txnlog::MAX_ENTRIES);
-    }
-
-    #[test]
-    fn near_aggregate_limit_rejects_every_auditable_flow_before_consequential_effects() {
-        let near_capacity = near_capacity_log();
-        let original_head = near_capacity.head();
-        let cases = [
-            Event::AuthorizationRequestReceived {
-                request: Vec::new(),
+        let sign_id = emit(
+            &mut core,
+            ActiveFlow::Presentation,
+            Effect::Sign {
+                key_ref: "device-key".into(),
+                payload: vec![1],
             },
-            Event::PaymentAuthorizationRequestReceived {
-                request: Vec::new(),
-            },
-            Event::CredentialOfferReceived {
-                offer: Vec::new(),
-                issuer_cert_chain: Vec::new(),
-                issuer_id: String::new(),
-            },
-            Event::WalletTransferOfferCreated,
-            Event::WalletTransferReceived {
-                credential: Vec::new(),
-                issuer_cert_chain: Vec::new(),
-                sender_public_key: Vec::new(),
-                sender_signature: Vec::new(),
-                sender_consent_hash: Vec::new(),
-                nonce: 1,
-            },
-        ];
+        );
 
-        for event in cases {
-            let mut core = Core::new("wallet.example", "device-key");
-            core.log = near_capacity.clone();
-            let effects = core.handle_event(event);
-            assert!(has_error_code(&effects, "audit_log_capacity_exhausted"));
-            assert!(effects.iter().all(|effect| matches!(
-                effect,
-                Effect::Render {
-                    screen: ScreenDescription::Error { .. }
-                } | Effect::Close
-            )));
-            assert_eq!(core.transaction_log().head(), original_head);
-            assert!(core.credentials.is_empty());
-            assert!(core.mdoc_holdings.is_empty());
-            assert!(core.w2w_credential.is_none());
-            assert_eq!(core.active, ActiveFlow::None);
-        }
-    }
-
-    #[test]
-    fn oversized_payment_audit_fields_fail_before_confirmation_or_signing() {
-        let mut core = Core::new("wallet.example", "device-key");
-        let request = serde_json::to_vec(&serde_json::json!({
-            "creditor_name": "x".repeat(txnlog::MAX_PAYMENT_PAYEE_BYTES + 1),
-            "creditor_account": "DE89370400440532013000",
-            "amount_minor": 100,
-            "currency": "EUR",
-            "transaction_id": "txn-1",
-            "nonce": 1,
-            "response_uri": "https://psp.example/authorize"
-        }))
-        .unwrap();
-
-        let effects = core.handle_event(Event::PaymentAuthorizationRequestReceived { request });
-        assert!(has_error_code(&effects, "audit_log_entry_invalid"));
-        assert!(effects.iter().all(|effect| matches!(
-            effect,
-            Effect::Render {
-                screen: ScreenDescription::Error { .. }
-            } | Effect::Close
-        )));
-        assert!(core.pay_summary.is_none());
-        assert!(core.transaction_log().is_empty());
-        assert_eq!(core.active, ActiveFlow::None);
-        assert!(core.audit_log_available());
-
-        let valid_request = serde_json::to_vec(&serde_json::json!({
-            "creditor_name": "Acme Store",
-            "creditor_account": "DE89370400440532013000",
-            "amount_minor": 100,
-            "currency": "EUR",
-            "transaction_id": "txn-2",
-            "nonce": 2,
-            "response_uri": "https://psp.example/authorize"
-        }))
-        .unwrap();
-        let valid_effects = core.handle_event(Event::PaymentAuthorizationRequestReceived {
-            request: valid_request,
-        });
-        assert!(valid_effects.iter().any(|effect| matches!(
-            effect,
-            Effect::Render {
-                screen: ScreenDescription::PaymentConfirmation(_)
-            }
-        )));
-        assert_eq!(core.active, ActiveFlow::Payment);
-    }
-
-    #[test]
-    fn redaction_recovers_dynamic_aggregate_capacity_without_history_wipe() {
-        let mut core = Core::new("wallet.example", "device-key");
-        core.log = near_capacity_log();
-        let head = core.log.head();
-
-        let rejected = core.handle_event(Event::WalletTransferOfferCreated);
-        assert!(has_error_code(&rejected, "audit_log_capacity_exhausted"));
-        assert!(!core.audit_log_available());
-        assert!(core.audit_log_available, "capacity must not latch a fault");
-
-        assert!(core.redact_transaction(0));
-        assert_eq!(core.log.head(), head);
-        assert!(core.audit_log_available());
-
-        let admitted = core.handle_event(Event::WalletTransferOfferCreated);
-        assert!(admitted
-            .iter()
-            .any(|effect| matches!(effect, Effect::PublishTransferOffer { .. })));
-        assert!(!has_error_code(&admitted, "audit_log_capacity_exhausted"));
-        assert_eq!(core.active, ActiveFlow::WalletTransfer);
-    }
-}
-
-#[cfg(test)]
-mod structured_sdjwt_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn disclosure(
-        raw: &str,
-        digest: &str,
-        path: Vec<sdjwt::ClaimPathElement>,
-        parent_digest: Option<&str>,
-        value: serde_json::Value,
-    ) -> sdjwt::VerifiedDisclosure {
-        sdjwt::VerifiedDisclosure {
-            raw: raw.into(),
-            digest: digest.into(),
-            path,
-            parent_digest: parent_digest.map(String::from),
-            value,
-        }
-    }
-
-    fn holding() -> AuthenticatedSdJwtHolding {
-        use sdjwt::ClaimPathElement::{Index, Name};
-
-        AuthenticatedSdJwtHolding {
-            processed: sdjwt::ProcessedSdJwt {
-                claims: json!({
-                    "iss":"https://issuer.example",
-                    "vct":"urn:eudi:pid:1",
-                    "cnf":{"jwk":{"kty":"EC"}},
-                    "family_name":"Permanent",
-                    "address":{"country":"DE", "street":"Main", "locality":"Berlin"},
-                    "contacts":[
-                        {"kind":"phone", "value":"111"},
-                        {"kind":"email", "value":"alice@example.com"},
-                        {"kind":"backup", "value":"backup@example.com"}
-                    ]
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-                disclosures: vec![
-                    disclosure(
-                        "address-raw",
-                        "address",
-                        vec![Name("address".into())],
-                        None,
-                        json!({"country":"DE"}),
-                    ),
-                    disclosure(
-                        "street-raw",
-                        "street",
-                        vec![Name("address".into()), Name("street".into())],
-                        Some("address"),
-                        json!("Main"),
-                    ),
-                    disclosure(
-                        "locality-raw",
-                        "locality",
-                        vec![Name("address".into()), Name("locality".into())],
-                        Some("address"),
-                        json!("Berlin"),
-                    ),
-                    disclosure(
-                        "contact-0-raw",
-                        "contact-0",
-                        vec![Name("contacts".into()), Index(0)],
-                        None,
-                        json!({"kind":"phone", "value":"111"}),
-                    ),
-                    disclosure(
-                        "contact-1-raw",
-                        "contact-1",
-                        vec![Name("contacts".into()), Index(1)],
-                        None,
-                        json!({"kind":"email", "value":"alice@example.com"}),
-                    ),
-                    disclosure(
-                        "contact-2-raw",
-                        "contact-2",
-                        vec![Name("contacts".into()), Index(2)],
-                        None,
-                        json!({"kind":"backup", "value":"backup@example.com"}),
-                    ),
-                ],
-            },
-        }
-    }
-
-    mod operation_contract_tests {
-        use super::*;
-
-        fn operation_id(output: &str) -> u64 {
-            serde_json::from_str::<serde_json::Value>(output).unwrap()[0]["operationId"]
-                .as_u64()
-                .unwrap()
-        }
-
-        fn emit(core: &mut Core, flow: ActiveFlow, effect: Effect) -> u64 {
-            core.active = flow;
-            let output = core.serialize_wire_effects(vec![effect]).unwrap();
-            operation_id(&output)
-        }
-
-        fn fail(core: &mut Core, operation_id: u64) -> String {
-            core.handle_event_json(&format!(
-                r#"{{"type":"operationFailed","operationId":{operation_id},"failure":"transport"}}"#
+        assert!(core
+            .handle_event_json(r#"{"type":"deviceSignatureProduced","signature":[1]}"#)
+            .unwrap_err()
+            .contains("missing or invalid operationId"));
+        assert!(core
+            .handle_event_json(&format!(
+                r#"{{"type":"presentationDelivered","operationId":{sign_id}}}"#
             ))
-            .unwrap()
-        }
-
-        #[test]
-        fn missing_mismatched_and_stale_callbacks_are_rejected() {
-            let mut core = Core::new("wallet.example", "device-key");
-            let sign_id = emit(
-                &mut core,
-                ActiveFlow::Presentation,
-                Effect::Sign {
-                    key_ref: "device-key".into(),
-                    payload: vec![1],
-                },
-            );
-
-            assert!(core
-                .handle_event_json(r#"{"type":"deviceSignatureProduced","signature":[1]}"#)
-                .unwrap_err()
-                .contains("missing or invalid operationId"));
-            assert!(core
-                .handle_event_json(&format!(
-                    r#"{{"type":"presentationDelivered","operationId":{sign_id}}}"#
-                ))
-                .unwrap_err()
-                .contains("expects deviceSignatureProduced"));
-            assert!(fail(&mut core, sign_id).contains("operation_delivery_failed"));
-            assert!(core
+            .unwrap_err()
+            .contains("expects deviceSignatureProduced"));
+        assert!(fail(&mut core, sign_id).contains("operation_delivery_failed"));
+        assert!(core
             .handle_event_json(&format!(
                 r#"{{"type":"deviceSignatureProduced","operationId":{sign_id},"signature":[1]}}"#
             ))
             .unwrap_err()
             .contains("stale or unknown operationId"));
-        }
+    }
 
-        #[test]
-        fn stale_http_status_and_credential_callbacks_are_rejected_after_recovery() {
-            let cases = [
+    #[test]
+    fn stale_http_status_and_credential_callbacks_are_rejected_after_recovery() {
+        let cases = [
             (
                 ActiveFlow::Presentation,
                 Effect::Http {
-                    profile: HttpDeliveryProfile::Openid4vpDirectPost,
                     url: "https://rp.example/cb".into(),
                     body: vec![],
                 },
@@ -5399,490 +3764,337 @@ mod structured_sdjwt_tests {
             ),
         ];
 
-            for (flow, effect, event_type, fields) in cases {
-                let mut core = Core::new("wallet.example", "device-key");
-                let operation_id = emit(&mut core, flow, effect);
-                fail(&mut core, operation_id);
-                let error = core
-                    .handle_event_json(&format!(
-                        r#"{{"type":"{event_type}","operationId":{operation_id}{fields}}}"#
-                    ))
-                    .unwrap_err();
-                assert!(error.contains("stale or unknown operationId"), "{error}");
-            }
-        }
-
-        #[test]
-        fn exact_paths_select_only_parent_dependencies_and_never_array_siblings() {
-            use sdjwt::ClaimPathElement::{Index, Name};
-
-            let selection = select_authenticated_sdjwt_disclosures_for_paths(
-                &holding(),
-                &[
-                    vec![Name("address".into()), Name("street".into())],
-                    vec![Name("contacts".into()), Index(1), Name("kind".into())],
-                ],
-            );
-            assert_eq!(
-                selection.disclosures,
-                vec!["address-raw", "street-raw", "contact-1-raw"]
-            );
-            for visible in [
-                "family_name",
-                "address.country",
-                "address.street",
-                "contacts[1].kind",
-                "contacts[1].value",
-            ] {
-                assert!(selection.revealed_claims.contains(&visible.to_string()));
-            }
-            assert!(!selection
-                .revealed_claims
-                .contains(&"address.locality".to_string()));
-            assert!(!selection
-                .revealed_claims
-                .contains(&"contacts[0].value".to_string()));
-            assert!(!selection
-                .revealed_claims
-                .contains(&"contacts[2].value".to_string()));
-        }
-
-        #[test]
-        fn no_requested_disclosure_keeps_only_unavoidable_permanent_pii_visible() {
-            let selection = select_authenticated_sdjwt_disclosures_for_paths(&holding(), &[]);
-            assert!(selection.disclosures.is_empty());
-            assert_eq!(selection.revealed_claims, vec!["family_name"]);
-        }
-
-        #[test]
-        fn canonical_path_rendering_cannot_confuse_literal_and_nested_claim_names() {
-            use sdjwt::ClaimPathElement::Name;
-
-            let literal = sdjwt_path_string(&[Name("a.b".into())]);
-            let nested = sdjwt_path_string(&[Name("a".into()), Name("b".into())]);
-            assert_eq!(literal, r#"["a.b"]"#);
-            assert_eq!(nested, "a.b");
-            assert_ne!(literal, nested);
-            assert_ne!(
-                sdjwt_path_string(&[Name("items[0]".into())]),
-                sdjwt_path_string(&[Name("items".into()), sdjwt::ClaimPathElement::Index(0)])
-            );
-        }
-
-        #[test]
-        fn mdoc_paths_require_exact_namespace_and_element_components() {
-            assert_eq!(
-                requested_mdoc_path(&[json!("namespace"), json!("element")]),
-                Some(("namespace".into(), "element".into()))
-            );
-            assert!(
-                requested_mdoc_path(&[json!("namespace"), json!({}), json!("element")]).is_none()
-            );
-            assert!(requested_mdoc_path(&[json!("namespace"), json!("")]).is_none());
-        }
-
-        #[test]
-        fn status_operation_is_bound_to_the_exact_resource() {
+        for (flow, effect, event_type, fields) in cases {
             let mut core = Core::new("wallet.example", "device-key");
-            let operation_id = emit(
-                &mut core,
-                ActiveFlow::Presentation,
-                Effect::FetchStatusList {
-                    uri: "https://status.example/one".into(),
-                },
-            );
+            let operation_id = emit(&mut core, flow, effect);
+            fail(&mut core, operation_id);
             let error = core
+                .handle_event_json(&format!(
+                    r#"{{"type":"{event_type}","operationId":{operation_id}{fields}}}"#
+                ))
+                .unwrap_err();
+            assert!(error.contains("stale or unknown operationId"), "{error}");
+        }
+    }
+
+    #[test]
+    fn status_operation_is_bound_to_the_exact_resource() {
+        let mut core = Core::new("wallet.example", "device-key");
+        let operation_id = emit(
+            &mut core,
+            ActiveFlow::Presentation,
+            Effect::FetchStatusList {
+                uri: "https://status.example/one".into(),
+            },
+        );
+        let error = core
             .handle_event_json(&format!(
                 r#"{{"type":"statusListReceived","operationId":{operation_id},"uri":"https://status.example/two","httpStatus":200,"token":[],"providerCertChain":[]}}"#
             ))
             .unwrap_err();
-            assert!(error.contains("different status resource"));
-            assert!(core.pending_operations.contains_key(&operation_id));
-        }
+        assert!(error.contains("different status resource"));
+        assert!(core.pending_operations.contains_key(&operation_id));
+    }
 
-        #[test]
-        fn callback_is_rejected_when_its_owning_flow_is_not_active() {
-            let mut core = Core::new("wallet.example", "device-key");
-            let operation_id = emit(
-                &mut core,
-                ActiveFlow::Presentation,
-                Effect::Sign {
-                    key_ref: "device-key".into(),
-                    payload: vec![1],
-                },
-            );
-            // Model a corrupted/raced active marker without clearing the map. The JSON boundary must
-            // verify both possession of the operation id and ownership by the currently active flow.
-            core.active = ActiveFlow::Payment;
+    #[test]
+    fn callback_is_rejected_when_its_owning_flow_is_not_active() {
+        let mut core = Core::new("wallet.example", "device-key");
+        let operation_id = emit(
+            &mut core,
+            ActiveFlow::Presentation,
+            Effect::Sign {
+                key_ref: "device-key".into(),
+                payload: vec![1],
+            },
+        );
+        // Model a corrupted/raced active marker without clearing the map. The JSON boundary must
+        // verify both possession of the operation id and ownership by the currently active flow.
+        core.active = ActiveFlow::Payment;
 
-            let error = core
+        let error = core
             .handle_event_json(&format!(
                 r#"{{"type":"deviceSignatureProduced","operationId":{operation_id},"signature":[1]}}"#
             ))
             .unwrap_err();
 
-            assert!(error.contains("inactive wallet flow"));
-            assert!(core.pending_operations.contains_key(&operation_id));
-        }
+        assert!(error.contains("inactive wallet flow"));
+        assert!(core.pending_operations.contains_key(&operation_id));
+    }
 
-        #[test]
-        fn delivery_acknowledgements_are_rejected_before_the_protocol_is_ready() {
-            let cases = [
-                (
-                    ActiveFlow::Presentation,
-                    HttpDeliveryProfile::Openid4vpDirectPost,
-                    "presentationDelivered",
-                ),
-                (
-                    ActiveFlow::Payment,
-                    HttpDeliveryProfile::PaymentAuthorization,
-                    "paymentAuthorizationDelivered",
-                ),
-                (
-                    ActiveFlow::Qes,
-                    HttpDeliveryProfile::QesAuthorization,
-                    "qesAuthorizationDelivered",
-                ),
-            ];
+    #[test]
+    fn delivery_acknowledgements_are_rejected_before_the_protocol_is_ready() {
+        let cases = [
+            (ActiveFlow::Presentation, "presentationDelivered"),
+            (ActiveFlow::Payment, "paymentAuthorizationDelivered"),
+            (ActiveFlow::Qes, "qesAuthorizationDelivered"),
+        ];
 
-            for (flow, profile, event_type) in cases {
-                let mut core = Core::new("wallet.example", "device-key");
-                let operation_id = emit(
-                    &mut core,
-                    flow,
-                    Effect::Http {
-                        profile,
-                        url: "https://service.example/callback".into(),
-                        body: vec![],
-                    },
-                );
-
-                let error = core
-                    .handle_event_json(&format!(
-                        r#"{{"type":"{event_type}","operationId":{operation_id}}}"#
-                    ))
-                    .unwrap_err();
-
-                assert!(error.contains("invalid in the current state"), "{error}");
-                assert!(core.pending_operations.contains_key(&operation_id));
-            }
-        }
-
-        #[test]
-        fn http_delivery_profile_must_match_the_active_flow_before_wire_emission() {
-            let cases = [
-                (
-                    ActiveFlow::Presentation,
-                    HttpDeliveryProfile::PaymentAuthorization,
-                ),
-                (ActiveFlow::Payment, HttpDeliveryProfile::QesAuthorization),
-                (ActiveFlow::Qes, HttpDeliveryProfile::Openid4vpDirectPost),
-            ];
-
-            for (flow, profile) in cases {
-                let mut core = Core::new("wallet.example", "device-key");
-                core.active = flow;
-                let next_operation_id = core.next_operation_id;
-                let error = core
-                    .serialize_wire_effects(vec![Effect::Http {
-                        profile,
-                        url: "https://service.example/callback".into(),
-                        body: vec![],
-                    }])
-                    .unwrap_err();
-
-                assert!(error.contains("does not match active flow"), "{error}");
-                assert_eq!(core.next_operation_id, next_operation_id);
-                assert!(core.pending_operations.is_empty());
-            }
-        }
-
-        #[test]
-        fn wire_http_effect_carries_an_exact_profile_and_result_pair() {
-            let cases = [
-                (
-                    ActiveFlow::Presentation,
-                    HttpDeliveryProfile::Openid4vpDirectPost,
-                    "openid4vpDirectPost",
-                    "presentationDelivered",
-                ),
-                (
-                    ActiveFlow::Payment,
-                    HttpDeliveryProfile::PaymentAuthorization,
-                    "paymentAuthorization",
-                    "paymentAuthorizationDelivered",
-                ),
-                (
-                    ActiveFlow::Qes,
-                    HttpDeliveryProfile::QesAuthorization,
-                    "qesAuthorization",
-                    "qesAuthorizationDelivered",
-                ),
-            ];
-
-            for (flow, profile, expected_profile, expected_result) in cases {
-                let mut core = Core::new("wallet.example", "device-key");
-                core.active = flow;
-                let output = core
-                    .serialize_wire_effects(vec![Effect::Http {
-                        profile,
-                        url: "https://service.example/callback".into(),
-                        body: vec![],
-                    }])
-                    .unwrap();
-                let value: serde_json::Value = serde_json::from_str(&output).unwrap();
-                let effect = &value.as_array().unwrap()[0];
-                assert_eq!(effect["profile"], expected_profile);
-                assert_eq!(effect["resultType"], expected_result);
-            }
-        }
-
-        #[test]
-        fn old_consent_cannot_authorize_a_newer_flow() {
-            let consent = || Effect::Render {
-                screen: ScreenDescription::Consent(ConsentScreen {
-                    rp_display_name: "RP".into(),
-                    purpose: "age".into(),
-                    requested_claims: vec!["age_over_18".into()],
-                }),
-            };
+        for (flow, event_type) in cases {
             let mut core = Core::new("wallet.example", "device-key");
-            core.begin_flow(ActiveFlow::Presentation);
-            let old_effect = consent();
-            let Effect::Render { screen: old_screen } = &old_effect else {
-                unreachable!()
-            };
-            core.session = Some(SessionInfo {
-                consent_hash: presenter::consent_hash(&AwsLc, old_screen),
-                ..SessionInfo::default()
-            });
-            let old_id = operation_id(&core.serialize_wire_effects(vec![old_effect]).unwrap());
-            core.begin_flow(ActiveFlow::Presentation);
-            let current_effect = consent();
-            let Effect::Render {
-                screen: current_screen,
-            } = &current_effect
-            else {
-                unreachable!()
-            };
-            core.session = Some(SessionInfo {
-                consent_hash: presenter::consent_hash(&AwsLc, current_screen),
-                ..SessionInfo::default()
-            });
-            let current_id =
-                operation_id(&core.serialize_wire_effects(vec![current_effect]).unwrap());
+            let operation_id = emit(
+                &mut core,
+                flow,
+                Effect::Http {
+                    url: "https://service.example/callback".into(),
+                    body: vec![],
+                },
+            );
 
             let error = core
                 .handle_event_json(&format!(
-                    r#"{{"type":"userConsented","operationId":{old_id}}}"#
+                    r#"{{"type":"{event_type}","operationId":{operation_id}}}"#
                 ))
                 .unwrap_err();
-            assert!(error.contains("stale or unknown operationId"));
-            assert!(core.pending_operations.contains_key(&current_id));
-            assert!(core
-                .handle_event_json(&format!(
-                    r#"{{"type":"operationCancelled","operationId":{current_id}}}"#
-                ))
-                .unwrap()
-                .contains("operation_cancelled"));
-        }
 
-        #[test]
-        fn approval_requires_the_exact_rendered_authorization_hash() {
-            let screen = ScreenDescription::Consent(ConsentScreen {
+            assert!(error.contains("invalid in the current state"), "{error}");
+            assert!(core.pending_operations.contains_key(&operation_id));
+        }
+    }
+
+    #[test]
+    fn old_consent_cannot_authorize_a_newer_flow() {
+        let consent = || Effect::Render {
+            screen: ScreenDescription::Consent(ConsentScreen {
                 rp_display_name: "RP".into(),
                 purpose: "age".into(),
                 requested_claims: vec!["age_over_18".into()],
-            });
-            let expected_hash = presenter::consent_hash(&AwsLc, &screen);
-            let mut core = Core::new("wallet.example", "device-key");
-            core.active = ActiveFlow::Presentation;
-            core.session = Some(SessionInfo {
-                consent_hash: expected_hash,
-                ..SessionInfo::default()
-            });
-            let output = core
-                .serialize_wire_effects(vec![Effect::Render { screen }])
-                .unwrap();
-            let operation_id = operation_id(&output);
-            let wire_hash = serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]
-                ["authorizationHash"]
-                .clone();
-            assert_eq!(wire_hash, serde_json::to_value(expected_hash).unwrap());
+            }),
+        };
+        let mut core = Core::new("wallet.example", "device-key");
+        core.begin_flow(ActiveFlow::Presentation);
+        let old_effect = consent();
+        let Effect::Render { screen: old_screen } = &old_effect else {
+            unreachable!()
+        };
+        core.session = Some(SessionInfo {
+            consent_hash: presenter::consent_hash(&AwsLc, old_screen),
+            ..SessionInfo::default()
+        });
+        let old_id = operation_id(&core.serialize_wire_effects(vec![old_effect]).unwrap());
+        core.begin_flow(ActiveFlow::Presentation);
+        let current_effect = consent();
+        let Effect::Render {
+            screen: current_screen,
+        } = &current_effect
+        else {
+            unreachable!()
+        };
+        core.session = Some(SessionInfo {
+            consent_hash: presenter::consent_hash(&AwsLc, current_screen),
+            ..SessionInfo::default()
+        });
+        let current_id = operation_id(&core.serialize_wire_effects(vec![current_effect]).unwrap());
 
-            let missing = core
-                .handle_event_json(&format!(
-                    r#"{{"type":"userConsented","operationId":{operation_id}}}"#
-                ))
-                .unwrap_err();
-            assert!(missing.contains("missing or invalid authorizationHash"));
-            let wrong_hash = serde_json::to_string(&[0u8; 32]).unwrap();
-            let mismatch = core
+        let error = core
+            .handle_event_json(&format!(
+                r#"{{"type":"userConsented","operationId":{old_id}}}"#
+            ))
+            .unwrap_err();
+        assert!(error.contains("stale or unknown operationId"));
+        assert!(core.pending_operations.contains_key(&current_id));
+        assert!(core
+            .handle_event_json(&format!(
+                r#"{{"type":"operationCancelled","operationId":{current_id}}}"#
+            ))
+            .unwrap()
+            .contains("operation_cancelled"));
+    }
+
+    #[test]
+    fn approval_requires_the_exact_rendered_authorization_hash() {
+        let screen = ScreenDescription::Consent(ConsentScreen {
+            rp_display_name: "RP".into(),
+            purpose: "age".into(),
+            requested_claims: vec!["age_over_18".into()],
+        });
+        let expected_hash = presenter::consent_hash(&AwsLc, &screen);
+        let mut core = Core::new("wallet.example", "device-key");
+        core.active = ActiveFlow::Presentation;
+        core.session = Some(SessionInfo {
+            consent_hash: expected_hash,
+            ..SessionInfo::default()
+        });
+        let output = core
+            .serialize_wire_effects(vec![Effect::Render { screen }])
+            .unwrap();
+        let operation_id = operation_id(&output);
+        let wire_hash = serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]
+            ["authorizationHash"]
+            .clone();
+        assert_eq!(wire_hash, serde_json::to_value(expected_hash).unwrap());
+
+        let missing = core
+            .handle_event_json(&format!(
+                r#"{{"type":"userConsented","operationId":{operation_id}}}"#
+            ))
+            .unwrap_err();
+        assert!(missing.contains("missing or invalid authorizationHash"));
+        let wrong_hash = serde_json::to_string(&[0u8; 32]).unwrap();
+        let mismatch = core
             .handle_event_json(&format!(
                 r#"{{"type":"userConsented","operationId":{operation_id},"authorizationHash":{wrong_hash}}}"#
             ))
             .unwrap_err();
-            assert!(mismatch.contains("does not match the rendered screen"));
-            assert!(core.pending_operations.contains_key(&operation_id));
+        assert!(mismatch.contains("does not match the rendered screen"));
+        assert!(core.pending_operations.contains_key(&operation_id));
 
-            let different_screen = ScreenDescription::Consent(ConsentScreen {
-                rp_display_name: "Other RP".into(),
-                purpose: "different".into(),
-                requested_claims: vec!["family_name".into()],
-            });
-            let cross_screen_hash =
-                serde_json::to_string(&presenter::consent_hash(&AwsLc, &different_screen)).unwrap();
-            let cross_screen = core
+        let different_screen = ScreenDescription::Consent(ConsentScreen {
+            rp_display_name: "Other RP".into(),
+            purpose: "different".into(),
+            requested_claims: vec!["family_name".into()],
+        });
+        let cross_screen_hash =
+            serde_json::to_string(&presenter::consent_hash(&AwsLc, &different_screen)).unwrap();
+        let cross_screen = core
             .handle_event_json(&format!(
                 r#"{{"type":"userConsented","operationId":{operation_id},"authorizationHash":{cross_screen_hash}}}"#
             ))
             .unwrap_err();
-            assert!(cross_screen.contains("does not match the rendered screen"));
-        }
+        assert!(cross_screen.contains("does not match the rendered screen"));
+    }
 
-        #[test]
-        fn infrastructure_failure_resets_each_reusable_machine() {
-            let mut presentation = Core::new("wallet.example", "device-key");
-            presentation.vp = State::Aborted(AbortReason::MalformedRequest);
-            let id = emit(
-                &mut presentation,
-                ActiveFlow::Presentation,
-                Effect::Sign {
-                    key_ref: "key".into(),
-                    payload: vec![],
+    #[test]
+    fn infrastructure_failure_resets_each_reusable_machine() {
+        let mut presentation = Core::new("wallet.example", "device-key");
+        presentation.vp = State::Aborted(AbortReason::MalformedRequest);
+        let id = emit(
+            &mut presentation,
+            ActiveFlow::Presentation,
+            Effect::Sign {
+                key_ref: "key".into(),
+                payload: vec![],
+            },
+        );
+        fail(&mut presentation, id);
+        assert!(matches!(presentation.vp, State::Idle));
+
+        let mut payment = Core::new("wallet.example", "device-key");
+        payment.payment = payment::State::Aborted(payment::AbortReason::MalformedRequest);
+        let id = emit(
+            &mut payment,
+            ActiveFlow::Payment,
+            Effect::Sign {
+                key_ref: "key".into(),
+                payload: vec![],
+            },
+        );
+        fail(&mut payment, id);
+        assert!(matches!(payment.payment, payment::State::Idle));
+
+        let mut issuance = Core::new("wallet.example", "device-key");
+        issuance.issuance = oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid);
+        let id = emit(&mut issuance, ActiveFlow::Issuance, Effect::RequestToken);
+        fail(&mut issuance, id);
+        assert!(matches!(issuance.issuance, oid4vci::State::Idle));
+
+        let mut qes = Core::new("wallet.example", "device-key");
+        qes.qes = qes::QesState::Aborted(qes::AbortReason::MalformedRequest);
+        let id = emit(
+            &mut qes,
+            ActiveFlow::Qes,
+            Effect::Sign {
+                key_ref: "key".into(),
+                payload: vec![],
+            },
+        );
+        fail(&mut qes, id);
+        assert!(matches!(qes.qes, qes::QesState::Idle));
+    }
+
+    #[test]
+    fn wire_effect_batch_is_atomic_at_id_exhaustion() {
+        let mut core = Core::new("wallet.example", "device-key");
+        core.active = ActiveFlow::Presentation;
+        core.next_operation_id = i64::MAX as u64;
+        let error = core
+            .serialize_wire_effects(vec![
+                Effect::ResolveRpTrust {
+                    client_id: "rp.example".into(),
                 },
-            );
-            fail(&mut presentation, id);
-            assert!(matches!(presentation.vp, State::Idle));
-
-            let mut payment = Core::new("wallet.example", "device-key");
-            payment.payment = payment::State::Aborted(payment::AbortReason::MalformedRequest);
-            let id = emit(
-                &mut payment,
-                ActiveFlow::Payment,
-                Effect::Sign {
-                    key_ref: "key".into(),
-                    payload: vec![],
-                },
-            );
-            fail(&mut payment, id);
-            assert!(matches!(payment.payment, payment::State::Idle));
-
-            let mut issuance = Core::new("wallet.example", "device-key");
-            issuance.issuance = oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid);
-            let id = emit(&mut issuance, ActiveFlow::Issuance, Effect::RequestToken);
-            fail(&mut issuance, id);
-            assert!(matches!(issuance.issuance, oid4vci::State::Idle));
-
-            let mut qes = Core::new("wallet.example", "device-key");
-            qes.qes = qes::QesState::Aborted(qes::AbortReason::MalformedRequest);
-            let id = emit(
-                &mut qes,
-                ActiveFlow::Qes,
-                Effect::Sign {
-                    key_ref: "key".into(),
-                    payload: vec![],
-                },
-            );
-            fail(&mut qes, id);
-            assert!(matches!(qes.qes, qes::QesState::Idle));
-        }
-
-        #[test]
-        fn wire_effect_batch_is_atomic_at_id_exhaustion() {
-            let mut core = Core::new("wallet.example", "device-key");
-            core.active = ActiveFlow::Presentation;
-            core.next_operation_id = i64::MAX as u64;
-            let error = core
-                .serialize_wire_effects(vec![
-                    Effect::ResolveRpTrust {
-                        client_id: "rp.example".into(),
-                    },
-                    Effect::PersistNonce { nonce: 1 },
-                ])
-                .unwrap_err();
-            assert!(error.contains("operationId space exhausted"));
-            assert!(core.pending_operations.is_empty());
-            assert_eq!(core.next_operation_id, i64::MAX as u64);
-        }
-
-        #[test]
-        fn wire_id_exhaustion_resets_progressed_flow_before_returning_error() {
-            let mut core = Core::new("wallet.example", "device-key");
-            core.next_operation_id = i64::MAX as u64 + 1;
-
-            let error = core
-                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
-                .unwrap_err();
-
-            assert!(error.contains("operationId space exhausted"));
-            assert_eq!(core.active, ActiveFlow::None);
-            assert!(matches!(core.w2w, w2w::State::Idle));
-            assert!(core.pending_operations.is_empty());
-
-            // Exhaustion is practically unreachable and intentionally does not wrap/reuse IDs. Reset
-            // the injected boundary value to prove the protocol machine itself is cleanly reusable.
-            core.next_operation_id = 1;
-            let output = core
-                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
-                .unwrap();
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]["type"],
-                "publishTransferOffer"
-            );
-            assert_eq!(core.active, ActiveFlow::WalletTransfer);
-            assert!(matches!(core.w2w, w2w::State::AwaitingTransfer));
-        }
-
-        #[test]
-        fn pending_cap_failure_clears_all_callbacks_and_allows_a_new_flow() {
-            let mut core = Core::new("wallet.example", "device-key");
-            for operation_id in 1..=MAX_PENDING_OPERATIONS as u64 {
-                core.pending_operations.insert(
-                    operation_id,
-                    PendingOperation {
-                        flow: ActiveFlow::Presentation,
-                        result: OperationResultKind::Persisted,
-                        authorization_hash: None,
-                    },
-                );
-            }
-
-            let error = core
-                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
-                .unwrap_err();
-
-            assert!(error.contains("too many pending wallet operations"));
-            assert_eq!(core.active, ActiveFlow::None);
-            assert!(matches!(core.w2w, w2w::State::Idle));
-            assert!(core.pending_operations.is_empty());
-
-            let output = core
-                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
-                .unwrap();
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]["type"],
-                "publishTransferOffer"
-            );
-            assert_eq!(core.active, ActiveFlow::WalletTransfer);
-        }
-
-        #[test]
-        fn operation_ids_are_positive_signed_range_and_monotonic() {
-            let mut core = Core::new("wallet.example", "device-key");
-            assert!((1..=(1u64 << 62)).contains(&core.next_operation_id));
-            let first = emit(
-                &mut core,
-                ActiveFlow::Presentation,
                 Effect::PersistNonce { nonce: 1 },
+            ])
+            .unwrap_err();
+        assert!(error.contains("operationId space exhausted"));
+        assert!(core.pending_operations.is_empty());
+        assert_eq!(core.next_operation_id, i64::MAX as u64);
+    }
+
+    #[test]
+    fn wire_id_exhaustion_resets_progressed_flow_before_returning_error() {
+        let mut core = Core::new("wallet.example", "device-key");
+        core.next_operation_id = i64::MAX as u64 + 1;
+
+        let error = core
+            .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+            .unwrap_err();
+
+        assert!(error.contains("operationId space exhausted"));
+        assert_eq!(core.active, ActiveFlow::None);
+        assert!(matches!(core.w2w, w2w::State::Idle));
+        assert!(core.pending_operations.is_empty());
+
+        // Exhaustion is practically unreachable and intentionally does not wrap/reuse IDs. Reset
+        // the injected boundary value to prove the protocol machine itself is cleanly reusable.
+        core.next_operation_id = 1;
+        let output = core
+            .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]["type"],
+            "publishTransferOffer"
+        );
+        assert_eq!(core.active, ActiveFlow::WalletTransfer);
+        assert!(matches!(core.w2w, w2w::State::AwaitingTransfer));
+    }
+
+    #[test]
+    fn pending_cap_failure_clears_all_callbacks_and_allows_a_new_flow() {
+        let mut core = Core::new("wallet.example", "device-key");
+        for operation_id in 1..=MAX_PENDING_OPERATIONS as u64 {
+            core.pending_operations.insert(
+                operation_id,
+                PendingOperation {
+                    flow: ActiveFlow::Presentation,
+                    result: OperationResultKind::Persisted,
+                    authorization_hash: None,
+                },
             );
-            let second = emit(
-                &mut core,
-                ActiveFlow::Presentation,
-                Effect::PersistNonce { nonce: 2 },
-            );
-            assert!((1..=i64::MAX as u64).contains(&first));
-            assert_eq!(second, first + 1);
         }
+
+        let error = core
+            .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+            .unwrap_err();
+
+        assert!(error.contains("too many pending wallet operations"));
+        assert_eq!(core.active, ActiveFlow::None);
+        assert!(matches!(core.w2w, w2w::State::Idle));
+        assert!(core.pending_operations.is_empty());
+
+        let output = core
+            .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]["type"],
+            "publishTransferOffer"
+        );
+        assert_eq!(core.active, ActiveFlow::WalletTransfer);
+    }
+
+    #[test]
+    fn operation_ids_are_positive_signed_range_and_monotonic() {
+        let mut core = Core::new("wallet.example", "device-key");
+        assert!((1..=(1u64 << 62)).contains(&core.next_operation_id));
+        let first = emit(
+            &mut core,
+            ActiveFlow::Presentation,
+            Effect::PersistNonce { nonce: 1 },
+        );
+        let second = emit(
+            &mut core,
+            ActiveFlow::Presentation,
+            Effect::PersistNonce { nonce: 2 },
+        );
+        assert!((1..=i64::MAX as u64).contains(&first));
+        assert_eq!(second, first + 1);
     }
 }
