@@ -100,6 +100,8 @@ final class WalletModel: ObservableObject {
     /// Monotonic nonce source: a persistent engine records used nonces (replay protection), so each
     /// presentation/payment/issuance must carry a fresh one.
     private var nonceCounter: UInt64 = 1
+    private var pendingOperationId: UInt64 = 0
+    private var pendingAuthorizationHash = Data(repeating: 0, count: 32)
 
     init() {
         let (engine, issuance, rpCertChain, redirectUris) = Self.makeEngine(demo)
@@ -136,7 +138,7 @@ final class WalletModel: ObservableObject {
     /// `render` maps the core's screens to the live UI (or a no-op for silent seeding).
     private func makeExecutor(
         issuer: IssuerResponder?,
-        render: @escaping (ScreenDescription) -> Void
+        render: @escaping (UInt64?, Data?, ScreenDescription) throws -> Void
     ) -> EffectExecutor {
         EffectExecutor(
             engine: engine,
@@ -149,7 +151,7 @@ final class WalletModel: ObservableObject {
     }
 
     private func liveExecutor() -> EffectExecutor {
-        let ex = makeExecutor(issuer: nil) { [weak self] screen in
+        let ex = makeExecutor(issuer: nil) { [weak self] _, _, screen in
             Task { @MainActor in self?.phase = .screen(screen) }
         }
         self.executor = ex
@@ -260,7 +262,11 @@ final class WalletModel: ObservableObject {
             credentialCompact: Data(compact.utf8),
             cNonce: nextNonce(),
             format: type.issuanceFormat)
-        let ex = makeExecutor(issuer: issuer, render: { _ in })
+        let ex = makeExecutor(issuer: issuer, render: { [weak self] operationId, authorizationHash, screen in
+            self?.pendingOperationId = operationId ?? 0
+            self?.pendingAuthorizationHash = authorizationHash ?? Data(repeating: 0, count: 32)
+            self?.phase = .screen(screen)
+        })
         return await run(ex, eventJson: WalletEventJSON.credentialOfferReceived(
             offer: offer,
             issuerCertChain: issuance.issuerCertChain,
@@ -329,12 +335,12 @@ final class WalletModel: ObservableObject {
                 return
             }
             if wasPayment {
-                guard await run(executor, eventJson: WalletEventJSON.paymentApproved()) else { return }
+                guard await run(executor, eventJson: WalletEventJSON.paymentApproved(operationId: pendingOperationId, authorizationHash: pendingAuthorizationHash)) else { return }
                 note("Device signed the dynamic-linking binding; auth code posted to the PSP.")
                 reloadHistory()
                 phase = .done("Payment authorised — SCA auth code delivered.")
             } else {
-                guard await run(executor, eventJson: WalletEventJSON.userConsented()) else { return }
+                guard await run(executor, eventJson: WalletEventJSON.userConsented(operationId: pendingOperationId, authorizationHash: pendingAuthorizationHash)) else { return }
                 note("Device signed the key-binding JWT; vp_token posted to the RP.")
                 reloadHistory()
                 phase = .done("Presentation delivered — only the requested claim was shared.")
@@ -349,7 +355,7 @@ final class WalletModel: ObservableObject {
                 phase = .failed("Wallet executor is unavailable")
                 return
             }
-            guard await run(executor, eventJson: WalletEventJSON.userDeclined()) else { return }
+            guard await run(executor, eventJson: WalletEventJSON.userDeclined(operationId: pendingOperationId)) else { return }
             phase = .done("Declined — nothing was shared.")
         }
     }
@@ -367,17 +373,17 @@ final class WalletModel: ObservableObject {
     func seedHistoryForDemo(redactFirst: Bool = false, thenExport: Bool = false) {
         Task {
             guard await issue(.pid) else { return }
-            let ex = makeExecutor(issuer: nil, render: { _ in })
+            let ex = makeExecutor(issuer: nil, render: { _, _, _ in })
             guard await run(
                 ex,
                 eventJson: WalletEventJSON.authorizationRequestReceived(
                     demo.presentationRequest(nonce: nextNonce()))) else { return }
-            guard await run(ex, eventJson: WalletEventJSON.userConsented()) else { return }
+            guard await run(ex, eventJson: WalletEventJSON.userConsented(operationId: pendingOperationId, authorizationHash: pendingAuthorizationHash)) else { return }
             guard await run(
                 ex,
                 eventJson: WalletEventJSON.paymentAuthorizationRequestReceived(
                     demo.paymentRequest(nonce: nextNonce()))) else { return }
-            guard await run(ex, eventJson: WalletEventJSON.paymentApproved()) else { return }
+            guard await run(ex, eventJson: WalletEventJSON.paymentApproved(operationId: pendingOperationId, authorizationHash: pendingAuthorizationHash)) else { return }
             if redactFirst {
                 _ = engine.redactTransaction(seq: 0)
             }
