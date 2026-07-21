@@ -1,5 +1,10 @@
 # euwallet — EUDI Wallet (Rust core · Swift shell · formally verified)
 
+## Security status
+
+EUWallet is not yet production-certified. An independent pre-launch security
+review remains a launch gate; see [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md).
+
 A from-scratch European Digital Identity Wallet, built as a **sans-IO Rust behaviour core**
 with **thin native shells** (Swift/iOS now, Kotlin/Android later), and verified across **three
 formal tiers** (property/fuzz/Kani → Lean state-machine proofs → Tamarin protocol analysis).

@@ -13,6 +13,14 @@ Government provision, mandate or recognition; accredited certification; and Comm
 notification remain external launch gates. Engineering must produce the complete evidence and
 operational solution needed to enter those processes.
 
+## Planned milestone — pre-launch security review
+
+- [ ] Run documented Claude/Codex adversarial review for each release candidate.
+- [ ] Select an independent external auditor and freeze audited inputs.
+- [ ] Complete the scope in `docs/SECURITY_AUDIT.md`.
+- [ ] Remediate critical/high findings with regression tests.
+- [ ] Obtain independent re-review and publish a sanitized report.
+
 ## Active phase — P0 trustworthy foundation
 
 - [x] Repair CI paths and make every claimed assurance gate fail closed.
