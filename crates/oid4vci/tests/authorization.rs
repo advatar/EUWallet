@@ -385,7 +385,9 @@ fn happy_path_emits_exact_pkce_par_callback_dpop_and_token_contracts() {
     assert_eq!(flow.status(), FlowStatus::Complete);
     let grant = flow.into_token().unwrap();
     assert_eq!(grant.access_token(), "ACCESS-TOKEN");
+    assert_eq!(grant.issued_at_epoch_seconds(), 1_700_000_004);
     assert_eq!(grant.expires_in_seconds(), Some(300));
+    assert_eq!(grant.credential_identifiers().count(), 0);
     assert_eq!(grant.token_endpoint_dpop_nonce(), Some("next-token-nonce"));
     assert_eq!(grant.authorization_server(), AS);
     assert_eq!(grant.token_endpoint(), TOKEN);
@@ -1240,6 +1242,66 @@ fn final_token_parser_ignores_bounded_legacy_c_nonce_instead_of_requiring_it() {
     )
     .unwrap();
     assert_eq!(flow.into_token().unwrap().access_token(), "A");
+}
+
+#[test]
+fn token_response_carries_only_exact_selected_configuration_identifiers() {
+    let random = SequenceRandom::new();
+    let FlowAtToken {
+        mut flow,
+        request_id,
+    } = flow_at_token(&random, vec![], 2);
+    flow.step(
+        AuthorizationInput::TokenResponse(token_response(
+            request_id,
+            200,
+            "application/json",
+            true,
+            vec![],
+            format!(
+                r#"{{"access_token":"A","token_type":"DPoP","authorization_details":[{{"type":"openid_credential","credential_configuration_id":"pid-sd-jwt","locations":["{ISSUER}"],"credential_identifiers":["dataset-a","dataset-b"],"bounded_extension":true}}]}}"#
+            )
+            .into_bytes(),
+        )),
+        &environment(&random, 1_700_000_004),
+    )
+    .unwrap();
+    let grant = flow.into_token().unwrap();
+    assert_eq!(
+        grant.credential_identifiers().collect::<Vec<_>>(),
+        vec!["dataset-a", "dataset-b"]
+    );
+
+    for authorization_details in [
+        r#"[{"type":"openid_credential","credential_configuration_id":"other","credential_identifiers":["dataset-a"]}]"#,
+        r#"[{"type":"openid_credential","credential_configuration_id":"pid-sd-jwt","credential_identifiers":["same","same"]}]"#,
+        r#"[{"type":"openid_credential","credential_configuration_id":"pid-sd-jwt","locations":["https://other.example"],"credential_identifiers":["dataset-a"]}]"#,
+        r#"[{"type":"openid_credential","credential_configuration_id":"pid-sd-jwt","credential_identifiers":[]}]"#,
+    ] {
+        let random = SequenceRandom::new();
+        let FlowAtToken {
+            mut flow,
+            request_id,
+        } = flow_at_token(&random, vec![], 2);
+        assert_eq!(
+            flow.step(
+                AuthorizationInput::TokenResponse(token_response(
+                    request_id,
+                    200,
+                    "application/json",
+                    true,
+                    vec![],
+                    format!(
+                        r#"{{"access_token":"A","token_type":"DPoP","authorization_details":{authorization_details}}}"#
+                    )
+                    .into_bytes(),
+                )),
+                &environment(&random, 1_700_000_004),
+            )
+            .unwrap_err(),
+            AuthorizationError::InvalidTokenResponse
+        );
+    }
 }
 
 #[test]
