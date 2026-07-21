@@ -251,7 +251,11 @@ pub mod model {
 
     impl Ctx {
         pub fn init() -> Self {
-            Ctx { st: St::Idle, session_bound: false, consented: false }
+            Ctx {
+                st: St::Idle,
+                session_bound: false,
+                consented: false,
+            }
         }
     }
 

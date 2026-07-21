@@ -13,6 +13,11 @@
 use base64ct::{Base64UrlUnpadded, Encoding};
 use serde_json::Value as Json;
 
+pub mod authorization;
+pub mod bounded_json;
+pub mod credential;
+pub mod foundation;
+
 /// The only two grant types HAIP permits. There is deliberately no "other" variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HaipGrant {
@@ -102,7 +107,12 @@ pub enum Input {
     CredentialResponse {
         format: CredentialFormat,
         bytes: Vec<u8>,
+        /// The wallet facade authenticated the credential signature against the trusted issuer
+        /// and applied credential-type policy. Structural parsing alone is never sufficient.
+        issuer_authenticated: bool,
     },
+    /// The transport returned a response that cannot even be represented as a supported format.
+    CredentialResponseRejected,
     Decline,
 }
 
@@ -302,13 +312,23 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
         // HLR-VCI-T-007 — credential returned: accept only the requested, structurally valid format.
         (
             State::RequestingCredential { format },
-            Input::CredentialResponse { format: got, bytes },
+            Input::CredentialResponse {
+                format: got,
+                bytes,
+                issuer_authenticated,
+            },
         ) => {
             if got != format || !guards::credential_format_is_supported(*got) {
-                return (State::Aborted(AbortReason::UnsupportedFormat), vec![]);
+                return (
+                    State::Aborted(AbortReason::UnsupportedFormat),
+                    vec![Output::Close],
+                );
             }
-            if !validate_issued_credential(*got, bytes) {
-                return (State::Aborted(AbortReason::CredentialInvalid), vec![]);
+            if !issuer_authenticated || !validate_issued_credential(*got, bytes) {
+                return (
+                    State::Aborted(AbortReason::CredentialInvalid),
+                    vec![Output::Close],
+                );
             }
             (
                 State::CredentialIssued {
@@ -318,6 +338,11 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                 vec![Output::Close],
             )
         }
+
+        (State::RequestingCredential { .. }, Input::CredentialResponseRejected) => (
+            State::Aborted(AbortReason::CredentialInvalid),
+            vec![Output::Close],
+        ),
 
         // HLR-VCI-T-008 — user declines at any pre-terminal step.
         (_, Input::Decline) => (
@@ -405,7 +430,7 @@ pub mod model {
 
     #[derive(Clone, Debug)]
     pub enum Ev {
-        Offer(bool),                       // issuer trusted in-core
+        Offer(bool),                           // issuer trusted in-core
         Token { bound: bool, attested: bool }, // sender-bound token + proof-key attested (WUA High)
         Proof,
         Credential(bool),

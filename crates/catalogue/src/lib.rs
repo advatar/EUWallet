@@ -13,14 +13,70 @@
 //!
 //! Pure and sans-IO: the catalogue is a value the shell ships / updates; no I/O here.
 
+/// A format-aware claim identity. mdoc claims remain structurally bound to their namespace;
+/// callers never have to infer that boundary by splitting a dotted string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClaimPath {
+    Json(String),
+    Mdoc { namespace: String, element: String },
+}
+
+impl ClaimPath {
+    pub fn mdoc(namespace: impl Into<String>, element: impl Into<String>) -> Self {
+        Self::Mdoc {
+            namespace: namespace.into(),
+            element: element.into(),
+        }
+    }
+
+    /// External request/display spelling. Structural mdoc checks use the enum fields directly.
+    pub fn request_path(&self) -> String {
+        match self {
+            Self::Json(path) => path.clone(),
+            Self::Mdoc { namespace, element } => format!("{namespace}.{element}"),
+        }
+    }
+
+    fn matches_request(&self, requested: &str) -> bool {
+        match self {
+            Self::Json(path) => path == requested,
+            Self::Mdoc { namespace, element } => requested
+                .strip_prefix(namespace)
+                .and_then(|suffix| suffix.strip_prefix('.'))
+                .is_some_and(|suffix| suffix == element),
+        }
+    }
+}
+
+impl From<&str> for ClaimPath {
+    fn from(value: &str) -> Self {
+        Self::Json(value.into())
+    }
+}
+
+impl From<String> for ClaimPath {
+    fn from(value: String) -> Self {
+        Self::Json(value)
+    }
+}
+
 /// One claim a credential type carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaimSpec {
-    /// Claim path/identity (e.g. `age_over_18`, `family_name`).
-    pub path: String,
+    /// Format-aware claim identity.
+    pub path: ClaimPath,
     pub display_name: String,
     /// Whether the type is invalid without this claim.
     pub mandatory: bool,
+}
+
+/// Trusted-list service domain authorised to issue a credential type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IssuerTrustDomain {
+    /// Person Identification Data issuer service.
+    Pid,
+    /// Electronic attestation issuer service, including mdoc and (Q)EAA credentials.
+    Attestation,
 }
 
 /// A credential type the wallet understands.
@@ -31,6 +87,8 @@ pub struct AttestationType {
     pub display_name: String,
     /// Credential format: `dc+sd-jwt` or `mso_mdoc`.
     pub format: String,
+    /// The exact trusted-list service whose anchors may authenticate issuers of this type.
+    pub issuer_trust_domain: IssuerTrustDomain,
     pub claims: Vec<ClaimSpec>,
     /// Issuer ids trusted to issue this type.
     pub trusted_issuers: Vec<String>,
@@ -38,16 +96,16 @@ pub struct AttestationType {
 
 impl AttestationType {
     /// The mandatory claim paths of this type.
-    pub fn mandatory_claims(&self) -> Vec<&str> {
+    pub fn mandatory_claims(&self) -> Vec<&ClaimPath> {
         self.claims
             .iter()
             .filter(|c| c.mandatory)
-            .map(|c| c.path.as_str())
+            .map(|c| &c.path)
             .collect()
     }
 
     fn offers(&self, path: &str) -> bool {
-        self.claims.iter().any(|c| c.path == path)
+        self.claims.iter().any(|c| c.path.matches_request(path))
     }
 }
 
@@ -114,14 +172,33 @@ impl Catalogue {
             .unwrap_or(false)
     }
 
+    /// The trusted-list service domain required for issuers of type `id`.
+    pub fn issuer_trust_domain(&self, id: &str) -> Option<IssuerTrustDomain> {
+        self.get(id).map(|t| t.issuer_trust_domain)
+    }
+
     /// Does the set of `held` claim paths satisfy type `id`'s mandatory claims? False if unknown id.
     pub fn satisfies_mandatory(&self, id: &str, held: &[String]) -> bool {
         match self.get(id) {
             Some(t) => t
                 .mandatory_claims()
                 .iter()
-                .all(|m| held.iter().any(|h| h == m)),
+                .all(|m| matches!(m, ClaimPath::Json(path) if held.iter().any(|h| h == path))),
             None => false,
+        }
+    }
+
+    /// Does an mdoc with this exact signed document type and these exact namespace/element pairs
+    /// contain every mandatory catalogue claim? JSON paths and bare element names never match.
+    pub fn satisfies_mandatory_mdoc(&self, doc_type: &str, held: &[(String, String)]) -> bool {
+        match self.get(doc_type) {
+            Some(t) if t.format == "mso_mdoc" => t.mandatory_claims().iter().all(|claim| {
+                matches!(claim,
+                    ClaimPath::Mdoc { namespace, element }
+                        if held.iter().any(|(held_namespace, held_element)|
+                            held_namespace == namespace && held_element == element))
+            }),
+            _ => false,
         }
     }
 }
@@ -134,11 +211,28 @@ pub fn default_catalogue() -> Catalogue {
         id: "urn:eudi:pid:1".into(),
         display_name: "Person Identification Data".into(),
         format: "dc+sd-jwt".into(),
+        issuer_trust_domain: IssuerTrustDomain::Pid,
         claims: vec![
-            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
-            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
-            ClaimSpec { path: "birthdate".into(), display_name: "Date of birth".into(), mandatory: true },
-            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+            ClaimSpec {
+                path: "family_name".into(),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "given_name".into(),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "birthdate".into(),
+                display_name: "Date of birth".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "age_over_18".into(),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
     });
@@ -147,12 +241,57 @@ pub fn default_catalogue() -> Catalogue {
         id: "urn:eudi:mdl:1".into(),
         display_name: "Mobile Driving Licence".into(),
         format: "dc+sd-jwt".into(),
+        issuer_trust_domain: IssuerTrustDomain::Attestation,
         claims: vec![
-            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
-            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
-            ClaimSpec { path: "driving_privileges".into(), display_name: "Driving categories".into(), mandatory: true },
-            ClaimSpec { path: "issuing_country".into(), display_name: "Issuing country".into(), mandatory: true },
-            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+            ClaimSpec {
+                path: "family_name".into(),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "given_name".into(),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "driving_privileges".into(),
+                display_name: "Driving categories".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "issuing_country".into(),
+                display_name: "Issuing country".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "age_over_18".into(),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
+        ],
+        trusted_issuers: vec!["https://issuer.example".into()],
+    });
+    c.register(AttestationType {
+        id: "org.iso.18013.5.1.mDL".into(),
+        display_name: "Mobile Driving Licence (mdoc)".into(),
+        format: "mso_mdoc".into(),
+        issuer_trust_domain: IssuerTrustDomain::Attestation,
+        claims: vec![
+            ClaimSpec {
+                path: ClaimPath::mdoc("org.iso.18013.5.1", "family_name"),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: ClaimPath::mdoc("org.iso.18013.5.1", "given_name"),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: ClaimPath::mdoc("org.iso.18013.5.1", "age_over_18"),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
     });
@@ -161,13 +300,38 @@ pub fn default_catalogue() -> Catalogue {
         id: "urn:eudi:passport:1".into(),
         display_name: "Passport".into(),
         format: "dc+sd-jwt".into(),
+        issuer_trust_domain: IssuerTrustDomain::Attestation,
         claims: vec![
-            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
-            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
-            ClaimSpec { path: "document_number".into(), display_name: "Passport number".into(), mandatory: true },
-            ClaimSpec { path: "nationality".into(), display_name: "Nationality".into(), mandatory: true },
-            ClaimSpec { path: "expiry_date".into(), display_name: "Expiry date".into(), mandatory: true },
-            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+            ClaimSpec {
+                path: "family_name".into(),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "given_name".into(),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "document_number".into(),
+                display_name: "Passport number".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "nationality".into(),
+                display_name: "Nationality".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "expiry_date".into(),
+                display_name: "Expiry date".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "age_over_18".into(),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
     });
@@ -176,13 +340,38 @@ pub fn default_catalogue() -> Catalogue {
         id: "urn:eudi:nid:1".into(),
         display_name: "National ID Card".into(),
         format: "dc+sd-jwt".into(),
+        issuer_trust_domain: IssuerTrustDomain::Attestation,
         claims: vec![
-            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
-            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
-            ClaimSpec { path: "document_number".into(), display_name: "Document number".into(), mandatory: true },
-            ClaimSpec { path: "issuing_country".into(), display_name: "Issuing country".into(), mandatory: true },
-            ClaimSpec { path: "expiry_date".into(), display_name: "Expiry date".into(), mandatory: true },
-            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+            ClaimSpec {
+                path: "family_name".into(),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "given_name".into(),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "document_number".into(),
+                display_name: "Document number".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "issuing_country".into(),
+                display_name: "Issuing country".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "expiry_date".into(),
+                display_name: "Expiry date".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "age_over_18".into(),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
     });
@@ -191,14 +380,43 @@ pub fn default_catalogue() -> Catalogue {
         id: "urn:eudi:pid:de:1".into(),
         display_name: "German ID Card".into(),
         format: "dc+sd-jwt".into(),
+        issuer_trust_domain: IssuerTrustDomain::Pid,
         claims: vec![
-            ClaimSpec { path: "family_name".into(), display_name: "Family name".into(), mandatory: true },
-            ClaimSpec { path: "given_name".into(), display_name: "Given name".into(), mandatory: true },
-            ClaimSpec { path: "birthdate".into(), display_name: "Date of birth".into(), mandatory: true },
-            ClaimSpec { path: "place_of_birth".into(), display_name: "Place of birth".into(), mandatory: true },
-            ClaimSpec { path: "resident_address".into(), display_name: "Resident address".into(), mandatory: true },
-            ClaimSpec { path: "issuing_country".into(), display_name: "Issuing country".into(), mandatory: true },
-            ClaimSpec { path: "age_over_18".into(), display_name: "Over 18".into(), mandatory: false },
+            ClaimSpec {
+                path: "family_name".into(),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "given_name".into(),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "birthdate".into(),
+                display_name: "Date of birth".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "place_of_birth".into(),
+                display_name: "Place of birth".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "resident_address".into(),
+                display_name: "Resident address".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "issuing_country".into(),
+                display_name: "Issuing country".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "age_over_18".into(),
+                display_name: "Over 18".into(),
+                mandatory: false,
+            },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
     });
@@ -217,6 +435,7 @@ mod tests {
             id: "t1".into(),
             display_name: "One".into(),
             format: "dc+sd-jwt".into(),
+            issuer_trust_domain: IssuerTrustDomain::Pid,
             claims: vec![],
             trusted_issuers: vec![],
         }));
@@ -226,11 +445,16 @@ mod tests {
             id: "t1".into(),
             display_name: "One v2".into(),
             format: "mso_mdoc".into(),
+            issuer_trust_domain: IssuerTrustDomain::Attestation,
             claims: vec![],
             trusted_issuers: vec![],
         }));
         assert_eq!(c.len(), 1);
         assert_eq!(c.get("t1").unwrap().display_name, "One v2");
+        assert_eq!(
+            c.issuer_trust_domain("t1"),
+            Some(IssuerTrustDomain::Attestation)
+        );
         assert!(c.get("missing").is_none());
     }
 
@@ -248,9 +472,19 @@ mod tests {
                 "urn:eudi:pid:de:1"
             ]
         );
-        assert_eq!(c.types_offering("driving_privileges"), vec!["urn:eudi:mdl:1"]);
+        assert_eq!(
+            c.types_offering("org.iso.18013.5.1.age_over_18"),
+            vec!["org.iso.18013.5.1.mDL"]
+        );
+        assert_eq!(
+            c.types_offering("driving_privileges"),
+            vec!["urn:eudi:mdl:1"]
+        );
         assert_eq!(c.types_offering("nationality"), vec!["urn:eudi:passport:1"]);
-        assert_eq!(c.types_offering("place_of_birth"), vec!["urn:eudi:pid:de:1"]);
+        assert_eq!(
+            c.types_offering("place_of_birth"),
+            vec!["urn:eudi:pid:de:1"]
+        );
         // Date of birth is on both the PID and the German ID card.
         assert_eq!(
             c.types_offering("birthdate"),
@@ -270,6 +504,13 @@ mod tests {
             ]
         );
         assert_eq!(
+            c.types_satisfying(&[
+                "org.iso.18013.5.1.family_name".into(),
+                "org.iso.18013.5.1.age_over_18".into()
+            ]),
+            vec!["org.iso.18013.5.1.mDL"]
+        );
+        assert_eq!(
             c.types_satisfying(&["family_name".into(), "birthdate".into()]),
             vec!["urn:eudi:pid:1", "urn:eudi:pid:de:1"]
         );
@@ -282,15 +523,26 @@ mod tests {
             vec!["urn:eudi:passport:1"]
         );
         // A request including a claim no type offers resolves to nothing.
-        assert!(c.types_satisfying(&["family_name".into(), "iban".into()]).is_empty());
+        assert!(c
+            .types_satisfying(&["family_name".into(), "iban".into()])
+            .is_empty());
 
         // Issuer policy.
         assert!(c.issuer_allowed("urn:eudi:pid:1", "https://issuer.example"));
         assert!(c.issuer_allowed("urn:eudi:mdl:1", "https://issuer.example"));
+        assert!(c.issuer_allowed("org.iso.18013.5.1.mDL", "https://issuer.example"));
         assert!(c.issuer_allowed("urn:eudi:passport:1", "https://issuer.example"));
         assert!(c.issuer_allowed("urn:eudi:pid:de:1", "https://issuer.example"));
         assert!(!c.issuer_allowed("urn:eudi:pid:1", "https://evil.example"));
         assert!(!c.issuer_allowed("unknown", "https://issuer.example"));
+        assert_eq!(
+            c.issuer_trust_domain("urn:eudi:pid:1"),
+            Some(IssuerTrustDomain::Pid)
+        );
+        assert_eq!(
+            c.issuer_trust_domain("org.iso.18013.5.1.mDL"),
+            Some(IssuerTrustDomain::Attestation)
+        );
     }
 
     #[test]
@@ -299,7 +551,11 @@ mod tests {
         // All three mandatory claims present → satisfied (age_over_18 is optional).
         assert!(c.satisfies_mandatory(
             "urn:eudi:pid:1",
-            &["family_name".into(), "given_name".into(), "birthdate".into()]
+            &[
+                "family_name".into(),
+                "given_name".into(),
+                "birthdate".into()
+            ]
         ));
         // Missing a mandatory claim → not satisfied.
         assert!(!c.satisfies_mandatory(
@@ -307,5 +563,23 @@ mod tests {
             &["family_name".into(), "age_over_18".into()]
         ));
         assert!(!c.satisfies_mandatory("unknown", &[]));
+
+        let exact_mdoc_claims = vec![
+            ("org.iso.18013.5.1".into(), "family_name".into()),
+            ("org.iso.18013.5.1".into(), "given_name".into()),
+        ];
+        assert!(c.satisfies_mandatory_mdoc("org.iso.18013.5.1.mDL", &exact_mdoc_claims));
+        assert!(!c.satisfies_mandatory_mdoc(
+            "org.iso.18013.5.1.mDL",
+            &[
+                ("org.example.lookalike".into(), "family_name".into()),
+                ("org.example.lookalike".into(), "given_name".into()),
+            ]
+        ));
+        assert!(!c.satisfies_mandatory_mdoc("org.example.lookalike.mDL", &exact_mdoc_claims));
+        assert!(!c.satisfies_mandatory(
+            "org.iso.18013.5.1.mDL",
+            &["family_name".into(), "given_name".into()]
+        ));
     }
 }

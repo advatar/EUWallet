@@ -1,4 +1,5 @@
 import XCTest
+import Security
 @testable import WalletShell
 
 /// Tests the DER→JOSE ECDSA signature conversion in isolation. JOSE ES256 (what the Rust core
@@ -41,5 +42,43 @@ final class SecureEnclaveSignerTests: XCTestCase {
 
     func testRejectsNonSequence() {
         XCTAssertNil(SecureEnclaveSigner.joseSignature(fromDER: Data([0x02, 0x01, 0x00])))
+    }
+
+    func testApprovedHardwareAttributesSatisfyPolicy() {
+        let attributes: [String: Any] = [
+            kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave as String,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom as String,
+            kSecAttrKeySizeInBits as String: NSNumber(value: 256),
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate as String,
+            kSecAttrCanSign as String: NSNumber(value: true),
+            kSecAttrIsExtractable as String: NSNumber(value: false),
+        ]
+
+        XCTAssertNil(SecureEnclaveSigner.hardwarePolicyViolation(
+            attributes: attributes,
+            accessControlMatched: true))
+    }
+
+    func testSoftwareKeyCannotSatisfyHardwarePolicy() {
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom as String,
+            kSecAttrKeySizeInBits as String: NSNumber(value: 256),
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate as String,
+            kSecAttrCanSign as String: NSNumber(value: true),
+        ]
+
+        XCTAssertEqual(
+            SecureEnclaveSigner.hardwarePolicyViolation(
+                attributes: attributes,
+                accessControlMatched: true),
+            "key is not backed by the Secure Enclave")
+    }
+
+    func testUnapprovedAccessControlCannotSatisfyHardwarePolicy() {
+        XCTAssertEqual(
+            SecureEnclaveSigner.hardwarePolicyViolation(
+                attributes: [:],
+                accessControlMatched: false),
+            "approved access control was not matched")
     }
 }

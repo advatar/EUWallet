@@ -205,7 +205,11 @@ mod tests {
     use crypto_traits::{Alg, Digest, KeyRef, Signer, Verifier};
 
     fn env<'a>(seen: &'a [u64], ch: [u8; 32]) -> Env<'a> {
-        Env { seen_nonces: seen, device_key_ref: "device-key", consent_hash: ch }
+        Env {
+            seen_nonces: seen,
+            device_key_ref: "device-key",
+            consent_hash: ch,
+        }
     }
 
     fn request_json(nonce: u64, doc_hex: &str) -> Vec<u8> {
@@ -226,7 +230,10 @@ mod tests {
             &Input::SignatureRequest(request_json(1, "deadbeef")),
             &env(&[], consent),
         );
-        assert!(matches!(out.as_slice(), [Output::RenderSignConfirmation { .. }]));
+        assert!(matches!(
+            out.as_slice(),
+            [Output::RenderSignConfirmation { .. }]
+        ));
 
         // 2) authorize → SignAuthorization over the DTBS/R.
         let (s, out) = step(&s, &Input::UserAuthorized, &env(&[], consent));
@@ -259,11 +266,21 @@ mod tests {
             nonce: 1,
         };
         assert!(AwsLc
-            .verify(Alg::Es256, device.public_key_raw(), &qes_authorization_binding(&req, &consent), &sig)
+            .verify(
+                Alg::Es256,
+                device.public_key_raw(),
+                &qes_authorization_binding(&req, &consent),
+                &sig
+            )
             .is_ok());
         let other = AwsLc.sha256(b"a different screen");
         assert!(AwsLc
-            .verify(Alg::Es256, device.public_key_raw(), &qes_authorization_binding(&req, &other), &sig)
+            .verify(
+                Alg::Es256,
+                device.public_key_raw(),
+                &qes_authorization_binding(&req, &other),
+                &sig
+            )
             .is_err());
     }
 
@@ -340,7 +357,12 @@ pub mod model {
 
     impl Ctx {
         pub fn init() -> Self {
-            Ctx { st: St::Idle, seen: Vec::new(), confirmed: None, authorized: false }
+            Ctx {
+                st: St::Idle,
+                seen: Vec::new(),
+                confirmed: None,
+                authorized: false,
+            }
         }
     }
 

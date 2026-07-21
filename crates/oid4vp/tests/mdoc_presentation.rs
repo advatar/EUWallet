@@ -29,7 +29,7 @@ fn cose_key(pubkey: &[u8]) -> Value {
     let y = pubkey[33..65].to_vec();
     Value::Map(vec![
         (Value::Uint(1), Value::Uint(2)),
-        (Value::Nint(0), Value::Uint(1)), // -1 => P-256
+        (Value::Nint(0), Value::Uint(1)),  // -1 => P-256
         (Value::Nint(1), Value::Bytes(x)), // -2 => x
         (Value::Nint(2), Value::Bytes(y)), // -3 => y
     ])
@@ -37,7 +37,10 @@ fn cose_key(pubkey: &[u8]) -> Value {
 
 fn map_get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     match v {
-        Value::Map(pairs) => pairs.iter().find(|(k, _)| *k == Value::Text(key.into())).map(|(_, x)| x),
+        Value::Map(pairs) => pairs
+            .iter()
+            .find(|(k, _)| *k == Value::Text(key.into()))
+            .map(|(_, x)| x),
         _ => None,
     }
 }
@@ -111,19 +114,29 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
         device_key_ref: "device-key",
     };
 
-    let (state, out) = step(&State::RequestValidated(Box::new(req)), &Input::ConsentGranted, &env);
+    let (state, out) = step(
+        &State::RequestValidated(Box::new(req)),
+        &Input::ConsentGranted,
+        &env,
+    );
     assert!(matches!(state, State::AwaitingDeviceSignature(_)));
     let signing_input = match out.as_slice() {
         [Output::SignKeyBinding { signing_input, .. }] => signing_input.clone(),
         other => panic!("expected SignKeyBinding, got {other:?}"),
     };
     // The machine binds the device signature to the OID4VP SessionTranscript (anti-relay).
-    let expected_device_auth = device_authentication_bytes(&transcript, DOCTYPE, &ns_bytes).unwrap();
+    let expected_device_auth =
+        device_authentication_bytes(&transcript, DOCTYPE, &ns_bytes).unwrap();
     let protected = cose::encode_protected_header(Alg::Es256);
-    assert_eq!(signing_input, cose::sig_structure(&protected, &[], &expected_device_auth));
+    assert_eq!(
+        signing_input,
+        cose::sig_structure(&protected, &[], &expected_device_auth)
+    );
 
     // Device signs the Sig_structure; feed it back.
-    let sig = device.sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input).unwrap();
+    let sig = device
+        .sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input)
+        .unwrap();
     let (state, out) = step(&state, &Input::DeviceSignatureProduced(sig.clone()), &env);
     assert_eq!(state, State::Presenting);
     let body = match out.as_slice() {
@@ -138,11 +151,15 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
     );
 
     // ---- Extract the DeviceResponse from the direct_post body and VERIFY the device signature. ----
-    let vp_json = body.strip_prefix("vp_token=").and_then(|s| s.split('&').next()).unwrap();
+    let vp_json = body
+        .strip_prefix("vp_token=")
+        .and_then(|s| s.split('&').next())
+        .unwrap();
     let decoded = percent_decode(vp_json);
     let obj: serde_json::Value = serde_json::from_str(&decoded).unwrap();
-    let device_response_b64 = obj["cred1"].as_str().expect("DCQL-keyed vp_token");
-    let dr_cbor = Base64UrlUnpadded::decode_vec(device_response_b64).expect("base64url DeviceResponse");
+    let device_response_b64 = obj["cred1"][0].as_str().expect("DCQL-keyed vp_token");
+    let dr_cbor =
+        Base64UrlUnpadded::decode_vec(device_response_b64).expect("base64url DeviceResponse");
     let dr = cbor::from_canonical_slice(&dr_cbor).expect("canonical DeviceResponse CBOR");
 
     // documents[0].docType == mDL
@@ -151,7 +168,10 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
         _ => panic!("documents array"),
     };
     assert_eq!(docs.len(), 1);
-    assert_eq!(map_get(&docs[0], "docType"), Some(&Value::Text(DOCTYPE.into())));
+    assert_eq!(
+        map_get(&docs[0], "docType"),
+        Some(&Value::Text(DOCTYPE.into()))
+    );
 
     // deviceSigned.deviceAuth.deviceSignature = [protected, unprotected, payload(null), signature]
     let device_signed = map_get(&docs[0], "deviceSigned").unwrap();
@@ -159,9 +179,19 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
     let device_signature = map_get(device_auth, "deviceSignature").unwrap();
     let (got_protected, got_sig) = match device_signature {
         Value::Array(a) if a.len() == 4 => {
-            let p = match &a[0] { Value::Bytes(b) => b.clone(), _ => panic!("protected bstr") };
-            assert_eq!(a[2], Value::Null, "payload is detached (null) in mdoc DeviceAuth");
-            let s = match &a[3] { Value::Bytes(b) => b.clone(), _ => panic!("signature bstr") };
+            let p = match &a[0] {
+                Value::Bytes(b) => b.clone(),
+                _ => panic!("protected bstr"),
+            };
+            assert_eq!(
+                a[2],
+                Value::Null,
+                "payload is detached (null) in mdoc DeviceAuth"
+            );
+            let s = match &a[3] {
+                Value::Bytes(b) => b.clone(),
+                _ => panic!("signature bstr"),
+            };
             (p, s)
         }
         _ => panic!("deviceSignature is a 4-element COSE_Sign1 array"),
@@ -171,7 +201,9 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
     let tbs = cose::sig_structure(&got_protected, &[], &expected_device_auth);
     AwsLc
         .verify(Alg::Es256, device.public_key_raw(), &tbs, &got_sig)
-        .expect("the DeviceResponse's device signature verifies against the device key + transcript");
+        .expect(
+            "the DeviceResponse's device signature verifies against the device key + transcript",
+        );
 
     // The MSO's issuer signature + item digests also verify (issuer-side check).
     let _ = &issuer_signed;

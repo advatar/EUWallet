@@ -10,12 +10,13 @@
 //! backend ([`crypto_backend::AwsLc`]). Device-bound signing is an [`Effect::Sign`] the shell
 //! fulfils with the Secure Enclave — the private key never enters the core.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use catalogue::IssuerTrustDomain;
 use crypto_backend::AwsLc;
-use crypto_traits::{Alg, Digest};
-use oid4vp::{Env, Input, ResolvedTrust, SelectedCredential, State};
+use crypto_traits::{Alg, Digest, Random};
+use oid4vp::{AbortReason, Env, Input, ResolvedTrust, SelectedCredential, State};
 use presenter::{minimum_claim_set, ConsentScreen, PaymentScreen, ScreenDescription, SignScreen};
 use serde::{Deserialize, Serialize};
 use trust::{ServiceType, TrustStore};
@@ -32,11 +33,91 @@ enum ActiveFlow {
     WalletTransfer,
 }
 
+/// Failure classes the native shells can report for a correlated operation. Values are deliberately
+/// stable and low-cardinality: implementation details remain in device-local diagnostics rather
+/// than crossing the core boundary or being rendered to the holder.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum OperationFailure {
+    Trust,
+    Storage,
+    Signing,
+    Transport,
+    HttpStatus,
+    Issuer,
+    Status,
+    Rendering,
+    MissingDependency,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OperationResultKind {
+    RpCertChain,
+    Persisted,
+    Signature,
+    PresentationDelivery,
+    PaymentDelivery,
+    QesDelivery,
+    Par,
+    AuthorizationCode,
+    TransactionCode,
+    Token,
+    Credential,
+    StatusList { uri: String },
+    TransferOfferPublished,
+    PresentationDecision,
+    PaymentDecision,
+    QesDecision,
+}
+
+impl OperationResultKind {
+    fn result_type(&self) -> &'static str {
+        match self {
+            Self::RpCertChain => "rpCertChainResolved",
+            Self::Persisted | Self::TransferOfferPublished => "operationSucceeded",
+            Self::Signature => "deviceSignatureProduced",
+            Self::PresentationDelivery => "presentationDelivered",
+            Self::PaymentDelivery => "paymentAuthorizationDelivered",
+            Self::QesDelivery => "qesAuthorizationDelivered",
+            Self::Par => "parPushed",
+            Self::AuthorizationCode => "authorizationCodeReturned",
+            Self::TransactionCode => "transactionCodeEntered",
+            Self::Token => "tokenReceived",
+            Self::Credential => "credentialReceived",
+            Self::StatusList { .. } => "statusListReceived",
+            Self::PresentationDecision => "presentationDecision",
+            Self::PaymentDecision => "paymentDecision",
+            Self::QesDecision => "qesDecision",
+        }
+    }
+
+    fn accepts_event(&self, event_type: &str) -> bool {
+        match self {
+            Self::PresentationDecision => matches!(event_type, "userConsented" | "userDeclined"),
+            Self::PaymentDecision => {
+                matches!(event_type, "paymentApproved" | "paymentDeclined")
+            }
+            Self::QesDecision => matches!(event_type, "qesAuthorized" | "qesDeclined"),
+            _ => self.result_type() == event_type,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingOperation {
+    flow: ActiveFlow,
+    result: OperationResultKind,
+    authorization_hash: Option<[u8; 32]>,
+}
+
 uniffi::setup_scaffolding!();
 
+mod delivery;
 mod demo;
 pub use demo::{DemoScenario, DemoWallet, IssuanceScenario};
 
+pub mod durable;
 pub mod export;
 
 /// Verify a wallet export bundle's integrity hash (TS10). Callable from the shell before re-import.
@@ -74,40 +155,344 @@ fn format_name(f: oid4vci::CredentialFormat) -> &'static str {
     }
 }
 
-/// Parse a `dc+sd-jwt` compact serialization (`<issuer-jwt>~<disclosure>~…~`) into a held
-/// credential: the issuer JWT plus each named disclosure keyed by its claim name. Returns `None`
-/// if the compact is malformed. This is how an issued credential (received over the wire) becomes
-/// a stored holding — the same shape the shell loads a credential in.
-fn held_credential_from_compact(bytes: &[u8]) -> Option<HeldCredential> {
-    let compact = core::str::from_utf8(bytes).ok()?;
-    let sd = sdjwt::SdJwtVc::parse(compact).ok()?;
+fn operation_id_seed() -> u64 {
+    let mut random = [0u8; 8];
+    AwsLc.fill(&mut random);
+    // Start uniformly in 1..=2^62. This gives every process a ~62-bit restart namespace while
+    // reserving at least ~2^62 signed-range values for monotonic increments.
+    (u64::from_be_bytes(random) & ((1u64 << 62) - 1)) + 1
+}
+
+/// Convert an already authenticated SD-JWT VC into the wallet's presentation holding.
+fn held_credential_from_verified_sd(
+    sd: &sdjwt::SdJwtVc,
+    processed: &sdjwt::ProcessedSdJwt,
+    status: Option<StatusReference>,
+) -> Result<HeldCredential, CredentialIngestionError> {
     let mut disclosures_by_claim = BTreeMap::new();
-    for raw in &sd.disclosures {
-        let d = sdjwt::Disclosure::parse(raw).ok()?;
-        // Object-member disclosures ([salt, name, value]) are the claims a wallet holds.
-        if let Some(name) = d.name {
-            disclosures_by_claim.insert(name, raw.clone());
+    for disclosure in &processed.disclosures {
+        // Preserve the established public fixture/card API only for unambiguous top-level object
+        // members. Production selection consumes `ProcessedSdJwt` directly and never flattens a
+        // nested path or silently drops an array disclosure into this compatibility view.
+        let [sdjwt::ClaimPathElement::Name(name)] = disclosure.path.as_slice() else {
+            continue;
+        };
+        if disclosures_by_claim
+            .insert(name.clone(), disclosure.raw.clone())
+            .is_some()
+        {
+            return Err(CredentialIngestionError::DuplicateClaim);
         }
     }
-    Some(HeldCredential {
-        issuer_jwt: sd.issuer_jwt,
+    Ok(HeldCredential {
+        issuer_jwt: sd.issuer_jwt.clone(),
         disclosures_by_claim,
-        status_index: None,
+        status,
     })
 }
 
-/// Parse an issued `mso_mdoc` credential into a holding. OpenID4VCI delivers it as a base64url
-/// string of the `IssuerSigned` CBOR; we decode, parse, and read its doctype from the MSO.
-fn mdoc_holding_from_credential(bytes: &[u8]) -> Option<MdocHolding> {
+const SDJWT_CONTROL_CLAIMS: [&str; 8] = [
+    "iss",
+    "vct",
+    "cnf",
+    "iat",
+    "nbf",
+    "exp",
+    "status",
+    "vct#integrity",
+];
+
+fn contains_sdjwt_placeholder(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            object.contains_key("_sd")
+                || object.contains_key("...")
+                || object.values().any(contains_sdjwt_placeholder)
+        }
+        serde_json::Value::Array(values) => values.iter().any(contains_sdjwt_placeholder),
+        _ => false,
+    }
+}
+
+fn validate_sdjwt_issuer_profile(
+    sd: &sdjwt::SdJwtVc,
+    issuer_payload: &serde_json::Map<String, serde_json::Value>,
+    processed: &sdjwt::ProcessedSdJwt,
+) -> Result<(), CredentialIngestionError> {
+    // Credential ingestion accepts an Issued SD-JWT only. A pre-existing KB-JWT is a holder
+    // presentation from some other transaction and must never become a reusable wallet holding.
+    if sd.key_binding_jwt.is_some() {
+        return Err(CredentialIngestionError::MalformedCredential);
+    }
+
+    for required in ["iss", "vct", "cnf"] {
+        if !issuer_payload.contains_key(required) || !processed.claims.contains_key(required) {
+            return Err(CredentialIngestionError::MalformedCredential);
+        }
+    }
+
+    for control in SDJWT_CONTROL_CLAIMS {
+        let issuer_value = issuer_payload.get(control);
+        let processed_value = processed.claims.get(control);
+        if issuer_value.is_none() && processed_value.is_none() {
+            continue;
+        }
+        let Some(issuer_value) = issuer_value else {
+            return Err(CredentialIngestionError::MalformedCredential);
+        };
+        if processed_value != Some(issuer_value) || contains_sdjwt_placeholder(issuer_value) {
+            return Err(CredentialIngestionError::MalformedCredential);
+        }
+        if processed.disclosures.iter().any(|disclosure| {
+            matches!(
+                disclosure.path.first(),
+                Some(sdjwt::ClaimPathElement::Name(name)) if name == control
+            )
+        }) {
+            return Err(CredentialIngestionError::MalformedCredential);
+        }
+    }
+    Ok(())
+}
+
+/// Decode the OpenID4VCI representation of an mdoc (`base64url(IssuerSigned CBOR)`).
+fn decode_mdoc_credential(bytes: &[u8]) -> Result<mdoc::IssuerSigned, CredentialIngestionError> {
     use base64ct::{Base64UrlUnpadded, Encoding};
-    let compact = core::str::from_utf8(bytes).ok()?;
-    let cbor = Base64UrlUnpadded::decode_vec(compact.trim()).ok()?;
-    let issuer_signed = mdoc::IssuerSigned::parse(&cbor).ok()?;
-    let doctype = issuer_signed.doc_type().ok()?;
-    Some(MdocHolding {
-        doctype,
-        issuer_signed,
-    })
+    let compact =
+        core::str::from_utf8(bytes).map_err(|_| CredentialIngestionError::MalformedCredential)?;
+    let cbor = Base64UrlUnpadded::decode_vec(compact.trim())
+        .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+    mdoc::IssuerSigned::parse(&cbor).map_err(|_| CredentialIngestionError::MalformedCredential)
+}
+
+/// Extract bounded RFC 9360 issuer-certificate evidence from the credential itself. The COSE
+/// parser has already rejected malformed, colliding and over-budget header values; this function
+/// deliberately does not fall back to a path supplied alongside the credential.
+fn embedded_mdoc_issuer_chain(
+    issuer_signed: &mdoc::IssuerSigned,
+) -> Result<Vec<Vec<u8>>, CredentialIngestionError> {
+    let chain = issuer_signed
+        .issuer_auth
+        .x5chain()
+        .map_err(|_| CredentialIngestionError::MalformedCredential)?
+        .ok_or(CredentialIngestionError::UntrustedIssuer)?;
+    Ok(chain
+        .certificates()
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect())
+}
+
+fn json_epoch_claim(
+    claims: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> Result<Option<i64>, CredentialIngestionError> {
+    match claims.get(name) {
+        None => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .map(Some)
+            .ok_or(CredentialIngestionError::MalformedCredential),
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CredentialValidity {
+    issued_at: Option<i64>,
+    not_before: Option<i64>,
+    expires_at: Option<i64>,
+}
+
+impl CredentialValidity {
+    const IAT_CLOCK_SKEW_SECONDS: i64 = 300;
+
+    fn validate_at(&self, now: i64) -> Result<(), CredentialIngestionError> {
+        if self
+            .issued_at
+            .is_some_and(|iat| iat > now.saturating_add(Self::IAT_CLOCK_SKEW_SECONDS))
+            || self.not_before.is_some_and(|nbf| nbf > now)
+        {
+            return Err(CredentialIngestionError::CredentialNotYetValid);
+        }
+        if self.expires_at.is_some_and(|exp| exp <= now) {
+            return Err(CredentialIngestionError::CredentialExpired);
+        }
+        Ok(())
+    }
+}
+
+fn json_validity(
+    claims: &serde_json::Map<String, serde_json::Value>,
+    now: i64,
+) -> Result<CredentialValidity, CredentialIngestionError> {
+    // Permit a small positive skew for issuer clocks, but never accept a future `nbf` or an
+    // expired credential. The SD-JWT VC claims are optional at the format layer; when present they
+    // are security inputs and therefore must have the exact integer type.
+    let validity = CredentialValidity {
+        issued_at: json_epoch_claim(claims, "iat")?,
+        not_before: json_epoch_claim(claims, "nbf")?,
+        expires_at: json_epoch_claim(claims, "exp")?,
+    };
+    validity.validate_at(now)?;
+    Ok(validity)
+}
+
+fn sdjwt_device_binding_matches(
+    claims: &serde_json::Map<String, serde_json::Value>,
+    key: &[u8],
+) -> bool {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+
+    if key.len() != 65 || key.first() != Some(&0x04) {
+        return false;
+    }
+    let Some(jwk) = claims
+        .get("cnf")
+        .and_then(|v| v.get("jwk"))
+        .and_then(|v| v.as_object())
+    else {
+        return false;
+    };
+    // Only a local public EC key is accepted. In particular, never follow an issuer-controlled
+    // URL from a confirmation method and never accept private key material in a credential.
+    if jwk.get("kty").and_then(|v| v.as_str()) != Some("EC")
+        || jwk.get("crv").and_then(|v| v.as_str()) != Some("P-256")
+        || jwk.contains_key("d")
+        || jwk.contains_key("jku")
+        || jwk.contains_key("x5u")
+    {
+        return false;
+    }
+    let (Some(x), Some(y)) = (
+        jwk.get("x")
+            .and_then(|v| v.as_str())
+            .and_then(|v| Base64UrlUnpadded::decode_vec(v).ok()),
+        jwk.get("y")
+            .and_then(|v| v.as_str())
+            .and_then(|v| Base64UrlUnpadded::decode_vec(v).ok()),
+    ) else {
+        return false;
+    };
+    x.len() == 32 && y.len() == 32 && key[1..33] == x && key[33..65] == y
+}
+
+fn valid_status_uri(uri: &str) -> bool {
+    const MAX_STATUS_URI_BYTES: usize = 2048;
+    if uri.is_empty()
+        || uri.len() > MAX_STATUS_URI_BYTES
+        || !uri.is_ascii()
+        || uri
+            .bytes()
+            .any(|b| b.is_ascii_control() || b == b' ' || b == b'\\')
+        || uri.contains('#')
+    {
+        return false;
+    }
+    let Some(remainder) = uri.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = remainder.split(['/', '?']).next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    if authority.starts_with('[') {
+        return authority.find(']').is_some_and(|end| {
+            if end <= 1 {
+                return false;
+            }
+            let suffix = &authority[end + 1..];
+            suffix.is_empty()
+                || suffix.strip_prefix(':').is_some_and(|port| {
+                    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+                })
+        });
+    }
+    if authority.matches(':').count() > 1 {
+        return false;
+    }
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        && port.is_none_or(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn status_reference_from_claims(
+    claims: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<StatusReference>, CredentialIngestionError> {
+    let Some(status) = claims.get("status") else {
+        return Ok(None);
+    };
+    let Some(reference) = status.get("status_list").and_then(|v| v.as_object()) else {
+        return Err(CredentialIngestionError::UnsupportedStatusReference);
+    };
+    let Some(uri) = reference.get("uri").and_then(|v| v.as_str()) else {
+        return Err(CredentialIngestionError::UnsupportedStatusReference);
+    };
+    if !valid_status_uri(uri) {
+        return Err(CredentialIngestionError::UnsupportedStatusReference);
+    }
+    let index = reference
+        .get("idx")
+        .and_then(|v| v.as_u64())
+        .ok_or(CredentialIngestionError::UnsupportedStatusReference)?;
+    Ok(Some(StatusReference {
+        uri: uri.to_string(),
+        index,
+    }))
+}
+
+fn mdoc_device_binding_matches(device_key: &cose::cbor::Value, key: &[u8]) -> bool {
+    use cose::cbor::Value;
+
+    if key.len() != 65 || key.first() != Some(&0x04) {
+        return false;
+    }
+    let Value::Map(pairs) = device_key else {
+        return false;
+    };
+    let get = |label: &Value| {
+        pairs
+            .iter()
+            .find(|(candidate, _)| candidate == label)
+            .map(|(_, value)| value)
+    };
+    let public_only = !pairs.iter().any(|(label, _)| *label == Value::Nint(3)); // -4 / `d`
+    let x = get(&Value::Nint(1)); // -2
+    let y = get(&Value::Nint(2)); // -3
+    public_only
+        && get(&Value::Uint(1)) == Some(&Value::Uint(2)) // kty: EC2
+        && get(&Value::Nint(0)) == Some(&Value::Uint(1)) // crv: P-256
+        && matches!(x, Some(Value::Bytes(bytes)) if bytes.as_slice() == &key[1..33])
+        && matches!(y, Some(Value::Bytes(bytes)) if bytes.as_slice() == &key[33..65])
+}
+
+fn mdoc_validity(
+    validity: &mdoc::ValidityInfo,
+    now: i64,
+) -> Result<CredentialValidity, CredentialIngestionError> {
+    let signed = mdoc::TDate::parse(&validity.signed)
+        .ok_or(CredentialIngestionError::MalformedCredential)?;
+    let valid_from = mdoc::TDate::parse(&validity.valid_from)
+        .ok_or(CredentialIngestionError::MalformedCredential)?;
+    let valid_until = mdoc::TDate::parse(&validity.valid_until)
+        .ok_or(CredentialIngestionError::MalformedCredential)?;
+    if signed > valid_until || valid_from > valid_until {
+        return Err(CredentialIngestionError::MalformedCredential);
+    }
+    let validity = CredentialValidity {
+        // The shell clock has whole-second precision. Ceiling fractional bounds preserves exact
+        // `TDate` semantics: an instant at `...00.5` is still future at `...00` and expires before
+        // `...01`, while an integral timestamp remains unchanged.
+        issued_at: Some(signed.unix_seconds_ceil()),
+        not_before: Some(valid_from.unix_seconds_ceil()),
+        expires_at: Some(valid_until.unix_seconds_ceil()),
+    };
+    validity.validate_at(now)?;
+    Ok(validity)
 }
 
 /// A human-readable rendering of an mdoc element value for the card display (UI hint only).
@@ -122,6 +507,38 @@ fn cbor_value_display(v: &cose::cbor::Value) -> String {
     }
 }
 
+fn cbor_value_matches_json(cbor: &cose::cbor::Value, json: &serde_json::Value) -> bool {
+    use cose::cbor::Value as Cbor;
+    match (cbor, json) {
+        (Cbor::Text(left), serde_json::Value::String(right)) => left == right,
+        (Cbor::Bool(left), serde_json::Value::Bool(right)) => left == right,
+        (Cbor::Uint(left), serde_json::Value::Number(right)) => right.as_u64() == Some(*left),
+        (Cbor::Nint(argument), serde_json::Value::Number(right)) => right
+            .as_i64()
+            .is_some_and(|right| i128::from(right) == -1 - i128::from(*argument)),
+        (Cbor::Null, serde_json::Value::Null) => true,
+        (Cbor::Array(left), serde_json::Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| cbor_value_matches_json(left, right))
+        }
+        (Cbor::Map(left), serde_json::Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, value)| {
+                    let Cbor::Text(key) = key else {
+                        return false;
+                    };
+                    right
+                        .get(key)
+                        .is_some_and(|right| cbor_value_matches_json(value, right))
+                })
+        }
+        _ => false,
+    }
+}
+
 /// The disclosed value of an SD-JWT disclosure `base64url([salt, name, value])`.
 fn sd_disclosure_value(b64: &str) -> Option<serde_json::Value> {
     use base64ct::{Base64UrlUnpadded, Encoding};
@@ -130,42 +547,308 @@ fn sd_disclosure_value(b64: &str) -> Option<serde_json::Value> {
     arr.into_iter().nth(2)
 }
 
-/// Render a JSON value the way [`cbor_value_display`] renders CBOR (strings unquoted), so a DCQL
-/// `values` constraint can be compared against an mdoc element value.
-fn json_value_display(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RequestedSdJwtPathElement {
+    Name(String),
+    Index(usize),
+    AnyIndex,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SdJwtDisclosureSelection {
+    disclosures: Vec<String>,
+    revealed_claims: Vec<String>,
+}
+
+fn requested_sdjwt_path(path: &[serde_json::Value]) -> Option<Vec<RequestedSdJwtPathElement>> {
+    if path.is_empty() {
+        return None;
+    }
+    path.iter()
+        .map(|element| match element {
+            serde_json::Value::String(name) if !name.is_empty() => {
+                Some(RequestedSdJwtPathElement::Name(name.clone()))
+            }
+            serde_json::Value::Number(index) => index
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+                .map(RequestedSdJwtPathElement::Index),
+            serde_json::Value::Null => Some(RequestedSdJwtPathElement::AnyIndex),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_matching_json_paths(
+    value: &serde_json::Value,
+    requested: &[RequestedSdJwtPathElement],
+    current: &mut Vec<sdjwt::ClaimPathElement>,
+    matches: &mut Vec<(Vec<sdjwt::ClaimPathElement>, serde_json::Value)>,
+) {
+    let Some((head, tail)) = requested.split_first() else {
+        matches.push((current.clone(), value.clone()));
+        return;
+    };
+    match (head, value) {
+        (RequestedSdJwtPathElement::Name(name), serde_json::Value::Object(object)) => {
+            if let Some(child) = object.get(name) {
+                current.push(sdjwt::ClaimPathElement::Name(name.clone()));
+                collect_matching_json_paths(child, tail, current, matches);
+                current.pop();
+            }
+        }
+        (RequestedSdJwtPathElement::Index(index), serde_json::Value::Array(array)) => {
+            if let Some(child) = array.get(*index) {
+                current.push(sdjwt::ClaimPathElement::Index(*index));
+                collect_matching_json_paths(child, tail, current, matches);
+                current.pop();
+            }
+        }
+        (RequestedSdJwtPathElement::AnyIndex, serde_json::Value::Array(array)) => {
+            for (index, child) in array.iter().enumerate() {
+                current.push(sdjwt::ClaimPathElement::Index(index));
+                collect_matching_json_paths(child, tail, current, matches);
+                current.pop();
+            }
+        }
+        _ => {}
     }
 }
 
-/// Find an mdoc element's value by its namespaced path (`<namespace>.<element>`).
-fn mdoc_value_at<'a>(issued: &'a mdoc::IssuerSigned, path: &str) -> Option<&'a cose::cbor::Value> {
-    issued.name_spaces.iter().find_map(|(ns, items)| {
+fn matching_sdjwt_values(
+    authenticated: &AuthenticatedSdJwtHolding,
+    requested: &[RequestedSdJwtPathElement],
+) -> Vec<(Vec<sdjwt::ClaimPathElement>, serde_json::Value)> {
+    let root = serde_json::Value::Object(authenticated.processed.claims.clone());
+    let mut matches = Vec::new();
+    collect_matching_json_paths(&root, requested, &mut Vec::new(), &mut matches);
+    matches
+}
+
+fn claim_path_is_prefix(
+    prefix: &[sdjwt::ClaimPathElement],
+    path: &[sdjwt::ClaimPathElement],
+) -> bool {
+    prefix.len() <= path.len() && prefix.iter().zip(path).all(|(left, right)| left == right)
+}
+
+fn add_sdjwt_disclosure_dependencies(
+    authenticated: &AuthenticatedSdJwtHolding,
+    selected: &mut BTreeSet<String>,
+) -> bool {
+    let mut changed = false;
+    let selected_now: Vec<String> = selected.iter().cloned().collect();
+    for digest in selected_now {
+        let Some(disclosure) = authenticated
+            .processed
+            .disclosures
+            .iter()
+            .find(|candidate| candidate.digest == digest)
+        else {
+            continue;
+        };
+        if let Some(parent) = &disclosure.parent_digest {
+            changed |= selected.insert(parent.clone());
+        }
+    }
+    changed
+}
+
+fn sdjwt_path_string(path: &[sdjwt::ClaimPathElement]) -> String {
+    let mut rendered = String::new();
+    for element in path {
+        match element {
+            sdjwt::ClaimPathElement::Name(name) => {
+                // Preserve familiar dotted labels for simple claim names, but use JSON-escaped
+                // bracket notation whenever punctuation could collide with nesting or an array
+                // index (for example literal `a.b` versus path `["a", "b"]`).
+                let simple = !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+                if simple {
+                    if !rendered.is_empty() {
+                        rendered.push('.');
+                    }
+                    rendered.push_str(name);
+                } else {
+                    rendered.push('[');
+                    rendered.push_str(
+                        &serde_json::to_string(name)
+                            .expect("serializing a JSON object key cannot fail"),
+                    );
+                    rendered.push(']');
+                }
+            }
+            sdjwt::ClaimPathElement::Index(index) => {
+                rendered.push('[');
+                rendered.push_str(&index.to_string());
+                rendered.push(']');
+            }
+        }
+    }
+    rendered
+}
+
+fn collect_json_leaf_paths(
+    value: &serde_json::Value,
+    path: &mut Vec<sdjwt::ClaimPathElement>,
+    leaves: &mut Vec<Vec<sdjwt::ClaimPathElement>>,
+) {
+    match value {
+        serde_json::Value::Object(object) if !object.is_empty() => {
+            for (name, child) in object {
+                path.push(sdjwt::ClaimPathElement::Name(name.clone()));
+                collect_json_leaf_paths(child, path, leaves);
+                path.pop();
+            }
+        }
+        serde_json::Value::Array(array) if !array.is_empty() => {
+            for (index, child) in array.iter().enumerate() {
+                path.push(sdjwt::ClaimPathElement::Index(index));
+                collect_json_leaf_paths(child, path, leaves);
+                path.pop();
+            }
+        }
+        _ if !path.is_empty() => leaves.push(path.clone()),
+        _ => {}
+    }
+}
+
+fn visible_sdjwt_claims(
+    authenticated: &AuthenticatedSdJwtHolding,
+    selected: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut leaves = Vec::new();
+    collect_json_leaf_paths(
+        &serde_json::Value::Object(authenticated.processed.claims.clone()),
+        &mut Vec::new(),
+        &mut leaves,
+    );
+    let mut visible = Vec::new();
+    for path in leaves {
+        let Some(sdjwt::ClaimPathElement::Name(root_name)) = path.first() else {
+            continue;
+        };
+        if SDJWT_CONTROL_CLAIMS.contains(&root_name.as_str()) || root_name == "_sd_alg" {
+            continue;
+        }
+        let all_enclosing_disclosures_selected = authenticated
+            .processed
+            .disclosures
+            .iter()
+            .filter(|disclosure| claim_path_is_prefix(&disclosure.path, &path))
+            .all(|disclosure| selected.contains(&disclosure.digest));
+        if all_enclosing_disclosures_selected {
+            let rendered = sdjwt_path_string(&path);
+            if !visible.contains(&rendered) {
+                visible.push(rendered);
+            }
+        }
+    }
+    visible
+}
+
+fn select_authenticated_sdjwt_disclosures(
+    authenticated: &AuthenticatedSdJwtHolding,
+    requested_paths: &[Vec<RequestedSdJwtPathElement>],
+) -> Option<SdJwtDisclosureSelection> {
+    let mut matched_paths = Vec::new();
+    for requested in requested_paths {
+        let matches = matching_sdjwt_values(authenticated, requested);
+        if matches.is_empty() {
+            return None;
+        }
+        for (matched_path, _) in matches {
+            if !matched_paths.contains(&matched_path) {
+                matched_paths.push(matched_path);
+            }
+        }
+    }
+    Some(select_authenticated_sdjwt_disclosures_for_paths(
+        authenticated,
+        &matched_paths,
+    ))
+}
+
+fn select_authenticated_sdjwt_disclosures_for_paths(
+    authenticated: &AuthenticatedSdJwtHolding,
+    matched_paths: &[Vec<sdjwt::ClaimPathElement>],
+) -> SdJwtDisclosureSelection {
+    let mut selected = BTreeSet::new();
+    for matched_path in matched_paths {
+        for disclosure in &authenticated.processed.disclosures {
+            // Ancestors are needed to reach a selected leaf. When the requested value is itself an
+            // object/array, descendants are needed to reconstruct that complete value rather than
+            // return an accidentally partial object.
+            if claim_path_is_prefix(&disclosure.path, matched_path)
+                || claim_path_is_prefix(matched_path, &disclosure.path)
+            {
+                selected.insert(disclosure.digest.clone());
+            }
+        }
+    }
+    while add_sdjwt_disclosure_dependencies(authenticated, &mut selected) {}
+    SdJwtDisclosureSelection {
+        disclosures: authenticated
+            .processed
+            .disclosures
+            .iter()
+            .filter(|disclosure| selected.contains(&disclosure.digest))
+            .map(|disclosure| disclosure.raw.clone())
+            .collect(),
+        revealed_claims: visible_sdjwt_claims(authenticated, &selected),
+    }
+}
+
+fn requested_mdoc_path(path: &[serde_json::Value]) -> Option<(String, String)> {
+    let [serde_json::Value::String(namespace), serde_json::Value::String(element)] = path else {
+        return None;
+    };
+    if namespace.is_empty() || element.is_empty() {
+        return None;
+    }
+    Some((namespace.clone(), element.clone()))
+}
+
+/// Find an mdoc element's value by its exact typed `[namespace, element]` path.
+fn mdoc_value_at<'a>(
+    issued: &'a mdoc::IssuerSigned,
+    path: &(String, String),
+) -> Option<&'a cose::cbor::Value> {
+    issued.name_spaces.iter().find_map(|(namespace, items)| {
+        if namespace != &path.0 {
+            return None;
+        }
         items
             .iter()
-            .find(|it| format!("{ns}.{}", it.element_id) == path)
-            .map(|it| &it.element_value)
+            .find(|item| item.element_id == path.1)
+            .map(|item| &item.element_value)
     })
 }
 
 /// Drop the issuer-signed items a request did not ask for (mdoc data minimisation). The MSO
 /// (`issuerAuth`) is left intact; a verifier checks each *presented* item's digest against it, so
 /// omitting items is valid and reveals only the requested-and-held subset.
-fn minimise_mdoc(issued: &mdoc::IssuerSigned, requested_claims: &[String]) -> mdoc::IssuerSigned {
-    // mdoc DCQL claim paths are `[namespace, element]`, rendered "<namespace>.<element>". Match the
-    // issuer-signed items against that namespaced identity.
-    let all: Vec<String> = mdoc_claim_ids(issued);
-    let keep = minimum_claim_set(requested_claims, &all);
+fn minimise_mdoc(
+    issued: &mdoc::IssuerSigned,
+    requested_claims: &[(String, String)],
+) -> mdoc::IssuerSigned {
     let name_spaces = issued
         .name_spaces
         .iter()
-        .map(|(ns, items)| {
+        .map(|(namespace, items)| {
             (
-                ns.clone(),
+                namespace.clone(),
                 items
                     .iter()
-                    .filter(|it| keep.contains(&format!("{ns}.{}", it.element_id)))
+                    .filter(|item| {
+                        requested_claims
+                            .iter()
+                            .any(|(requested_ns, requested_element)| {
+                                requested_ns == namespace && requested_element == &item.element_id
+                            })
+                    })
                     .cloned()
                     .collect(),
             )
@@ -175,15 +858,6 @@ fn minimise_mdoc(issued: &mdoc::IssuerSigned, requested_claims: &[String]) -> md
         name_spaces,
         issuer_auth: issued.issuer_auth.clone(),
     }
-}
-
-/// The namespaced claim identities (`<namespace>.<element>`) an mdoc holding carries.
-fn mdoc_claim_ids(issued: &mdoc::IssuerSigned) -> Vec<String> {
-    issued
-        .name_spaces
-        .iter()
-        .flat_map(|(ns, items)| items.iter().map(move |it| format!("{ns}.{}", it.element_id)))
-        .collect()
 }
 
 /// A deterministic `mdoc_generated_nonce` derived from the request nonce. The sans-IO core has no
@@ -202,9 +876,10 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(hi), Some(lo)) =
-                ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16))
-            {
+            if let (Some(hi), Some(lo)) = (
+                (b[i + 1] as char).to_digit(16),
+                (b[i + 2] as char).to_digit(16),
+            ) {
                 out.push((hi * 16 + lo) as u8);
                 i += 3;
                 continue;
@@ -252,12 +927,21 @@ fn credential_vct_and_issuer(issuer_jwt: &str) -> (String, String) {
 
 /// A credential the wallet holds: the issuer-signed JWT plus its disclosures keyed by claim name,
 /// so the core can disclose exactly the requested-and-held subset.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusReference {
+    /// Exact HTTPS URI of the Status List Token. Its signed `sub` must be byte-for-byte equal.
+    pub uri: String,
+    /// Non-negative entry index within that list.
+    pub index: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HeldCredential {
     pub issuer_jwt: String,
     pub disclosures_by_claim: BTreeMap<String, String>,
-    /// This credential's index in its Token Status List, if it has one. Checked before presenting.
-    pub status_index: Option<u64>,
+    /// Authenticated, indivisible status reference. URI and index can never be mixed across lists.
+    pub status: Option<StatusReference>,
 }
 
 /// An ISO 18013-5 mdoc the wallet holds (issued in the `mso_mdoc` format): the parsed
@@ -266,6 +950,170 @@ pub struct HeldCredential {
 pub struct MdocHolding {
     pub doctype: String,
     pub issuer_signed: mdoc::IssuerSigned,
+}
+
+/// Authenticated material retained with a holding so time, trust-list, certificate-path, issuer,
+/// signature, catalogue, and device-binding decisions can be repeated at presentation time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CredentialProvenance {
+    format: oid4vci::CredentialFormat,
+    raw_credential: Vec<u8>,
+    issuer: CredentialIssuerEvidence,
+}
+
+/// Path- and profile-validated issuer evidence retained with a verified holding. The service
+/// domain is selected by catalogue policy and was never inferred from shell metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CredentialIssuerEvidence {
+    identity: String,
+    service: IssuerTrustDomain,
+    public_key_raw: Vec<u8>,
+    certificate_path: Vec<Vec<u8>>,
+    not_before: i64,
+    not_after: i64,
+}
+
+impl CredentialIssuerEvidence {
+    fn is_internally_consistent(&self) -> bool {
+        !self.identity.is_empty()
+            && !self.public_key_raw.is_empty()
+            && !self.certificate_path.is_empty()
+            && self.not_before <= self.not_after
+            && matches!(
+                self.service,
+                IssuerTrustDomain::Pid | IssuerTrustDomain::Attestation
+            )
+    }
+}
+
+/// The explicitly named Rust-only fixture loaders remain source-compatible for existing tests;
+/// production ingestion always stores the `Authenticated` variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StoredProvenance {
+    Authenticated(CredentialProvenance),
+    TestFixture,
+}
+
+/// Private authenticated SD-JWT representation. Unlike [`HeldCredential`], this retains the
+/// processed document, typed object/array paths, raw disclosures and parent digest dependencies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthenticatedSdJwtHolding {
+    processed: sdjwt::ProcessedSdJwt,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredSdJwtCredential {
+    holding: HeldCredential,
+    /// Always `Some` for production ingestion. `None` exists solely for the explicit Rust fixture
+    /// API, whose flat map remains source-compatible with older tests.
+    authenticated: Option<AuthenticatedSdJwtHolding>,
+    validity: CredentialValidity,
+    provenance: StoredProvenance,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredMdocCredential {
+    holding: MdocHolding,
+    validity: CredentialValidity,
+    provenance: StoredProvenance,
+}
+
+/// Why a credential was refused before it could enter wallet storage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CredentialIngestionError {
+    ClockNotSet,
+    UnsupportedFormat,
+    UntrustedIssuer,
+    MalformedCredential,
+    UnsupportedAlgorithm,
+    SignatureInvalid,
+    IssuerMismatch,
+    IssuerServiceMismatch,
+    UnknownCredentialType,
+    CredentialTypeFormatMismatch,
+    IssuerNotAllowedForType,
+    MandatoryClaimsMissing,
+    CredentialNotYetValid,
+    CredentialExpired,
+    DeviceBindingMissing,
+    DeviceBindingMismatch,
+    DuplicateClaim,
+    UnsupportedStatusReference,
+    CredentialStoreFull,
+    CredentialEvidenceLimitExceeded,
+    UnexpectedCredentialResponse,
+}
+
+/// Why a downloaded status assertion was refused before entering the bounded cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StatusLoadError {
+    ClockNotSet,
+    InvalidUri,
+    UntrustedProvider,
+    InvalidToken(status::StatusError),
+    CacheFull,
+}
+
+/// The only values allowed across the authentication-to-storage boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VerifiedCredential {
+    SdJwt {
+        holding: HeldCredential,
+        authenticated: AuthenticatedSdJwtHolding,
+        validity: CredentialValidity,
+    },
+    Mdoc {
+        holding: MdocHolding,
+        validity: CredentialValidity,
+    },
+}
+
+impl VerifiedCredential {
+    fn format(&self) -> oid4vci::CredentialFormat {
+        match self {
+            Self::SdJwt { .. } => oid4vci::CredentialFormat::DcSdJwt,
+            Self::Mdoc { .. } => oid4vci::CredentialFormat::MsoMdoc,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthenticatedCredential {
+    credential: VerifiedCredential,
+    provenance: CredentialProvenance,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PresentationCredentialReference {
+    SdJwt {
+        holding: HeldCredential,
+        authenticated: Option<AuthenticatedSdJwtHolding>,
+    },
+    Mdoc(MdocHolding),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PresentationEligibilityError {
+    CredentialExpired,
+    CredentialNotYetValid,
+    CredentialProvenanceInvalid,
+    TrustEvidenceInvalid,
+    NoEligibleCredential,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedPresentationCredential {
+    selected: SelectedCredential,
+    source: PresentationCredentialReference,
+    /// Every holder-visible claim path that the resulting presentation reveals, including
+    /// permanent PII and incidental values exposed by disclosure dependencies.
+    revealed_claims: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RelyingPartyProvenance {
+    certificate_chain: Vec<Vec<u8>>,
+    public_key: Vec<u8>,
 }
 
 /// Static wallet configuration.
@@ -282,8 +1130,8 @@ pub struct WalletConfig {
 struct SessionInfo {
     rp_client_id: String,
     purpose: String,
-    /// The union of requested claim paths across all DCQL queries — drives the consent screen and
-    /// the legacy (no-DCQL) single-credential selection. Per-query selection reads `dcql` instead.
+    /// Every declared DCQL path, or the legacy flat claims when DCQL is absent. DCQL consent uses
+    /// `selected_revealed_claims`; only the legacy selector reads this field directly.
     requested_claims: Vec<String>,
     /// The request nonce, needed to bind the mdoc OpenID4VP SessionTranscript.
     nonce: u64,
@@ -292,9 +1140,17 @@ struct SessionInfo {
     response_mode: String,
     /// The verifier's response-encryption key (uncompressed P-256), present iff `direct_post.jwt`.
     response_encryption_key: Option<Vec<u8>>,
-    /// The full DCQL query when present — one credential query per credential the RP wants, so the
-    /// wallet can select and present ONE credential per query (multi-credential presentation).
+    /// The full DCQL query when present. Its set planner selects the complete required subset and
+    /// omits optional sets without holder opt-in, with at most one held credential per supported
+    /// query until `multiple=true` lands.
     dcql: Option<oid4vp::dcql::DcqlQuery>,
+    /// Exact credentials selected before consent. Later phases revalidate these values instead of
+    /// silently switching to a different holding after the user approved the screen.
+    selected_credentials: Vec<SelectedCredential>,
+    selected_sources: Vec<PresentationCredentialReference>,
+    selected_revealed_claims: Vec<String>,
+    /// RP certificate path + request-verification key retained for current-time revalidation.
+    rp_provenance: Option<RelyingPartyProvenance>,
     /// The consent hash + the exact claim paths shown on the consent screen, captured when it is
     /// rendered, so the transaction log can record what was shared without storing values.
     consent_hash: [u8; 32],
@@ -315,12 +1171,20 @@ struct SessionInfo {
 pub enum Event {
     /// Set the shell's wall-clock (Unix seconds); the core has no clock of its own.
     SetClock { epoch: i64 },
+    /// Replace one completed transaction-log entry with its chain-preserving canonical tombstone.
+    /// History mutations are accepted only while no protocol flow or native callback is pending.
+    RedactTransaction { seq: u64 },
+    /// Erase the complete transaction log and clear the audit fault latch. This is accepted only
+    /// while no protocol flow or native callback is pending, so erasure cannot race an audit append.
+    WipeTransactionLog,
     /// A remote authorization request (compact JWS) arrived via deep link / browser.
     AuthorizationRequestReceived { request: Vec<u8> },
     /// The shell fetched the RP's certificate chain (DER, leaf-first) for the pending request.
     /// Whether the RP is *registered* is decided IN-CORE against the trusted list — not here.
     RpCertChainResolved {
         rp_cert_chain: Vec<Vec<u8>>,
+        /// Authenticated RP delivery endpoints. The legacy redirect-oriented name is retained in
+        /// the FFI contract; presentation `response_uri` values are matched against this list too.
         registered_redirect_uris: Vec<String>,
     },
     /// The user approved the consent screen.
@@ -332,6 +1196,21 @@ pub enum Event {
     DeviceSignatureProduced { signature: Vec<u8> },
     /// The shell confirmed the vp_token reached the response_uri.
     PresentationDelivered,
+    /// The payment service acknowledged the dynamically linked authorization code.
+    PaymentAuthorizationDelivered,
+    /// The QTSP acknowledged the QES authorization response.
+    QesAuthorizationDelivered,
+    /// A correlated operation without a protocol-specific payload completed (currently durable
+    /// nonce persistence and peer-offer publication).
+    OperationSucceeded { operation_id: u64 },
+    /// A correlated native operation failed. The JSON boundary validates `operation_id` before
+    /// this transition can reset the owning flow.
+    OperationFailed {
+        operation_id: u64,
+        failure: OperationFailure,
+    },
+    /// The OS or holder cancelled a correlated native operation.
+    OperationCancelled { operation_id: u64 },
     /// A payment authorization request (PSD2/TS12) arrived.
     PaymentAuthorizationRequestReceived { request: Vec<u8> },
     /// The user approved the payment confirmation screen.
@@ -361,6 +1240,14 @@ pub enum Event {
     TokenReceived { bound: bool, c_nonce: u64 },
     /// The credential endpoint returned a credential.
     CredentialReceived { format: String, bytes: Vec<u8> },
+    /// The shell completed an HTTPS Token Status List fetch. The token is trusted only after the
+    /// core validates the exact URI, 2xx response, status-provider certificate path and JWS.
+    StatusListReceived {
+        uri: String,
+        http_status: u16,
+        token: Vec<u8>,
+        provider_cert_chain: Vec<Vec<u8>>,
+    },
     /// The holder wants to RECEIVE a credential from a peer wallet (TS09): publish an offer
     /// carrying this wallet's key + a fresh nonce over the peer transport (BLE/QR).
     WalletTransferOfferCreated,
@@ -385,6 +1272,17 @@ pub enum Event {
 }
 
 /// Everything the core asks the shell to do (serialised to JSON at the FFI boundary).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HttpDeliveryProfile {
+    /// OpenID4VP 1.0 `direct_post` and `direct_post.jwt` response delivery.
+    Openid4vpDirectPost,
+    /// A payment authorization destined for a dedicated PSP adapter.
+    PaymentAuthorization,
+    /// A QES authorization destined for a dedicated CSC/QTSP adapter.
+    QesAuthorization,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 // See the note on `Event`: `rename_all_fields` makes struct-variant fields (`client_id` ->
 // `clientId`, `key_ref` -> `keyRef`) camelCase so the shell's `WalletEffect` decoder matches.
@@ -402,8 +1300,13 @@ pub enum Effect {
     Render { screen: ScreenDescription },
     /// Sign `payload` with the device key (Secure Enclave), then send back `DeviceSignatureProduced`.
     Sign { key_ref: String, payload: Vec<u8> },
-    /// Perform an HTTP POST (TLS handled by the OS), then send back `PresentationDelivered`.
-    Http { url: String, body: Vec<u8> },
+    /// Deliver a protocol response through the profile-specific native adapter. The profile is
+    /// checked against the active flow before this effect crosses the JSON boundary.
+    Http {
+        profile: HttpDeliveryProfile,
+        url: String,
+        body: Vec<u8>,
+    },
     // --- Issuance (OID4VCI) actions ---
     /// Push a PAR request, then send back `ParPushed`.
     PushPar,
@@ -415,11 +1318,35 @@ pub enum Effect {
     RequestToken,
     /// Request the credential with the assembled proof, then send back `CredentialReceived`.
     RequestCredential { proof_jwt: Vec<u8> },
+    /// Fetch a Token Status List over HTTPS. The shell must cap the response at
+    /// `status::MAX_TOKEN_BYTES`, then return `StatusListReceived` with the status signer's chain.
+    FetchStatusList { uri: String },
     /// Publish a wallet-to-wallet receive offer over the peer transport: this wallet's key (the
     /// binding the sender must target). The shell adds a fresh nonce + BLE/QR transport (TS09).
     PublishTransferOffer { offered_key: Vec<u8> },
     /// Tear down the exchange.
     Close,
+}
+
+const MAX_CACHED_STATUS_LISTS: usize = 8;
+const MAX_STATUS_LISTS_PER_PRESENTATION: usize = 8;
+const MAX_PENDING_OPERATIONS: usize = 32;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StatusGate {
+    Ready,
+    Fetch {
+        all_references: Vec<StatusReference>,
+        uris: Vec<String>,
+    },
+    Revoked,
+    Indeterminate,
+}
+
+#[derive(Clone, Debug)]
+struct CachedStatusList {
+    list: status::StatusList,
+    provider_cert_chain: Vec<Vec<u8>>,
 }
 
 /// The whole wallet state.
@@ -430,16 +1357,25 @@ pub struct Core {
     seen_nonces: Vec<u64>,
     /// The credentials the wallet holds. A real wallet holds several (a PID, an mDL, …); issuance
     /// appends, and presentation selects the one that data-minimally satisfies the request.
-    credentials: Vec<HeldCredential>,
+    credentials: Vec<StoredSdJwtCredential>,
     /// mdoc holdings (ISO 18013-5), presented over OpenID4VP as DeviceResponses.
-    mdoc_holdings: Vec<MdocHolding>,
+    mdoc_holdings: Vec<StoredMdocCredential>,
     session: Option<SessionInfo>,
+    pending_rp_provenance: Option<RelyingPartyProvenance>,
     now_epoch: i64,
     // Payment SCA flow.
     payment: payment::State,
     pay_seen_nonces: Vec<u64>,
     pay_pending: Option<(String, u64)>, // (response_uri, nonce) of the in-flight payment
     active: ActiveFlow,
+    /// Monotonic, process-local correlation sequence. IDs are never reused, even after a flow is
+    /// cancelled, so a delayed native callback cannot target a later operation.
+    next_operation_id: u64,
+    /// Operations emitted over the production JSON boundary and still awaiting their exact result.
+    pending_operations: BTreeMap<u64, PendingOperation>,
+    /// Dormant checkpoint-v2 delivery foundation. No production event, FFI or native path can
+    /// enqueue or dispatch this ledger until resumable aggregate persistence is complete.
+    delivery_ledger: delivery::DeliveryLedger,
     // Trust: the verified trusted list, used to decide RP registration in-core (not shell-supplied).
     trust_store: TrustStore,
     // Issuance (OID4VCI) flow.
@@ -448,11 +1384,28 @@ pub struct Core {
     device_public_key: Vec<u8>,
     wua: Option<wua::WalletUnitAttestation>,
     issuer_trusted_current: bool,
+    /// Authenticated certificate identity used by the issuance machine and audit log.
     issuer_id_current: String,
-    // Revocation: the current verified Token Status List, checked before presenting.
-    status_list: Option<status::StatusList>,
+    /// Full issuer path retained for revalidation throughout issuance and credential provenance.
+    issuer_cert_chain_current: Vec<Vec<u8>>,
+    /// Original shell assertion, retained only so the credential response can re-check it.
+    issuer_id_assertion_current: String,
+    /// Service-scoped path/profile results for the active issuer chain.
+    issuer_candidates_current: Vec<CredentialIssuerEvidence>,
+    /// Parsed credential that crossed the authentication/policy boundary for this response.
+    pending_verified_credential: Option<AuthenticatedCredential>,
+    last_credential_ingestion_error: Option<CredentialIngestionError>,
+    // Revocation: URI-keyed verified lists plus the exact selected references awaiting refresh.
+    // Both collections are explicitly bounded to keep hostile issuer data from growing memory.
+    status_lists: BTreeMap<String, CachedStatusList>,
+    pending_status_references: Vec<StatusReference>,
     // Transaction (audit) log: privacy-preserving, tamper-evident record of completed flows (TS06).
     log: txnlog::TransactionLog,
+    /// Process-local safety latch: once an interaction cannot be recorded, later auditable flows
+    /// stay blocked until the holder explicitly wipes/resets the incomplete history. The eventual
+    /// #16 checkpoint must restore/revalidate the log and external anchor; this flag is not durable
+    /// rollback protection by itself.
+    audit_log_available: bool,
     // Payment details captured at the confirmation screen, recorded into the log on authorization.
     pay_summary: Option<txnlog::PaymentSummary>,
     pay_consent_hash: [u8; 32],
@@ -479,11 +1432,15 @@ impl Core {
             credentials: Vec::new(),
             mdoc_holdings: Vec::new(),
             session: None,
+            pending_rp_provenance: None,
             now_epoch: 0,
             payment: payment::State::Idle,
             pay_seen_nonces: Vec::new(),
             pay_pending: None,
             active: ActiveFlow::None,
+            next_operation_id: operation_id_seed(),
+            pending_operations: BTreeMap::new(),
+            delivery_ledger: delivery::DeliveryLedger::new(),
             trust_store: TrustStore::new(),
             issuance: oid4vci::State::Idle,
             iss_seen_c_nonces: Vec::new(),
@@ -491,8 +1448,15 @@ impl Core {
             wua: None,
             issuer_trusted_current: false,
             issuer_id_current: String::new(),
-            status_list: None,
+            issuer_cert_chain_current: Vec::new(),
+            issuer_id_assertion_current: String::new(),
+            issuer_candidates_current: Vec::new(),
+            pending_verified_credential: None,
+            last_credential_ingestion_error: None,
+            status_lists: BTreeMap::new(),
+            pending_status_references: Vec::new(),
             log: txnlog::TransactionLog::new(),
+            audit_log_available: true,
             pay_summary: None,
             pay_consent_hash: [0u8; 32],
             catalogue: catalogue::default_catalogue(),
@@ -524,7 +1488,7 @@ impl Core {
                     .map(|c| {
                         format!(
                             r#"{{"path":{:?},"displayName":{:?},"mandatory":{}}}"#,
-                            c.path, c.display_name, c.mandatory
+                            c.path.request_path(), c.display_name, c.mandatory
                         )
                     })
                     .collect::<Vec<_>>()
@@ -547,6 +1511,12 @@ impl Core {
     /// The transaction (audit) log — completed presentations, payments, and issuances.
     pub fn transaction_log(&self) -> &txnlog::TransactionLog {
         &self.log
+    }
+
+    /// Whether new auditable operations may start. False means a prior append failed or the log
+    /// cannot reserve one maximum-sized entry; the core fails before consent/signing/delivery.
+    pub fn audit_log_available(&self) -> bool {
+        self.audit_log_available && self.log.can_guarantee_max_entry()
     }
 
     /// The transaction log as a JSON array (what the iOS history screen renders). Records claim
@@ -589,8 +1559,8 @@ impl Core {
 
     /// Erase one transaction-log entry's content (data-subject right to erasure, TS07). Leaves a
     /// tamper-evident tombstone: the chain stays intact and the deletion is auditable, but the
-    /// counterparty / claim paths / consent hash / payment detail are gone. Returns whether `seq`
-    /// existed.
+    /// original time, kind, outcome, counterparty, claim paths, consent hash and payment detail are
+    /// replaced by deterministic blank values. Returns whether `seq` existed.
     pub fn redact_transaction(&mut self, seq: u64) -> bool {
         self.log.redact(seq)
     }
@@ -598,13 +1568,45 @@ impl Core {
     /// Erase the entire transaction log (full erasure / reset).
     pub fn wipe_transaction_log(&mut self) {
         self.log.wipe();
+        self.audit_log_available = true;
+    }
+
+    /// History erasure must be a standalone state transition. In particular, never allow a UI
+    /// action to erase or rewrite the audit chain while an operation is awaiting a native result
+    /// that may later append to it. The native coordinator also serializes durable commits; this
+    /// Core-side guard keeps direct/event callers fail-closed under accidental interleaving.
+    fn history_mutation_is_safe(&self) -> bool {
+        self.active == ActiveFlow::None && self.pending_operations.is_empty()
+    }
+
+    fn history_mutation_rejection_effects() -> Vec<Effect> {
+        vec![Effect::Render {
+            screen: ScreenDescription::Error {
+                code: "history_mutation_in_progress".into(),
+                message: "Wallet history cannot be changed while another wallet operation is in progress.".into(),
+            },
+        }]
+    }
+
+    fn wallet_transfer_in_progress_effects() -> Vec<Effect> {
+        vec![Effect::Render {
+            screen: ScreenDescription::Error {
+                code: "wallet_transfer_in_progress".into(),
+                message: "A credential transfer cannot replace another wallet operation.".into(),
+            },
+        }]
     }
 
     /// A portable, integrity-protected export of the holder's own wallet data (TS10): the held
     /// credential + the transaction log, under a SHA-256 hash over canonical bytes. The holder's
     /// explicit action; the shell adds at-rest encryption before it leaves the device.
     pub fn export_json(&self) -> String {
-        export::export_json(&AwsLc, self.now_epoch, self.credentials.first(), &self.log)
+        export::export_json(
+            &AwsLc,
+            self.now_epoch,
+            self.credentials.first().map(|stored| &stored.holding),
+            &self.log,
+        )
     }
 
     /// A privacy-preserving activity report as JSON (TS08): counts by kind, redaction count, and
@@ -623,33 +1625,122 @@ impl Core {
         )
     }
 
-    /// Verify + store a Token Status List used to check credential revocation before presenting.
+    /// Verify + store one URI-bound Token Status List in the bounded cache.
     pub fn load_status_list(
         &mut self,
+        uri: &str,
         token: &[u8],
-        provider_public_key: &[u8],
-    ) -> Result<(), String> {
+        provider_cert_chain: &[Vec<u8>],
+    ) -> Result<(), StatusLoadError> {
+        if self.now_epoch <= 0 {
+            return Err(StatusLoadError::ClockNotSet);
+        }
+        if !valid_status_uri(uri) {
+            return Err(StatusLoadError::InvalidUri);
+        }
+        let provider_public_key = self
+            .resolve_status_provider_key(provider_cert_chain)
+            .ok_or(StatusLoadError::UntrustedProvider)?;
         let list = status::parse_and_verify(
             token,
-            provider_public_key,
+            uri,
+            &provider_public_key,
             &AwsLc,
             Alg::Es256,
             self.now_epoch,
         )
-        .map_err(|e| format!("{e:?}"))?;
-        self.status_list = Some(list);
+        .map_err(StatusLoadError::InvalidToken)?;
+
+        // Drop stale entries before applying the fixed cache cardinality cap. A fresh entry may
+        // replace the same URI, but an attacker cannot fill an unbounded number of distinct lists.
+        let now = self.now_epoch;
+        self.status_lists
+            .retain(|_, cached| cached.list.is_fresh_at(now));
+        if !self.status_lists.contains_key(uri)
+            && self.status_lists.len() >= MAX_CACHED_STATUS_LISTS
+        {
+            return Err(StatusLoadError::CacheFull);
+        }
+        self.status_lists.insert(
+            uri.to_string(),
+            CachedStatusList {
+                list,
+                provider_cert_chain: provider_cert_chain.to_vec(),
+            },
+        );
         Ok(())
     }
 
-    /// Should the held credential be blocked from presentation because it is revoked/suspended (or
-    /// its status is unavailable under a fail-closed policy)? Decided in-core.
-    fn status_blocks_presentation(&self) -> bool {
-        let Some(idx) = self.credentials.iter().find_map(|c| c.status_index) else {
-            return false; // no status list reference → nothing to check
+    /// Evaluate status for exactly the credentials selected for this consent. Missing/stale lists
+    /// request a refresh; known-bad, out-of-range and structurally inconsistent values fail closed.
+    fn presentation_status_gate(&self) -> StatusGate {
+        let mut references = Vec::<StatusReference>::new();
+
+        let Some(session) = self.session.as_ref() else {
+            return StatusGate::Indeterminate;
         };
-        let st = self.status_list.as_ref().map(|l| l.status_at(idx as usize));
-        // Remote presentation is online → fail closed if the status can't be resolved.
-        status::decide(st, status::FailPolicy::FailClosed) == status::Decision::Reject
+        for source in &session.selected_sources {
+            let PresentationCredentialReference::SdJwt { holding, .. } = source else {
+                continue;
+            };
+            if let Some(reference) = &holding.status {
+                if !references.contains(reference) {
+                    references.push(reference.clone());
+                }
+            }
+        }
+
+        if references.len() > MAX_STATUS_LISTS_PER_PRESENTATION {
+            return StatusGate::Indeterminate;
+        }
+
+        let mut fetch_uris = Vec::new();
+        for reference in &references {
+            let Some(cached) = self.status_lists.get(&reference.uri) else {
+                if !fetch_uris.contains(&reference.uri) {
+                    fetch_uris.push(reference.uri.clone());
+                }
+                continue;
+            };
+            if !cached.list.is_fresh_at(self.now_epoch)
+                || self
+                    .resolve_status_provider_key(&cached.provider_cert_chain)
+                    .is_none()
+            {
+                if !fetch_uris.contains(&reference.uri) {
+                    fetch_uris.push(reference.uri.clone());
+                }
+                continue;
+            }
+            let Ok(index) = usize::try_from(reference.index) else {
+                return StatusGate::Indeterminate;
+            };
+            match cached.list.status_at(index) {
+                status::CredentialStatus::Valid => {}
+                status::CredentialStatus::Invalid | status::CredentialStatus::Suspended => {
+                    return StatusGate::Revoked;
+                }
+                status::CredentialStatus::Unknown => return StatusGate::Indeterminate,
+            }
+        }
+
+        if fetch_uris.is_empty() {
+            StatusGate::Ready
+        } else {
+            StatusGate::Fetch {
+                all_references: references,
+                uris: fetch_uris,
+            }
+        }
+    }
+
+    fn status_block_effects(&mut self, revoked: bool) -> Vec<Effect> {
+        let reason = if revoked {
+            AbortReason::CredentialStatusInvalid
+        } else {
+            AbortReason::CredentialStatusUnavailable
+        };
+        self.abort_presentation(reason)
     }
 
     /// Register the device public key (the Secure Enclave key the WUA attests). Needed to check
@@ -695,7 +1786,7 @@ impl Core {
     fn resolve_rp(&self, chain: &[Vec<u8>]) -> (bool, Vec<u8>) {
         let anchors = self
             .trust_store
-            .parsed_anchors(ServiceType::RelyingPartyAccessCa);
+            .parsed_anchors_at(ServiceType::RelyingPartyAccessCa, self.now_epoch);
         match x509::check_relying_party(chain, &anchors, self.now_epoch, &AwsLc) {
             Ok(_) => {
                 let key = chain
@@ -709,19 +1800,159 @@ impl Core {
         }
     }
 
-    /// Add a credential to the wallet's holdings (e.g. a PID or mDL obtained via issuance).
-    /// Idempotent: loading a byte-identical credential twice does not duplicate it.
-    pub fn load_credential(&mut self, credential: HeldCredential) {
-        if !self.credentials.contains(&credential) {
-            self.credentials.push(credential);
+    /// Install an unverified SD-JWT holding in a test fixture.
+    ///
+    /// Production callers must use issuance or [`Self::ingest_credential`]. Keeping the bypass
+    /// loudly named prevents test setup from becoming an accidental storage API.
+    #[doc(hidden)]
+    pub fn load_unverified_credential_for_testing(&mut self, credential: HeldCredential) {
+        if !self
+            .credentials
+            .iter()
+            .any(|stored| stored.holding == credential)
+        {
+            self.credentials.push(StoredSdJwtCredential {
+                holding: credential,
+                authenticated: None,
+                validity: CredentialValidity::default(),
+                provenance: StoredProvenance::TestFixture,
+            });
         }
     }
 
-    /// Add an mdoc holding (e.g. an mso_mdoc mDL obtained via issuance). Idempotent.
-    pub fn load_mdoc_credential(&mut self, holding: MdocHolding) {
-        if !self.mdoc_holdings.contains(&holding) {
-            self.mdoc_holdings.push(holding);
+    /// Install an unverified mdoc holding in a test fixture. Never exposed over FFI.
+    #[doc(hidden)]
+    pub fn load_unverified_mdoc_for_testing(&mut self, holding: MdocHolding) {
+        if !self
+            .mdoc_holdings
+            .iter()
+            .any(|stored| stored.holding == holding)
+        {
+            self.mdoc_holdings.push(StoredMdocCredential {
+                holding,
+                validity: CredentialValidity::default(),
+                provenance: StoredProvenance::TestFixture,
+            });
         }
+    }
+
+    fn store_verified_credential(
+        &mut self,
+        authenticated: AuthenticatedCredential,
+    ) -> Result<(), CredentialIngestionError> {
+        debug_assert!(authenticated.provenance.issuer.is_internally_consistent());
+        durable::ensure_credential_storage_admission(self, &authenticated)?;
+        let provenance = StoredProvenance::Authenticated(authenticated.provenance);
+        match authenticated.credential {
+            VerifiedCredential::SdJwt {
+                holding,
+                authenticated,
+                validity,
+            } => {
+                if let Some(stored) = self
+                    .credentials
+                    .iter_mut()
+                    .find(|stored| stored.holding == holding)
+                {
+                    stored.authenticated = Some(authenticated);
+                    stored.validity = validity;
+                    stored.provenance = provenance;
+                } else {
+                    self.credentials.push(StoredSdJwtCredential {
+                        holding,
+                        authenticated: Some(authenticated),
+                        validity,
+                        provenance,
+                    });
+                }
+            }
+            VerifiedCredential::Mdoc { holding, validity } => {
+                if let Some(stored) = self
+                    .mdoc_holdings
+                    .iter_mut()
+                    .find(|stored| stored.holding == holding)
+                {
+                    stored.validity = validity;
+                    stored.provenance = provenance;
+                } else {
+                    self.mdoc_holdings.push(StoredMdocCredential {
+                        holding,
+                        validity,
+                        provenance,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn authenticate_received_credential(
+        &self,
+        format: oid4vci::CredentialFormat,
+        bytes: &[u8],
+        issuer_cert_chain: &[Vec<u8>],
+        issuer_id_assertion: &str,
+    ) -> Result<AuthenticatedCredential, CredentialIngestionError> {
+        if self.now_epoch <= 0 {
+            return Err(CredentialIngestionError::ClockNotSet);
+        }
+        if self.device_public_key.is_empty() {
+            return Err(CredentialIngestionError::DeviceBindingMissing);
+        }
+
+        let (credential, issuer) = match format {
+            oid4vci::CredentialFormat::DcSdJwt => {
+                // SD-JWT VC has no COSE issuerAuth header, so its authenticated transport/restore
+                // boundary still supplies the issuer certificate bundle explicitly.
+                let issuers = self.resolve_credential_issuers(issuer_cert_chain);
+                if !Self::issuer_candidates_are_consistent(&issuers) {
+                    return Err(CredentialIngestionError::UntrustedIssuer);
+                }
+                self.verify_sdjwt_credential(bytes, &issuers, issuer_id_assertion)?
+            }
+            oid4vci::CredentialFormat::MsoMdoc => {
+                // For mdoc, the credential's own bounded x5chain is the sole certificate evidence
+                // used to authenticate issuerAuth. A caller path can neither rescue nor replace it.
+                let issuer_signed = decode_mdoc_credential(bytes)?;
+                let embedded_chain = embedded_mdoc_issuer_chain(&issuer_signed)?;
+                let issuers = self.resolve_credential_issuers(&embedded_chain);
+                if !Self::issuer_candidates_are_consistent(&issuers) {
+                    return Err(CredentialIngestionError::UntrustedIssuer);
+                }
+                self.verify_mdoc_credential(issuer_signed, &issuers, issuer_id_assertion)?
+            }
+        };
+        Ok(AuthenticatedCredential {
+            credential,
+            provenance: CredentialProvenance {
+                format,
+                raw_credential: bytes.to_vec(),
+                issuer,
+            },
+        })
+    }
+
+    /// Authenticate, validate and store a credential obtained outside the active issuance
+    /// session (for example during a verified restore). This is the production storage boundary.
+    /// `issuer_cert_chain` authenticates SD-JWT VC inputs; an mdoc is authenticated exclusively
+    /// with the bounded `x5chain` embedded in its `issuerAuth` COSE header.
+    pub fn ingest_credential(
+        &mut self,
+        format: &str,
+        bytes: &[u8],
+        issuer_cert_chain: &[Vec<u8>],
+        issuer_id: &str,
+    ) -> Result<(), CredentialIngestionError> {
+        let format = parse_format(format).ok_or(CredentialIngestionError::UnsupportedFormat)?;
+        let verified =
+            self.authenticate_received_credential(format, bytes, issuer_cert_chain, issuer_id)?;
+        self.store_verified_credential(verified)?;
+        self.last_credential_ingestion_error = None;
+        Ok(())
+    }
+
+    pub fn last_credential_ingestion_error(&self) -> Option<&CredentialIngestionError> {
+        self.last_credential_ingestion_error.as_ref()
     }
 
     /// The credentials the wallet holds, as a JSON array the UI renders as cards. Each entry gives
@@ -732,8 +1963,15 @@ impl Core {
         let mut items: Vec<String> = self
             .credentials
             .iter()
-            .map(|c| {
-                let (vct, iss) = credential_vct_and_issuer(&c.issuer_jwt);
+            .map(|stored| {
+                let c = &stored.holding;
+                let (vct, jwt_issuer) = credential_vct_and_issuer(&c.issuer_jwt);
+                let issuer = match &stored.provenance {
+                    StoredProvenance::Authenticated(provenance) => {
+                        provenance.issuer.identity.as_str()
+                    }
+                    StoredProvenance::TestFixture => &jwt_issuer,
+                };
                 let disclosures = c
                     .disclosures_by_claim
                     .iter()
@@ -742,38 +1980,352 @@ impl Core {
                     .join(",");
                 format!(
                     r#"{{"vct":{:?},"issuer":{:?},"format":"dc+sd-jwt","disclosuresByClaim":{{{}}}}}"#,
-                    vct, iss, disclosures
+                    vct, issuer, disclosures
                 )
             })
             .collect();
         // mdoc holdings: values are already decoded (no salted disclosures) — surface them under
         // `claims` so the shell renders the card; `disclosuresByClaim` stays empty for this format.
-        for h in &self.mdoc_holdings {
+        for stored in &self.mdoc_holdings {
+            let h = &stored.holding;
+            let issuer = match &stored.provenance {
+                StoredProvenance::Authenticated(provenance) => provenance.issuer.identity.as_str(),
+                StoredProvenance::TestFixture => "ISO 18013-5 mdoc",
+            };
             let claims = h
                 .issuer_signed
                 .name_spaces
                 .values()
                 .flatten()
-                .map(|it| format!("{:?}:{:?}", it.element_id, cbor_value_display(&it.element_value)))
+                .map(|it| {
+                    format!(
+                        "{:?}:{:?}",
+                        it.element_id,
+                        cbor_value_display(&it.element_value)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(",");
             items.push(format!(
-                r#"{{"vct":{:?},"issuer":"ISO 18013-5 mdoc","format":"mso_mdoc","claims":{{{}}},"disclosuresByClaim":{{}}}}"#,
-                h.doctype, claims
+                r#"{{"vct":{:?},"issuer":{:?},"format":"mso_mdoc","claims":{{{}}},"disclosuresByClaim":{{}}}}"#,
+                h.doctype, issuer, claims
             ));
         }
         format!("[{}]", items.join(","))
     }
 
+    fn clear_pending_operations(&mut self, flow: ActiveFlow) {
+        self.pending_operations
+            .retain(|_, pending| pending.flow != flow);
+    }
+
+    /// Reset only ephemeral state. Replay sets, stored credentials, the trusted clock and audit
+    /// log intentionally survive cancellation/failure.
+    fn reset_flow(&mut self, flow: ActiveFlow) {
+        self.clear_pending_operations(flow);
+        match flow {
+            ActiveFlow::Presentation => {
+                self.vp = State::Idle;
+                self.session = None;
+                self.pending_rp_provenance = None;
+                self.pending_status_references.clear();
+            }
+            ActiveFlow::Payment => {
+                self.payment = payment::State::Idle;
+                self.pay_pending = None;
+                self.pay_summary = None;
+                self.pay_consent_hash = [0u8; 32];
+            }
+            ActiveFlow::Issuance => {
+                self.issuance = oid4vci::State::Idle;
+                self.issuer_trusted_current = false;
+                self.issuer_id_current.clear();
+                self.issuer_cert_chain_current.clear();
+                self.issuer_id_assertion_current.clear();
+                self.issuer_candidates_current.clear();
+                self.pending_verified_credential = None;
+            }
+            ActiveFlow::Qes => {
+                self.qes = qes::QesState::Idle;
+                self.qes_consent_hash = [0u8; 32];
+            }
+            ActiveFlow::WalletTransfer => {
+                self.w2w = w2w::State::Idle;
+            }
+            ActiveFlow::None => {}
+        }
+        if self.active == flow {
+            self.active = ActiveFlow::None;
+        }
+    }
+
+    fn begin_flow(&mut self, flow: ActiveFlow) {
+        if self.active != ActiveFlow::None {
+            self.reset_flow(self.active);
+        }
+        // Also reset a terminal machine whose active marker was already cleared.
+        self.reset_flow(flow);
+        self.active = flow;
+    }
+
+    /// Complete a terminal exchange without erasing the protocol machine's exact success/abort
+    /// state. This preserves diagnostics for direct-core callers while scrubbing ephemeral
+    /// context, pending native callbacks and the active marker so the next flow is reusable.
+    fn finish_flow(&mut self, flow: ActiveFlow) {
+        self.clear_pending_operations(flow);
+        match flow {
+            ActiveFlow::Presentation => {
+                self.session = None;
+                self.pending_rp_provenance = None;
+                self.pending_status_references.clear();
+            }
+            ActiveFlow::Payment => {
+                self.pay_pending = None;
+                self.pay_summary = None;
+                self.pay_consent_hash = [0u8; 32];
+            }
+            ActiveFlow::Issuance => {
+                self.issuer_trusted_current = false;
+                self.issuer_id_current.clear();
+                self.issuer_cert_chain_current.clear();
+                self.issuer_id_assertion_current.clear();
+                self.issuer_candidates_current.clear();
+                self.pending_verified_credential = None;
+            }
+            ActiveFlow::Qes => {
+                self.qes_consent_hash = [0u8; 32];
+            }
+            ActiveFlow::WalletTransfer | ActiveFlow::None => {}
+        }
+        if self.active == flow {
+            self.active = ActiveFlow::None;
+        }
+    }
+
+    fn operation_terminal_effects(
+        &mut self,
+        pending: PendingOperation,
+        failure: Option<OperationFailure>,
+    ) -> Vec<Effect> {
+        self.reset_flow(pending.flow);
+        let (code, message) = match failure {
+            None => (
+                "operation_cancelled",
+                "The wallet operation was cancelled before it completed.",
+            ),
+            Some(OperationFailure::Trust) => (
+                "operation_trust_failed",
+                "Current authenticated trust information could not be resolved.",
+            ),
+            Some(OperationFailure::Storage) => (
+                "operation_storage_failed",
+                "Required wallet state could not be stored securely.",
+            ),
+            Some(OperationFailure::Signing) => (
+                "operation_signing_failed",
+                "The protected device key could not complete the operation.",
+            ),
+            Some(OperationFailure::Transport | OperationFailure::HttpStatus) => (
+                "operation_delivery_failed",
+                "The remote service did not acknowledge the wallet operation.",
+            ),
+            Some(OperationFailure::Issuer) => (
+                "operation_issuer_failed",
+                "The credential issuer operation failed.",
+            ),
+            Some(OperationFailure::Status) => (
+                "operation_status_failed",
+                "Current authenticated credential status could not be obtained.",
+            ),
+            Some(OperationFailure::Rendering) => (
+                "operation_rendering_failed",
+                "The wallet could not show the confirmation securely.",
+            ),
+            Some(OperationFailure::MissingDependency) => (
+                "operation_dependency_missing",
+                "A required wallet service is not available.",
+            ),
+            Some(OperationFailure::Unsupported) => (
+                "operation_unsupported",
+                "This wallet operation is not supported by the native client.",
+            ),
+        };
+        vec![
+            Effect::Render {
+                screen: ScreenDescription::Error {
+                    code: code.into(),
+                    message: message.into(),
+                },
+            },
+            Effect::Close,
+        ]
+    }
+
+    fn durable_replay_value_can_be_reserved(values: &[u64], candidate: u64) -> bool {
+        !values.contains(&candidate) && values.len() < durable::MAX_REPLAY_VALUES
+    }
+
+    fn durable_replay_capacity_flow(&self, event: &Event) -> Option<ActiveFlow> {
+        match event {
+            Event::AuthorizationRequestReceived { .. }
+                if self.seen_nonces.len() >= durable::MAX_REPLAY_VALUES =>
+            {
+                Some(ActiveFlow::Presentation)
+            }
+            Event::PaymentAuthorizationRequestReceived { .. }
+                if self.pay_seen_nonces.len() >= durable::MAX_REPLAY_VALUES =>
+            {
+                Some(ActiveFlow::Payment)
+            }
+            Event::CredentialOfferReceived { .. }
+                if self.iss_seen_c_nonces.len() >= durable::MAX_REPLAY_VALUES =>
+            {
+                Some(ActiveFlow::Issuance)
+            }
+            Event::QesSignRequestReceived { .. }
+                if self.qes_seen_nonces.len() >= durable::MAX_REPLAY_VALUES =>
+            {
+                Some(ActiveFlow::Qes)
+            }
+            _ => None,
+        }
+    }
+
+    fn durable_replay_capacity_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
+        self.terminate_audited_flow(
+            flow,
+            "durable_replay_capacity_exhausted",
+            "The wallet cannot safely reserve another replay-protection value. No operation was started.",
+        )
+    }
+
+    fn audited_flow_started_by(event: &Event) -> Option<ActiveFlow> {
+        match event {
+            Event::AuthorizationRequestReceived { .. } => Some(ActiveFlow::Presentation),
+            Event::PaymentAuthorizationRequestReceived { .. } => Some(ActiveFlow::Payment),
+            Event::CredentialOfferReceived { .. } => Some(ActiveFlow::Issuance),
+            Event::WalletTransferOfferCreated | Event::WalletTransferReceived { .. } => {
+                Some(ActiveFlow::WalletTransfer)
+            }
+            _ => None,
+        }
+    }
+
+    fn terminate_audited_flow(
+        &mut self,
+        flow: ActiveFlow,
+        code: &'static str,
+        message: &'static str,
+    ) -> Vec<Effect> {
+        if self.active != ActiveFlow::None && self.active != flow {
+            self.reset_flow(self.active);
+        }
+        self.reset_flow(flow);
+        vec![
+            Effect::Render {
+                screen: ScreenDescription::Error {
+                    code: code.into(),
+                    message: message.into(),
+                },
+            },
+            Effect::Close,
+        ]
+    }
+
+    fn audit_log_fault_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
+        self.audit_log_available = false;
+        self.terminate_audited_flow(
+            flow,
+            "audit_log_unavailable",
+            "The wallet cannot securely record this operation. No further auditable operation is allowed until the wallet history is repaired or reset.",
+        )
+    }
+
+    fn audit_log_capacity_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
+        self.terminate_audited_flow(
+            flow,
+            "audit_log_capacity_exhausted",
+            "The wallet history does not have enough capacity for this operation. Review or erase history before trying again.",
+        )
+    }
+
+    fn audit_log_candidate_rejection_effects(&mut self, flow: ActiveFlow) -> Vec<Effect> {
+        self.terminate_audited_flow(
+            flow,
+            "audit_log_entry_invalid",
+            "This operation contains activity details that cannot be recorded safely.",
+        )
+    }
+
+    fn append_audit_entry(&mut self, entry: txnlog::NewEntry) -> Result<(), txnlog::Error> {
+        // Each auditable flow reserved MAX_ENTRY_BYTES at admission and checked its exact variable
+        // fields before its first consequential effect. A post-ack error is therefore an internal
+        // invariant/storage-coordination fault, not a recoverable capacity condition.
+        match self.log.append(&AwsLc, entry) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                self.audit_log_available = false;
+                Err(error)
+            }
+        }
+    }
+
+    fn check_audit_entry(&self, entry: &txnlog::NewEntry) -> Result<(), txnlog::Error> {
+        self.log.check_append(entry)
+    }
+
     /// The single entry point. Same state + same event ⇒ same effects (I/O is all in the shell).
     pub fn handle_event(&mut self, event: Event) -> Vec<Effect> {
+        // Durable replay sets never evict values. Reject a new flow before changing any protocol
+        // state or emitting trust, consent, signing or network work when its set is already full.
+        // The transition-local checks in each driver below also protect against an interleaved or
+        // otherwise inconsistent in-memory flow reaching the actual reservation point.
+        if let Some(flow) = self.durable_replay_capacity_flow(&event) {
+            return self.durable_replay_capacity_effects(flow);
+        }
+        if let Some(flow) = Self::audited_flow_started_by(&event) {
+            if !self.audit_log_available {
+                return self.audit_log_fault_effects(flow);
+            }
+            if !self.log.can_guarantee_max_entry() {
+                return self.audit_log_capacity_effects(flow);
+            }
+        }
         match event {
             Event::SetClock { epoch } => {
+                // `now_epoch` is a process-local high-water mark. A backwards update must never
+                // make expired credentials, trust lists, certificates, status assertions or WUAs
+                // appear current again. Keep the prior value and terminate any in-flight
+                // presentation before another consent/sign/delivery effect can be emitted.
+                if epoch < self.now_epoch {
+                    if self.active == ActiveFlow::Presentation {
+                        return self.abort_presentation(AbortReason::ClockRollback);
+                    }
+                    return Self::presentation_error_effects(AbortReason::ClockRollback)
+                        .unwrap_or_default();
+                }
                 self.now_epoch = epoch;
                 Vec::new()
             }
+            Event::RedactTransaction { seq } => {
+                if !self.history_mutation_is_safe() {
+                    return Self::history_mutation_rejection_effects();
+                }
+                // A missing/already-redacted sequence is intentionally a deterministic no-op. The
+                // shell still commits the resulting checkpoint generation before treating the
+                // empty effect batch as an idle completion.
+                self.redact_transaction(seq);
+                Vec::new()
+            }
+            Event::WipeTransactionLog => {
+                if !self.history_mutation_is_safe() {
+                    return Self::history_mutation_rejection_effects();
+                }
+                self.wipe_transaction_log();
+                Vec::new()
+            }
             Event::AuthorizationRequestReceived { request } => {
-                self.active = ActiveFlow::Presentation;
+                self.begin_flow(ActiveFlow::Presentation);
                 self.drive(Input::AuthorizationRequest(request))
             }
             Event::RpCertChainResolved {
@@ -782,6 +2334,10 @@ impl Core {
             } => {
                 // The registration decision is computed here, in-core, from the trusted list.
                 let (registered, rp_public_key) = self.resolve_rp(&rp_cert_chain);
+                self.pending_rp_provenance = registered.then(|| RelyingPartyProvenance {
+                    certificate_chain: rp_cert_chain,
+                    public_key: rp_public_key.clone(),
+                });
                 self.drive(Input::RpTrustResolved(ResolvedTrust {
                     registered,
                     rp_public_key,
@@ -789,23 +2345,39 @@ impl Core {
                 }))
             }
             Event::UserConsented => {
-                // Never present a revoked/suspended credential (checked in-core against the
-                // Token Status List) — refuse before disclosing anything.
-                if self.status_blocks_presentation() {
-                    return vec![
-                        Effect::Render {
-                            screen: ScreenDescription::Error {
-                                code: "credential_revoked".into(),
-                                message: "This credential is no longer valid and cannot be shared."
-                                    .into(),
-                            },
-                        },
-                        Effect::Close,
-                    ];
+                // Preserve an already-terminal state when the shell races a stale UI event after
+                // an earlier fail-closed abort (for example, no complete eligible selection).
+                if self.active != ActiveFlow::Presentation {
+                    return self.drive(Input::ConsentGranted);
                 }
-                self.drive(Input::ConsentGranted)
+                if let Err(error) = self.presentation_evidence_is_current() {
+                    return self.abort_presentation_eligibility(error);
+                }
+                // Status is resolved after explicit consent but before any signature/disclosure.
+                // Missing or stale selected lists become bounded HTTPS fetch effects; known-bad
+                // and indeterminate values fail closed immediately.
+                match self.presentation_status_gate() {
+                    StatusGate::Ready => {
+                        self.pending_status_references.clear();
+                        self.drive(Input::ConsentGranted)
+                    }
+                    StatusGate::Fetch {
+                        all_references,
+                        uris,
+                    } => {
+                        self.pending_status_references = all_references;
+                        uris.into_iter()
+                            .map(|uri| Effect::FetchStatusList { uri })
+                            .collect()
+                    }
+                    StatusGate::Revoked => self.status_block_effects(true),
+                    StatusGate::Indeterminate => self.status_block_effects(false),
+                }
             }
-            Event::UserDeclined => self.drive(Input::ConsentDeclined),
+            Event::UserDeclined => {
+                self.pending_status_references.clear();
+                self.drive(Input::ConsentDeclined)
+            }
             Event::DeviceSignatureProduced { signature } => match self.active {
                 // Route the device signature to whichever flow requested it.
                 ActiveFlow::Payment => {
@@ -817,23 +2389,89 @@ impl Core {
                 ActiveFlow::Qes => {
                     self.drive_qes(qes::Input::AuthorizationSignatureProduced(signature))
                 }
+                ActiveFlow::Presentation => {
+                    if let Some(reason) = self.presentation_sensitive_abort_reason() {
+                        self.abort_presentation(reason)
+                    } else {
+                        self.drive(Input::DeviceSignatureProduced(signature))
+                    }
+                }
                 _ => self.drive(Input::DeviceSignatureProduced(signature)),
             },
-            Event::PresentationDelivered => self.drive(Input::PresentationDelivered),
+            Event::PresentationDelivered => {
+                let effects = self.drive(Input::PresentationDelivered);
+                if matches!(self.vp, State::Done) {
+                    self.finish_flow(ActiveFlow::Presentation);
+                }
+                effects
+            }
+            Event::PaymentAuthorizationDelivered => {
+                if self.active != ActiveFlow::Payment
+                    || !matches!(self.payment, payment::State::Authorized { .. })
+                {
+                    return Vec::new();
+                }
+                if self.record_payment().is_err() {
+                    return self.audit_log_fault_effects(ActiveFlow::Payment);
+                }
+                self.finish_flow(ActiveFlow::Payment);
+                vec![Effect::Close]
+            }
+            Event::QesAuthorizationDelivered => {
+                if self.active != ActiveFlow::Qes
+                    || !matches!(self.qes, qes::QesState::Signed { .. })
+                {
+                    return Vec::new();
+                }
+                self.finish_flow(ActiveFlow::Qes);
+                vec![Effect::Close]
+            }
+            Event::OperationSucceeded { operation_id } => {
+                self.pending_operations.remove(&operation_id);
+                Vec::new()
+            }
+            Event::OperationFailed {
+                operation_id,
+                failure,
+            } => self
+                .pending_operations
+                .remove(&operation_id)
+                .map(|pending| self.operation_terminal_effects(pending, Some(failure)))
+                .unwrap_or_default(),
+            Event::OperationCancelled { operation_id } => self
+                .pending_operations
+                .remove(&operation_id)
+                .map(|pending| self.operation_terminal_effects(pending, None))
+                .unwrap_or_default(),
             Event::PaymentAuthorizationRequestReceived { request } => {
-                self.active = ActiveFlow::Payment;
+                self.begin_flow(ActiveFlow::Payment);
                 self.drive_payment(payment::Input::PaymentAuthorizationRequest(request))
             }
             Event::PaymentApproved => self.drive_payment(payment::Input::UserApproved),
             Event::PaymentDeclined => self.drive_payment(payment::Input::UserDeclined),
             Event::QesSignRequestReceived { request } => {
-                self.active = ActiveFlow::Qes;
+                self.begin_flow(ActiveFlow::Qes);
                 self.drive_qes(qes::Input::SignatureRequest(request))
             }
             Event::QesAuthorized => self.drive_qes(qes::Input::UserAuthorized),
             Event::QesDeclined => self.drive_qes(qes::Input::UserDeclined),
             Event::WalletTransferOfferCreated => {
-                self.active = ActiveFlow::WalletTransfer;
+                if !matches!(self.active, ActiveFlow::None | ActiveFlow::WalletTransfer) {
+                    return Self::wallet_transfer_in_progress_effects();
+                }
+                let audit_candidate = txnlog::NewEntry {
+                    epoch: self.now_epoch,
+                    kind: txnlog::Kind::Transfer,
+                    counterparty: "peer-wallet".into(),
+                    consent_hash: [0u8; 32],
+                    claim_paths: Vec::new(),
+                    outcome: txnlog::Outcome::Completed,
+                    payment: None,
+                };
+                if self.check_audit_entry(&audit_candidate).is_err() {
+                    return self.audit_log_candidate_rejection_effects(ActiveFlow::WalletTransfer);
+                }
+                self.begin_flow(ActiveFlow::WalletTransfer);
                 self.drive_w2w(w2w::Input::CreateOffer)
             }
             Event::WalletTransferReceived {
@@ -844,6 +2482,12 @@ impl Core {
                 sender_consent_hash,
                 nonce,
             } => {
+                if !matches!(self.active, ActiveFlow::None | ActiveFlow::WalletTransfer) {
+                    return Self::wallet_transfer_in_progress_effects();
+                }
+                if self.active == ActiveFlow::None {
+                    self.begin_flow(ActiveFlow::WalletTransfer);
+                }
                 // Decide acceptance IN-CORE (never shell booleans):
                 //  * issuer_valid — the issuer chain is trusted AND signs this credential;
                 //  * peer_bound   — the sender's authorization is bound to THIS wallet's key and
@@ -857,7 +2501,6 @@ impl Core {
                     &sender_consent_hash,
                     nonce,
                 );
-                self.active = ActiveFlow::WalletTransfer;
                 self.drive_w2w(w2w::Input::TransferReceived {
                     issuer_valid,
                     peer_bound,
@@ -869,14 +2512,28 @@ impl Core {
                 issuer_cert_chain,
                 issuer_id,
             } => {
-                self.active = ActiveFlow::Issuance;
+                self.begin_flow(ActiveFlow::Issuance);
                 // A new offer begins a FRESH OpenID4VCI session: reset the (one-shot) issuance
                 // machine to Idle so a wallet can be issued several credentials in one lifetime.
                 // Replay protection (`iss_seen_c_nonces`) deliberately persists across sessions.
                 self.issuance = oid4vci::State::Idle;
-                // Issuer trust is decided in-core against the trusted list (PID/attestation CAs).
-                self.issuer_trusted_current = self.resolve_issuer(&issuer_cert_chain);
-                self.issuer_id_current = issuer_id;
+                self.issuer_cert_chain_current = issuer_cert_chain;
+                // Resolve each trusted-list service separately. The shell value is only a
+                // compatibility assertion; proof audience and audit identity come from the
+                // authenticated leaf URI and a mismatch keeps the issuance machine fail-closed.
+                let issuers = self.resolve_credential_issuers(&self.issuer_cert_chain_current);
+                let authenticated_identity = issuers
+                    .first()
+                    .map(|issuer| issuer.identity.clone())
+                    .unwrap_or_default();
+                let consistent_path = Self::issuer_candidates_are_consistent(&issuers);
+                self.issuer_trusted_current =
+                    !issuers.is_empty() && consistent_path && issuer_id == authenticated_identity;
+                self.issuer_id_current = authenticated_identity;
+                self.issuer_id_assertion_current = issuer_id;
+                self.issuer_candidates_current = if consistent_path { issuers } else { Vec::new() };
+                self.pending_verified_credential = None;
+                self.last_credential_ingestion_error = None;
                 self.drive_issuance(oid4vci::Input::CredentialOffer(offer))
             }
             Event::ParPushed { pkce_s256 } => {
@@ -898,24 +2555,402 @@ impl Core {
                 }
                 effects
             }
-            Event::CredentialReceived { format, bytes } => match parse_format(&format) {
-                Some(f) => {
-                    self.drive_issuance(oid4vci::Input::CredentialResponse { format: f, bytes })
+            Event::CredentialReceived { format, bytes } => {
+                if self.active != ActiveFlow::Issuance
+                    || !matches!(self.issuance, oid4vci::State::RequestingCredential { .. })
+                {
+                    return self.reject_unexpected_credential_response();
                 }
-                None => Vec::new(),
-            },
+                match parse_format(&format) {
+                    Some(f) => match self.authenticate_received_credential(
+                        f,
+                        &bytes,
+                        &self.issuer_cert_chain_current,
+                        &self.issuer_id_assertion_current,
+                    ) {
+                        Ok(verified) => {
+                            match durable::ensure_credential_storage_admission(self, &verified) {
+                                Ok(()) => {
+                                    self.pending_verified_credential = Some(verified);
+                                    self.last_credential_ingestion_error = None;
+                                    self.drive_issuance(oid4vci::Input::CredentialResponse {
+                                        format: f,
+                                        bytes,
+                                        issuer_authenticated: true,
+                                    })
+                                }
+                                Err(error) => {
+                                    self.pending_verified_credential = None;
+                                    self.last_credential_ingestion_error = Some(error);
+                                    self.drive_issuance(oid4vci::Input::CredentialResponseRejected)
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            self.pending_verified_credential = None;
+                            self.last_credential_ingestion_error = Some(error);
+                            self.drive_issuance(oid4vci::Input::CredentialResponse {
+                                format: f,
+                                bytes,
+                                issuer_authenticated: false,
+                            })
+                        }
+                    },
+                    None => {
+                        self.pending_verified_credential = None;
+                        self.last_credential_ingestion_error =
+                            Some(CredentialIngestionError::UnsupportedFormat);
+                        self.drive_issuance(oid4vci::Input::CredentialResponseRejected)
+                    }
+                }
+            }
+            Event::StatusListReceived {
+                uri,
+                http_status,
+                token,
+                provider_cert_chain,
+            } => {
+                if let Err(error) = self.presentation_evidence_is_current() {
+                    return self.abort_presentation_eligibility(error);
+                }
+                let expected = self
+                    .pending_status_references
+                    .iter()
+                    .any(|reference| reference.uri == uri);
+                if !expected || !(200..=299).contains(&http_status) {
+                    self.pending_status_references.clear();
+                    return self.status_block_effects(false);
+                }
+                if self
+                    .load_status_list(&uri, &token, &provider_cert_chain)
+                    .is_err()
+                {
+                    self.pending_status_references.clear();
+                    return self.status_block_effects(false);
+                }
+
+                match self.presentation_status_gate() {
+                    StatusGate::Ready => {
+                        self.pending_status_references.clear();
+                        self.drive(Input::ConsentGranted)
+                    }
+                    StatusGate::Fetch { all_references, .. } => {
+                        // All missing URIs were emitted together on consent. Wait for the other
+                        // in-flight responses without issuing duplicates.
+                        self.pending_status_references = all_references;
+                        Vec::new()
+                    }
+                    StatusGate::Revoked => {
+                        self.pending_status_references.clear();
+                        self.status_block_effects(true)
+                    }
+                    StatusGate::Indeterminate => {
+                        self.pending_status_references.clear();
+                        self.status_block_effects(false)
+                    }
+                }
+            }
         }
     }
 
     /// FFI-friendly wrapper: takes a JSON `Event`, returns a JSON array of `Effect`s.
     pub fn handle_event_json(&mut self, event_json: &str) -> Result<String, String> {
-        let event: Event = serde_json::from_str(event_json).map_err(|e| e.to_string())?;
+        let value: serde_json::Value =
+            serde_json::from_str(event_json).map_err(|e| e.to_string())?;
+        let event_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "event type must be a string".to_string())?;
+        let event: Event = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+
+        if Self::is_operation_result_event(event_type) {
+            let operation_id = value
+                .get("operationId")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| format!("missing or invalid operationId for {event_type}"))?;
+            let pending = self
+                .pending_operations
+                .get(&operation_id)
+                .cloned()
+                .ok_or_else(|| format!("stale or unknown operationId {operation_id}"))?;
+            if pending.flow != self.active {
+                return Err(format!(
+                    "operationId {operation_id} belongs to an inactive wallet flow"
+                ));
+            }
+
+            let is_terminal = matches!(
+                &event,
+                Event::OperationFailed { .. } | Event::OperationCancelled { .. }
+            );
+            if !is_terminal && !pending.result.accepts_event(event_type) {
+                return Err(format!(
+                    "operationId {operation_id} expects {}, got {event_type}",
+                    pending.result.result_type()
+                ));
+            }
+            if matches!(
+                event_type,
+                "userConsented" | "paymentApproved" | "qesAuthorized"
+            ) {
+                let expected_hash = pending.authorization_hash.ok_or_else(|| {
+                    format!("operationId {operation_id} has no authorization hash")
+                })?;
+                let actual_hash = Self::wire_authorization_hash(&value, event_type)?;
+                if actual_hash != expected_hash {
+                    return Err(format!(
+                        "operationId {operation_id} authorizationHash does not match the rendered screen"
+                    ));
+                }
+            }
+            if !is_terminal && !self.operation_result_state_is_valid(event_type) {
+                return Err(format!(
+                    "operationId {operation_id} result {event_type} is invalid in the current state"
+                ));
+            }
+            if let (
+                OperationResultKind::StatusList { uri: expected },
+                Event::StatusListReceived { uri: actual, .. },
+            ) = (&pending.result, &event)
+            {
+                if expected != actual {
+                    return Err(format!(
+                        "operationId {operation_id} is bound to a different status resource"
+                    ));
+                }
+            }
+
+            // Generic terminal events remove/reset through `handle_event`; exact protocol results
+            // are consumed here before the state transition so duplicates are immediately stale.
+            if !matches!(
+                &event,
+                Event::OperationSucceeded { .. }
+                    | Event::OperationFailed { .. }
+                    | Event::OperationCancelled { .. }
+            ) {
+                self.pending_operations.remove(&operation_id);
+            }
+        }
+
         let effects = self.handle_event(event);
-        serde_json::to_string(&effects).map_err(|e| e.to_string())
+        match self.serialize_wire_effects(effects) {
+            Ok(json) => Ok(json),
+            Err(error) => {
+                // `handle_event` may already have advanced a protocol machine. If its resulting
+                // effects cannot be represented atomically on the native wire, no shell callback
+                // can ever complete that state. Tear down the ephemeral flow and every pending
+                // callback so the next request starts cleanly instead of inheriting a zombie.
+                let active = self.active;
+                if active != ActiveFlow::None {
+                    self.reset_flow(active);
+                }
+                self.pending_operations.clear();
+                Err(error)
+            }
+        }
+    }
+
+    fn is_operation_result_event(event_type: &str) -> bool {
+        matches!(
+            event_type,
+            "rpCertChainResolved"
+                | "deviceSignatureProduced"
+                | "presentationDelivered"
+                | "paymentAuthorizationDelivered"
+                | "qesAuthorizationDelivered"
+                | "parPushed"
+                | "authorizationCodeReturned"
+                | "transactionCodeEntered"
+                | "tokenReceived"
+                | "credentialReceived"
+                | "statusListReceived"
+                | "userConsented"
+                | "userDeclined"
+                | "paymentApproved"
+                | "paymentDeclined"
+                | "qesAuthorized"
+                | "qesDeclined"
+                | "operationSucceeded"
+                | "operationFailed"
+                | "operationCancelled"
+        )
+    }
+
+    fn operation_result_state_is_valid(&self, event_type: &str) -> bool {
+        match event_type {
+            "presentationDelivered" => matches!(self.vp, State::Presenting),
+            "paymentAuthorizationDelivered" => {
+                matches!(self.payment, payment::State::Authorized { .. })
+            }
+            "qesAuthorizationDelivered" => matches!(self.qes, qes::QesState::Signed { .. }),
+            _ => true,
+        }
+    }
+
+    fn wire_authorization_hash(
+        value: &serde_json::Value,
+        event_type: &str,
+    ) -> Result<[u8; 32], String> {
+        let bytes = value
+            .get("authorizationHash")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("missing or invalid authorizationHash for {event_type}"))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "missing or invalid authorizationHash for {event_type}"
+            ));
+        }
+        let mut hash = [0u8; 32];
+        for (index, byte) in bytes.iter().enumerate() {
+            let byte = byte
+                .as_u64()
+                .filter(|value| *value <= u8::MAX as u64)
+                .ok_or_else(|| format!("authorizationHash[{index}] must be an unsigned byte"))?;
+            hash[index] = byte as u8;
+        }
+        Ok(hash)
+    }
+
+    fn operation_result_for_effect(
+        &self,
+        effect: &Effect,
+    ) -> Result<Option<PendingOperation>, String> {
+        let mut authorization_hash = None;
+        let result = match effect {
+            Effect::ResolveRpTrust { .. } => OperationResultKind::RpCertChain,
+            Effect::PersistNonce { .. } => OperationResultKind::Persisted,
+            Effect::Sign { .. } => OperationResultKind::Signature,
+            Effect::Http { profile, .. } => {
+                let (expected_profile, result) = match self.active {
+                    ActiveFlow::Presentation => (
+                        HttpDeliveryProfile::Openid4vpDirectPost,
+                        OperationResultKind::PresentationDelivery,
+                    ),
+                    ActiveFlow::Payment => (
+                        HttpDeliveryProfile::PaymentAuthorization,
+                        OperationResultKind::PaymentDelivery,
+                    ),
+                    ActiveFlow::Qes => (
+                        HttpDeliveryProfile::QesAuthorization,
+                        OperationResultKind::QesDelivery,
+                    ),
+                    flow => {
+                        return Err(format!("HTTP effect emitted for unsupported flow {flow:?}"))
+                    }
+                };
+                if *profile != expected_profile {
+                    return Err(format!(
+                        "HTTP delivery profile {profile:?} does not match active flow {:?}",
+                        self.active
+                    ));
+                }
+                result
+            }
+            Effect::PushPar => OperationResultKind::Par,
+            Effect::OpenAuthBrowser => OperationResultKind::AuthorizationCode,
+            Effect::PromptTxCode => OperationResultKind::TransactionCode,
+            Effect::RequestToken => OperationResultKind::Token,
+            Effect::RequestCredential { .. } => OperationResultKind::Credential,
+            Effect::FetchStatusList { uri } => OperationResultKind::StatusList { uri: uri.clone() },
+            Effect::PublishTransferOffer { .. } => OperationResultKind::TransferOfferPublished,
+            Effect::Render { screen } => {
+                let (result, stored_hash) = match screen {
+                    ScreenDescription::Consent(_) => (
+                        OperationResultKind::PresentationDecision,
+                        self.session.as_ref().map(|session| session.consent_hash),
+                    ),
+                    ScreenDescription::PaymentConfirmation(_) => (
+                        OperationResultKind::PaymentDecision,
+                        Some(self.pay_consent_hash),
+                    ),
+                    ScreenDescription::SignConfirmation(_) => (
+                        OperationResultKind::QesDecision,
+                        Some(self.qes_consent_hash),
+                    ),
+                    _ => return Ok(None),
+                };
+                let computed_hash = presenter::consent_hash(&AwsLc, screen);
+                let stored_hash = stored_hash.ok_or_else(|| {
+                    "interactive render has no core authorization hash".to_string()
+                })?;
+                if stored_hash != computed_hash {
+                    return Err("interactive render authorization hash is inconsistent".into());
+                }
+                authorization_hash = Some(stored_hash);
+                result
+            }
+            Effect::Close => return Ok(None),
+        };
+        Ok(Some(PendingOperation {
+            flow: self.active,
+            result,
+            authorization_hash,
+        }))
+    }
+
+    fn serialize_wire_effects(&mut self, effects: Vec<Effect>) -> Result<String, String> {
+        let prepared: Vec<(Effect, Option<PendingOperation>)> = effects
+            .into_iter()
+            .map(|effect| {
+                let pending = self.operation_result_for_effect(&effect)?;
+                Ok((effect, pending))
+            })
+            .collect::<Result<_, String>>()?;
+        let operation_count = prepared
+            .iter()
+            .filter(|(_, pending)| pending.is_some())
+            .count();
+        if self.pending_operations.len() + operation_count > MAX_PENDING_OPERATIONS {
+            return Err("too many pending wallet operations".into());
+        }
+
+        // Android's public contract uses a signed Long. Never emit an ID outside that common
+        // Swift/Kotlin range, and preflight the complete batch before mutating the sequence/map.
+        let operation_count_u64 =
+            u64::try_from(operation_count).map_err(|_| "too many wallet operations")?;
+        let next_after_batch = self
+            .next_operation_id
+            .checked_add(operation_count_u64)
+            .ok_or_else(|| "wallet operationId space exhausted".to_string())?;
+        if operation_count > 0 && next_after_batch - 1 > i64::MAX as u64 {
+            return Err("wallet operationId space exhausted".into());
+        }
+
+        let mut next_id = self.next_operation_id;
+        let mut values = Vec::with_capacity(prepared.len());
+        let mut staged = Vec::with_capacity(operation_count);
+        for (effect, pending) in prepared {
+            let mut value = serde_json::to_value(effect).map_err(|e| e.to_string())?;
+            if let Some(pending) = pending {
+                let operation_id = next_id;
+                next_id += 1;
+                let result_type = pending.result.result_type();
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| "effect did not serialize as an object".to_string())?;
+                object.insert("operationId".into(), operation_id.into());
+                object.insert(
+                    "resultType".into(),
+                    serde_json::Value::String(result_type.into()),
+                );
+                if let Some(hash) = pending.authorization_hash {
+                    object.insert(
+                        "authorizationHash".into(),
+                        serde_json::to_value(hash).map_err(|e| e.to_string())?,
+                    );
+                }
+                staged.push((operation_id, pending));
+            }
+            values.push(value);
+        }
+        let json = serde_json::to_string(&values).map_err(|e| e.to_string())?;
+        self.next_operation_id = next_after_batch;
+        self.pending_operations.extend(staged);
+        Ok(json)
     }
 
     fn drive(&mut self, input: Input) -> Vec<Effect> {
-        // For consent, compute the data-minimised selection — one credential per DCQL query.
+        // For consent, compute the complete data-minimised DCQL set plan.
         let selected = self.select_credentials_for(&input);
 
         let verifier = AwsLc;
@@ -932,7 +2967,23 @@ impl Core {
             };
             oid4vp::step(&self.vp, &input, &env)
         };
+        if let Some(nonce) = outputs.iter().find_map(|output| match output {
+            oid4vp::Output::PersistNonce(nonce) => Some(*nonce),
+            _ => None,
+        }) {
+            if !Self::durable_replay_value_can_be_reserved(&self.seen_nonces, nonce) {
+                return self.durable_replay_capacity_effects(ActiveFlow::Presentation);
+            }
+        }
         let was_done = matches!(self.vp, State::Done);
+        let was_aborted = matches!(self.vp, State::Aborted(_));
+        let newly_aborted = if was_aborted {
+            None
+        } else if let State::Aborted(reason) = &next {
+            Some(*reason)
+        } else {
+            None
+        };
         self.vp = next;
 
         // Capture session details the moment the request is validated (needed later for the
@@ -947,31 +2998,469 @@ impl Core {
                 response_mode: req.response_mode.clone(),
                 response_encryption_key: req.response_encryption_key.clone(),
                 dcql: req.dcql.clone(),
+                selected_credentials: Vec::new(),
+                selected_sources: Vec::new(),
+                selected_revealed_claims: Vec::new(),
+                rp_provenance: self.pending_rp_provenance.clone(),
                 consent_hash: [0u8; 32],
                 shared_claims: Vec::new(),
             });
+            // Freeze the complete selection while the request, RP trust and every credential are
+            // current. If one query cannot be satisfied, do not render consent (or emit any of the
+            // protocol outputs produced alongside it).
+            if let Err(error) = self.prepare_presentation_selection() {
+                return self.abort_presentation_eligibility(error);
+            }
+            // Admission happens before the RP trust effect and before any consent/sign/delivery.
+            // The consent hash has fixed width and is filled after rendering; every variable-sized
+            // field is already exact here.
+            let audit_candidate = self.session.as_ref().map(|session| txnlog::NewEntry {
+                epoch: self.now_epoch,
+                kind: txnlog::Kind::Presentation,
+                counterparty: session.rp_client_id.clone(),
+                consent_hash: [0u8; 32],
+                claim_paths: session.selected_revealed_claims.clone(),
+                outcome: txnlog::Outcome::Completed,
+                payment: None,
+            });
+            if audit_candidate
+                .as_ref()
+                .is_some_and(|entry| self.check_audit_entry(entry).is_err())
+            {
+                return self.audit_log_candidate_rejection_effects(ActiveFlow::Presentation);
+            }
         }
 
-        let effects: Vec<Effect> = outputs
+        let mut effects: Vec<Effect> = outputs
             .into_iter()
             .flat_map(|o| self.translate(o))
             .collect();
 
+        // Delivery-policy failures happen before consent and therefore have no protocol output of
+        // their own. Surface a stable error screen + close effect instead of silently stalling.
+        if let Some(reason) = newly_aborted {
+            if let Some(error_effects) = Self::presentation_error_effects(reason) {
+                effects.retain(|effect| !matches!(effect, Effect::Close));
+                effects.extend(error_effects);
+            } else if !effects.iter().any(|effect| matches!(effect, Effect::Close)) {
+                effects.push(Effect::Close);
+            }
+        }
+        if matches!(self.vp, State::Aborted(_)) && self.active == ActiveFlow::Presentation {
+            self.finish_flow(ActiveFlow::Presentation);
+        }
+
         // Record a completed presentation the moment the machine reaches Done (once).
-        if !was_done && matches!(self.vp, State::Done) {
-            self.record_presentation();
+        if !was_done && matches!(self.vp, State::Done) && self.record_presentation().is_err() {
+            return self.audit_log_fault_effects(ActiveFlow::Presentation);
         }
         effects
     }
 
-    /// Is the issuer chain trusted? Validated in-core against the PID/attestation CAs in the list.
-    fn resolve_issuer(&self, chain: &[Vec<u8>]) -> bool {
-        let mut anchors = self.trust_store.parsed_anchors(ServiceType::PidProvider);
-        anchors.extend(
-            self.trust_store
-                .parsed_anchors(ServiceType::AttestationProvider),
-        );
-        !anchors.is_empty() && x509::validate_path(chain, &anchors, self.now_epoch, &AwsLc).is_ok()
+    fn presentation_error_effects(reason: AbortReason) -> Option<Vec<Effect>> {
+        let (code, message) = match reason {
+            AbortReason::RequestNotSignedOrBound => (
+                "presentation_request_untrusted",
+                "The presentation request could not be authenticated.",
+            ),
+            AbortReason::RelyingPartyNotRegistered => (
+                "presentation_rp_not_registered",
+                "The relying party is not registered for this wallet interaction.",
+            ),
+            AbortReason::NonceReplayed => (
+                "presentation_nonce_replayed",
+                "The presentation request was already used.",
+            ),
+            AbortReason::PurposeUndeclared => (
+                "presentation_purpose_undeclared",
+                "The relying party did not declare a valid purpose.",
+            ),
+            AbortReason::AudienceMismatch => (
+                "presentation_audience_mismatch",
+                "The presentation request was addressed to a different wallet.",
+            ),
+            AbortReason::RedirectUriNotRegistered => (
+                "presentation_redirect_uri_not_registered",
+                "The relying party redirect is not registered.",
+            ),
+            AbortReason::ResponseModeUnsupported => (
+                "presentation_response_mode_unsupported",
+                "The relying party requested an unsupported response mode.",
+            ),
+            AbortReason::ResponseUriInvalid => (
+                "presentation_response_uri_invalid",
+                "The relying party did not provide a valid HTTPS response endpoint.",
+            ),
+            AbortReason::ResponseUriNotRegistered => (
+                "presentation_response_uri_not_registered",
+                "The response endpoint is not registered for this relying party.",
+            ),
+            AbortReason::ResponseEncryptionMetadataInvalid => (
+                "presentation_response_encryption_metadata_invalid",
+                "The relying party did not provide valid response-encryption metadata.",
+            ),
+            AbortReason::ResponseEncryptionFailed => (
+                "presentation_response_encryption_failed",
+                "The presentation response could not be encrypted safely.",
+            ),
+            AbortReason::ClockRollback => (
+                "clock_rollback_rejected",
+                "The trusted wallet clock cannot move backwards.",
+            ),
+            AbortReason::CredentialExpired => (
+                "credential_expired",
+                "A selected credential expired before it could be shared.",
+            ),
+            AbortReason::CredentialNotYetValid => (
+                "credential_not_yet_valid",
+                "A selected credential is not currently valid.",
+            ),
+            AbortReason::CredentialProvenanceInvalid => (
+                "credential_provenance_invalid",
+                "A selected credential no longer has valid authenticated provenance.",
+            ),
+            AbortReason::PresentationTrustInvalid => (
+                "presentation_trust_invalid",
+                "Current trusted relying-party evidence is required before sharing.",
+            ),
+            AbortReason::NoCredential => (
+                "no_eligible_credential",
+                "No current credential satisfies the complete presentation request.",
+            ),
+            AbortReason::CredentialStatusInvalid => (
+                "credential_revoked",
+                "This credential is revoked or suspended and cannot be shared.",
+            ),
+            AbortReason::CredentialStatusUnavailable => (
+                "credential_status_unavailable",
+                "A fresh, trusted status assertion is required before this credential can be shared.",
+            ),
+            AbortReason::MalformedRequest => (
+                "presentation_request_malformed",
+                "The presentation request is malformed.",
+            ),
+            AbortReason::UserDeclined => return None,
+        };
+        Some(vec![
+            Effect::Render {
+                screen: ScreenDescription::Error {
+                    code: code.into(),
+                    message: message.into(),
+                },
+            },
+            Effect::Close,
+        ])
+    }
+
+    fn abort_presentation(&mut self, reason: AbortReason) -> Vec<Effect> {
+        self.vp = State::Aborted(reason);
+        self.finish_flow(ActiveFlow::Presentation);
+        Self::presentation_error_effects(reason).unwrap_or_default()
+    }
+
+    fn abort_presentation_eligibility(
+        &mut self,
+        error: PresentationEligibilityError,
+    ) -> Vec<Effect> {
+        self.abort_presentation(Self::eligibility_abort_reason(error))
+    }
+
+    fn eligibility_abort_reason(error: PresentationEligibilityError) -> AbortReason {
+        match error {
+            PresentationEligibilityError::CredentialExpired => AbortReason::CredentialExpired,
+            PresentationEligibilityError::CredentialNotYetValid => {
+                AbortReason::CredentialNotYetValid
+            }
+            PresentationEligibilityError::CredentialProvenanceInvalid => {
+                AbortReason::CredentialProvenanceInvalid
+            }
+            PresentationEligibilityError::TrustEvidenceInvalid => {
+                AbortReason::PresentationTrustInvalid
+            }
+            PresentationEligibilityError::NoEligibleCredential => {
+                // Keep the established protocol-state reason for API compatibility while the
+                // facade supplies the new explicit terminal error screen.
+                AbortReason::NoCredential
+            }
+        }
+    }
+
+    /// The complete gate used immediately before any signature or HTTP disclosure. Status-list
+    /// fetch/retry is supported at the consent transition; if evidence becomes stale later, abort
+    /// instead of consuming a signature callback or silently reusing cached authorization.
+    fn presentation_sensitive_abort_reason(&self) -> Option<AbortReason> {
+        if let Err(error) = self.presentation_evidence_is_current() {
+            return Some(Self::eligibility_abort_reason(error));
+        }
+        match self.presentation_status_gate() {
+            StatusGate::Ready => None,
+            StatusGate::Revoked => Some(AbortReason::CredentialStatusInvalid),
+            StatusGate::Fetch { .. } | StatusGate::Indeterminate => {
+                Some(AbortReason::CredentialStatusUnavailable)
+            }
+        }
+    }
+
+    /// Resolve a credential issuer independently in each catalogue-supported trust domain. The
+    /// returned values retain authenticated identity, leaf key and validity provenance; roots are
+    /// never unioned, and the signed credential type later selects exactly one required service.
+    fn resolve_credential_issuers(&self, chain: &[Vec<u8>]) -> Vec<CredentialIssuerEvidence> {
+        [IssuerTrustDomain::Pid, IssuerTrustDomain::Attestation]
+            .into_iter()
+            .filter_map(|service| {
+                let trust_service = match service {
+                    IssuerTrustDomain::Pid => ServiceType::PidProvider,
+                    IssuerTrustDomain::Attestation => ServiceType::AttestationProvider,
+                };
+                let anchors = self
+                    .trust_store
+                    .parsed_anchors_at(trust_service, self.now_epoch);
+                if anchors.is_empty() {
+                    return None;
+                }
+                x509::check_credential_issuer(chain, &anchors, self.now_epoch, &AwsLc)
+                    .ok()
+                    .map(|validated| CredentialIssuerEvidence {
+                        identity: validated.identity,
+                        service,
+                        public_key_raw: validated.public_key_raw,
+                        certificate_path: chain.to_vec(),
+                        not_before: validated.not_before,
+                        not_after: validated.not_after,
+                    })
+            })
+            .collect()
+    }
+
+    fn issuer_for_type<'a>(
+        &self,
+        issuers: &'a [CredentialIssuerEvidence],
+        credential_type: &str,
+    ) -> Result<&'a CredentialIssuerEvidence, CredentialIngestionError> {
+        let service = self
+            .catalogue
+            .issuer_trust_domain(credential_type)
+            .ok_or(CredentialIngestionError::UnknownCredentialType)?;
+        issuers
+            .iter()
+            .find(|issuer| issuer.service == service)
+            .ok_or(CredentialIngestionError::IssuerServiceMismatch)
+    }
+
+    /// Every service candidate comes from the same bounded certificate bundle. Reject any
+    /// ambiguity before a credential verifier is allowed to use one candidate's key and another
+    /// candidate's policy domain.
+    fn issuer_candidates_are_consistent(issuers: &[CredentialIssuerEvidence]) -> bool {
+        let Some(first) = issuers.first() else {
+            return false;
+        };
+        first.is_internally_consistent()
+            && issuers.iter().all(|issuer| {
+                issuer.is_internally_consistent()
+                    && issuer.identity == first.identity
+                    && issuer.public_key_raw == first.public_key_raw
+                    && issuer.certificate_path == first.certificate_path
+                    && issuer.not_before == first.not_before
+                    && issuer.not_after == first.not_after
+            })
+    }
+
+    /// Resolve a status-signing key only through anchors authorised for the StatusProvider
+    /// service. A PID issuer, RP or arbitrary shell-supplied key cannot sign cache entries.
+    fn resolve_status_provider_key(&self, chain: &[Vec<u8>]) -> Option<Vec<u8>> {
+        let anchors = self
+            .trust_store
+            .parsed_anchors_at(ServiceType::StatusProvider, self.now_epoch);
+        if anchors.is_empty() {
+            return None;
+        }
+        x509::validate_path(chain, &anchors, self.now_epoch, &AwsLc)
+            .ok()
+            .and_then(|path| {
+                path.first()
+                    .filter(|leaf| !leaf.is_ca)
+                    .map(|leaf| leaf.public_key_raw.clone())
+            })
+    }
+
+    fn verify_sdjwt_credential(
+        &self,
+        bytes: &[u8],
+        issuers: &[CredentialIssuerEvidence],
+        issuer_id_assertion: &str,
+    ) -> Result<(VerifiedCredential, CredentialIssuerEvidence), CredentialIngestionError> {
+        let compact = core::str::from_utf8(bytes)
+            .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+        let sd = sdjwt::SdJwtVc::parse(compact)
+            .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+        let alg = sd
+            .issuer_algorithm()
+            .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+        // The current EUDI crypto profile and the certificate vectors use P-256. Do not silently
+        // accept algorithms merely because a backend happens to implement them.
+        if alg != Alg::Es256 {
+            return Err(CredentialIngestionError::UnsupportedAlgorithm);
+        }
+        let processed = sd
+            .verify_and_process(&AwsLc, &AwsLc, &issuers[0].public_key_raw, alg)
+            .map_err(|error| match error {
+                sdjwt::SdJwtError::Crypto(_) => CredentialIngestionError::SignatureInvalid,
+                _ => CredentialIngestionError::MalformedCredential,
+            })?;
+        let issuer_payload = sd
+            .issuer_payload()
+            .map_err(|_| CredentialIngestionError::MalformedCredential)?;
+        validate_sdjwt_issuer_profile(&sd, &issuer_payload, &processed)?;
+        let claims = &processed.claims;
+
+        let issuer = claims
+            .get("iss")
+            .and_then(|v| v.as_str())
+            .ok_or(CredentialIngestionError::MalformedCredential)?;
+        let vct = claims
+            .get("vct")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .ok_or(CredentialIngestionError::UnknownCredentialType)?;
+        let credential_type = self
+            .catalogue
+            .get(vct)
+            .ok_or(CredentialIngestionError::UnknownCredentialType)?;
+        if credential_type.format != "dc+sd-jwt" {
+            return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
+        }
+        let authenticated_issuer = self.issuer_for_type(issuers, vct)?;
+        if issuer.is_empty()
+            || issuer != authenticated_issuer.identity
+            || issuer_id_assertion != authenticated_issuer.identity
+        {
+            return Err(CredentialIngestionError::IssuerMismatch);
+        }
+        if !self
+            .catalogue
+            .issuer_allowed(vct, &authenticated_issuer.identity)
+        {
+            return Err(CredentialIngestionError::IssuerNotAllowedForType);
+        }
+        let held_claims: Vec<String> = claims.keys().cloned().collect();
+        if !self.catalogue.satisfies_mandatory(vct, &held_claims) {
+            return Err(CredentialIngestionError::MandatoryClaimsMissing);
+        }
+        let validity = json_validity(claims, self.now_epoch)?;
+        if !claims.contains_key("cnf") {
+            return Err(CredentialIngestionError::DeviceBindingMissing);
+        }
+        if !sdjwt_device_binding_matches(claims, &self.device_public_key) {
+            return Err(CredentialIngestionError::DeviceBindingMismatch);
+        }
+        let status = status_reference_from_claims(claims)?;
+        let holding = held_credential_from_verified_sd(&sd, &processed, status)?;
+        Ok((
+            VerifiedCredential::SdJwt {
+                holding,
+                authenticated: AuthenticatedSdJwtHolding { processed },
+                validity,
+            },
+            authenticated_issuer.clone(),
+        ))
+    }
+
+    fn verify_mdoc_credential(
+        &self,
+        issuer_signed: mdoc::IssuerSigned,
+        issuers: &[CredentialIssuerEvidence],
+        issuer_id_assertion: &str,
+    ) -> Result<(VerifiedCredential, CredentialIssuerEvidence), CredentialIngestionError> {
+        let mso = mdoc::verify_issuer_signed(
+            &issuer_signed,
+            &AwsLc,
+            &AwsLc,
+            &issuers[0].public_key_raw,
+            Alg::Es256,
+        )
+        .map_err(|_| CredentialIngestionError::SignatureInvalid)?;
+        if mso.version != "1.0" || mso.digest_algorithm != "SHA-256" || mso.doc_type.is_empty() {
+            return Err(CredentialIngestionError::MalformedCredential);
+        }
+        let credential_type = self
+            .catalogue
+            .get(&mso.doc_type)
+            .ok_or(CredentialIngestionError::UnknownCredentialType)?;
+        if credential_type.format != "mso_mdoc" {
+            return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
+        }
+        let authenticated_issuer = self.issuer_for_type(issuers, &mso.doc_type)?;
+        if issuer_id_assertion != authenticated_issuer.identity {
+            return Err(CredentialIngestionError::IssuerMismatch);
+        }
+        if !self
+            .catalogue
+            .issuer_allowed(&mso.doc_type, &authenticated_issuer.identity)
+        {
+            return Err(CredentialIngestionError::IssuerNotAllowedForType);
+        }
+        let mut held_claims = Vec::new();
+        for (namespace, items) in &issuer_signed.name_spaces {
+            for item in items {
+                held_claims.push((namespace.clone(), item.element_id.clone()));
+            }
+        }
+        if !self
+            .catalogue
+            .satisfies_mandatory_mdoc(&mso.doc_type, &held_claims)
+        {
+            return Err(CredentialIngestionError::MandatoryClaimsMissing);
+        }
+        let validity = mdoc_validity(&mso.validity_info, self.now_epoch)?;
+        if matches!(mso.device_key, cose::cbor::Value::Null) {
+            return Err(CredentialIngestionError::DeviceBindingMissing);
+        }
+        if !mdoc_device_binding_matches(&mso.device_key, &self.device_public_key) {
+            return Err(CredentialIngestionError::DeviceBindingMismatch);
+        }
+        Ok((
+            VerifiedCredential::Mdoc {
+                holding: MdocHolding {
+                    doctype: mso.doc_type,
+                    issuer_signed,
+                },
+                validity,
+            },
+            authenticated_issuer.clone(),
+        ))
+    }
+
+    fn credential_issuance_rejection_effects() -> Vec<Effect> {
+        vec![
+            Effect::Render {
+                screen: ScreenDescription::Error {
+                    code: "credential_issuance_rejected".into(),
+                    message: "The credential response could not be authenticated and stored."
+                        .into(),
+                },
+            },
+            Effect::Close,
+        ]
+    }
+
+    fn reject_unexpected_credential_response(&mut self) -> Vec<Effect> {
+        self.pending_verified_credential = None;
+        self.last_credential_ingestion_error =
+            Some(CredentialIngestionError::UnexpectedCredentialResponse);
+
+        let closes_current_flow = matches!(self.active, ActiveFlow::None | ActiveFlow::Issuance);
+        if self.active == ActiveFlow::Issuance
+            || matches!(self.issuance, oid4vci::State::RequestingCredential { .. })
+        {
+            self.issuance = oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid);
+            self.finish_flow(ActiveFlow::Issuance);
+        }
+
+        let mut effects = Self::credential_issuance_rejection_effects();
+        if !closes_current_flow {
+            effects.retain(|effect| !matches!(effect, Effect::Close));
+        }
+        effects
     }
 
     fn drive_issuance(&mut self, input: oid4vci::Input) -> Vec<Effect> {
@@ -980,8 +3469,22 @@ impl Core {
         let proof_key_attested = self
             .wua
             .as_ref()
-            .map(|w| w.is_valid_for(&self.device_public_key, wua::AssuranceLevel::High))
+            .map(|w| {
+                w.is_valid_for_at(
+                    &self.device_public_key,
+                    wua::AssuranceLevel::High,
+                    self.now_epoch,
+                )
+            })
             .unwrap_or(false);
+        let current_issuers = self.resolve_credential_issuers(&self.issuer_cert_chain_current);
+        let issuer_trusted = Self::issuer_candidates_are_consistent(&current_issuers)
+            && current_issuers == self.issuer_candidates_current
+            && current_issuers
+                .first()
+                .is_some_and(|issuer| issuer.identity == self.issuer_id_current)
+            && self.issuer_id_assertion_current == self.issuer_id_current;
+        self.issuer_trusted_current = issuer_trusted;
 
         let (next, outputs) = {
             let env = oid4vci::Env {
@@ -994,33 +3497,96 @@ impl Core {
             };
             oid4vci::step(&self.issuance, &input, &env)
         };
+        if matches!(next, oid4vci::State::ProvingPossession { .. }) {
+            if let oid4vci::Input::TokenResponse { c_nonce, .. } = &input {
+                if !Self::durable_replay_value_can_be_reserved(&self.iss_seen_c_nonces, *c_nonce) {
+                    return self.durable_replay_capacity_effects(ActiveFlow::Issuance);
+                }
+            }
+        }
         let was_issued = matches!(self.issuance, oid4vci::State::CredentialIssued { .. });
+        let was_aborted = matches!(self.issuance, oid4vci::State::Aborted(_));
         self.issuance = next;
+
+        let audit_format = match &self.issuance {
+            oid4vci::State::OfferParsed { format, .. }
+            | oid4vci::State::Authorizing { format }
+            | oid4vci::State::AwaitingTxCode { format }
+            | oid4vci::State::RequestingToken { format }
+            | oid4vci::State::ProvingPossession { format, .. }
+            | oid4vci::State::RequestingCredential { format }
+            | oid4vci::State::CredentialIssued { format, .. } => Some(*format),
+            oid4vci::State::Idle | oid4vci::State::Aborted(_) => None,
+        };
+        if let Some(format) = audit_format {
+            let audit_candidate = txnlog::NewEntry {
+                epoch: self.now_epoch,
+                kind: txnlog::Kind::Issuance,
+                counterparty: self.issuer_id_current.clone(),
+                consent_hash: [0u8; 32],
+                claim_paths: vec![format_name(format).to_string()],
+                outcome: txnlog::Outcome::Completed,
+                payment: None,
+            };
+            if self.check_audit_entry(&audit_candidate).is_err() {
+                return self.audit_log_candidate_rejection_effects(ActiveFlow::Issuance);
+            }
+        }
 
         let effects: Vec<Effect> = outputs
             .into_iter()
             .map(|o| self.translate_issuance(o))
             .collect();
 
-        // The moment the credential is issued (once): store it as a holding so it can be presented
-        // and shown on the wallet home, and record the completed issuance in the audit log.
+        // The moment the credential is issued (once), consume the value that already crossed the
+        // authentication/policy boundary. Raw response bytes are never parsed into storage here.
         if !was_issued {
-            if let oid4vci::State::CredentialIssued { format, credential } = &self.issuance {
-                let fmt = format_name(*format).to_string();
-                match *format {
-                    oid4vci::CredentialFormat::DcSdJwt => {
-                        if let Some(held) = held_credential_from_compact(credential) {
-                            self.load_credential(held);
+            if let oid4vci::State::CredentialIssued { format, .. } = &self.issuance {
+                let issued_format = *format;
+                let fmt = format_name(issued_format).to_string();
+                match self.pending_verified_credential.take() {
+                    Some(verified) if verified.credential.format() == issued_format => {
+                        if self.record_issuance(fmt).is_err() {
+                            return self.audit_log_fault_effects(ActiveFlow::Issuance);
+                        }
+                        if let Err(error) = self.store_verified_credential(verified) {
+                            // The credential was admitted immediately before the successful
+                            // protocol transition. A later refusal is therefore an internal
+                            // invariant failure; fail closed instead of exposing issued state.
+                            self.issuance =
+                                oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid);
+                            self.last_credential_ingestion_error = Some(error);
+                            return self.audit_log_fault_effects(ActiveFlow::Issuance);
                         }
                     }
-                    // mso_mdoc credential response = base64url(IssuerSigned CBOR); store it parsed.
-                    oid4vci::CredentialFormat::MsoMdoc => {
-                        if let Some(holding) = mdoc_holding_from_credential(credential) {
-                            self.load_mdoc_credential(holding);
-                        }
+                    _ => {
+                        // Defensive invariant: the OID4VCI machine must never reach its success
+                        // state without a corresponding authenticated value to store.
+                        self.issuance =
+                            oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid);
+                        self.last_credential_ingestion_error =
+                            Some(CredentialIngestionError::MalformedCredential);
                     }
                 }
-                self.record_issuance(fmt);
+            }
+        }
+
+        if matches!(self.issuance, oid4vci::State::CredentialIssued { .. }) {
+            self.finish_flow(ActiveFlow::Issuance);
+        } else if let oid4vci::State::Aborted(reason) = &self.issuance {
+            let terminal_effects = if !was_aborted {
+                let terminal_effects = if *reason == oid4vci::AbortReason::UserDeclined {
+                    vec![Effect::Close]
+                } else {
+                    Self::credential_issuance_rejection_effects()
+                };
+                Some(terminal_effects)
+            } else {
+                None
+            };
+            self.finish_flow(ActiveFlow::Issuance);
+            if let Some(terminal_effects) = terminal_effects {
+                return terminal_effects;
             }
         }
         effects
@@ -1063,7 +3629,13 @@ impl Core {
             };
             payment::step(&self.payment, &input, &env)
         };
-        let was_authorized = matches!(self.payment, payment::State::Authorized { .. });
+        if matches!(next, payment::State::Authorized { .. }) {
+            if let Some((_, nonce)) = self.pay_pending {
+                if !Self::durable_replay_value_can_be_reserved(&self.pay_seen_nonces, nonce) {
+                    return self.durable_replay_capacity_effects(ActiveFlow::Payment);
+                }
+            }
+        }
         self.payment = next;
 
         // Capture the response endpoint + nonce when the confirmation screen is reached.
@@ -1079,14 +3651,27 @@ impl Core {
             }
         }
 
-        let effects: Vec<Effect> = outputs
+        let mut effects: Vec<Effect> = outputs
             .into_iter()
             .flat_map(|o| self.translate_payment(o))
             .collect();
 
-        // Record a completed payment the moment the machine reaches Authorized (once).
-        if !was_authorized && matches!(self.payment, payment::State::Authorized { .. }) {
-            self.record_payment();
+        // `Authorized` means the device produced a dynamically linked code; completion requires a
+        // distinct payment-service acknowledgement. Validation/user-decline aborts are terminal
+        // locally and must leave the reusable machine recoverable.
+        if let payment::State::Aborted(reason) = &self.payment {
+            if !effects.iter().any(|effect| matches!(effect, Effect::Close)) {
+                if *reason != payment::AbortReason::UserDeclined {
+                    effects.push(Effect::Render {
+                        screen: ScreenDescription::Error {
+                            code: "payment_aborted".into(),
+                            message: "The payment authorization could not be completed.".into(),
+                        },
+                    });
+                }
+                effects.push(Effect::Close);
+            }
+            self.finish_flow(ActiveFlow::Payment);
         }
         effects
     }
@@ -1107,12 +3692,26 @@ impl Core {
                     currency: currency.clone(),
                 });
                 // Capture the payer-visible essence + the committing hash for the audit log.
-                self.pay_consent_hash = presenter::consent_hash(&AwsLc, &screen);
-                self.pay_summary = Some(txnlog::PaymentSummary {
+                let consent_hash = presenter::consent_hash(&AwsLc, &screen);
+                let summary = txnlog::PaymentSummary {
                     payee: creditor_name,
                     amount_minor,
                     currency,
-                });
+                };
+                let audit_candidate = txnlog::NewEntry {
+                    epoch: self.now_epoch,
+                    kind: txnlog::Kind::Payment,
+                    counterparty: summary.payee.clone(),
+                    consent_hash,
+                    claim_paths: Vec::new(),
+                    outcome: txnlog::Outcome::Completed,
+                    payment: Some(summary.clone()),
+                };
+                if self.check_audit_entry(&audit_candidate).is_err() {
+                    return self.audit_log_candidate_rejection_effects(ActiveFlow::Payment);
+                }
+                self.pay_consent_hash = consent_hash;
+                self.pay_summary = Some(summary);
                 vec![Effect::Render { screen }]
             }
             PO::SignAuthCode {
@@ -1128,8 +3727,15 @@ impl Core {
                     .as_ref()
                     .map(|(u, _)| u.clone())
                     .unwrap_or_default();
-                vec![Effect::Http { url, body: code }]
+                vec![Effect::Http {
+                    profile: HttpDeliveryProfile::PaymentAuthorization,
+                    url,
+                    body: code,
+                }]
             }
+            // The pure payment machine closes after producing the authorization. The facade waits
+            // for `PaymentAuthorizationDelivered`; a decline still closes immediately.
+            PO::Close if matches!(self.payment, payment::State::Authorized { .. }) => Vec::new(),
             PO::Close => vec![Effect::Close],
         }
     }
@@ -1146,6 +3752,11 @@ impl Core {
             };
             qes::step(&self.qes, &input, &env)
         };
+        if let qes::QesState::AwaitingAuthorization(request) = &next {
+            if !Self::durable_replay_value_can_be_reserved(&self.qes_seen_nonces, request.nonce) {
+                return self.durable_replay_capacity_effects(ActiveFlow::Qes);
+            }
+        }
         self.qes = next;
         // Record the request nonce once the confirmation is reached (replay protection).
         if let qes::QesState::AwaitingAuthorization(req) = &self.qes {
@@ -1153,10 +3764,26 @@ impl Core {
                 self.qes_seen_nonces.push(req.nonce);
             }
         }
-        outputs
+        let mut effects: Vec<Effect> = outputs
             .into_iter()
             .flat_map(|o| self.translate_qes(o))
-            .collect()
+            .collect();
+        if let qes::QesState::Aborted(reason) = &self.qes {
+            if *reason != qes::AbortReason::UserDeclined {
+                effects.push(Effect::Render {
+                    screen: ScreenDescription::Error {
+                        code: "qes_aborted".into(),
+                        message: "The qualified-signature authorization could not be completed."
+                            .into(),
+                    },
+                });
+            }
+            if !effects.iter().any(|effect| matches!(effect, Effect::Close)) {
+                effects.push(Effect::Close);
+            }
+            self.finish_flow(ActiveFlow::Qes);
+        }
+        effects
     }
 
     fn translate_qes(&mut self, output: qes::Output) -> Vec<Effect> {
@@ -1185,43 +3812,271 @@ impl Core {
             }],
             // The QTSP endpoint (CSC API) is resolved by the shell; the body is the authorization.
             QO::SendToQtsp(body) => vec![Effect::Http {
+                profile: HttpDeliveryProfile::QesAuthorization,
                 url: String::new(),
                 body,
             }],
+            // A produced QES authorization is not completion until the QTSP acknowledges it.
+            QO::Close if matches!(self.qes, qes::QesState::Signed { .. }) => Vec::new(),
             QO::Close => vec![Effect::Close],
         }
     }
 
-    /// Choose what to present: one credential per DCQL credential query (multi-credential), each
-    /// keyed by its query id. A legacy flat-`claims` request (no DCQL) yields a single bare SD-JWT.
-    /// Selection never widens disclosure — only the requested-and-held subset is ever revealed.
+    fn eligibility_from_ingestion_error(
+        error: CredentialIngestionError,
+    ) -> PresentationEligibilityError {
+        match error {
+            CredentialIngestionError::CredentialExpired => {
+                PresentationEligibilityError::CredentialExpired
+            }
+            CredentialIngestionError::CredentialNotYetValid => {
+                PresentationEligibilityError::CredentialNotYetValid
+            }
+            _ => PresentationEligibilityError::CredentialProvenanceInvalid,
+        }
+    }
+
+    fn sdjwt_credential_is_current(
+        &self,
+        stored: &StoredSdJwtCredential,
+    ) -> Result<(), PresentationEligibilityError> {
+        stored
+            .validity
+            .validate_at(self.now_epoch)
+            .map_err(Self::eligibility_from_ingestion_error)?;
+        let StoredProvenance::Authenticated(provenance) = &stored.provenance else {
+            return Ok(()); // Explicit Rust-only fixture loader; never reachable over FFI.
+        };
+        let authenticated = self
+            .authenticate_received_credential(
+                provenance.format,
+                &provenance.raw_credential,
+                &provenance.issuer.certificate_path,
+                &provenance.issuer.identity,
+            )
+            .map_err(Self::eligibility_from_ingestion_error)?;
+        if authenticated.provenance != *provenance {
+            return Err(PresentationEligibilityError::CredentialProvenanceInvalid);
+        }
+        match authenticated.credential {
+            VerifiedCredential::SdJwt {
+                holding,
+                authenticated,
+                validity,
+            } if holding == stored.holding
+                && stored.authenticated.as_ref() == Some(&authenticated)
+                && validity == stored.validity =>
+            {
+                Ok(())
+            }
+            _ => Err(PresentationEligibilityError::CredentialProvenanceInvalid),
+        }
+    }
+
+    fn mdoc_credential_is_current(
+        &self,
+        stored: &StoredMdocCredential,
+    ) -> Result<(), PresentationEligibilityError> {
+        stored
+            .validity
+            .validate_at(self.now_epoch)
+            .map_err(Self::eligibility_from_ingestion_error)?;
+        let StoredProvenance::Authenticated(provenance) = &stored.provenance else {
+            return Ok(()); // Explicit Rust-only fixture loader; never reachable over FFI.
+        };
+        let authenticated = self
+            .authenticate_received_credential(
+                provenance.format,
+                &provenance.raw_credential,
+                &provenance.issuer.certificate_path,
+                &provenance.issuer.identity,
+            )
+            .map_err(Self::eligibility_from_ingestion_error)?;
+        if authenticated.provenance != *provenance {
+            return Err(PresentationEligibilityError::CredentialProvenanceInvalid);
+        }
+        match authenticated.credential {
+            VerifiedCredential::Mdoc { holding, validity }
+                if holding == stored.holding && validity == stored.validity =>
+            {
+                Ok(())
+            }
+            _ => Err(PresentationEligibilityError::CredentialProvenanceInvalid),
+        }
+    }
+
+    fn presentation_trust_is_current(
+        &self,
+        session: &SessionInfo,
+    ) -> Result<(), PresentationEligibilityError> {
+        if !self.trust_store.is_valid_at(self.now_epoch) {
+            return Err(PresentationEligibilityError::TrustEvidenceInvalid);
+        }
+        let provenance = session
+            .rp_provenance
+            .as_ref()
+            .ok_or(PresentationEligibilityError::TrustEvidenceInvalid)?;
+        let (registered, public_key) = self.resolve_rp(&provenance.certificate_chain);
+        if !registered || public_key != provenance.public_key {
+            return Err(PresentationEligibilityError::TrustEvidenceInvalid);
+        }
+        Ok(())
+    }
+
+    fn presentation_evidence_is_current(&self) -> Result<(), PresentationEligibilityError> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or(PresentationEligibilityError::TrustEvidenceInvalid)?;
+        self.presentation_trust_is_current(session)?;
+        if session.selected_sources.is_empty()
+            || session.selected_sources.len() != session.selected_credentials.len()
+        {
+            return Err(PresentationEligibilityError::NoEligibleCredential);
+        }
+        for source in &session.selected_sources {
+            match source {
+                PresentationCredentialReference::SdJwt {
+                    holding,
+                    authenticated,
+                } => {
+                    let stored = self
+                        .credentials
+                        .iter()
+                        .find(|stored| {
+                            stored.holding == *holding && stored.authenticated == *authenticated
+                        })
+                        .ok_or(PresentationEligibilityError::CredentialProvenanceInvalid)?;
+                    self.sdjwt_credential_is_current(stored)?;
+                }
+                PresentationCredentialReference::Mdoc(holding) => {
+                    let stored = self
+                        .mdoc_holdings
+                        .iter()
+                        .find(|stored| stored.holding == *holding)
+                        .ok_or(PresentationEligibilityError::CredentialProvenanceInvalid)?;
+                    self.mdoc_credential_is_current(stored)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Freeze the complete, currently eligible DCQL plan before consent is rendered.
+    fn prepare_presentation_selection(&mut self) -> Result<(), PresentationEligibilityError> {
+        let session = self
+            .session
+            .clone()
+            .ok_or(PresentationEligibilityError::TrustEvidenceInvalid)?;
+        self.presentation_trust_is_current(&session)?;
+
+        let prepared = match &session.dcql {
+            Some(dcql) if !dcql.credentials.is_empty() => {
+                // Evaluate every query without mutating session state, then select required
+                // Credential Set options atomically. Optional sets are omitted until the holder
+                // explicitly opts in, while a required unsatisfied set cannot leak a partial
+                // credential through consent, signing or response assembly.
+                let mut candidates = Vec::with_capacity(dcql.credentials.len());
+                let mut errors = Vec::with_capacity(dcql.credentials.len());
+                for query in &dcql.credentials {
+                    match self.select_for_query(&session, query) {
+                        Ok(candidate) => {
+                            candidates.push(Some(candidate));
+                            errors.push(None);
+                        }
+                        Err(error) => {
+                            candidates.push(None);
+                            errors.push(Some(error));
+                        }
+                    }
+                }
+                let satisfiable: Vec<bool> = candidates.iter().map(Option::is_some).collect();
+                let indices = dcql
+                    .credential_selection_plan(&satisfiable)
+                    .ok_or_else(|| {
+                        errors
+                            .iter()
+                            .flatten()
+                            .copied()
+                            .next()
+                            .unwrap_or(PresentationEligibilityError::NoEligibleCredential)
+                    })?;
+                if indices.is_empty() {
+                    return Err(PresentationEligibilityError::NoEligibleCredential);
+                }
+                let mut prepared = Vec::with_capacity(indices.len());
+                for index in indices {
+                    prepared.push(
+                        candidates[index]
+                            .take()
+                            .ok_or(PresentationEligibilityError::NoEligibleCredential)?,
+                    );
+                }
+                prepared
+            }
+            _ => vec![self.select_legacy_sdjwt(&session)?],
+        };
+        if prepared.is_empty() {
+            return Err(PresentationEligibilityError::NoEligibleCredential);
+        }
+        let target = self
+            .session
+            .as_mut()
+            .ok_or(PresentationEligibilityError::TrustEvidenceInvalid)?;
+        target.selected_credentials = prepared.iter().map(|item| item.selected.clone()).collect();
+        target.selected_revealed_claims.clear();
+        for claim in prepared.iter().flat_map(|item| item.revealed_claims.iter()) {
+            if !target.selected_revealed_claims.contains(claim) {
+                target.selected_revealed_claims.push(claim.clone());
+            }
+        }
+        target.selected_sources = prepared.into_iter().map(|item| item.source).collect();
+        Ok(())
+    }
+
+    /// Frozen credentials are the only values the protocol state machine may sign.
     fn select_credentials_for(&self, input: &Input) -> Vec<SelectedCredential> {
         if !matches!(input, Input::ConsentGranted) {
             return Vec::new();
         }
-        let Some(sess) = self.session.as_ref() else {
-            return Vec::new();
-        };
-        match &sess.dcql {
-            Some(dcql) if !dcql.credentials.is_empty() => dcql
-                .credentials
-                .iter()
-                .filter_map(|q| self.select_for_query(sess, q))
-                .collect(),
-            _ => self.select_legacy_sdjwt(sess).into_iter().collect(),
-        }
+        self.session
+            .as_ref()
+            .map(|session| session.selected_credentials.clone())
+            .unwrap_or_default()
     }
 
-    /// Select a credential for ONE DCQL credential query, minimised to that query's claims and
-    /// keyed by its id. `mso_mdoc` → an ISO DeviceResponse; otherwise an SD-JWT VC of a matching
-    /// `vct`. `None` if nothing held satisfies this query.
+    /// Select a current credential for one exact supported DCQL format.
     fn select_for_query(
         &self,
         sess: &SessionInfo,
         q: &oid4vp::dcql::CredentialQuery,
-    ) -> Option<SelectedCredential> {
-        let claims: Vec<String> = q
-            .claims
+    ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
+        let options = q
+            .claim_selection_options()
+            .ok_or(PresentationEligibilityError::NoEligibleCredential)?;
+        let mut first_error = None;
+        for option in options {
+            let claims: Vec<&oid4vp::dcql::ClaimQuery> =
+                option.iter().map(|index| &q.claims[*index]).collect();
+            match self.select_for_query_claims(sess, q, &claims) {
+                Ok(selected) => return Ok(selected),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
+    }
+
+    /// Select one holding for one already-resolved claim-set option. The caller tries options in
+    /// verifier preference order and commits only the first complete match.
+    fn select_for_query_claims(
+        &self,
+        sess: &SessionInfo,
+        q: &oid4vp::dcql::CredentialQuery,
+        requested_claims: &[&oid4vp::dcql::ClaimQuery],
+    ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
+        let claims: Vec<String> = requested_claims
             .iter()
             .map(|c| c.path_string())
             .filter(|s| !s.is_empty())
@@ -1231,16 +4086,8 @@ impl Core {
         // A DCQL `values` constraint means the RP only accepts a credential whose claim value is one
         // of the listed values (e.g. `age_over_18 ∈ [true]`). A candidate that can't satisfy it is
         // not eligible — the wallet never presents a value the verifier asked to exclude.
-        let mdoc_values_ok = |issued: &mdoc::IssuerSigned| -> bool {
-            q.claims.iter().all(|cq| match &cq.values {
-                None => true,
-                Some(allowed) => mdoc_value_at(issued, &cq.path_string())
-                    .map(cbor_value_display)
-                    .is_some_and(|disp| allowed.iter().any(|a| json_value_display(a) == disp)),
-            })
-        };
-        let sdjwt_values_ok = |c: &HeldCredential| -> bool {
-            q.claims.iter().all(|cq| match &cq.values {
+        let fixture_sdjwt_values_ok = |c: &HeldCredential| -> bool {
+            requested_claims.iter().all(|cq| match &cq.values {
                 None => true,
                 Some(allowed) => c
                     .disclosures_by_claim
@@ -1251,86 +4098,280 @@ impl Core {
         };
 
         if q.format == "mso_mdoc" {
-            let doctype = q.meta.as_ref().and_then(|m| m.doctype_value.clone())?;
-            let holding = self
-                .mdoc_holdings
+            let requested_mdoc_paths: Vec<(String, String)> = requested_claims
                 .iter()
-                .find(|h| h.doctype == doctype && mdoc_values_ok(&h.issuer_signed))?;
-            let issuer_signed = minimise_mdoc(&holding.issuer_signed, &claims);
-            let mgn = mdoc_generated_nonce(sess.nonce);
-            let session_transcript = mdoc::oid4vp_session_transcript(
-                &AwsLc,
-                &sess.rp_client_id,
-                &sess.response_uri,
-                &sess.nonce.to_string(),
-                &mgn,
-            );
-            return Some(SelectedCredential::Mdoc {
-                doctype: holding.doctype.clone(),
-                issuer_signed,
-                session_transcript,
-                device_namespaces: mdoc::empty_device_namespaces_bytes(),
-                mdoc_generated_nonce: mgn,
-                dcql_id,
-            });
+                .map(|claim| requested_mdoc_path(&claim.path))
+                .collect::<Option<_>>()
+                .ok_or(PresentationEligibilityError::NoEligibleCredential)?;
+            let mdoc_claim_labels: Vec<String> = requested_mdoc_paths
+                .iter()
+                .map(|(namespace, element)| format!("{namespace}.{element}"))
+                .collect();
+            let mdoc_values_ok = |issued: &mdoc::IssuerSigned| -> bool {
+                requested_claims
+                    .iter()
+                    .zip(&requested_mdoc_paths)
+                    .all(|(claim, path)| match &claim.values {
+                        None => true,
+                        Some(allowed) => mdoc_value_at(issued, path).is_some_and(|value| {
+                            allowed
+                                .iter()
+                                .any(|allowed| cbor_value_matches_json(value, allowed))
+                        }),
+                    })
+            };
+            let doctype = q
+                .meta
+                .as_ref()
+                .and_then(|m| m.doctype_value.clone())
+                .ok_or(PresentationEligibilityError::NoEligibleCredential)?;
+            let mut first_error = None;
+            for stored in self.mdoc_holdings.iter().filter(|stored| {
+                stored.holding.doctype == doctype
+                    && mdoc_values_ok(&stored.holding.issuer_signed)
+                    && requested_mdoc_paths
+                        .iter()
+                        .all(|path| mdoc_value_at(&stored.holding.issuer_signed, path).is_some())
+            }) {
+                if let Err(error) = self.mdoc_credential_is_current(stored) {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+                let holding = &stored.holding;
+                let issuer_signed = minimise_mdoc(&holding.issuer_signed, &requested_mdoc_paths);
+                let mgn = mdoc_generated_nonce(sess.nonce);
+                let session_transcript = mdoc::oid4vp_session_transcript(
+                    &AwsLc,
+                    &sess.rp_client_id,
+                    &sess.response_uri,
+                    &sess.nonce.to_string(),
+                    &mgn,
+                );
+                return Ok(PreparedPresentationCredential {
+                    selected: SelectedCredential::Mdoc {
+                        doctype: holding.doctype.clone(),
+                        issuer_signed,
+                        session_transcript,
+                        device_namespaces: mdoc::empty_device_namespaces_bytes(),
+                        mdoc_generated_nonce: mgn,
+                        dcql_id,
+                    },
+                    source: PresentationCredentialReference::Mdoc(holding.clone()),
+                    revealed_claims: mdoc_claim_labels.clone(),
+                });
+            }
+            return Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential));
         }
+        if q.format != "dc+sd-jwt" {
+            return Err(PresentationEligibilityError::NoEligibleCredential);
+        }
+
+        let requested_paths: Vec<Vec<RequestedSdJwtPathElement>> = requested_claims
+            .iter()
+            .map(|claim| requested_sdjwt_path(&claim.path))
+            .collect::<Option<_>>()
+            .ok_or(PresentationEligibilityError::NoEligibleCredential)?;
 
         // SD-JWT VC: a candidate must BE one of the query's `vct_values` (when given) — so a request
         // for `urn:eudi:pid:1` is answered by the PID, never an mDL that carries the same claim name.
-        let vcts = q.meta.as_ref().map(|m| m.vct_values.clone()).unwrap_or_default();
-        let type_matches = |c: &HeldCredential| -> bool {
-            vcts.is_empty() || vcts.contains(&credential_vct_and_issuer(&c.issuer_jwt).0)
-        };
-        let carries_all =
-            |c: &HeldCredential| claims.iter().all(|r| c.disclosures_by_claim.contains_key(r));
-        let cred = self
-            .credentials
-            .iter()
-            .find(|c| type_matches(c) && sdjwt_values_ok(c) && carries_all(c))
-            .or_else(|| {
-                self.credentials
-                    .iter()
-                    .find(|c| type_matches(c) && sdjwt_values_ok(c))
-            })?;
-        let held: Vec<String> = cred.disclosures_by_claim.keys().cloned().collect();
-        let disclosures = minimum_claim_set(&claims, &held)
-            .iter()
-            .filter_map(|c| cred.disclosures_by_claim.get(c).cloned())
-            .collect();
-        Some(SelectedCredential::SdJwt {
-            issuer_jwt: cred.issuer_jwt.clone(),
-            disclosures,
-            dcql_id,
-        })
+        let vcts = q
+            .meta
+            .as_ref()
+            .map(|m| m.vct_values.clone())
+            .unwrap_or_default();
+        let mut first_error = None;
+        for stored in &self.credentials {
+            let credential = &stored.holding;
+            match (&stored.authenticated, &stored.provenance) {
+                (Some(authenticated), StoredProvenance::Authenticated(_)) => {
+                    let type_matches = vcts.is_empty()
+                        || authenticated
+                            .processed
+                            .claims
+                            .get("vct")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|vct| vcts.iter().any(|allowed| allowed == vct));
+                    if !type_matches {
+                        continue;
+                    }
+
+                    // Resolve typed paths against the authenticated recursive document. Under
+                    // DCQL, `values` filters wildcard matches: disclose only concrete paths whose
+                    // exact JSON value is allowed, and treat the claim as absent if none match.
+                    let mut selected_paths = Vec::new();
+                    let mut claims_match = true;
+                    for (claim, requested) in requested_claims.iter().zip(&requested_paths) {
+                        let matches = matching_sdjwt_values(authenticated, requested);
+                        let matching_paths: Vec<Vec<sdjwt::ClaimPathElement>> = matches
+                            .into_iter()
+                            .filter(|(_, value)| {
+                                claim
+                                    .values
+                                    .as_ref()
+                                    .is_none_or(|allowed| allowed.contains(value))
+                            })
+                            .map(|(path, _)| path)
+                            .collect();
+                        if matching_paths.is_empty() {
+                            claims_match = false;
+                            break;
+                        }
+                        for path in matching_paths {
+                            if !selected_paths.contains(&path) {
+                                selected_paths.push(path);
+                            }
+                        }
+                    }
+                    if !claims_match {
+                        continue;
+                    }
+                    let selection = select_authenticated_sdjwt_disclosures_for_paths(
+                        authenticated,
+                        &selected_paths,
+                    );
+                    if let Err(error) = self.sdjwt_credential_is_current(stored) {
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                    return Ok(PreparedPresentationCredential {
+                        selected: SelectedCredential::SdJwt {
+                            issuer_jwt: credential.issuer_jwt.clone(),
+                            disclosures: selection.disclosures,
+                            dcql_id,
+                        },
+                        source: PresentationCredentialReference::SdJwt {
+                            holding: credential.clone(),
+                            authenticated: Some(authenticated.clone()),
+                        },
+                        revealed_claims: selection.revealed_claims,
+                    });
+                }
+                (None, StoredProvenance::TestFixture) => {
+                    let type_matches = vcts.is_empty()
+                        || vcts.contains(&credential_vct_and_issuer(&credential.issuer_jwt).0);
+                    let carries_all = claims
+                        .iter()
+                        .all(|claim| credential.disclosures_by_claim.contains_key(claim));
+                    if !type_matches
+                        || !fixture_sdjwt_values_ok(credential)
+                        || (!claims.is_empty() && !carries_all)
+                    {
+                        continue;
+                    }
+                    if let Err(error) = self.sdjwt_credential_is_current(stored) {
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                    let held: Vec<String> =
+                        credential.disclosures_by_claim.keys().cloned().collect();
+                    let selected_claims = minimum_claim_set(&claims, &held);
+                    let disclosures = selected_claims
+                        .iter()
+                        .filter_map(|claim| credential.disclosures_by_claim.get(claim).cloned())
+                        .collect();
+                    return Ok(PreparedPresentationCredential {
+                        selected: SelectedCredential::SdJwt {
+                            issuer_jwt: credential.issuer_jwt.clone(),
+                            disclosures,
+                            dcql_id,
+                        },
+                        source: PresentationCredentialReference::SdJwt {
+                            holding: credential.clone(),
+                            authenticated: None,
+                        },
+                        revealed_claims: selected_claims,
+                    });
+                }
+                _ => {
+                    first_error
+                        .get_or_insert(PresentationEligibilityError::CredentialProvenanceInvalid);
+                }
+            }
+        }
+        Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
     }
 
     /// The legacy flat-`claims` path (no DCQL): one SD-JWT, minimised to the requested claims, sent
     /// as a bare `vp_token` (no DCQL id) — exactly the pre-DCQL behaviour.
-    fn select_legacy_sdjwt(&self, sess: &SessionInfo) -> Option<SelectedCredential> {
-        let carries_all = |c: &HeldCredential| {
-            sess.requested_claims
-                .iter()
-                .all(|r| c.disclosures_by_claim.contains_key(r))
-        };
-        let cred = self
-            .credentials
+    fn select_legacy_sdjwt(
+        &self,
+        sess: &SessionInfo,
+    ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
+        let requested_paths: Vec<Vec<RequestedSdJwtPathElement>> = sess
+            .requested_claims
             .iter()
-            .find(|c| carries_all(c))
-            .or_else(|| self.credentials.first())?;
-        let held: Vec<String> = cred.disclosures_by_claim.keys().cloned().collect();
-        let disclosures = minimum_claim_set(&sess.requested_claims, &held)
-            .iter()
-            .filter_map(|c| cred.disclosures_by_claim.get(c).cloned())
+            .map(|claim| vec![RequestedSdJwtPathElement::Name(claim.clone())])
             .collect();
-        Some(SelectedCredential::SdJwt {
-            issuer_jwt: cred.issuer_jwt.clone(),
-            disclosures,
-            dcql_id: None,
-        })
+        let mut first_error = None;
+        for stored in &self.credentials {
+            let credential = &stored.holding;
+            match (&stored.authenticated, &stored.provenance) {
+                (Some(authenticated), StoredProvenance::Authenticated(_)) => {
+                    let Some(selection) =
+                        select_authenticated_sdjwt_disclosures(authenticated, &requested_paths)
+                    else {
+                        continue;
+                    };
+                    if let Err(error) = self.sdjwt_credential_is_current(stored) {
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                    return Ok(PreparedPresentationCredential {
+                        selected: SelectedCredential::SdJwt {
+                            issuer_jwt: credential.issuer_jwt.clone(),
+                            disclosures: selection.disclosures,
+                            dcql_id: None,
+                        },
+                        source: PresentationCredentialReference::SdJwt {
+                            holding: credential.clone(),
+                            authenticated: Some(authenticated.clone()),
+                        },
+                        revealed_claims: selection.revealed_claims,
+                    });
+                }
+                (None, StoredProvenance::TestFixture) => {
+                    let carries_all = sess
+                        .requested_claims
+                        .iter()
+                        .all(|claim| credential.disclosures_by_claim.contains_key(claim));
+                    if !sess.requested_claims.is_empty() && !carries_all {
+                        continue;
+                    }
+                    if let Err(error) = self.sdjwt_credential_is_current(stored) {
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                    let held: Vec<String> =
+                        credential.disclosures_by_claim.keys().cloned().collect();
+                    let selected_claims = minimum_claim_set(&sess.requested_claims, &held);
+                    let disclosures = selected_claims
+                        .iter()
+                        .filter_map(|claim| credential.disclosures_by_claim.get(claim).cloned())
+                        .collect();
+                    return Ok(PreparedPresentationCredential {
+                        selected: SelectedCredential::SdJwt {
+                            issuer_jwt: credential.issuer_jwt.clone(),
+                            disclosures,
+                            dcql_id: None,
+                        },
+                        source: PresentationCredentialReference::SdJwt {
+                            holding: credential.clone(),
+                            authenticated: None,
+                        },
+                        revealed_claims: selected_claims,
+                    });
+                }
+                _ => {
+                    first_error
+                        .get_or_insert(PresentationEligibilityError::CredentialProvenanceInvalid);
+                }
+            }
+        }
+        Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
     }
 
     /// Append a completed presentation to the audit log (paths + consent hash, never values).
-    fn record_presentation(&mut self) {
+    fn record_presentation(&mut self) -> Result<(), txnlog::Error> {
         let entry = match &self.session {
             Some(sess) => txnlog::NewEntry {
                 epoch: self.now_epoch,
@@ -1341,16 +4382,16 @@ impl Core {
                 outcome: txnlog::Outcome::Completed,
                 payment: None,
             },
-            None => return,
+            None => return Ok(()),
         };
-        self.log.append(&AwsLc, entry);
+        self.append_audit_entry(entry)
     }
 
     /// Append an authorised payment to the audit log (payer-visible summary + consent hash).
-    fn record_payment(&mut self) {
+    fn record_payment(&mut self) -> Result<(), txnlog::Error> {
         let summary = match &self.pay_summary {
             Some(s) => s.clone(),
-            None => return,
+            None => return Ok(()),
         };
         let entry = txnlog::NewEntry {
             epoch: self.now_epoch,
@@ -1361,11 +4402,11 @@ impl Core {
             outcome: txnlog::Outcome::Completed,
             payment: Some(summary),
         };
-        self.log.append(&AwsLc, entry);
+        self.append_audit_entry(entry)
     }
 
     /// Append a completed issuance to the audit log (issuer identity + credential format).
-    fn record_issuance(&mut self, format: String) {
+    fn record_issuance(&mut self, format: String) -> Result<(), txnlog::Error> {
         let entry = txnlog::NewEntry {
             epoch: self.now_epoch,
             kind: txnlog::Kind::Issuance,
@@ -1375,7 +4416,7 @@ impl Core {
             outcome: txnlog::Outcome::Completed,
             payment: None,
         };
-        self.log.append(&AwsLc, entry);
+        self.append_audit_entry(entry)
     }
 
     // --- Wallet-to-wallet receive (TS09) ---
@@ -1383,10 +4424,29 @@ impl Core {
     fn drive_w2w(&mut self, input: w2w::Input) -> Vec<Effect> {
         let (next, outputs) = w2w::step(&self.w2w, &input);
         self.w2w = next;
-        outputs
+        let effects: Vec<Effect> = outputs
             .into_iter()
             .flat_map(|o| self.translate_w2w(o))
-            .collect()
+            .collect();
+        match &self.w2w {
+            w2w::State::Accepted { .. } => {
+                self.finish_flow(ActiveFlow::WalletTransfer);
+                effects
+            }
+            w2w::State::Rejected(_) => {
+                self.finish_flow(ActiveFlow::WalletTransfer);
+                vec![
+                    Effect::Render {
+                        screen: ScreenDescription::Error {
+                            code: "wallet_transfer_rejected".into(),
+                            message: "The credential transfer could not be authenticated.".into(),
+                        },
+                    },
+                    Effect::Close,
+                ]
+            }
+            w2w::State::Idle | w2w::State::AwaitingTransfer => effects,
+        }
     }
 
     fn translate_w2w(&mut self, output: w2w::Output) -> Vec<Effect> {
@@ -1408,7 +4468,9 @@ impl Core {
                     outcome: txnlog::Outcome::Completed,
                     payment: None,
                 };
-                self.log.append(&AwsLc, entry);
+                if self.append_audit_entry(entry).is_err() {
+                    return self.audit_log_fault_effects(ActiveFlow::WalletTransfer);
+                }
                 self.w2w_credential = Some(credential);
                 vec![]
             }
@@ -1423,22 +4485,36 @@ impl Core {
         credential: &[u8],
         issuer_chain: &[Vec<u8>],
     ) -> bool {
-        if !self.resolve_issuer(issuer_chain) {
+        let issuers = self.resolve_credential_issuers(issuer_chain);
+        if !Self::issuer_candidates_are_consistent(&issuers) {
             return false;
         }
-        let Some(issuer_key) = issuer_chain
-            .first()
-            .and_then(|der| x509::parse_cert(der).ok())
-            .map(|c| c.public_key_raw)
-        else {
+        let Some(signing_issuer) = issuers.first() else {
             return false;
         };
         core::str::from_utf8(credential)
             .ok()
             .and_then(|s| sdjwt::SdJwtVc::parse(s).ok())
-            .map(|vc| {
-                vc.verify_and_disclose(&AwsLc, &AwsLc, &issuer_key, Alg::Es256)
-                    .is_ok()
+            .and_then(|vc| {
+                let alg = vc.issuer_algorithm().ok()?;
+                if alg != Alg::Es256 {
+                    return None;
+                }
+                let processed = vc
+                    .verify_and_process(&AwsLc, &AwsLc, &signing_issuer.public_key_raw, alg)
+                    .ok()?;
+                let issuer_payload = vc.issuer_payload().ok()?;
+                validate_sdjwt_issuer_profile(&vc, &issuer_payload, &processed).ok()?;
+                let claims = &processed.claims;
+                let issuer_id = claims.get("iss")?.as_str()?;
+                let credential_type = claims.get("vct")?.as_str()?;
+                let authenticated_issuer = self.issuer_for_type(&issuers, credential_type).ok()?;
+                Some(
+                    issuer_id == authenticated_issuer.identity
+                        && self
+                            .catalogue
+                            .issuer_allowed(credential_type, &authenticated_issuer.identity),
+                )
             })
             .unwrap_or(false)
     }
@@ -1472,27 +4548,17 @@ impl Core {
     }
 
     fn consent_screen(&self) -> ScreenDescription {
-        let (rp, purpose, requested) = match &self.session {
-            Some(s) => (
-                s.rp_client_id.clone(),
-                s.purpose.clone(),
-                s.requested_claims.clone(),
-            ),
-            None => (String::new(), String::new(), Vec::new()),
+        let Some(session) = self.session.as_ref() else {
+            return ScreenDescription::Consent(ConsentScreen {
+                rp_display_name: String::new(),
+                purpose: String::new(),
+                requested_claims: Vec::new(),
+            });
         };
-        // The consent screen offers the minimum subset the request needs that ANY holding can
-        // provide (selection later binds to one credential). Union of held claim names across both
-        // SD-JWT disclosures and mdoc issuer-signed element identifiers.
-        let mut held: Vec<String> = self
-            .credentials
-            .iter()
-            .flat_map(|c| c.disclosures_by_claim.keys().cloned())
-            .collect();
-        held.extend(self.mdoc_holdings.iter().flat_map(|h| mdoc_claim_ids(&h.issuer_signed)));
         ScreenDescription::Consent(ConsentScreen {
-            rp_display_name: rp,
-            purpose,
-            requested_claims: minimum_claim_set(&requested, &held),
+            rp_display_name: session.rp_client_id.clone(),
+            purpose: session.purpose.clone(),
+            requested_claims: session.selected_revealed_claims.clone(),
         })
     }
 
@@ -1501,10 +4567,19 @@ impl Core {
         match output {
             O::ResolveRpTrust { client_id } => vec![Effect::ResolveRpTrust { client_id }],
             O::PersistNonce(nonce) => {
+                // The transition driver reserves before installing its next state. Keep this
+                // final mutation boundary defensive so an impossible duplicate output can never
+                // corrupt the durable set or make its next checkpoint non-canonical.
+                if !Self::durable_replay_value_can_be_reserved(&self.seen_nonces, nonce) {
+                    return self.durable_replay_capacity_effects(ActiveFlow::Presentation);
+                }
                 self.seen_nonces.push(nonce);
                 vec![Effect::PersistNonce { nonce }]
             }
             O::RenderConsent { .. } => {
+                if let Err(error) = self.presentation_evidence_is_current() {
+                    return self.abort_presentation_eligibility(error);
+                }
                 let screen = self.consent_screen();
                 // Capture what the user is about to see: the consent hash commits to it, and the
                 // exact claim paths shown are what we record when the presentation completes.
@@ -1519,29 +4594,51 @@ impl Core {
             O::SignKeyBinding {
                 key_ref,
                 signing_input,
-            } => vec![Effect::Sign {
-                key_ref,
-                payload: signing_input,
-            }],
+            } => {
+                if let Some(reason) = self.presentation_sensitive_abort_reason() {
+                    return self.abort_presentation(reason);
+                }
+                vec![Effect::Sign {
+                    key_ref,
+                    payload: signing_input,
+                }]
+            }
             O::SendVpToken(body) => {
-                let sess = self.session.as_ref();
-                let url = sess.map(|s| s.response_uri.clone()).unwrap_or_default();
+                if let Some(reason) = self.presentation_sensitive_abort_reason() {
+                    return self.abort_presentation(reason);
+                }
+                let Some(sess) = self.session.as_ref() else {
+                    return self.abort_presentation(AbortReason::ResponseUriInvalid);
+                };
+                let url = sess.response_uri.clone();
                 // For `direct_post.jwt` the response is JWE-encrypted (ECDH-ES + A256GCM) to the
                 // verifier's key before it leaves the device. Encryption needs RNG (ephemeral key +
                 // IV), so it happens here in the facade, not in the sans-IO `oid4vp` core.
-                let enc_key = sess.and_then(|s| {
-                    (s.response_mode == "direct_post.jwt")
-                        .then_some(s.response_encryption_key.as_deref())
-                        .flatten()
-                });
-                match enc_key {
-                    Some(key) => match self.encrypt_direct_post_jwt(&body, key) {
-                        Some(encrypted) => vec![Effect::Http { url, body: encrypted }],
-                        // Fail closed: the verifier asked for encryption, so never fall back to a
-                        // plaintext POST that would disclose the presentation.
-                        None => vec![],
-                    },
-                    None => vec![Effect::Http { url, body }],
+                match sess.response_mode.as_str() {
+                    "direct_post" => vec![Effect::Http {
+                        profile: HttpDeliveryProfile::Openid4vpDirectPost,
+                        url,
+                        body,
+                    }],
+                    "direct_post.jwt" => {
+                        let Some(key) = sess.response_encryption_key.clone() else {
+                            return self.abort_presentation(
+                                AbortReason::ResponseEncryptionMetadataInvalid,
+                            );
+                        };
+                        match self.encrypt_direct_post_jwt(&body, &key) {
+                            Some(encrypted) => vec![Effect::Http {
+                                profile: HttpDeliveryProfile::Openid4vpDirectPost,
+                                url,
+                                body: encrypted,
+                            }],
+                            // Fail closed: the verifier asked for encryption, so never fall back to a
+                            // plaintext POST that would disclose the presentation. The stable abort
+                            // + error effects make the failure observable to the shell and holder.
+                            None => self.abort_presentation(AbortReason::ResponseEncryptionFailed),
+                        }
+                    }
+                    _ => self.abort_presentation(AbortReason::ResponseModeUnsupported),
                 }
             }
             O::Close => vec![Effect::Close],
@@ -1566,7 +4663,11 @@ impl Core {
         let plaintext = serde_json::to_string(&serde_json::Value::Object(obj)).ok()?;
 
         let apu = form_field(body, "mdoc_generated_nonce").unwrap_or_default();
-        let apv = self.session.as_ref().map(|s| s.nonce.to_string()).unwrap_or_default();
+        let apv = self
+            .session
+            .as_ref()
+            .map(|s| s.nonce.to_string())
+            .unwrap_or_default();
         let jwe = jwe::encrypt_ecdh_es_a256gcm(
             plaintext.as_bytes(),
             recipient_key,
@@ -1587,12 +4688,128 @@ impl Core {
     }
 }
 
+const MAX_DURABLE_TRUST_LIST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DURABLE_WUA_BYTES: usize = 64 * 1024;
+
+/// One canonical Core checkpoint plus the non-zero authenticated platform-envelope generation it
+/// must be committed under. The byte vector intentionally has no `Debug` implementation: native
+/// diagnostics must use [`DurableFfiError`] codes and never stringify credential-bearing state.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiDurableCheckpoint {
+    pub generation: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// Stable, low-cardinality failures for the durable UniFFI boundary.
+///
+/// No variant carries source bytes, credential details, identifiers, parser messages, sizes or
+/// generations. Generated Swift/Kotlin bindings can therefore surface the typed case without
+/// accidentally copying authenticated wallet state into logs or crash reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]
+pub enum DurableFfiError {
+    InvalidLifecycleState,
+    InvalidEnvironment,
+    TrustEnvironmentRejected,
+    WuaEnvironmentRejected,
+    InvalidGeneration,
+    ResourceLimit,
+    MalformedCheckpoint,
+    UnsupportedCheckpointVersion,
+    ContextRejected,
+    ClockRejected,
+    DeviceKeyRejected,
+    TrustRejected,
+    WuaRejected,
+    AuditLogRejected,
+    CredentialRejected,
+}
+
+impl DurableFfiError {
+    fn code(self) -> &'static str {
+        match self {
+            Self::InvalidLifecycleState => "invalid_lifecycle_state",
+            Self::InvalidEnvironment => "invalid_environment",
+            Self::TrustEnvironmentRejected => "trust_environment_rejected",
+            Self::WuaEnvironmentRejected => "wua_environment_rejected",
+            Self::InvalidGeneration => "invalid_generation",
+            Self::ResourceLimit => "resource_limit",
+            Self::MalformedCheckpoint => "malformed_checkpoint",
+            Self::UnsupportedCheckpointVersion => "unsupported_checkpoint_version",
+            Self::ContextRejected => "context_rejected",
+            Self::ClockRejected => "clock_rejected",
+            Self::DeviceKeyRejected => "device_key_rejected",
+            Self::TrustRejected => "trust_rejected",
+            Self::WuaRejected => "wua_rejected",
+            Self::AuditLogRejected => "audit_log_rejected",
+            Self::CredentialRejected => "credential_rejected",
+        }
+    }
+}
+
+impl core::fmt::Display for DurableFfiError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for DurableFfiError {}
+
+impl From<durable::DurableCheckpointError> for DurableFfiError {
+    fn from(error: durable::DurableCheckpointError) -> Self {
+        use durable::DurableCheckpointError as Error;
+        match error {
+            Error::ResourceLimit { .. } | Error::SizeOverflow => Self::ResourceLimit,
+            Error::Truncated | Error::NonCanonical | Error::Malformed => Self::MalformedCheckpoint,
+            Error::DormantDeliveryLedgerNotPristine => Self::InvalidLifecycleState,
+            Error::IdleAggregateHasLiveDeliveries | Error::InvalidDeliveryLedger => {
+                Self::MalformedCheckpoint
+            }
+            Error::UnsupportedVersion(_) => Self::UnsupportedCheckpointVersion,
+            Error::InvalidGeneration | Error::GenerationMismatch { .. } => Self::InvalidGeneration,
+            Error::ContextMismatch(_) => Self::ContextRejected,
+            Error::ClockUnavailable | Error::ClockRollback { .. } => Self::ClockRejected,
+            Error::DeviceKeyUnavailable | Error::DeviceKeyInvalid => Self::DeviceKeyRejected,
+            Error::TrustListUnavailable
+            | Error::TrustListExpired
+            | Error::TrustListRollback { .. } => Self::TrustRejected,
+            Error::WuaUnavailable | Error::WuaInvalid => Self::WuaRejected,
+            Error::AuditLogUnavailable
+            | Error::AuditTimestampAfterClock { .. }
+            | Error::TransactionLog(_) => Self::AuditLogRejected,
+            Error::CredentialInvalid { .. }
+            | Error::CredentialEvidenceMismatch { .. }
+            | Error::DuplicateCredential => Self::CredentialRejected,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DurableEnginePhase {
+    Fresh,
+    Prepared,
+    Running,
+    Legacy,
+}
+
+struct WalletEngineInner {
+    core: Core,
+    durable_phase: DurableEnginePhase,
+}
+
+impl WalletEngineInner {
+    fn mark_legacy_if_fresh(&mut self) {
+        if self.durable_phase == DurableEnginePhase::Fresh {
+            self.durable_phase = DurableEnginePhase::Legacy;
+        }
+    }
+}
+
 /// The UniFFI-exposed handle the native shell (Swift now, Kotlin later) holds. It wraps [`Core`]
-/// behind a mutex and speaks the FFI-friendly JSON API. The whole native surface is intentionally
-/// tiny: construct, load a credential, and drive events.
+/// behind a mutex and speaks the FFI-friendly JSON API. The durable API deliberately requires one
+/// fresh engine to be prepared with the current environment before any restore.
 #[derive(uniffi::Object)]
 pub struct WalletEngine {
-    inner: Mutex<Core>,
+    inner: Mutex<WalletEngineInner>,
 }
 
 #[uniffi::export]
@@ -1601,16 +4818,103 @@ impl WalletEngine {
     #[uniffi::constructor]
     pub fn new(wallet_client_id: String, device_key_ref: String) -> Arc<Self> {
         Arc::new(WalletEngine {
-            inner: Mutex::new(Core::new(wallet_client_id, device_key_ref)),
+            inner: Mutex::new(WalletEngineInner {
+                core: Core::new(wallet_client_id, device_key_ref),
+                durable_phase: DurableEnginePhase::Fresh,
+            }),
         })
+    }
+
+    /// Prepare a fresh engine with the live, independently obtained environment required to
+    /// authenticate a durable checkpoint. All inputs are bounded before cryptographic parsing.
+    /// The staged environment replaces the engine only after clock, trust list, device key and WUA
+    /// validation all succeed; no checkpoint bytes are accepted by this method.
+    pub fn prepare_durable_environment(
+        &self,
+        clock_epoch: i64,
+        signed_trust_list: Vec<u8>,
+        operator_public_key: Vec<u8>,
+        device_public_key: Vec<u8>,
+        wua_jwt: Vec<u8>,
+        wua_provider_public_key: Vec<u8>,
+    ) -> Result<(), DurableFfiError> {
+        if clock_epoch <= 0
+            || signed_trust_list.is_empty()
+            || signed_trust_list.len() > MAX_DURABLE_TRUST_LIST_BYTES
+            || wua_jwt.is_empty()
+            || wua_jwt.len() > MAX_DURABLE_WUA_BYTES
+            || !valid_durable_public_key(&operator_public_key)
+            || !valid_durable_public_key(&device_public_key)
+            || !valid_durable_public_key(&wua_provider_public_key)
+        {
+            return Err(DurableFfiError::InvalidEnvironment);
+        }
+
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.durable_phase != DurableEnginePhase::Fresh {
+            return Err(DurableFfiError::InvalidLifecycleState);
+        }
+
+        let mut staged = Core::new(
+            inner.core.config.wallet_client_id.clone(),
+            inner.core.config.device_key_ref.clone(),
+        );
+        let effects = staged.handle_event(Event::SetClock { epoch: clock_epoch });
+        if !effects.is_empty() {
+            return Err(DurableFfiError::InvalidEnvironment);
+        }
+        staged
+            .load_trust_list(&signed_trust_list, &operator_public_key)
+            .map_err(|_| DurableFfiError::TrustEnvironmentRejected)?;
+        staged.load_device_key(device_public_key);
+        staged
+            .load_wua(&wua_jwt, &wua_provider_public_key)
+            .map_err(|_| DurableFfiError::WuaEnvironmentRejected)?;
+
+        inner.core = staged;
+        inner.durable_phase = DurableEnginePhase::Prepared;
+        Ok(())
+    }
+
+    /// Export a bounded canonical checkpoint for the next authenticated store generation.
+    pub fn export_durable_checkpoint(
+        &self,
+        generation: u64,
+    ) -> Result<FfiDurableCheckpoint, DurableFfiError> {
+        let inner = self.inner.lock().expect("poisoned");
+        if !matches!(
+            inner.durable_phase,
+            DurableEnginePhase::Prepared | DurableEnginePhase::Running
+        ) {
+            return Err(DurableFfiError::InvalidLifecycleState);
+        }
+        let bytes = inner.core.export_durable_checkpoint(generation)?;
+        Ok(FfiDurableCheckpoint { generation, bytes })
+    }
+
+    /// Restore one authenticated platform-store record. This is legal only after the current
+    /// environment has been prepared and before any event has been driven in this process.
+    pub fn restore_durable_checkpoint(
+        &self,
+        checkpoint: FfiDurableCheckpoint,
+    ) -> Result<(), DurableFfiError> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.durable_phase != DurableEnginePhase::Prepared {
+            return Err(DurableFfiError::InvalidLifecycleState);
+        }
+        inner
+            .core
+            .restore_durable_checkpoint(&checkpoint.bytes, checkpoint.generation)?;
+        inner.durable_phase = DurableEnginePhase::Running;
+        Ok(())
     }
 
     /// Install/update the signed trusted list. Returns "" on success, else an error string.
     pub fn load_trust_list(&self, signed_list: Vec<u8>, operator_public_key: Vec<u8>) -> String {
-        match self
-            .inner
-            .lock()
-            .expect("poisoned")
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.mark_legacy_if_fresh();
+        match inner
+            .core
             .load_trust_list(&signed_list, &operator_public_key)
         {
             Ok(()) => String::new(),
@@ -1620,71 +4924,126 @@ impl WalletEngine {
 
     /// Register the device public key the WUA attests (raw uncompressed point).
     pub fn load_device_key(&self, device_public_key: Vec<u8>) {
-        self.inner
-            .lock()
-            .expect("poisoned")
-            .load_device_key(device_public_key);
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.mark_legacy_if_fresh();
+        inner.core.load_device_key(device_public_key);
     }
 
-    /// Verify + store a Token Status List (for revocation checks). Returns "" on success.
-    pub fn load_status_list(&self, token: Vec<u8>, provider_public_key: Vec<u8>) -> String {
-        match self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .load_status_list(&token, &provider_public_key)
+    /// Verify + cache a URI-bound Token Status List from a trusted status-provider certificate.
+    /// Returns "" on success.
+    pub fn load_status_list(
+        &self,
+        uri: String,
+        token: Vec<u8>,
+        provider_cert_chain: Vec<Vec<u8>>,
+    ) -> String {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.mark_legacy_if_fresh();
+        match inner
+            .core
+            .load_status_list(&uri, &token, &provider_cert_chain)
         {
             Ok(()) => String::new(),
-            Err(e) => e,
+            Err(e) => format!("{e:?}"),
         }
     }
 
     /// Verify + store the Wallet Unit Attestation. Returns "" on success, else an error string.
     pub fn load_wua(&self, wua_jwt: Vec<u8>, provider_public_key: Vec<u8>) -> String {
-        match self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .load_wua(&wua_jwt, &provider_public_key)
-        {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.mark_legacy_if_fresh();
+        match inner.core.load_wua(&wua_jwt, &provider_public_key) {
             Ok(()) => String::new(),
             Err(e) => e,
         }
     }
 
-    /// Load a held credential: the issuer JWT plus a JSON object mapping claim name -> disclosure.
+    /// Authenticate and store a credential against the current trusted list. Returns an empty
+    /// string on success or a stable debug code on refusal.
+    pub fn ingest_credential(
+        &self,
+        format: String,
+        credential: Vec<u8>,
+        issuer_cert_chain: Vec<Vec<u8>>,
+        issuer_id: String,
+    ) -> String {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.mark_legacy_if_fresh();
+        match inner
+            .core
+            .ingest_credential(&format, &credential, &issuer_cert_chain, &issuer_id)
+        {
+            Ok(()) => String::new(),
+            Err(error) => format!("{error:?}"),
+        }
+    }
+
+    /// Deprecated compatibility entry point. Unauthenticated credential injection is disabled;
+    /// callers must use [`Self::ingest_credential`] or the OID4VCI event flow.
     pub fn load_credential(
         &self,
         issuer_jwt: String,
         disclosures_by_claim_json: String,
         status_index: Option<u64>,
     ) {
-        let disclosures_by_claim: BTreeMap<String, String> =
-            serde_json::from_str(&disclosures_by_claim_json).unwrap_or_default();
-        self.inner
-            .lock()
-            .expect("poisoned")
-            .load_credential(HeldCredential {
-                issuer_jwt,
-                disclosures_by_claim,
-                status_index,
-            });
+        // Consume inputs so generated bindings remain link-compatible during migration, while no
+        // untrusted value can cross into holdings.
+        drop((issuer_jwt, disclosures_by_claim_json, status_index));
     }
 
     /// The transaction (audit) log as JSON — completed presentations, payments, issuances. Records
     /// claim paths + a committing consent hash, never raw claim values (TS06). For the history UI.
     pub fn transaction_log_json(&self) -> String {
-        self.inner.lock().expect("poisoned").transaction_log_json()
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .core
+            .transaction_log_json()
     }
 
-    /// Erase one transaction-log entry (right to erasure, TS07). Chain-preserving tombstone.
+    /// Legacy compatibility entry point for transaction redaction. Durable engines must send the
+    /// `redactTransaction` event through their lifecycle coordinator; this method refuses prepared
+    /// and running engines so it cannot mutate state outside the coordinator's commit gate.
     pub fn redact_transaction(&self, seq: u64) -> bool {
-        self.inner.lock().expect("poisoned").redact_transaction(seq)
+        let mut inner = self.inner.lock().expect("poisoned");
+        if matches!(
+            inner.durable_phase,
+            DurableEnginePhase::Prepared | DurableEnginePhase::Running
+        ) {
+            return false;
+        }
+        inner.mark_legacy_if_fresh();
+        let existed = inner
+            .core
+            .transaction_log()
+            .entries()
+            .iter()
+            .any(|entry| entry.seq == seq);
+        let effects = inner.core.handle_event(Event::RedactTransaction { seq });
+        existed
+            && effects.is_empty()
+            && inner
+                .core
+                .transaction_log()
+                .entries()
+                .iter()
+                .any(|entry| entry.seq == seq && entry.redacted)
     }
 
-    /// Erase the entire transaction log (TS07).
+    /// Legacy compatibility entry point for full history erasure. Durable engines must send the
+    /// `wipeTransactionLog` event through their lifecycle coordinator. This void method cannot
+    /// report a refusal, so coordinated application adapters must not expose it; prepared/running
+    /// engines deterministically leave their state unchanged.
     pub fn wipe_transaction_log(&self) {
-        self.inner.lock().expect("poisoned").wipe_transaction_log();
+        let mut inner = self.inner.lock().expect("poisoned");
+        if matches!(
+            inner.durable_phase,
+            DurableEnginePhase::Prepared | DurableEnginePhase::Running
+        ) {
+            return;
+        }
+        inner.mark_legacy_if_fresh();
+        drop(inner.core.handle_event(Event::WipeTransactionLog));
     }
 
     /// A privacy-preserving activity report as JSON (TS08).
@@ -1692,12 +5051,13 @@ impl WalletEngine {
         self.inner
             .lock()
             .expect("poisoned")
+            .core
             .transaction_report_json()
     }
 
     /// A portable, integrity-protected export of the holder's wallet data as JSON (TS10).
     pub fn export_json(&self) -> String {
-        self.inner.lock().expect("poisoned").export_json()
+        self.inner.lock().expect("poisoned").core.export_json()
     }
 
     /// The attestation catalogue as JSON (TS11): known credential types + their claims/issuers.
@@ -1705,26 +5065,1366 @@ impl WalletEngine {
         self.inner
             .lock()
             .expect("poisoned")
+            .core
             .attestation_catalogue_json()
     }
 
     /// The credentials the wallet holds as a JSON array (`[{vct, issuer, disclosuresByClaim}]`),
     /// including any just obtained via issuance. The wallet home renders these as cards.
     pub fn held_credentials_json(&self) -> String {
-        self.inner.lock().expect("poisoned").held_credentials_json()
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .core
+            .held_credentials_json()
     }
 
     /// Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
     /// event, returns a `{"error": "..."}` object instead of an array.
     pub fn handle_event_json(&self, event_json: String) -> String {
-        match self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .handle_event_json(&event_json)
-        {
-            Ok(effects) => effects,
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.mark_legacy_if_fresh();
+        match inner.core.handle_event_json(&event_json) {
+            Ok(effects) => {
+                if inner.durable_phase == DurableEnginePhase::Prepared {
+                    inner.durable_phase = DurableEnginePhase::Running;
+                }
+                effects
+            }
             Err(err) => serde_json::json!({ "error": err }).to_string(),
+        }
+    }
+}
+
+fn valid_durable_public_key(bytes: &[u8]) -> bool {
+    bytes.len() == 65 && bytes.first() == Some(&0x04)
+}
+
+#[cfg(test)]
+mod durable_ffi_tests {
+    use super::*;
+
+    fn prepare(engine: &WalletEngine, scenario: &IssuanceScenario) {
+        engine
+            .prepare_durable_environment(
+                scenario.epoch,
+                scenario.trust_list.clone(),
+                scenario.operator_public_key.clone(),
+                scenario.device_public_key.clone(),
+                scenario.wua_jwt.clone(),
+                scenario.wallet_provider_public_key.clone(),
+            )
+            .unwrap();
+    }
+
+    fn append_history(engine: &WalletEngine) {
+        let mut inner = engine.inner.lock().expect("poisoned");
+        let epoch = inner.core.now_epoch;
+        inner
+            .core
+            .log
+            .append(
+                &AwsLc,
+                txnlog::NewEntry {
+                    epoch,
+                    kind: txnlog::Kind::Presentation,
+                    counterparty: "https://rp.example".into(),
+                    consent_hash: [7u8; 32],
+                    claim_paths: vec!["age_over_18".into()],
+                    outcome: txnlog::Outcome::Completed,
+                    payment: None,
+                },
+            )
+            .unwrap();
+    }
+
+    fn effect(output: &str, effect_type: &str) -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(output)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|effect| effect["type"] == effect_type)
+            .unwrap_or_else(|| panic!("missing {effect_type} effect: {output}"))
+            .clone()
+    }
+
+    fn drive_ffi_issuance_to_credential_request(
+        engine: &WalletEngine,
+        wallet: &DemoWallet,
+        scenario: &IssuanceScenario,
+        c_nonce: u64,
+    ) -> u64 {
+        let output = engine.handle_event_json(
+            serde_json::json!({
+                "type": "credentialOfferReceived",
+                "offer": scenario.offer,
+                "issuerCertChain": scenario.issuer_cert_chain,
+                "issuerId": scenario.issuer_id,
+            })
+            .to_string(),
+        );
+        let request_token = effect(&output, "requestToken");
+
+        let output = engine.handle_event_json(
+            serde_json::json!({
+                "type": "tokenReceived",
+                "operationId": request_token["operationId"],
+                "bound": true,
+                "cNonce": c_nonce,
+            })
+            .to_string(),
+        );
+        let sign = effect(&output, "sign");
+        let payload: Vec<u8> = serde_json::from_value(sign["payload"].clone()).unwrap();
+        let signature = wallet.sign_device(payload);
+
+        let output = engine.handle_event_json(
+            serde_json::json!({
+                "type": "deviceSignatureProduced",
+                "operationId": sign["operationId"],
+                "signature": signature,
+            })
+            .to_string(),
+        );
+        effect(&output, "requestCredential")["operationId"]
+            .as_u64()
+            .unwrap()
+    }
+
+    #[test]
+    fn ffi_requires_prepare_before_export_or_restore() {
+        let engine = WalletEngine::new("wallet.example".into(), "device-key".into());
+        assert_eq!(
+            engine.export_durable_checkpoint(1).err().unwrap(),
+            DurableFfiError::InvalidLifecycleState
+        );
+        assert_eq!(
+            engine
+                .restore_durable_checkpoint(FfiDurableCheckpoint {
+                    generation: 1,
+                    bytes: Vec::new(),
+                })
+                .unwrap_err(),
+            DurableFfiError::InvalidLifecycleState
+        );
+    }
+
+    #[test]
+    fn environment_is_staged_atomically_and_can_only_prepare_a_fresh_engine() {
+        let wallet = DemoWallet::new();
+        let scenario = wallet.issuance_scenario();
+        let engine = WalletEngine::new("wallet.example".into(), "device-key".into());
+
+        let mut invalid_wua = scenario.wua_jwt.clone();
+        invalid_wua[0] ^= 1;
+        assert_eq!(
+            engine
+                .prepare_durable_environment(
+                    scenario.epoch,
+                    scenario.trust_list.clone(),
+                    scenario.operator_public_key.clone(),
+                    scenario.device_public_key.clone(),
+                    invalid_wua,
+                    scenario.wallet_provider_public_key.clone(),
+                )
+                .unwrap_err(),
+            DurableFfiError::WuaEnvironmentRejected
+        );
+
+        // The failed staged environment did not consume or partially mutate the fresh engine.
+        prepare(&engine, &scenario);
+        assert_eq!(
+            engine
+                .prepare_durable_environment(
+                    scenario.epoch,
+                    scenario.trust_list.clone(),
+                    scenario.operator_public_key.clone(),
+                    scenario.device_public_key.clone(),
+                    scenario.wua_jwt.clone(),
+                    scenario.wallet_provider_public_key.clone(),
+                )
+                .unwrap_err(),
+            DurableFfiError::InvalidLifecycleState
+        );
+    }
+
+    #[test]
+    fn legacy_use_cannot_be_relabelled_as_a_prepared_restore_environment() {
+        let wallet = DemoWallet::new();
+        let scenario = wallet.issuance_scenario();
+        let engine = WalletEngine::new("wallet.example".into(), "device-key".into());
+        assert_eq!(
+            engine.handle_event_json(format!(
+                r#"{{"type":"setClock","epoch":{}}}"#,
+                scenario.epoch
+            )),
+            "[]"
+        );
+        assert_eq!(
+            engine
+                .prepare_durable_environment(
+                    scenario.epoch,
+                    scenario.trust_list,
+                    scenario.operator_public_key,
+                    scenario.device_public_key,
+                    scenario.wua_jwt,
+                    scenario.wallet_provider_public_key,
+                )
+                .unwrap_err(),
+            DurableFfiError::InvalidLifecycleState
+        );
+    }
+
+    #[test]
+    fn checkpoint_record_binds_authenticated_generation_and_bounds() {
+        let wallet = DemoWallet::new();
+        let scenario = wallet.issuance_scenario();
+        let source = WalletEngine::new("wallet.example".into(), "device-key".into());
+        prepare(&source, &scenario);
+
+        assert_eq!(
+            source.export_durable_checkpoint(0).err().unwrap(),
+            DurableFfiError::InvalidGeneration
+        );
+        let checkpoint = source.export_durable_checkpoint(2).unwrap();
+        assert_eq!(checkpoint.generation, 2);
+        assert!(!checkpoint.bytes.is_empty());
+        assert!(checkpoint.bytes.len() <= durable::MAX_CHECKPOINT_BYTES);
+
+        let target = WalletEngine::new("wallet.example".into(), "device-key".into());
+        prepare(&target, &scenario);
+        assert_eq!(
+            target
+                .restore_durable_checkpoint(FfiDurableCheckpoint {
+                    generation: 1,
+                    bytes: checkpoint.bytes.clone(),
+                })
+                .unwrap_err(),
+            DurableFfiError::InvalidGeneration
+        );
+
+        // Failed restore is atomic and leaves the prepared engine able to accept the exact record.
+        target.restore_durable_checkpoint(checkpoint).unwrap();
+        assert!(target.export_durable_checkpoint(3).is_ok());
+
+        let oversized = WalletEngine::new("wallet.example".into(), "device-key".into());
+        prepare(&oversized, &scenario);
+        assert_eq!(
+            oversized
+                .restore_durable_checkpoint(FfiDurableCheckpoint {
+                    generation: 1,
+                    bytes: vec![0; durable::MAX_CHECKPOINT_BYTES + 1],
+                })
+                .unwrap_err(),
+            DurableFfiError::ResourceLimit
+        );
+    }
+
+    #[test]
+    fn ffi_restore_does_not_revive_a_process_operation_or_protocol_session() {
+        let wallet = DemoWallet::new();
+        let scenario = wallet.issuance_scenario();
+        let source = WalletEngine::new("wallet.example".into(), "device-key".into());
+        prepare(&source, &scenario);
+
+        let output =
+            source.handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#.to_string());
+        let operation_id = serde_json::from_str::<serde_json::Value>(&output)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|effect| {
+                effect
+                    .get("operationId")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .unwrap();
+        let checkpoint = source.export_durable_checkpoint(7).unwrap();
+
+        let restarted = WalletEngine::new("wallet.example".into(), "device-key".into());
+        prepare(&restarted, &scenario);
+        restarted.restore_durable_checkpoint(checkpoint).unwrap();
+        let stale = restarted.handle_event_json(format!(
+            r#"{{"type":"operationSucceeded","operationId":{operation_id}}}"#
+        ));
+        let value: serde_json::Value = serde_json::from_str(&stale).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    #[test]
+    fn history_events_advance_the_durable_lifecycle_and_restore_their_committed_state() {
+        let scenario = DemoWallet::new().issuance_scenario();
+        let source = WalletEngine::new("wallet.example".into(), "device-key".into());
+        prepare(&source, &scenario);
+        append_history(&source);
+        let before_event = source.export_durable_checkpoint(1).unwrap();
+
+        assert_eq!(
+            source.handle_event_json(r#"{"type":"redactTransaction","seq":0}"#.into()),
+            "[]"
+        );
+        assert_eq!(
+            source.restore_durable_checkpoint(before_event).unwrap_err(),
+            DurableFfiError::InvalidLifecycleState,
+            "an event-driven mutation must close the prepared restore window"
+        );
+        let redacted = source.export_durable_checkpoint(2).unwrap();
+
+        let restarted = WalletEngine::new("wallet.example".into(), "device-key".into());
+        prepare(&restarted, &scenario);
+        restarted.restore_durable_checkpoint(redacted).unwrap();
+        let restored_json = restarted.transaction_log_json();
+        assert!(restored_json.contains(r#""redacted":true"#));
+        assert!(!restored_json.contains("age_over_18"));
+
+        assert_eq!(
+            restarted.handle_event_json(r#"{"type":"wipeTransactionLog"}"#.into()),
+            "[]"
+        );
+        let wiped = restarted.export_durable_checkpoint(3).unwrap();
+        let wiped_restart = WalletEngine::new("wallet.example".into(), "device-key".into());
+        prepare(&wiped_restart, &scenario);
+        wiped_restart.restore_durable_checkpoint(wiped).unwrap();
+        assert_eq!(wiped_restart.transaction_log_json(), "[]");
+    }
+
+    #[test]
+    fn ffi_issuance_terminal_results_release_the_flow_and_report_rejection() {
+        let wallet = DemoWallet::new();
+        let scenario = wallet.issuance_scenario();
+
+        let issued = WalletEngine::new("wallet.example".into(), "device-key".into());
+        prepare(&issued, &scenario);
+        let operation_id =
+            drive_ffi_issuance_to_credential_request(&issued, &wallet, &scenario, 501);
+        let output = issued.handle_event_json(
+            serde_json::json!({
+                "type": "credentialReceived",
+                "operationId": operation_id,
+                "format": "dc+sd-jwt",
+                "bytes": scenario.pid_credential_compact.as_bytes(),
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]["type"],
+            "close"
+        );
+        {
+            let inner = issued.inner.lock().expect("poisoned");
+            assert_eq!(inner.core.active, ActiveFlow::None);
+            assert!(matches!(
+                inner.core.issuance,
+                oid4vci::State::CredentialIssued { .. }
+            ));
+            assert!(inner.core.pending_operations.is_empty());
+        }
+        assert_eq!(
+            issued.handle_event_json(r#"{"type":"redactTransaction","seq":0}"#.into()),
+            "[]"
+        );
+
+        let rejected = WalletEngine::new("wallet.example".into(), "device-key".into());
+        prepare(&rejected, &scenario);
+        let operation_id =
+            drive_ffi_issuance_to_credential_request(&rejected, &wallet, &scenario, 502);
+        let output = rejected.handle_event_json(
+            serde_json::json!({
+                "type": "credentialReceived",
+                "operationId": operation_id,
+                "format": "dc+sd-jwt",
+                "bytes": [1, 2, 3],
+            })
+            .to_string(),
+        );
+        let effects = serde_json::from_str::<serde_json::Value>(&output).unwrap();
+        assert_eq!(effects[0]["type"], "render");
+        assert_eq!(effects[0]["screen"]["code"], "credential_issuance_rejected");
+        assert_eq!(effects[1]["type"], "close");
+        {
+            let inner = rejected.inner.lock().expect("poisoned");
+            assert_eq!(inner.core.active, ActiveFlow::None);
+            assert!(matches!(
+                inner.core.issuance,
+                oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid)
+            ));
+            assert!(inner.core.credentials.is_empty());
+            assert!(inner.core.mdoc_holdings.is_empty());
+            assert!(inner.core.pending_operations.is_empty());
+        }
+        assert_eq!(
+            rejected.handle_event_json(r#"{"type":"wipeTransactionLog"}"#.into()),
+            "[]"
+        );
+    }
+
+    #[test]
+    fn raw_history_compatibility_methods_cannot_mutate_durable_engine_phases() {
+        let scenario = DemoWallet::new().issuance_scenario();
+        let engine = WalletEngine::new("wallet.example".into(), "device-key".into());
+        prepare(&engine, &scenario);
+        append_history(&engine);
+        let prepared_json = engine.transaction_log_json();
+        let prepared_checkpoint = engine.export_durable_checkpoint(10).unwrap();
+
+        assert!(!engine.redact_transaction(0));
+        engine.wipe_transaction_log();
+        assert_eq!(engine.transaction_log_json(), prepared_json);
+        assert!(engine.export_durable_checkpoint(10).unwrap() == prepared_checkpoint);
+
+        assert_eq!(
+            engine.handle_event_json(format!(
+                r#"{{"type":"setClock","epoch":{}}}"#,
+                scenario.epoch
+            )),
+            "[]"
+        );
+        let running_checkpoint = engine.export_durable_checkpoint(11).unwrap();
+        assert!(!engine.redact_transaction(0));
+        engine.wipe_transaction_log();
+        assert_eq!(engine.transaction_log_json(), prepared_json);
+        assert!(engine.export_durable_checkpoint(11).unwrap() == running_checkpoint);
+    }
+
+    #[test]
+    fn raw_history_compatibility_methods_remain_legacy_only() {
+        let engine = WalletEngine::new("wallet.example".into(), "device-key".into());
+        append_history(&engine);
+
+        assert!(engine.redact_transaction(0));
+        assert!(engine.transaction_log_json().contains(r#""redacted":true"#));
+        engine.wipe_transaction_log();
+        assert_eq!(engine.transaction_log_json(), "[]");
+
+        let scenario = DemoWallet::new().issuance_scenario();
+        assert_eq!(
+            engine
+                .prepare_durable_environment(
+                    scenario.epoch,
+                    scenario.trust_list,
+                    scenario.operator_public_key,
+                    scenario.device_public_key,
+                    scenario.wua_jwt,
+                    scenario.wallet_provider_public_key,
+                )
+                .unwrap_err(),
+            DurableFfiError::InvalidLifecycleState
+        );
+    }
+
+    #[test]
+    fn ffi_errors_never_format_source_or_checkpoint_material() {
+        let secret = "holder-secret-credential-value";
+        for error in [
+            DurableFfiError::InvalidLifecycleState,
+            DurableFfiError::InvalidEnvironment,
+            DurableFfiError::TrustEnvironmentRejected,
+            DurableFfiError::WuaEnvironmentRejected,
+            DurableFfiError::InvalidGeneration,
+            DurableFfiError::ResourceLimit,
+            DurableFfiError::MalformedCheckpoint,
+            DurableFfiError::UnsupportedCheckpointVersion,
+            DurableFfiError::ContextRejected,
+            DurableFfiError::ClockRejected,
+            DurableFfiError::DeviceKeyRejected,
+            DurableFfiError::TrustRejected,
+            DurableFfiError::WuaRejected,
+            DurableFfiError::AuditLogRejected,
+            DurableFfiError::CredentialRejected,
+        ] {
+            let display = error.to_string();
+            let debug = format!("{error:?}");
+            assert!(!display.contains(secret));
+            assert!(!debug.contains(secret));
+            assert!(!display.contains('{'));
+            assert!(!display.contains('['));
+        }
+    }
+}
+
+#[cfg(test)]
+mod audit_log_failure_tests {
+    use super::*;
+
+    fn audit_entry(epoch: i64) -> txnlog::NewEntry {
+        txnlog::NewEntry {
+            epoch,
+            kind: txnlog::Kind::Transfer,
+            counterparty: "peer-wallet".into(),
+            consent_hash: [1u8; 32],
+            claim_paths: Vec::new(),
+            outcome: txnlog::Outcome::Completed,
+            payment: None,
+        }
+    }
+
+    fn bulky_audit_entry(epoch: i64) -> txnlog::NewEntry {
+        txnlog::NewEntry {
+            epoch,
+            kind: txnlog::Kind::Presentation,
+            counterparty: "rp.example".into(),
+            consent_hash: [1u8; 32],
+            claim_paths: (0..100)
+                .map(|index| format!("{index:03}:{}", "x".repeat(496)))
+                .collect(),
+            outcome: txnlog::Outcome::Completed,
+            payment: None,
+        }
+    }
+
+    fn near_capacity_log() -> txnlog::TransactionLog {
+        let mut log = txnlog::TransactionLog::new();
+        let mut epoch = 0i64;
+        while log.can_guarantee_max_entry() {
+            log.append(&AwsLc, bulky_audit_entry(epoch)).unwrap();
+            epoch += 1;
+        }
+        assert!(!log.is_exhausted());
+        assert!(!log.can_guarantee_max_entry());
+        log
+    }
+
+    fn has_error_code(effects: &[Effect], expected: &str) -> bool {
+        effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::Render {
+                    screen: ScreenDescription::Error { code, .. }
+                } if code == expected
+            )
+        })
+    }
+
+    #[test]
+    fn append_validation_failure_blocks_later_auditable_flows_without_panicking() {
+        let mut core = Core::new("wallet.example", "device-key");
+        core.issuer_id_current = "x".repeat(txnlog::MAX_COUNTERPARTY_BYTES + 1);
+        assert!(matches!(
+            core.record_issuance("dc+sd-jwt".into()),
+            Err(txnlog::Error::FieldTooLong {
+                field: txnlog::TextField::Counterparty,
+                ..
+            })
+        ));
+        assert!(!core.audit_log_available());
+        assert!(core.transaction_log().is_empty());
+
+        let effects = core.handle_event(Event::AuthorizationRequestReceived {
+            request: Vec::new(),
+        });
+        assert!(has_error_code(&effects, "audit_log_unavailable"));
+        assert!(effects.iter().any(|effect| matches!(effect, Effect::Close)));
+        assert_eq!(core.active, ActiveFlow::None);
+    }
+
+    #[test]
+    fn explicit_history_wipe_clears_the_fault_and_allows_a_fresh_chain() {
+        let mut core = Core::new("wallet.example", "device-key");
+        core.issuer_id_current = "x".repeat(txnlog::MAX_COUNTERPARTY_BYTES + 1);
+        core.record_issuance("dc+sd-jwt".into()).unwrap_err();
+
+        core.wipe_transaction_log();
+        assert!(core.audit_log_available());
+        core.issuer_id_current = "https://issuer.example".into();
+        core.record_issuance("dc+sd-jwt".into()).unwrap();
+        assert_eq!(core.transaction_log().len(), 1);
+        assert!(core.audit_log_available());
+    }
+
+    #[test]
+    fn exhausted_history_blocks_a_transfer_before_progress_or_storage() {
+        let mut core = Core::new("wallet.example", "device-key");
+        for epoch in 0..txnlog::MAX_ENTRIES {
+            core.log
+                .append(&AwsLc, audit_entry(i64::try_from(epoch).unwrap()))
+                .unwrap();
+        }
+        assert!(core.log.is_exhausted());
+
+        let effects = core.handle_event(Event::WalletTransferOfferCreated);
+        assert!(has_error_code(&effects, "audit_log_capacity_exhausted"));
+        assert_eq!(core.active, ActiveFlow::None);
+        assert!(matches!(core.w2w, w2w::State::Idle));
+        assert!(core.w2w_credential.is_none());
+        assert_eq!(core.transaction_log().len(), txnlog::MAX_ENTRIES);
+    }
+
+    #[test]
+    fn near_aggregate_limit_rejects_every_auditable_flow_before_consequential_effects() {
+        let near_capacity = near_capacity_log();
+        let original_head = near_capacity.head();
+        let cases = [
+            Event::AuthorizationRequestReceived {
+                request: Vec::new(),
+            },
+            Event::PaymentAuthorizationRequestReceived {
+                request: Vec::new(),
+            },
+            Event::CredentialOfferReceived {
+                offer: Vec::new(),
+                issuer_cert_chain: Vec::new(),
+                issuer_id: String::new(),
+            },
+            Event::WalletTransferOfferCreated,
+            Event::WalletTransferReceived {
+                credential: Vec::new(),
+                issuer_cert_chain: Vec::new(),
+                sender_public_key: Vec::new(),
+                sender_signature: Vec::new(),
+                sender_consent_hash: Vec::new(),
+                nonce: 1,
+            },
+        ];
+
+        for event in cases {
+            let mut core = Core::new("wallet.example", "device-key");
+            core.log = near_capacity.clone();
+            let effects = core.handle_event(event);
+            assert!(has_error_code(&effects, "audit_log_capacity_exhausted"));
+            assert!(effects.iter().all(|effect| matches!(
+                effect,
+                Effect::Render {
+                    screen: ScreenDescription::Error { .. }
+                } | Effect::Close
+            )));
+            assert_eq!(core.transaction_log().head(), original_head);
+            assert!(core.credentials.is_empty());
+            assert!(core.mdoc_holdings.is_empty());
+            assert!(core.w2w_credential.is_none());
+            assert_eq!(core.active, ActiveFlow::None);
+        }
+    }
+
+    #[test]
+    fn oversized_payment_audit_fields_fail_before_confirmation_or_signing() {
+        let mut core = Core::new("wallet.example", "device-key");
+        let request = serde_json::to_vec(&serde_json::json!({
+            "creditor_name": "x".repeat(txnlog::MAX_PAYMENT_PAYEE_BYTES + 1),
+            "creditor_account": "DE89370400440532013000",
+            "amount_minor": 100,
+            "currency": "EUR",
+            "transaction_id": "txn-1",
+            "nonce": 1,
+            "response_uri": "https://psp.example/authorize"
+        }))
+        .unwrap();
+
+        let effects = core.handle_event(Event::PaymentAuthorizationRequestReceived { request });
+        assert!(has_error_code(&effects, "audit_log_entry_invalid"));
+        assert!(effects.iter().all(|effect| matches!(
+            effect,
+            Effect::Render {
+                screen: ScreenDescription::Error { .. }
+            } | Effect::Close
+        )));
+        assert!(core.pay_summary.is_none());
+        assert!(core.transaction_log().is_empty());
+        assert_eq!(core.active, ActiveFlow::None);
+        assert!(core.audit_log_available());
+
+        let valid_request = serde_json::to_vec(&serde_json::json!({
+            "creditor_name": "Acme Store",
+            "creditor_account": "DE89370400440532013000",
+            "amount_minor": 100,
+            "currency": "EUR",
+            "transaction_id": "txn-2",
+            "nonce": 2,
+            "response_uri": "https://psp.example/authorize"
+        }))
+        .unwrap();
+        let valid_effects = core.handle_event(Event::PaymentAuthorizationRequestReceived {
+            request: valid_request,
+        });
+        assert!(valid_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Render {
+                screen: ScreenDescription::PaymentConfirmation(_)
+            }
+        )));
+        assert_eq!(core.active, ActiveFlow::Payment);
+    }
+
+    #[test]
+    fn redaction_recovers_dynamic_aggregate_capacity_without_history_wipe() {
+        let mut core = Core::new("wallet.example", "device-key");
+        core.log = near_capacity_log();
+        let head = core.log.head();
+
+        let rejected = core.handle_event(Event::WalletTransferOfferCreated);
+        assert!(has_error_code(&rejected, "audit_log_capacity_exhausted"));
+        assert!(!core.audit_log_available());
+        assert!(core.audit_log_available, "capacity must not latch a fault");
+
+        assert!(core.redact_transaction(0));
+        assert_eq!(core.log.head(), head);
+        assert!(core.audit_log_available());
+
+        let admitted = core.handle_event(Event::WalletTransferOfferCreated);
+        assert!(admitted
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishTransferOffer { .. })));
+        assert!(!has_error_code(&admitted, "audit_log_capacity_exhausted"));
+        assert_eq!(core.active, ActiveFlow::WalletTransfer);
+    }
+}
+
+#[cfg(test)]
+mod structured_sdjwt_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn disclosure(
+        raw: &str,
+        digest: &str,
+        path: Vec<sdjwt::ClaimPathElement>,
+        parent_digest: Option<&str>,
+        value: serde_json::Value,
+    ) -> sdjwt::VerifiedDisclosure {
+        sdjwt::VerifiedDisclosure {
+            raw: raw.into(),
+            digest: digest.into(),
+            path,
+            parent_digest: parent_digest.map(String::from),
+            value,
+        }
+    }
+
+    fn holding() -> AuthenticatedSdJwtHolding {
+        use sdjwt::ClaimPathElement::{Index, Name};
+
+        AuthenticatedSdJwtHolding {
+            processed: sdjwt::ProcessedSdJwt {
+                claims: json!({
+                    "iss":"https://issuer.example",
+                    "vct":"urn:eudi:pid:1",
+                    "cnf":{"jwk":{"kty":"EC"}},
+                    "family_name":"Permanent",
+                    "address":{"country":"DE", "street":"Main", "locality":"Berlin"},
+                    "contacts":[
+                        {"kind":"phone", "value":"111"},
+                        {"kind":"email", "value":"alice@example.com"},
+                        {"kind":"backup", "value":"backup@example.com"}
+                    ]
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+                disclosures: vec![
+                    disclosure(
+                        "address-raw",
+                        "address",
+                        vec![Name("address".into())],
+                        None,
+                        json!({"country":"DE"}),
+                    ),
+                    disclosure(
+                        "street-raw",
+                        "street",
+                        vec![Name("address".into()), Name("street".into())],
+                        Some("address"),
+                        json!("Main"),
+                    ),
+                    disclosure(
+                        "locality-raw",
+                        "locality",
+                        vec![Name("address".into()), Name("locality".into())],
+                        Some("address"),
+                        json!("Berlin"),
+                    ),
+                    disclosure(
+                        "contact-0-raw",
+                        "contact-0",
+                        vec![Name("contacts".into()), Index(0)],
+                        None,
+                        json!({"kind":"phone", "value":"111"}),
+                    ),
+                    disclosure(
+                        "contact-1-raw",
+                        "contact-1",
+                        vec![Name("contacts".into()), Index(1)],
+                        None,
+                        json!({"kind":"email", "value":"alice@example.com"}),
+                    ),
+                    disclosure(
+                        "contact-2-raw",
+                        "contact-2",
+                        vec![Name("contacts".into()), Index(2)],
+                        None,
+                        json!({"kind":"backup", "value":"backup@example.com"}),
+                    ),
+                ],
+            },
+        }
+    }
+
+    mod operation_contract_tests {
+        use super::*;
+
+        fn operation_id(output: &str) -> u64 {
+            serde_json::from_str::<serde_json::Value>(output).unwrap()[0]["operationId"]
+                .as_u64()
+                .unwrap()
+        }
+
+        fn emit(core: &mut Core, flow: ActiveFlow, effect: Effect) -> u64 {
+            core.active = flow;
+            let output = core.serialize_wire_effects(vec![effect]).unwrap();
+            operation_id(&output)
+        }
+
+        fn fail(core: &mut Core, operation_id: u64) -> String {
+            core.handle_event_json(&format!(
+                r#"{{"type":"operationFailed","operationId":{operation_id},"failure":"transport"}}"#
+            ))
+            .unwrap()
+        }
+
+        #[test]
+        fn missing_mismatched_and_stale_callbacks_are_rejected() {
+            let mut core = Core::new("wallet.example", "device-key");
+            let sign_id = emit(
+                &mut core,
+                ActiveFlow::Presentation,
+                Effect::Sign {
+                    key_ref: "device-key".into(),
+                    payload: vec![1],
+                },
+            );
+
+            assert!(core
+                .handle_event_json(r#"{"type":"deviceSignatureProduced","signature":[1]}"#)
+                .unwrap_err()
+                .contains("missing or invalid operationId"));
+            assert!(core
+                .handle_event_json(&format!(
+                    r#"{{"type":"presentationDelivered","operationId":{sign_id}}}"#
+                ))
+                .unwrap_err()
+                .contains("expects deviceSignatureProduced"));
+            assert!(fail(&mut core, sign_id).contains("operation_delivery_failed"));
+            assert!(core
+            .handle_event_json(&format!(
+                r#"{{"type":"deviceSignatureProduced","operationId":{sign_id},"signature":[1]}}"#
+            ))
+            .unwrap_err()
+            .contains("stale or unknown operationId"));
+        }
+
+        #[test]
+        fn stale_http_status_and_credential_callbacks_are_rejected_after_recovery() {
+            let cases = [
+            (
+                ActiveFlow::Presentation,
+                Effect::Http {
+                    profile: HttpDeliveryProfile::Openid4vpDirectPost,
+                    url: "https://rp.example/cb".into(),
+                    body: vec![],
+                },
+                "presentationDelivered",
+                String::new(),
+            ),
+            (
+                ActiveFlow::Presentation,
+                Effect::FetchStatusList {
+                    uri: "https://status.example/list".into(),
+                },
+                "statusListReceived",
+                r#","uri":"https://status.example/list","httpStatus":200,"token":[],"providerCertChain":[]"#.into(),
+            ),
+            (
+                ActiveFlow::Issuance,
+                Effect::RequestCredential { proof_jwt: vec![1] },
+                "credentialReceived",
+                r#","format":"dc+sd-jwt","bytes":[]"#.into(),
+            ),
+        ];
+
+            for (flow, effect, event_type, fields) in cases {
+                let mut core = Core::new("wallet.example", "device-key");
+                let operation_id = emit(&mut core, flow, effect);
+                fail(&mut core, operation_id);
+                let error = core
+                    .handle_event_json(&format!(
+                        r#"{{"type":"{event_type}","operationId":{operation_id}{fields}}}"#
+                    ))
+                    .unwrap_err();
+                assert!(error.contains("stale or unknown operationId"), "{error}");
+            }
+        }
+
+        #[test]
+        fn exact_paths_select_only_parent_dependencies_and_never_array_siblings() {
+            use sdjwt::ClaimPathElement::{Index, Name};
+
+            let selection = select_authenticated_sdjwt_disclosures_for_paths(
+                &holding(),
+                &[
+                    vec![Name("address".into()), Name("street".into())],
+                    vec![Name("contacts".into()), Index(1), Name("kind".into())],
+                ],
+            );
+            assert_eq!(
+                selection.disclosures,
+                vec!["address-raw", "street-raw", "contact-1-raw"]
+            );
+            for visible in [
+                "family_name",
+                "address.country",
+                "address.street",
+                "contacts[1].kind",
+                "contacts[1].value",
+            ] {
+                assert!(selection.revealed_claims.contains(&visible.to_string()));
+            }
+            assert!(!selection
+                .revealed_claims
+                .contains(&"address.locality".to_string()));
+            assert!(!selection
+                .revealed_claims
+                .contains(&"contacts[0].value".to_string()));
+            assert!(!selection
+                .revealed_claims
+                .contains(&"contacts[2].value".to_string()));
+        }
+
+        #[test]
+        fn no_requested_disclosure_keeps_only_unavoidable_permanent_pii_visible() {
+            let selection = select_authenticated_sdjwt_disclosures_for_paths(&holding(), &[]);
+            assert!(selection.disclosures.is_empty());
+            assert_eq!(selection.revealed_claims, vec!["family_name"]);
+        }
+
+        #[test]
+        fn canonical_path_rendering_cannot_confuse_literal_and_nested_claim_names() {
+            use sdjwt::ClaimPathElement::Name;
+
+            let literal = sdjwt_path_string(&[Name("a.b".into())]);
+            let nested = sdjwt_path_string(&[Name("a".into()), Name("b".into())]);
+            assert_eq!(literal, r#"["a.b"]"#);
+            assert_eq!(nested, "a.b");
+            assert_ne!(literal, nested);
+            assert_ne!(
+                sdjwt_path_string(&[Name("items[0]".into())]),
+                sdjwt_path_string(&[Name("items".into()), sdjwt::ClaimPathElement::Index(0)])
+            );
+        }
+
+        #[test]
+        fn mdoc_paths_require_exact_namespace_and_element_components() {
+            assert_eq!(
+                requested_mdoc_path(&[json!("namespace"), json!("element")]),
+                Some(("namespace".into(), "element".into()))
+            );
+            assert!(
+                requested_mdoc_path(&[json!("namespace"), json!({}), json!("element")]).is_none()
+            );
+            assert!(requested_mdoc_path(&[json!("namespace"), json!("")]).is_none());
+        }
+
+        #[test]
+        fn status_operation_is_bound_to_the_exact_resource() {
+            let mut core = Core::new("wallet.example", "device-key");
+            let operation_id = emit(
+                &mut core,
+                ActiveFlow::Presentation,
+                Effect::FetchStatusList {
+                    uri: "https://status.example/one".into(),
+                },
+            );
+            let error = core
+            .handle_event_json(&format!(
+                r#"{{"type":"statusListReceived","operationId":{operation_id},"uri":"https://status.example/two","httpStatus":200,"token":[],"providerCertChain":[]}}"#
+            ))
+            .unwrap_err();
+            assert!(error.contains("different status resource"));
+            assert!(core.pending_operations.contains_key(&operation_id));
+        }
+
+        #[test]
+        fn callback_is_rejected_when_its_owning_flow_is_not_active() {
+            let mut core = Core::new("wallet.example", "device-key");
+            let operation_id = emit(
+                &mut core,
+                ActiveFlow::Presentation,
+                Effect::Sign {
+                    key_ref: "device-key".into(),
+                    payload: vec![1],
+                },
+            );
+            // Model a corrupted/raced active marker without clearing the map. The JSON boundary must
+            // verify both possession of the operation id and ownership by the currently active flow.
+            core.active = ActiveFlow::Payment;
+
+            let error = core
+            .handle_event_json(&format!(
+                r#"{{"type":"deviceSignatureProduced","operationId":{operation_id},"signature":[1]}}"#
+            ))
+            .unwrap_err();
+
+            assert!(error.contains("inactive wallet flow"));
+            assert!(core.pending_operations.contains_key(&operation_id));
+        }
+
+        #[test]
+        fn delivery_acknowledgements_are_rejected_before_the_protocol_is_ready() {
+            let cases = [
+                (
+                    ActiveFlow::Presentation,
+                    HttpDeliveryProfile::Openid4vpDirectPost,
+                    "presentationDelivered",
+                ),
+                (
+                    ActiveFlow::Payment,
+                    HttpDeliveryProfile::PaymentAuthorization,
+                    "paymentAuthorizationDelivered",
+                ),
+                (
+                    ActiveFlow::Qes,
+                    HttpDeliveryProfile::QesAuthorization,
+                    "qesAuthorizationDelivered",
+                ),
+            ];
+
+            for (flow, profile, event_type) in cases {
+                let mut core = Core::new("wallet.example", "device-key");
+                let operation_id = emit(
+                    &mut core,
+                    flow,
+                    Effect::Http {
+                        profile,
+                        url: "https://service.example/callback".into(),
+                        body: vec![],
+                    },
+                );
+
+                let error = core
+                    .handle_event_json(&format!(
+                        r#"{{"type":"{event_type}","operationId":{operation_id}}}"#
+                    ))
+                    .unwrap_err();
+
+                assert!(error.contains("invalid in the current state"), "{error}");
+                assert!(core.pending_operations.contains_key(&operation_id));
+            }
+        }
+
+        #[test]
+        fn http_delivery_profile_must_match_the_active_flow_before_wire_emission() {
+            let cases = [
+                (
+                    ActiveFlow::Presentation,
+                    HttpDeliveryProfile::PaymentAuthorization,
+                ),
+                (ActiveFlow::Payment, HttpDeliveryProfile::QesAuthorization),
+                (ActiveFlow::Qes, HttpDeliveryProfile::Openid4vpDirectPost),
+            ];
+
+            for (flow, profile) in cases {
+                let mut core = Core::new("wallet.example", "device-key");
+                core.active = flow;
+                let next_operation_id = core.next_operation_id;
+                let error = core
+                    .serialize_wire_effects(vec![Effect::Http {
+                        profile,
+                        url: "https://service.example/callback".into(),
+                        body: vec![],
+                    }])
+                    .unwrap_err();
+
+                assert!(error.contains("does not match active flow"), "{error}");
+                assert_eq!(core.next_operation_id, next_operation_id);
+                assert!(core.pending_operations.is_empty());
+            }
+        }
+
+        #[test]
+        fn wire_http_effect_carries_an_exact_profile_and_result_pair() {
+            let cases = [
+                (
+                    ActiveFlow::Presentation,
+                    HttpDeliveryProfile::Openid4vpDirectPost,
+                    "openid4vpDirectPost",
+                    "presentationDelivered",
+                ),
+                (
+                    ActiveFlow::Payment,
+                    HttpDeliveryProfile::PaymentAuthorization,
+                    "paymentAuthorization",
+                    "paymentAuthorizationDelivered",
+                ),
+                (
+                    ActiveFlow::Qes,
+                    HttpDeliveryProfile::QesAuthorization,
+                    "qesAuthorization",
+                    "qesAuthorizationDelivered",
+                ),
+            ];
+
+            for (flow, profile, expected_profile, expected_result) in cases {
+                let mut core = Core::new("wallet.example", "device-key");
+                core.active = flow;
+                let output = core
+                    .serialize_wire_effects(vec![Effect::Http {
+                        profile,
+                        url: "https://service.example/callback".into(),
+                        body: vec![],
+                    }])
+                    .unwrap();
+                let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+                let effect = &value.as_array().unwrap()[0];
+                assert_eq!(effect["profile"], expected_profile);
+                assert_eq!(effect["resultType"], expected_result);
+            }
+        }
+
+        #[test]
+        fn old_consent_cannot_authorize_a_newer_flow() {
+            let consent = || Effect::Render {
+                screen: ScreenDescription::Consent(ConsentScreen {
+                    rp_display_name: "RP".into(),
+                    purpose: "age".into(),
+                    requested_claims: vec!["age_over_18".into()],
+                }),
+            };
+            let mut core = Core::new("wallet.example", "device-key");
+            core.begin_flow(ActiveFlow::Presentation);
+            let old_effect = consent();
+            let Effect::Render { screen: old_screen } = &old_effect else {
+                unreachable!()
+            };
+            core.session = Some(SessionInfo {
+                consent_hash: presenter::consent_hash(&AwsLc, old_screen),
+                ..SessionInfo::default()
+            });
+            let old_id = operation_id(&core.serialize_wire_effects(vec![old_effect]).unwrap());
+            core.begin_flow(ActiveFlow::Presentation);
+            let current_effect = consent();
+            let Effect::Render {
+                screen: current_screen,
+            } = &current_effect
+            else {
+                unreachable!()
+            };
+            core.session = Some(SessionInfo {
+                consent_hash: presenter::consent_hash(&AwsLc, current_screen),
+                ..SessionInfo::default()
+            });
+            let current_id =
+                operation_id(&core.serialize_wire_effects(vec![current_effect]).unwrap());
+
+            let error = core
+                .handle_event_json(&format!(
+                    r#"{{"type":"userConsented","operationId":{old_id}}}"#
+                ))
+                .unwrap_err();
+            assert!(error.contains("stale or unknown operationId"));
+            assert!(core.pending_operations.contains_key(&current_id));
+            assert!(core
+                .handle_event_json(&format!(
+                    r#"{{"type":"operationCancelled","operationId":{current_id}}}"#
+                ))
+                .unwrap()
+                .contains("operation_cancelled"));
+        }
+
+        #[test]
+        fn approval_requires_the_exact_rendered_authorization_hash() {
+            let screen = ScreenDescription::Consent(ConsentScreen {
+                rp_display_name: "RP".into(),
+                purpose: "age".into(),
+                requested_claims: vec!["age_over_18".into()],
+            });
+            let expected_hash = presenter::consent_hash(&AwsLc, &screen);
+            let mut core = Core::new("wallet.example", "device-key");
+            core.active = ActiveFlow::Presentation;
+            core.session = Some(SessionInfo {
+                consent_hash: expected_hash,
+                ..SessionInfo::default()
+            });
+            let output = core
+                .serialize_wire_effects(vec![Effect::Render { screen }])
+                .unwrap();
+            let operation_id = operation_id(&output);
+            let wire_hash = serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]
+                ["authorizationHash"]
+                .clone();
+            assert_eq!(wire_hash, serde_json::to_value(expected_hash).unwrap());
+
+            let missing = core
+                .handle_event_json(&format!(
+                    r#"{{"type":"userConsented","operationId":{operation_id}}}"#
+                ))
+                .unwrap_err();
+            assert!(missing.contains("missing or invalid authorizationHash"));
+            let wrong_hash = serde_json::to_string(&[0u8; 32]).unwrap();
+            let mismatch = core
+            .handle_event_json(&format!(
+                r#"{{"type":"userConsented","operationId":{operation_id},"authorizationHash":{wrong_hash}}}"#
+            ))
+            .unwrap_err();
+            assert!(mismatch.contains("does not match the rendered screen"));
+            assert!(core.pending_operations.contains_key(&operation_id));
+
+            let different_screen = ScreenDescription::Consent(ConsentScreen {
+                rp_display_name: "Other RP".into(),
+                purpose: "different".into(),
+                requested_claims: vec!["family_name".into()],
+            });
+            let cross_screen_hash =
+                serde_json::to_string(&presenter::consent_hash(&AwsLc, &different_screen)).unwrap();
+            let cross_screen = core
+            .handle_event_json(&format!(
+                r#"{{"type":"userConsented","operationId":{operation_id},"authorizationHash":{cross_screen_hash}}}"#
+            ))
+            .unwrap_err();
+            assert!(cross_screen.contains("does not match the rendered screen"));
+        }
+
+        #[test]
+        fn infrastructure_failure_resets_each_reusable_machine() {
+            let mut presentation = Core::new("wallet.example", "device-key");
+            presentation.vp = State::Aborted(AbortReason::MalformedRequest);
+            let id = emit(
+                &mut presentation,
+                ActiveFlow::Presentation,
+                Effect::Sign {
+                    key_ref: "key".into(),
+                    payload: vec![],
+                },
+            );
+            fail(&mut presentation, id);
+            assert!(matches!(presentation.vp, State::Idle));
+
+            let mut payment = Core::new("wallet.example", "device-key");
+            payment.payment = payment::State::Aborted(payment::AbortReason::MalformedRequest);
+            let id = emit(
+                &mut payment,
+                ActiveFlow::Payment,
+                Effect::Sign {
+                    key_ref: "key".into(),
+                    payload: vec![],
+                },
+            );
+            fail(&mut payment, id);
+            assert!(matches!(payment.payment, payment::State::Idle));
+
+            let mut issuance = Core::new("wallet.example", "device-key");
+            issuance.issuance = oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid);
+            let id = emit(&mut issuance, ActiveFlow::Issuance, Effect::RequestToken);
+            fail(&mut issuance, id);
+            assert!(matches!(issuance.issuance, oid4vci::State::Idle));
+
+            let mut qes = Core::new("wallet.example", "device-key");
+            qes.qes = qes::QesState::Aborted(qes::AbortReason::MalformedRequest);
+            let id = emit(
+                &mut qes,
+                ActiveFlow::Qes,
+                Effect::Sign {
+                    key_ref: "key".into(),
+                    payload: vec![],
+                },
+            );
+            fail(&mut qes, id);
+            assert!(matches!(qes.qes, qes::QesState::Idle));
+        }
+
+        #[test]
+        fn wire_effect_batch_is_atomic_at_id_exhaustion() {
+            let mut core = Core::new("wallet.example", "device-key");
+            core.active = ActiveFlow::Presentation;
+            core.next_operation_id = i64::MAX as u64;
+            let error = core
+                .serialize_wire_effects(vec![
+                    Effect::ResolveRpTrust {
+                        client_id: "rp.example".into(),
+                    },
+                    Effect::PersistNonce { nonce: 1 },
+                ])
+                .unwrap_err();
+            assert!(error.contains("operationId space exhausted"));
+            assert!(core.pending_operations.is_empty());
+            assert_eq!(core.next_operation_id, i64::MAX as u64);
+        }
+
+        #[test]
+        fn wire_id_exhaustion_resets_progressed_flow_before_returning_error() {
+            let mut core = Core::new("wallet.example", "device-key");
+            core.next_operation_id = i64::MAX as u64 + 1;
+
+            let error = core
+                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+                .unwrap_err();
+
+            assert!(error.contains("operationId space exhausted"));
+            assert_eq!(core.active, ActiveFlow::None);
+            assert!(matches!(core.w2w, w2w::State::Idle));
+            assert!(core.pending_operations.is_empty());
+
+            // Exhaustion is practically unreachable and intentionally does not wrap/reuse IDs. Reset
+            // the injected boundary value to prove the protocol machine itself is cleanly reusable.
+            core.next_operation_id = 1;
+            let output = core
+                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]["type"],
+                "publishTransferOffer"
+            );
+            assert_eq!(core.active, ActiveFlow::WalletTransfer);
+            assert!(matches!(core.w2w, w2w::State::AwaitingTransfer));
+        }
+
+        #[test]
+        fn pending_cap_failure_clears_all_callbacks_and_allows_a_new_flow() {
+            let mut core = Core::new("wallet.example", "device-key");
+            for operation_id in 1..=MAX_PENDING_OPERATIONS as u64 {
+                core.pending_operations.insert(
+                    operation_id,
+                    PendingOperation {
+                        flow: ActiveFlow::Presentation,
+                        result: OperationResultKind::Persisted,
+                        authorization_hash: None,
+                    },
+                );
+            }
+
+            let error = core
+                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+                .unwrap_err();
+
+            assert!(error.contains("too many pending wallet operations"));
+            assert_eq!(core.active, ActiveFlow::None);
+            assert!(matches!(core.w2w, w2w::State::Idle));
+            assert!(core.pending_operations.is_empty());
+
+            let output = core
+                .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]["type"],
+                "publishTransferOffer"
+            );
+            assert_eq!(core.active, ActiveFlow::WalletTransfer);
+        }
+
+        #[test]
+        fn operation_ids_are_positive_signed_range_and_monotonic() {
+            let mut core = Core::new("wallet.example", "device-key");
+            assert!((1..=(1u64 << 62)).contains(&core.next_operation_id));
+            let first = emit(
+                &mut core,
+                ActiveFlow::Presentation,
+                Effect::PersistNonce { nonce: 1 },
+            );
+            let second = emit(
+                &mut core,
+                ActiveFlow::Presentation,
+                Effect::PersistNonce { nonce: 2 },
+            );
+            assert!((1..=i64::MAX as u64).contains(&first));
+            assert_eq!(second, first + 1);
         }
     }
 }

@@ -2,7 +2,7 @@
 //! verify, and tamper detection. Crypto is a deterministic STUB over the crypto-traits boundary.
 use mdoc::cbor::Value;
 use mdoc::{
-    build_and_sign, verify_issuer_signed, IssuerSignedItem, MdocError, MobileSecurityObject,
+    build_and_sign, verify_issuer_signed, IssuerSignedItem, MdocError, MobileSecurityObject, TDate,
     ValidityInfo,
 };
 use std::collections::BTreeMap;
@@ -68,6 +68,66 @@ fn sample_namespaces() -> BTreeMap<String, Vec<IssuerSignedItem>> {
     ns
 }
 
+fn sample_validity() -> ValidityInfo {
+    ValidityInfo {
+        signed: "2026-07-17T00:00:00Z".into(),
+        valid_from: "2026-07-17T00:00:00Z".into(),
+        valid_until: "2027-07-17T00:00:00Z".into(),
+    }
+}
+
+fn validity_value(mso_bytes: &[u8], field: &str) -> Value {
+    let Value::Tag(24, wrapped) = mdoc::cbor::from_canonical_slice(mso_bytes).expect("tag 24")
+    else {
+        panic!("MSO bytes must use tag 24");
+    };
+    let Value::Bytes(inner) = *wrapped else {
+        panic!("tag 24 must wrap bytes");
+    };
+    let Value::Map(mso) = mdoc::cbor::from_canonical_slice(&inner).expect("MSO") else {
+        panic!("MSO must be a map");
+    };
+    let Value::Map(validity) = mso
+        .iter()
+        .find_map(|(key, value)| (key == &Value::Text("validityInfo".into())).then_some(value))
+        .expect("validityInfo")
+    else {
+        panic!("validityInfo must be a map");
+    };
+    validity
+        .iter()
+        .find_map(|(key, value)| (key == &Value::Text(field.into())).then_some(value.clone()))
+        .expect("validity field")
+}
+
+fn replace_validity_value(issued: &mut mdoc::IssuerSigned, field: &str, replacement: Value) {
+    let payload = issued.issuer_auth.payload.as_mut().expect("payload");
+    let Value::Tag(24, mut wrapped) = mdoc::cbor::from_canonical_slice(payload).expect("tag 24")
+    else {
+        panic!("MSO bytes must use tag 24");
+    };
+    let Value::Bytes(ref mut inner) = *wrapped else {
+        panic!("tag 24 must wrap bytes");
+    };
+    let Value::Map(ref mut mso) = mdoc::cbor::from_canonical_slice(inner).expect("MSO") else {
+        panic!("MSO must be a map");
+    };
+    let Value::Map(validity) = mso
+        .iter_mut()
+        .find_map(|(key, value)| (key == &Value::Text("validityInfo".into())).then_some(value))
+        .expect("validityInfo")
+    else {
+        panic!("validityInfo must be a map");
+    };
+    let target = validity
+        .iter_mut()
+        .find_map(|(key, value)| (key == &Value::Text(field.into())).then_some(value))
+        .expect("validity field");
+    *target = replacement;
+    *inner = Value::Map(mso.clone()).to_canonical();
+    *payload = Value::Tag(24, wrapped).to_canonical();
+}
+
 #[test]
 fn issuer_signed_item_bytes_are_tag24_and_deterministic() {
     let item = IssuerSignedItem {
@@ -90,11 +150,7 @@ fn mso_roundtrips_through_canonical_cbor() {
         sample_namespaces(),
         "org.iso.18013.5.1.mDL",
         Value::Null,
-        ValidityInfo {
-            signed: "2026-07-17T00:00:00Z".into(),
-            valid_from: "2026-07-17T00:00:00Z".into(),
-            valid_until: "2027-07-17T00:00:00Z".into(),
-        },
+        sample_validity(),
         &crypto,
         &crypto,
         &KeyRef("issuer".into()),
@@ -107,8 +163,88 @@ fn mso_roundtrips_through_canonical_cbor() {
     assert_eq!(mso.doc_type, "org.iso.18013.5.1.mDL");
     assert_eq!(mso.digest_algorithm, "SHA-256");
     // Re-encode the decoded MSO and confirm it decodes again (canonical fixed point).
-    let bytes = mso.to_mso_bytes();
-    assert_eq!(MobileSecurityObject::to_mso_bytes(&mso), bytes);
+    let bytes = mso.to_mso_bytes().expect("encode");
+    assert_eq!(
+        MobileSecurityObject::to_mso_bytes(&mso).expect("encode"),
+        bytes
+    );
+    for field in ["signed", "validFrom", "validUntil"] {
+        assert!(matches!(
+            validity_value(&bytes, field),
+            Value::Tag(0, inner) if matches!(*inner, Value::Text(_))
+        ));
+    }
+}
+
+#[test]
+fn tdate_accepts_offsets_and_fractional_seconds_as_the_same_instant() {
+    let utc = TDate::parse("2026-07-17T12:34:56.500Z").expect("UTC tdate");
+    let offset = TDate::parse("2026-07-17T14:34:56.5+02:00").expect("offset tdate");
+    assert_eq!(utc, offset);
+    assert!(
+        TDate::parse("2026-07-17T12:34:56.500000001Z").unwrap()
+            > TDate::parse("2026-07-17T12:34:56.5Z").unwrap()
+    );
+}
+
+#[test]
+fn malformed_or_non_tagged_tdates_are_rejected() {
+    for invalid in [
+        "2026-07-17t12:34:56Z",
+        "2026-07-17T12:34:56z",
+        "2026-07-17T12:34:56",
+        "2026-07-17T12:34:56.Z",
+        "2025-02-29T12:34:56Z",
+        "2026-07-17T12:34:60Z",
+        "2026-07-17T12:34:56-00:00",
+    ] {
+        assert!(TDate::parse(invalid).is_none(), "accepted {invalid}");
+    }
+
+    let crypto = StubCrypto;
+    let original = build_and_sign(
+        sample_namespaces(),
+        "org.iso.18013.5.1.mDL",
+        Value::Null,
+        sample_validity(),
+        &crypto,
+        &crypto,
+        &KeyRef("issuer".into()),
+        Alg::Es256,
+    )
+    .expect("build");
+    for replacement in [
+        Value::Text("2026-07-17T00:00:00Z".into()),
+        Value::Tag(1, Box::new(Value::Text("2026-07-17T00:00:00Z".into()))),
+        Value::Tag(0, Box::new(Value::Bytes(vec![0]))),
+        Value::Tag(0, Box::new(Value::Text("not-a-date".into()))),
+    ] {
+        let mut candidate = original.clone();
+        replace_validity_value(&mut candidate, "signed", replacement);
+        assert_eq!(
+            candidate.doc_type(),
+            Err(MdocError::Malformed("signed tdate"))
+        );
+    }
+}
+
+#[test]
+fn issuer_refuses_to_encode_invalid_tdate() {
+    let crypto = StubCrypto;
+    let result = build_and_sign(
+        sample_namespaces(),
+        "org.iso.18013.5.1.mDL",
+        Value::Null,
+        ValidityInfo {
+            signed: "not-a-date".into(),
+            ..sample_validity()
+        },
+        &crypto,
+        &crypto,
+        &KeyRef("issuer".into()),
+        Alg::Es256,
+    );
+    assert_eq!(result.unwrap_err(), MdocError::Malformed("signed tdate"));
 }
 
 #[test]
@@ -118,7 +254,7 @@ fn verify_succeeds_for_untampered_credential() {
         sample_namespaces(),
         "org.iso.18013.5.1.mDL",
         Value::Null,
-        ValidityInfo::default(),
+        sample_validity(),
         &crypto,
         &crypto,
         &KeyRef("issuer".into()),
@@ -135,7 +271,7 @@ fn verify_detects_tampered_element_value() {
         sample_namespaces(),
         "org.iso.18013.5.1.mDL",
         Value::Null,
-        ValidityInfo::default(),
+        sample_validity(),
         &crypto,
         &crypto,
         &KeyRef("issuer".into()),
@@ -158,7 +294,7 @@ fn verify_detects_forged_issuer_signature() {
         sample_namespaces(),
         "org.iso.18013.5.1.mDL",
         Value::Null,
-        ValidityInfo::default(),
+        sample_validity(),
         &crypto,
         &crypto,
         &KeyRef("issuer".into()),

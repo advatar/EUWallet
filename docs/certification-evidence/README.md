@@ -20,14 +20,20 @@ module reaches its definition-of-done (plan Section 12).
 | `perf-benchmarks.md` | Hot-path latency/throughput vs. the real backend (`crates/benches`) | — |
 | `mutation-testing.md` | cargo-mutants score for the presentation machine | EUCC (test adequacy) |
 | `interop.md` | Reference-environment reachability + wire-shape probe (`tools/interop/probe.sh`) | interoperability |
+| `openid-self-certification.md` | OpenID Foundation profile matrix, evidence retention, submission and renewal gate | OIDF self-certification |
+| `conformance-run-2026-07-21.md` | Reproducible local EU/EUDI test run and explicit external blockers | engineering evidence |
+| `hybrid-pq-boundary.md` | ARF-preserving hybrid post-quantum design boundary and approval gates | crypto/certification |
+| `../tools/oidf/profile-matrix.json` + `../tools/oidf/validate_evidence.py` | Machine-readable OIDF scope and fail-closed release evidence gate | OIDF self-certification |
 | `payment-sca.md` | PSD2 RTS Art. 4–5 dynamic-linking traceability | 2018/389 |
 
 ## External conformance suites (where to run real interop/certification tests)
 
 Our in-repo `tools/evidence/generate.sh` covers Tiers 0–3 (traceability, implementation tests,
 machine-checked proofs, symbolic protocol analysis). Full conformance/certification is run against
-these EXTERNAL, official suites — the wallet is designed to be driven against them (the sans-IO
-core + `shell-io` reference shell already complete real OpenID4VP/OID4VCI round-trips over TCP):
+these EXTERNAL, official suites. The sans-IO core and `shell-io` exercise the local OpenID4VP
+socket path, but the issuance harness still uses a synthetic token/credential contract. It is not
+an OpenID4VCI 1.0 or HAIP 1.0 conformance adapter; that production work is tracked in
+[#18](https://github.com/advatar/EUWallet/issues/18):
 
 | Suite | Covers | Access | Maps to our crates |
 |---|---|---|---|

@@ -16,15 +16,26 @@ fn byte_array(b: &[u8]) -> String {
     )
 }
 
+fn operation_id(output: &str, effect_type: &str) -> u64 {
+    serde_json::from_str::<serde_json::Value>(output)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["type"] == effect_type)
+        .and_then(|effect| effect["operationId"].as_u64())
+        .unwrap_or_else(|| panic!("missing operationId for {effect_type}: {output}"))
+}
+
 #[test]
 fn presentation_json_contract_is_camel_case() {
     let wallet = DemoWallet::new();
     let s = wallet.scenario();
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(wallet_core::HeldCredential {
+    core.load_unverified_credential_for_testing(wallet_core::HeldCredential {
         issuer_jwt: s.issuer_jwt.clone(),
         disclosures_by_claim: serde_json::from_str(&s.disclosures_by_claim_json).unwrap(),
-        status_index: None,
+        status: None,
     });
     core.load_device_key(s.device_public_key.clone());
     core.handle_event_json(&format!(r#"{{"type":"setClock","epoch":{}}}"#, s.epoch))
@@ -44,6 +55,7 @@ fn presentation_json_contract_is_camel_case() {
         "expected camelCase clientId, got: {out}"
     );
     assert!(!out.contains("client_id"), "leaked snake_case field: {out}");
+    let trust_operation_id = operation_id(&out, "resolveRpTrust");
 
     // The shell echoes the RP cert chain via a camelCase `rpCertChain` event field; the core must
     // accept it and emit a consent render minimised to the one requested-and-held claim.
@@ -55,7 +67,7 @@ fn presentation_json_contract_is_camel_case() {
         .join(",");
     let out = core
         .handle_event_json(&format!(
-            r#"{{"type":"rpCertChainResolved","rpCertChain":[{certs}],"registeredRedirectUris":[]}}"#
+            r#"{{"type":"rpCertChainResolved","operationId":{trust_operation_id},"rpCertChain":[{certs}],"registeredRedirectUris":["https://rp.example/response"]}}"#
         ))
         .unwrap();
     assert!(
@@ -70,4 +82,32 @@ fn presentation_json_contract_is_camel_case() {
         out.contains(r#""age_over_18""#),
         "expected the minimised claim, got: {out}"
     );
+}
+
+#[test]
+fn history_mutation_json_contract_uses_camel_case_commands_and_numeric_seq() {
+    let mut core = Core::new("wallet.example", "device-key");
+
+    assert_eq!(
+        core.handle_event_json(r#"{"type":"redactTransaction","seq":0}"#)
+            .unwrap(),
+        "[]"
+    );
+    assert_eq!(
+        core.handle_event_json(r#"{"type":"wipeTransactionLog"}"#)
+            .unwrap(),
+        "[]"
+    );
+
+    for invalid in [
+        r#"{"type":"redact_transaction","seq":0}"#,
+        r#"{"type":"redactTransaction","transactionId":0}"#,
+        r#"{"type":"redactTransaction","seq":"0"}"#,
+        r#"{"type":"wipe_transaction_log"}"#,
+    ] {
+        assert!(
+            core.handle_event_json(invalid).is_err(),
+            "accepted non-contract history event: {invalid}"
+        );
+    }
 }

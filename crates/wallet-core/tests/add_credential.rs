@@ -5,7 +5,7 @@
 //! the iOS "Add credential" button; only the (stubbed) issuer transport is not a live socket.
 
 use base64ct::{Base64UrlUnpadded, Encoding};
-use wallet_core::{Core, DemoWallet, Effect, Event, IssuanceScenario};
+use wallet_core::{Core, CredentialIngestionError, DemoWallet, Effect, Event, IssuanceScenario};
 
 /// Run ONE pre-authorized OID4VCI issuance to completion against `core`. `wallet` supplies the
 /// device signature over the proof — the same key the loaded WUA attests, so the in-core
@@ -69,14 +69,21 @@ fn add_mdoc_credential(
         issuer_cert_chain: scn.issuer_cert_chain.clone(),
         issuer_id: scn.issuer_id.clone(),
     });
-    assert!(fx.contains(&Effect::RequestToken), "mso_mdoc offer proceeds: {fx:?}");
+    assert!(
+        fx.contains(&Effect::RequestToken),
+        "mso_mdoc offer proceeds: {fx:?}"
+    );
 
-    let fx = core.handle_event(Event::TokenReceived { bound: true, c_nonce });
+    let fx = core.handle_event(Event::TokenReceived {
+        bound: true,
+        c_nonce,
+    });
     let signing_input = sign_payload(&fx).expect("attested proof key → Sign effect");
     let sig = wallet.sign_device(signing_input);
     let fx = core.handle_event(Event::DeviceSignatureProduced { signature: sig });
     assert!(
-        fx.iter().any(|e| matches!(e, Effect::RequestCredential { .. })),
+        fx.iter()
+            .any(|e| matches!(e, Effect::RequestCredential { .. })),
         "signed proof → RequestCredential, got {fx:?}"
     );
 
@@ -113,7 +120,11 @@ fn empty_wallet_gains_two_distinct_credentials_then_presents_one() {
     let mut core = issuance_ready_core(&scn);
 
     // The wallet starts empty.
-    assert_eq!(core.held_credentials_json(), "[]", "fresh wallet holds nothing");
+    assert_eq!(
+        core.held_credentials_json(),
+        "[]",
+        "fresh wallet holds nothing"
+    );
 
     // ---- Add the PID. ----
     add_credential(&mut core, &wallet, &scn, 111, &scn.pid_credential_compact);
@@ -135,15 +146,26 @@ fn empty_wallet_gains_two_distinct_credentials_then_presents_one() {
     // Re-issuing the SAME credential does not duplicate the holding.
     add_credential(&mut core, &wallet, &scn, 333, &scn.pid_credential_compact);
     assert_eq!(
-        core.held_credentials_json().matches("urn:eudi:pid:1").count(),
+        core.held_credentials_json()
+            .matches("urn:eudi:pid:1")
+            .count(),
         1,
         "re-issuing the PID is idempotent in the holdings"
     );
 
     // ---- Add a passport (a third, document-shaped type with its own claims). ----
-    add_credential(&mut core, &wallet, &scn, 444, &scn.passport_credential_compact);
+    add_credential(
+        &mut core,
+        &wallet,
+        &scn,
+        444,
+        &scn.passport_credential_compact,
+    );
     let held = core.held_credentials_json();
-    assert!(held.contains("urn:eudi:passport:1"), "passport held: {held}");
+    assert!(
+        held.contains("urn:eudi:passport:1"),
+        "passport held: {held}"
+    );
     assert!(
         held.contains("document_number") && held.contains("nationality"),
         "passport carries its discriminating claims: {held}"
@@ -206,20 +228,49 @@ fn mso_mdoc_issuance_stores_a_presentable_mdoc_holding() {
 
     add_mdoc_credential(&mut core, &wallet, &scn, 601, &scn.mdl_mdoc_credential);
     let held = core.held_credentials_json();
-    assert!(held.contains(r#""format":"mso_mdoc""#), "mdoc holding stored: {held}");
+    assert!(
+        held.contains(r#""format":"mso_mdoc""#),
+        "mdoc holding stored: {held}"
+    );
     assert!(
         held.contains("org.iso.18013.5.1.mDL"),
         "held mdoc surfaces its doctype: {held}"
     );
-    assert!(held.contains("age_over_18"), "mdoc element values surfaced: {held}");
+    assert!(
+        held.contains("age_over_18"),
+        "mdoc element values surfaced: {held}"
+    );
 
     // Re-issuing the same mdoc is idempotent in the holdings.
     add_mdoc_credential(&mut core, &wallet, &scn, 602, &scn.mdl_mdoc_credential);
     assert_eq!(
-        core.held_credentials_json().matches("org.iso.18013.5.1.mDL").count(),
+        core.held_credentials_json()
+            .matches("org.iso.18013.5.1.mDL")
+            .count(),
         1,
         "re-issuing the mdoc does not duplicate the holding"
     );
+}
+
+#[test]
+fn mso_mdoc_issuance_does_not_reconstruct_missing_x5chain_from_the_offer() {
+    let wallet = DemoWallet::new();
+    let scn = wallet.issuance_scenario();
+    let decoded = Base64UrlUnpadded::decode_vec(&scn.mdl_mdoc_credential).expect("mdoc base64url");
+    let mut issued = mdoc::IssuerSigned::parse(&decoded).expect("demo IssuerSigned");
+    issued.issuer_auth.unprotected.x5chain = None;
+    let without_x5chain = Base64UrlUnpadded::encode_string(&issued.to_value().to_canonical());
+    let mut core = issuance_ready_core(&scn);
+
+    // The offer's shell-supplied issuer path is valid, but it is only offer/transport evidence.
+    // The credential response must independently authenticate its own issuerAuth x5chain.
+    add_mdoc_credential(&mut core, &wallet, &scn, 603, &without_x5chain);
+
+    assert_eq!(
+        core.last_credential_ingestion_error(),
+        Some(&CredentialIngestionError::UntrustedIssuer)
+    );
+    assert_eq!(core.held_credentials_json(), "[]");
 }
 
 /// DCQL type constraint drives selection: with BOTH an mDL and a PID held — the mDL added first,
@@ -235,7 +286,7 @@ fn dcql_vct_constraint_selects_the_requested_type() {
     add_credential(&mut core, &wallet, &scn, 502, &scn.pid_credential_compact);
 
     // scenario_with_response_uri carries a real DCQL query for age_over_18 constrained to the PID.
-    let s = wallet.scenario_with_response_uri("http://127.0.0.1:1/response");
+    let s = wallet.scenario_with_response_uri("https://rp.example/response");
     core.handle_event(Event::AuthorizationRequestReceived {
         request: s.presentation_request.clone(),
     });
@@ -265,7 +316,7 @@ fn dcql_vct_constraint_selects_the_requested_type() {
 }
 
 /// Extract the presented SD-JWT's `vct` from a DCQL direct_post body
-/// (`vp_token=<percent-encoded {"pid":"<compact>"}>`).
+/// (`vp_token=<percent-encoded {"pid":["<compact>"]}>`).
 fn presented_vct(body: &str) -> String {
     let raw = body
         .strip_prefix("vp_token=")
@@ -273,7 +324,7 @@ fn presented_vct(body: &str) -> String {
         .expect("vp_token field");
     let decoded = percent_decode(raw);
     let obj: serde_json::Value = serde_json::from_str(&decoded).expect("vp_token JSON object");
-    let compact = obj["pid"].as_str().expect("pid presentation");
+    let compact = obj["pid"][0].as_str().expect("pid presentation");
     let issuer_jwt = compact.split('~').next().expect("issuer jwt");
     let payload_b64 = issuer_jwt.split('.').nth(1).expect("jwt payload");
     let payload = Base64UrlUnpadded::decode_vec(payload_b64).expect("b64 payload");

@@ -14,9 +14,9 @@ use std::collections::BTreeMap;
 use crypto_traits::Digest;
 use serde::{Deserialize, Serialize};
 
-use crate::{hex32, HeldCredential};
+use crate::{hex32, HeldCredential, StatusReference};
 
-const EXPORT_VERSION: u64 = 1;
+const EXPORT_VERSION: u64 = 2;
 
 /// A held credential, in export form (the holder's own credential material).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +25,7 @@ pub struct ExportCredential {
     pub issuer_jwt: String,
     /// Claim name → base64url disclosure (BTreeMap ⇒ deterministic order).
     pub disclosures: BTreeMap<String, String>,
-    pub status_index: Option<u64>,
+    pub status: Option<StatusReference>,
 }
 
 /// A payment summary in export form.
@@ -81,7 +81,7 @@ pub fn build_data(
     let credential = credential.map(|c| ExportCredential {
         issuer_jwt: c.issuer_jwt.clone(),
         disclosures: c.disclosures_by_claim.clone(),
-        status_index: c.status_index,
+        status: c.status.clone(),
     });
     let transaction_log = log
         .entries()
@@ -127,11 +127,12 @@ fn canonical(d: &ExportData) -> Vec<u8> {
                 put(&mut b, k.as_bytes());
                 put(&mut b, v.as_bytes());
             }
-            match c.status_index {
+            match &c.status {
                 None => b.push(0),
-                Some(i) => {
+                Some(reference) => {
                     b.push(1);
-                    b.extend_from_slice(&i.to_le_bytes());
+                    put(&mut b, reference.uri.as_bytes());
+                    b.extend_from_slice(&reference.index.to_le_bytes());
                 }
             }
         }

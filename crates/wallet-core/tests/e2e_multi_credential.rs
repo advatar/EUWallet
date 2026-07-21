@@ -38,18 +38,27 @@ fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
     .to_string()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = operator.sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = operator
+        .sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
 fn issue_pid(issuer: &SoftwareSigner) -> (String, BTreeMap<String, String>) {
     let mut by_claim = BTreeMap::new();
     let mut sd = Vec::new();
-    for (i, (name, value)) in [("family_name", json!("Andersson")), ("age_over_18", json!(true))]
-        .iter()
-        .enumerate()
+    for (i, (name, value)) in [
+        ("family_name", json!("Andersson")),
+        ("age_over_18", json!(true)),
+    ]
+    .iter()
+    .enumerate()
     {
-        let raw = b64(serde_json::to_string(&json!([format!("s{i}"), name, value])).unwrap().as_bytes());
+        let raw = b64(
+            serde_json::to_string(&json!([format!("s{i}"), name, value]))
+                .unwrap()
+                .as_bytes(),
+        );
         sd.push(json!(b64(&AwsLc.sha256(raw.as_bytes()))));
         by_claim.insert((*name).to_string(), raw);
     }
@@ -60,7 +69,9 @@ fn issue_pid(issuer: &SoftwareSigner) -> (String, BTreeMap<String, String>) {
     .unwrap()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = issuer.sign(&KeyRef("i".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = issuer
+        .sign(&KeyRef("i".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     (format!("{si}.{}", b64(&sig)), by_claim)
 }
 
@@ -75,14 +86,10 @@ fn cose_key(pubkey: &[u8]) -> Value {
 
 /// An RP-signed request whose DCQL asks for BOTH a PID (SD-JWT) and an mDL (mdoc) at once.
 fn sign_multi_request(rp: &SoftwareSigner, nonce: u64) -> Vec<u8> {
-    let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
-    let payload = b64(serde_json::to_string(&json!({
-        "client_id": "rp.example",
-        "nonce": nonce,
-        "aud": "wallet.example",
-        "response_uri": RESPONSE_URI,
-        "purpose": "Prove your identity and driving entitlement",
-        "dcql_query": { "credentials": [
+    sign_dcql_request(
+        rp,
+        nonce,
+        json!({ "credentials": [
             {
                 "id": "pid",
                 "format": "dc+sd-jwt",
@@ -95,25 +102,44 @@ fn sign_multi_request(rp: &SoftwareSigner, nonce: u64) -> Vec<u8> {
                 "meta": { "doctype_value": DOCTYPE },
                 "claims": [{ "path": [NS, "age_over_18"] }]
             }
-        ]},
+        ]}),
+    )
+}
+
+fn sign_dcql_request(rp: &SoftwareSigner, nonce: u64, dcql_query: serde_json::Value) -> Vec<u8> {
+    let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
+    let payload = b64(serde_json::to_string(&json!({
+        "client_id": "rp.example",
+        "nonce": nonce,
+        "aud": "wallet.example",
+        "response_uri": RESPONSE_URI,
+        "response_mode": "direct_post",
+        "purpose": "Prove your identity and driving entitlement",
+        "dcql_query": dcql_query,
     }))
     .unwrap()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = rp.sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = rp
+        .sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
 fn map_get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     match v {
-        Value::Map(p) => p.iter().find(|(k, _)| *k == Value::Text(key.into())).map(|(_, x)| x),
+        Value::Map(p) => p
+            .iter()
+            .find(|(k, _)| *k == Value::Text(key.into()))
+            .map(|(_, x)| x),
         _ => None,
     }
 }
 
 fn field(body: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}=");
-    body.split('&').find_map(|kv| kv.strip_prefix(&prefix).map(percent_decode))
+    body.split('&')
+        .find_map(|kv| kv.strip_prefix(&prefix).map(percent_decode))
 }
 
 /// Feed a device signature and return the next Sign payload, or `None` if the flow finished.
@@ -122,6 +148,91 @@ fn next_sign(fx: &[Effect]) -> Option<Vec<u8>> {
         Effect::Sign { payload, .. } => Some(payload.clone()),
         _ => None,
     })
+}
+
+fn wallet_with_holdings(include_mdoc: bool) -> (Core, SoftwareSigner) {
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let device = SoftwareSigner::generate_p256().unwrap();
+    let trust_operator = SoftwareSigner::generate_p256().unwrap();
+    let (issuer_jwt, by_claim) = issue_pid(&issuer);
+    let mut core = Core::new("wallet.example", "device-key");
+    core.load_unverified_credential_for_testing(HeldCredential {
+        issuer_jwt,
+        disclosures_by_claim: by_claim,
+        status: None,
+    });
+    if include_mdoc {
+        let mut name_spaces = BTreeMap::new();
+        name_spaces.insert(
+            NS.to_string(),
+            vec![IssuerSignedItem {
+                digest_id: 0,
+                random: vec![0x55; 16],
+                element_id: "age_over_18".into(),
+                element_value: Value::Bool(true),
+            }],
+        );
+        let issuer_signed = build_and_sign(
+            name_spaces,
+            DOCTYPE,
+            cose_key(device.public_key_raw()),
+            ValidityInfo {
+                signed: "2026-07-19T00:00:00Z".into(),
+                valid_from: "2026-07-19T00:00:00Z".into(),
+                valid_until: "2035-01-01T00:00:00Z".into(),
+            },
+            &AwsLc,
+            &issuer,
+            &KeyRef("issuer".into()),
+            Alg::Es256,
+        )
+        .unwrap();
+        core.load_unverified_mdoc_for_testing(MdocHolding {
+            doctype: DOCTYPE.into(),
+            issuer_signed,
+        });
+    }
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    core.load_trust_list(
+        &signed_trust_list(&trust_operator),
+        trust_operator.public_key_raw(),
+    )
+    .unwrap();
+    (core, device)
+}
+
+fn resolve_to_consent(core: &mut Core, request: Vec<u8>) -> Vec<Effect> {
+    assert!(matches!(
+        core.handle_event(Event::AuthorizationRequestReceived { request })
+            .as_slice(),
+        [Effect::ResolveRpTrust { .. }]
+    ));
+    core.handle_event(Event::RpCertChainResolved {
+        rp_cert_chain: vec![RP_DER.to_vec()],
+        registered_redirect_uris: vec![RESPONSE_URI.into()],
+    })
+}
+
+fn finish_selected_presentations(core: &mut Core, device: &SoftwareSigner) -> String {
+    let mut effects = core.handle_event(Event::UserConsented);
+    loop {
+        if let Some(payload) = next_sign(&effects) {
+            let signature = device
+                .sign(&KeyRef("device-key".into()), Alg::Es256, &payload)
+                .unwrap();
+            effects = core.handle_event(Event::DeviceSignatureProduced { signature });
+            continue;
+        }
+        return effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Http { body, .. } => String::from_utf8(body.clone()).ok(),
+                _ => None,
+            })
+            .expect("complete selected set posts one atomic VP Token");
+    }
 }
 
 #[test]
@@ -160,31 +271,40 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
     .expect("issue mDL");
 
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(HeldCredential {
+    core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt,
         disclosures_by_claim: by_claim,
-        status_index: None,
+        status: None,
     });
-    core.load_mdoc_credential(MdocHolding {
+    core.load_unverified_mdoc_for_testing(MdocHolding {
         doctype: DOCTYPE.into(),
         issuer_signed,
     });
-    core.handle_event(Event::SetClock { epoch: 1_790_000_000 });
-    core.load_trust_list(&signed_trust_list(&trust_operator), trust_operator.public_key_raw())
-        .expect("trust list loads");
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    core.load_trust_list(
+        &signed_trust_list(&trust_operator),
+        trust_operator.public_key_raw(),
+    )
+    .expect("trust list loads");
 
     // Request → trust → consent.
-    core.handle_event(Event::AuthorizationRequestReceived { request: sign_multi_request(&rp, NONCE) });
+    core.handle_event(Event::AuthorizationRequestReceived {
+        request: sign_multi_request(&rp, NONCE),
+    });
     core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec![RESPONSE_URI.into()],
     });
 
     // Two credentials ⇒ two sequential device-signing rounds. Sign each; the last yields the Http.
     let fx = core.handle_event(Event::UserConsented);
     let p1 = next_sign(&fx).expect("first Sign (credential #1)");
     let fx = core.handle_event(Event::DeviceSignatureProduced {
-        signature: device.sign(&KeyRef("device-key".into()), Alg::Es256, &p1).unwrap(),
+        signature: device
+            .sign(&KeyRef("device-key".into()), Alg::Es256, &p1)
+            .unwrap(),
     });
     let p2 = next_sign(&fx).expect("second Sign (credential #2) — the machine signs one at a time");
     assert!(
@@ -192,7 +312,9 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
         "nothing is posted until BOTH credentials are signed"
     );
     let fx = core.handle_event(Event::DeviceSignatureProduced {
-        signature: device.sign(&KeyRef("device-key".into()), Alg::Es256, &p2).unwrap(),
+        signature: device
+            .sign(&KeyRef("device-key".into()), Alg::Es256, &p2)
+            .unwrap(),
     });
     let body = fx
         .iter()
@@ -207,7 +329,7 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
     let obj: serde_json::Value = serde_json::from_str(&vp).expect("vp_token JSON object");
 
     // 1) PID (SD-JWT): the KB-JWT verifies; only age_over_18 was disclosed.
-    let pid_pres = obj["pid"].as_str().expect("pid presentation");
+    let pid_pres = obj["pid"][0].as_str().expect("pid presentation");
     let sd = sdjwt::SdJwtVc::parse(pid_pres).expect("SD-JWT parses");
     let kb = sdjwt::KeyBindingCheck {
         device_public_key: device.public_key_raw(),
@@ -219,19 +341,28 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
         .verify_presentation(&AwsLc, &AwsLc, issuer.public_key_raw(), Alg::Es256, &kb)
         .expect("PID presentation verifies");
     assert_eq!(claims.get("age_over_18"), Some(&json!(true)));
-    assert!(claims.get("family_name").is_none(), "PID minimised to age_over_18");
+    assert!(
+        claims.get("family_name").is_none(),
+        "PID minimised to age_over_18"
+    );
 
     // 2) mDL (mdoc): the DeviceResponse device signature verifies over the SessionTranscript.
     let mgn = field(&body, "mdoc_generated_nonce").expect("mdoc_generated_nonce companion field");
-    let dr_b64 = obj["mdl"].as_str().expect("mdl DeviceResponse");
+    let dr_b64 = obj["mdl"][0].as_str().expect("mdl DeviceResponse");
     let dr = cbor::from_canonical_slice(&Base64UrlUnpadded::decode_vec(dr_b64).unwrap()).unwrap();
     let docs = match map_get(&dr, "documents") {
         Some(Value::Array(a)) => a,
         _ => panic!("documents"),
     };
-    assert_eq!(map_get(&docs[0], "docType"), Some(&Value::Text(DOCTYPE.into())));
-    let transcript = oid4vp_session_transcript(&AwsLc, "rp.example", RESPONSE_URI, &NONCE.to_string(), &mgn);
-    let expected = device_authentication_bytes(&transcript, DOCTYPE, &empty_device_namespaces_bytes()).unwrap();
+    assert_eq!(
+        map_get(&docs[0], "docType"),
+        Some(&Value::Text(DOCTYPE.into()))
+    );
+    let transcript =
+        oid4vp_session_transcript(&AwsLc, "rp.example", RESPONSE_URI, &NONCE.to_string(), &mgn);
+    let expected =
+        device_authentication_bytes(&transcript, DOCTYPE, &empty_device_namespaces_bytes())
+            .unwrap();
     let device_signature = map_get(map_get(&docs[0], "deviceSigned").unwrap(), "deviceAuth")
         .and_then(|da| map_get(da, "deviceSignature"))
         .unwrap();
@@ -258,6 +389,226 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
     let fx = core.handle_event(Event::PresentationDelivered);
     assert!(fx.iter().any(|e| matches!(e, Effect::Close)));
     assert_eq!(core.state(), &oid4vp::State::Done);
+}
+
+#[test]
+fn an_incomplete_multi_query_aborts_atomically_before_consent_or_signing() {
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let trust_operator = SoftwareSigner::generate_p256().unwrap();
+    let (issuer_jwt, by_claim) = issue_pid(&issuer);
+
+    // The PID satisfies query #1, but the wallet has no mdoc for query #2. The request is one
+    // atomic authorization decision: it must not fall back to presenting only the PID.
+    let mut core = Core::new("wallet.example", "device-key");
+    core.load_unverified_credential_for_testing(HeldCredential {
+        issuer_jwt,
+        disclosures_by_claim: by_claim,
+        status: None,
+    });
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    core.load_trust_list(
+        &signed_trust_list(&trust_operator),
+        trust_operator.public_key_raw(),
+    )
+    .unwrap();
+    core.handle_event(Event::AuthorizationRequestReceived {
+        request: sign_multi_request(&rp, NONCE),
+    });
+    let effects = core.handle_event(Event::RpCertChainResolved {
+        rp_cert_chain: vec![RP_DER.to_vec()],
+        registered_redirect_uris: vec![RESPONSE_URI.into()],
+    });
+
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Error { code, .. }
+        } if code == "no_eligible_credential"
+    )));
+    assert!(effects.contains(&Effect::Close));
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Consent(_)
+        } | Effect::Sign { .. }
+            | Effect::Http { .. }
+    )));
+    let late_consent = core.handle_event(Event::UserConsented);
+    assert!(!late_consent
+        .iter()
+        .any(|effect| matches!(effect, Effect::Sign { .. } | Effect::Http { .. })));
+    assert_eq!(
+        core.state(),
+        &oid4vp::State::Aborted(oid4vp::AbortReason::NoCredential)
+    );
+}
+
+#[test]
+fn credential_sets_choose_a_complete_fallback_and_omit_a_satisfiable_optional_set() {
+    let (mut core, device) = wallet_with_holdings(true);
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let request = sign_dcql_request(
+        &rp,
+        NONCE + 1,
+        json!({
+            "credentials": [
+                {"id":"diploma", "format":"jwt_vc_json", "meta":{}},
+                {"id":"pid", "format":"dc+sd-jwt",
+                    "meta":{"vct_values":["urn:eudi:pid:1"]},
+                    "claims":[{"path":["age_over_18"]}]},
+                {"id":"mdl", "format":"mso_mdoc",
+                    "meta":{"doctype_value":DOCTYPE},
+                    "claims":[{"path":[NS, "age_over_18"]}]}
+            ],
+            "credential_sets": [
+                {"options":[["diploma"], ["pid"]]},
+                {"required":false, "options":[["mdl"]]}
+            ]
+        }),
+    );
+    let effects = resolve_to_consent(&mut core, request);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Consent(_)
+        }
+    )));
+
+    let body = finish_selected_presentations(&mut core, &device);
+    let vp = field(&body, "vp_token").unwrap();
+    let object: serde_json::Value = serde_json::from_str(&vp).unwrap();
+    assert!(object.get("pid").is_some());
+    assert!(object.get("mdl").is_none());
+    assert!(object.get("diploma").is_none());
+}
+
+#[test]
+fn unavailable_optional_credential_set_is_not_promoted_to_required() {
+    let (mut core, device) = wallet_with_holdings(false);
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let request = sign_dcql_request(
+        &rp,
+        NONCE + 2,
+        json!({
+            "credentials": [
+                {"id":"pid", "format":"dc+sd-jwt",
+                    "meta":{"vct_values":["urn:eudi:pid:1"]},
+                    "claims":[{"path":["age_over_18"]}]},
+                {"id":"mdl", "format":"mso_mdoc",
+                    "meta":{"doctype_value":DOCTYPE},
+                    "claims":[{"path":[NS, "age_over_18"]}]}
+            ],
+            "credential_sets": [
+                {"options":[["pid"]]},
+                {"required":false, "options":[["mdl"]]}
+            ]
+        }),
+    );
+    let effects = resolve_to_consent(&mut core, request);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Consent(_)
+        }
+    )));
+
+    let body = finish_selected_presentations(&mut core, &device);
+    let vp = field(&body, "vp_token").unwrap();
+    let object: serde_json::Value = serde_json::from_str(&vp).unwrap();
+    assert!(object.get("pid").is_some());
+    assert!(object.get("mdl").is_none());
+}
+
+#[test]
+fn unsatisfied_required_credential_set_emits_no_partial_consent_sign_or_response() {
+    let (mut core, _device) = wallet_with_holdings(false);
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let request = sign_dcql_request(
+        &rp,
+        NONCE + 3,
+        json!({
+            "credentials": [
+                {"id":"pid", "format":"dc+sd-jwt",
+                    "meta":{"vct_values":["urn:eudi:pid:1"]},
+                    "claims":[{"path":["age_over_18"]}]},
+                {"id":"mdl", "format":"mso_mdoc",
+                    "meta":{"doctype_value":DOCTYPE},
+                    "claims":[{"path":[NS, "age_over_18"]}]}
+            ],
+            "credential_sets": [{"options":[["pid", "mdl"]]}]
+        }),
+    );
+    let effects = resolve_to_consent(&mut core, request);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Error { code, .. }
+        } if code == "no_eligible_credential"
+    )));
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Consent(_)
+        } | Effect::Sign { .. }
+            | Effect::Http { .. }
+    )));
+    let late = core.handle_event(Event::UserConsented);
+    assert!(!late
+        .iter()
+        .any(|effect| matches!(effect, Effect::Sign { .. } | Effect::Http { .. })));
+}
+
+#[test]
+fn mdoc_claim_set_fallback_minimises_the_emitted_namespaces() {
+    let (mut core, device) = wallet_with_holdings(true);
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let request = sign_dcql_request(
+        &rp,
+        NONCE + 4,
+        json!({
+            "credentials": [{
+                "id":"mdl",
+                "format":"mso_mdoc",
+                "meta":{"doctype_value":DOCTYPE},
+                "claims":[
+                    {"id":"unavailable", "path":[NS, "family_name"]},
+                    {"id":"age", "path":[NS, "age_over_18"]}
+                ],
+                "claim_sets":[["unavailable"], ["age"]]
+            }]
+        }),
+    );
+    let effects = resolve_to_consent(&mut core, request);
+    let consent = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Render {
+                screen: presenter::ScreenDescription::Consent(consent),
+            } => Some(&consent.requested_claims),
+            _ => None,
+        })
+        .expect("fallback claim set renders consent");
+    assert_eq!(consent, &vec![format!("{NS}.age_over_18")]);
+
+    let body = finish_selected_presentations(&mut core, &device);
+    let vp = field(&body, "vp_token").unwrap();
+    let object: serde_json::Value = serde_json::from_str(&vp).unwrap();
+    let response = Base64UrlUnpadded::decode_vec(object["mdl"][0].as_str().unwrap()).unwrap();
+    let response = cbor::from_canonical_slice(&response).unwrap();
+    let documents = match map_get(&response, "documents") {
+        Some(Value::Array(documents)) => documents,
+        _ => panic!("documents"),
+    };
+    let issuer_signed = map_get(&documents[0], "issuerSigned").unwrap();
+    let issuer_signed = mdoc::IssuerSigned::from_value(issuer_signed).unwrap();
+    let disclosed: Vec<&str> = issuer_signed.name_spaces[NS]
+        .iter()
+        .map(|item| item.element_id.as_str())
+        .collect();
+    assert_eq!(disclosed, vec!["age_over_18"]);
 }
 
 fn percent_decode(s: &str) -> String {

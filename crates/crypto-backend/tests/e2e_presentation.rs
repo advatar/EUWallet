@@ -59,6 +59,7 @@ fn sign_request(rp: &SoftwareSigner, client_id: &str, nonce: u64, aud: &str) -> 
         "nonce": nonce,
         "aud": aud,
         "response_uri": "https://rp.example/response",
+        "response_mode": "direct_post",
         "purpose": "Prove you are over 18",
     }))
     .unwrap()
@@ -116,7 +117,7 @@ fn full_remote_presentation_with_real_crypto() {
     let trust = ResolvedTrust {
         registered: true,
         rp_public_key: rp.public_key_raw().to_vec(),
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec!["https://rp.example/response".into()],
     };
     let (s, out) = step(&s, &Input::RpTrustResolved(trust), &env);
     assert!(

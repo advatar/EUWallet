@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! `sdjwt` — SD-JWT VC credential format (IETF draft-17) with selective disclosure.
+//! `sdjwt` — RFC 9901 SD-JWT processing with an SD-JWT VC draft-17 profile.
 //!
 //! See docs/IMPLEMENTATION_PLAN.md Section 4.3.
 //!
@@ -13,6 +13,15 @@
 use base64ct::{Base64UrlUnpadded, Encoding};
 use crypto_traits::{Alg, CryptoError, Verifier};
 use serde_json::Value as Json;
+use std::collections::{BTreeMap, BTreeSet};
+
+const MAX_COMPACT_BYTES: usize = 1024 * 1024;
+const MAX_JWS_BYTES: usize = 512 * 1024;
+const MAX_DISCLOSURE_BYTES: usize = 64 * 1024;
+const MAX_DISCLOSURES: usize = 256;
+const MAX_NESTING_DEPTH: usize = 32;
+const MAX_EMBEDDED_DIGESTS: usize = 4_096;
+const MAX_PROCESSED_JSON_BYTES: usize = 2 * 1024 * 1024;
 
 /// Pinned wire version. Isolate the codec behind this marker: SD-JWT VC is a moving draft, not
 /// an RFC (register change-watch). A silent bump must break the build (see the test).
@@ -29,18 +38,24 @@ pub enum SdJwtError {
     Malformed,
     /// A base64url segment did not decode.
     InvalidBase64,
+    /// An input exceeded the wallet's explicit parser budget.
+    TooLarge,
     /// A JSON segment did not parse, or was not the expected shape.
     InvalidJson,
     /// The JOSE header used `alg: none`, which is never acceptable.
     AlgNone,
     /// The JOSE header `alg` was missing or not one we support.
     UnsupportedAlg,
+    /// The JOSE `typ` header was not the required `dc+sd-jwt` media type.
+    InvalidType,
     /// A `crit` header member we do not understand → fail closed.
     UnknownCriticalParam,
     /// `_sd_alg` named a hash we do not implement.
     UnsupportedHashAlg,
     /// A presented disclosure's digest was not present in the SD-JWT's `_sd` array → tampering.
     UnknownDisclosure,
+    /// A claim name or disclosure digest appeared more than once.
+    DuplicateClaim,
     /// The key-binding JWT was missing, or its aud/nonce/sd_hash did not match expectations.
     KeyBindingMismatch,
     /// The signature did not verify.
@@ -76,9 +91,37 @@ pub struct Disclosure {
     pub value: Json,
 }
 
+/// One component of a verified disclosure's exact location in the processed JSON document.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ClaimPathElement {
+    Name(String),
+    Index(usize),
+}
+
+/// A disclosure that was reached from an issuer-signed digest placeholder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedDisclosure {
+    pub raw: String,
+    pub digest: String,
+    pub path: Vec<ClaimPathElement>,
+    /// The closest enclosing disclosure. A child cannot be presented without this dependency.
+    pub parent_digest: Option<String>,
+    pub value: Json,
+}
+
+/// RFC 9901's Processed SD-JWT Payload plus authenticated disclosure locations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessedSdJwt {
+    pub claims: serde_json::Map<String, Json>,
+    pub disclosures: Vec<VerifiedDisclosure>,
+}
+
 impl Disclosure {
     /// Parse a single base64url disclosure string.
     pub fn parse(raw: &str) -> Result<Self, SdJwtError> {
+        if raw.len() > MAX_DISCLOSURE_BYTES {
+            return Err(SdJwtError::TooLarge);
+        }
         let bytes = Base64UrlUnpadded::decode_vec(raw).map_err(|_| SdJwtError::InvalidBase64)?;
         let json: Json = serde_json::from_slice(&bytes).map_err(|_| SdJwtError::InvalidJson)?;
         let arr = json.as_array().ok_or(SdJwtError::InvalidJson)?;
@@ -127,12 +170,18 @@ impl SdJwtVc {
     /// Split the combined serialization on `~`. Per draft-17 §4, the last element is the
     /// (possibly empty) key-binding JWT: a trailing `~` means "no KB-JWT".
     pub fn parse(compact: &str) -> Result<Self, SdJwtError> {
+        if compact.len() > MAX_COMPACT_BYTES {
+            return Err(SdJwtError::TooLarge);
+        }
         let mut parts: Vec<&str> = compact.split('~').collect();
         if parts.len() < 2 {
             // Must be at least "<jwt>~".
             return Err(SdJwtError::Malformed);
         }
         let issuer_jwt = parts.remove(0).to_string();
+        if issuer_jwt.len() > MAX_JWS_BYTES {
+            return Err(SdJwtError::TooLarge);
+        }
         if issuer_jwt.is_empty() || issuer_jwt.matches('.').count() != 2 {
             return Err(SdJwtError::Malformed);
         }
@@ -141,12 +190,18 @@ impl SdJwtVc {
         let key_binding_jwt = if kb.is_empty() {
             None
         } else {
+            if kb.len() > MAX_JWS_BYTES {
+                return Err(SdJwtError::TooLarge);
+            }
             if kb.matches('.').count() != 2 {
                 return Err(SdJwtError::Malformed);
             }
             Some(kb.to_string())
         };
         // Remaining parts are disclosures; none may be empty.
+        if parts.len() > MAX_DISCLOSURES || parts.iter().any(|p| p.len() > MAX_DISCLOSURE_BYTES) {
+            return Err(SdJwtError::TooLarge);
+        }
         if parts.iter().any(|p| p.is_empty()) {
             return Err(SdJwtError::Malformed);
         }
@@ -157,22 +212,25 @@ impl SdJwtVc {
         })
     }
 
-    /// Verify the issuer signature and reconstruct the disclosed claim set: every presented
-    /// disclosure must hash to an entry in the JWT's `_sd` array (else `UnknownDisclosure`), and
-    /// the always-present (non-`_sd`) claims are included as-is.
-    pub fn verify_and_disclose(
+    /// Verify the issuer signature and run RFC 9901's recursive disclosure-processing algorithm.
+    pub fn verify_and_process(
         &self,
         verifier: &dyn Verifier,
         digest: &dyn crypto_traits::Digest,
         issuer_public_key: &[u8],
         expected_alg: Alg,
-    ) -> Result<serde_json::Map<String, Json>, SdJwtError> {
+    ) -> Result<ProcessedSdJwt, SdJwtError> {
         let (header, payload_bytes, signing_input, signature) = split_jws(&self.issuer_jwt)?;
 
-        // 1) Header: reject alg:none / unknown alg / unknown crit; enforce the expected alg.
+        // 1) Header: reject alg:none / unknown alg / unknown crit; enforce the expected alg and
+        // the SD-JWT VC media type. `typ: dc+sd-jwt` is mandatory in draft-17 and prevents a JWT
+        // minted for another protocol from being confused for a credential.
         let hdr_alg = parse_jose_alg(&header)?;
         if hdr_alg != expected_alg {
             return Err(SdJwtError::UnsupportedAlg);
+        }
+        if header.get("typ").and_then(|v| v.as_str()) != Some("dc+sd-jwt") {
+            return Err(SdJwtError::InvalidType);
         }
 
         // 2) Verify the signature over ASCII(header_b64 "." payload_b64).
@@ -184,45 +242,307 @@ impl SdJwtVc {
         )?;
 
         // 3) Parse the payload and confirm the hash algorithm.
-        let payload: Json =
+        let mut payload: Json =
             serde_json::from_slice(&payload_bytes).map_err(|_| SdJwtError::InvalidJson)?;
         let obj = payload.as_object().ok_or(SdJwtError::InvalidJson)?;
-        match obj.get(SD_ALG_CLAIM).and_then(|v| v.as_str()) {
-            None | Some("sha-256") | Some("SHA-256") => {}
-            Some(_) => return Err(SdJwtError::UnsupportedHashAlg),
+        match obj.get(SD_ALG_CLAIM) {
+            None => {}
+            Some(Json::String(value)) if value == "sha-256" => {}
+            Some(Json::String(_)) => return Err(SdJwtError::UnsupportedHashAlg),
+            Some(_) => return Err(SdJwtError::InvalidJson),
         }
 
-        // 4) Collect the set of digests the issuer committed to.
-        let sd_digests: Vec<String> = obj
-            .get(SD_CLAIM)
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // 5) Start from the plain (non-selective) claims.
-        let mut result = serde_json::Map::new();
-        for (k, v) in obj {
-            if k != SD_CLAIM && k != SD_ALG_CLAIM {
-                result.insert(k.clone(), v.clone());
-            }
-        }
-
-        // 6) Add each disclosed object member, checking its digest is one the issuer signed.
+        // 4) Index every provided Disclosure once. A repeated Disclosure (or digest collision) is
+        // invalid even when the duplicate appears at a different place in the combined format.
+        let mut disclosure_by_digest = BTreeMap::new();
         for raw in &self.disclosures {
-            let d = Disclosure::parse(raw)?;
-            let dig = d.digest_b64(digest);
-            if !sd_digests.contains(&dig) {
-                return Err(SdJwtError::UnknownDisclosure);
-            }
-            if let Some(name) = d.name {
-                result.insert(name, d.value);
+            let disclosure = Disclosure::parse(raw)?;
+            let disclosure_digest = disclosure.digest_b64(digest);
+            if disclosure_by_digest
+                .insert(disclosure_digest, disclosure)
+                .is_some()
+            {
+                return Err(SdJwtError::DuplicateClaim);
             }
         }
-        Ok(result)
+
+        // 5) Recursively replace matching object and array placeholders. Missing matches are
+        // decoys or intentionally undisclosed claims and are removed from the processed payload.
+        let initial_bytes = serde_json::to_vec(&payload)
+            .map_err(|_| SdJwtError::InvalidJson)?
+            .len();
+        let mut processor = DisclosureProcessor {
+            disclosure_by_digest,
+            used_disclosures: BTreeSet::new(),
+            encountered_digests: BTreeSet::new(),
+            verified: Vec::new(),
+            embedded_digest_count: 0,
+            output_budget: initial_bytes,
+        };
+        processor.process_value(&mut payload, &[], None, 0, true)?;
+        if processor.used_disclosures.len() != processor.disclosure_by_digest.len() {
+            return Err(SdJwtError::UnknownDisclosure);
+        }
+        if serde_json::to_vec(&payload)
+            .map_err(|_| SdJwtError::InvalidJson)?
+            .len()
+            > MAX_PROCESSED_JSON_BYTES
+        {
+            return Err(SdJwtError::TooLarge);
+        }
+        let claims = payload
+            .as_object()
+            .cloned()
+            .ok_or(SdJwtError::InvalidJson)?;
+        Ok(ProcessedSdJwt {
+            claims,
+            disclosures: processor.verified,
+        })
+    }
+
+    /// Compatibility wrapper returning only the processed claim map.
+    pub fn verify_and_disclose(
+        &self,
+        verifier: &dyn Verifier,
+        digest: &dyn crypto_traits::Digest,
+        issuer_public_key: &[u8],
+        expected_alg: Alg,
+    ) -> Result<serde_json::Map<String, Json>, SdJwtError> {
+        self.verify_and_process(verifier, digest, issuer_public_key, expected_alg)
+            .map(|processed| processed.claims)
+    }
+
+    /// Parse and validate the issuer JWT's JOSE header and return its signing algorithm.
+    ///
+    /// Holders use this before signature verification so algorithm selection comes from the
+    /// protected header and is still constrained by their local algorithm policy.
+    pub fn issuer_algorithm(&self) -> Result<Alg, SdJwtError> {
+        let (header, _, _, _) = split_jws(&self.issuer_jwt)?;
+        if header.get("typ").and_then(|v| v.as_str()) != Some("dc+sd-jwt") {
+            return Err(SdJwtError::InvalidType);
+        }
+        parse_jose_alg(&header)
+    }
+
+    /// Decode the issuer-signed payload without applying disclosures.
+    ///
+    /// Callers use this only after signature verification to enforce that protocol control claims
+    /// such as `vct` and `cnf` were not made selectively disclosable.
+    pub fn issuer_payload(&self) -> Result<serde_json::Map<String, Json>, SdJwtError> {
+        let (_, payload, _, _) = split_jws(&self.issuer_jwt)?;
+        serde_json::from_slice::<Json>(&payload)
+            .map_err(|_| SdJwtError::InvalidJson)?
+            .as_object()
+            .cloned()
+            .ok_or(SdJwtError::InvalidJson)
+    }
+}
+
+struct DisclosureProcessor {
+    disclosure_by_digest: BTreeMap<String, Disclosure>,
+    used_disclosures: BTreeSet<String>,
+    encountered_digests: BTreeSet<String>,
+    verified: Vec<VerifiedDisclosure>,
+    embedded_digest_count: usize,
+    output_budget: usize,
+}
+
+impl DisclosureProcessor {
+    fn process_value(
+        &mut self,
+        value: &mut Json,
+        path: &[ClaimPathElement],
+        parent_digest: Option<&str>,
+        depth: usize,
+        is_root: bool,
+    ) -> Result<(), SdJwtError> {
+        if depth > MAX_NESTING_DEPTH {
+            return Err(SdJwtError::TooLarge);
+        }
+        match value {
+            Json::Object(object) => {
+                if is_root {
+                    object.remove(SD_ALG_CLAIM);
+                } else if object.contains_key(SD_ALG_CLAIM) {
+                    return Err(SdJwtError::InvalidJson);
+                }
+                if object.contains_key("...") {
+                    // `...` is legal only as the sole member of an array placeholder object.
+                    return Err(SdJwtError::InvalidJson);
+                }
+
+                let digest_values = match object.remove(SD_CLAIM) {
+                    None => Vec::new(),
+                    Some(Json::Array(values)) => values,
+                    Some(_) => return Err(SdJwtError::InvalidJson),
+                };
+
+                // Permanent nested values can themselves contain digest placeholders.
+                let permanent_names: Vec<String> = object.keys().cloned().collect();
+                for name in permanent_names {
+                    let mut child_path = path.to_vec();
+                    child_path.push(ClaimPathElement::Name(name.clone()));
+                    let child = object.get_mut(&name).ok_or(SdJwtError::InvalidJson)?;
+                    self.process_value(child, &child_path, parent_digest, depth + 1, false)?;
+                }
+
+                for digest_value in digest_values {
+                    let disclosure_digest = digest_value
+                        .as_str()
+                        .ok_or(SdJwtError::InvalidJson)?
+                        .to_string();
+                    self.encounter_digest(&disclosure_digest)?;
+                    let Some(disclosure) =
+                        self.disclosure_by_digest.get(&disclosure_digest).cloned()
+                    else {
+                        continue;
+                    };
+                    let name = disclosure.name.clone().ok_or(SdJwtError::InvalidJson)?;
+                    if matches!(name.as_str(), SD_CLAIM | SD_ALG_CLAIM | "...") {
+                        return Err(SdJwtError::InvalidJson);
+                    }
+                    if object.contains_key(&name) {
+                        return Err(SdJwtError::DuplicateClaim);
+                    }
+                    self.consume_budget(&disclosure.value)?;
+                    let mut child_path = path.to_vec();
+                    child_path.push(ClaimPathElement::Name(name.clone()));
+                    self.record_disclosure(
+                        &disclosure_digest,
+                        &disclosure,
+                        &child_path,
+                        parent_digest,
+                    )?;
+                    let mut disclosed_value = disclosure.value;
+                    self.process_value(
+                        &mut disclosed_value,
+                        &child_path,
+                        Some(&disclosure_digest),
+                        depth + 1,
+                        false,
+                    )?;
+                    object.insert(name, disclosed_value);
+                }
+            }
+            Json::Array(array) => {
+                let original = core::mem::take(array);
+                let mut processed = Vec::with_capacity(original.len());
+                for mut element in original {
+                    let placeholder = match &element {
+                        Json::Object(object) if object.contains_key("...") => {
+                            if object.len() != 1 {
+                                return Err(SdJwtError::InvalidJson);
+                            }
+                            Some(
+                                object
+                                    .get("...")
+                                    .and_then(Json::as_str)
+                                    .ok_or(SdJwtError::InvalidJson)?
+                                    .to_string(),
+                            )
+                        }
+                        _ => None,
+                    };
+                    if let Some(disclosure_digest) = placeholder {
+                        self.encounter_digest(&disclosure_digest)?;
+                        let Some(disclosure) =
+                            self.disclosure_by_digest.get(&disclosure_digest).cloned()
+                        else {
+                            // Undisclosed array elements and decoys disappear entirely.
+                            continue;
+                        };
+                        if disclosure.name.is_some() {
+                            return Err(SdJwtError::InvalidJson);
+                        }
+                        self.consume_budget(&disclosure.value)?;
+                        let mut child_path = path.to_vec();
+                        child_path.push(ClaimPathElement::Index(processed.len()));
+                        self.record_disclosure(
+                            &disclosure_digest,
+                            &disclosure,
+                            &child_path,
+                            parent_digest,
+                        )?;
+                        let mut disclosed_value = disclosure.value;
+                        self.process_value(
+                            &mut disclosed_value,
+                            &child_path,
+                            Some(&disclosure_digest),
+                            depth + 1,
+                            false,
+                        )?;
+                        processed.push(disclosed_value);
+                    } else {
+                        let mut child_path = path.to_vec();
+                        child_path.push(ClaimPathElement::Index(processed.len()));
+                        self.process_value(
+                            &mut element,
+                            &child_path,
+                            parent_digest,
+                            depth + 1,
+                            false,
+                        )?;
+                        processed.push(element);
+                    }
+                }
+                *array = processed;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn encounter_digest(&mut self, digest: &str) -> Result<(), SdJwtError> {
+        let decoded =
+            Base64UrlUnpadded::decode_vec(digest).map_err(|_| SdJwtError::InvalidBase64)?;
+        if decoded.len() != 32 {
+            return Err(SdJwtError::InvalidJson);
+        }
+        self.embedded_digest_count = self
+            .embedded_digest_count
+            .checked_add(1)
+            .ok_or(SdJwtError::TooLarge)?;
+        if self.embedded_digest_count > MAX_EMBEDDED_DIGESTS {
+            return Err(SdJwtError::TooLarge);
+        }
+        if !self.encountered_digests.insert(digest.to_string()) {
+            return Err(SdJwtError::DuplicateClaim);
+        }
+        Ok(())
+    }
+
+    fn consume_budget(&mut self, value: &Json) -> Result<(), SdJwtError> {
+        let bytes = serde_json::to_vec(value)
+            .map_err(|_| SdJwtError::InvalidJson)?
+            .len();
+        self.output_budget = self
+            .output_budget
+            .checked_add(bytes)
+            .ok_or(SdJwtError::TooLarge)?;
+        if self.output_budget > MAX_PROCESSED_JSON_BYTES {
+            return Err(SdJwtError::TooLarge);
+        }
+        Ok(())
+    }
+
+    fn record_disclosure(
+        &mut self,
+        digest: &str,
+        disclosure: &Disclosure,
+        path: &[ClaimPathElement],
+        parent_digest: Option<&str>,
+    ) -> Result<(), SdJwtError> {
+        if !self.used_disclosures.insert(digest.to_string()) {
+            return Err(SdJwtError::DuplicateClaim);
+        }
+        self.verified.push(VerifiedDisclosure {
+            raw: disclosure.raw.clone(),
+            digest: digest.to_string(),
+            path: path.to_vec(),
+            parent_digest: parent_digest.map(String::from),
+            value: disclosure.value.clone(),
+        });
+        Ok(())
     }
 }
 
@@ -247,7 +567,7 @@ impl SdJwtVc {
             .ok_or(SdJwtError::KeyBindingMismatch)?;
         let (header, payload_bytes, signing_input, signature) = split_jws(kb_jwt)?;
         let kb_alg = parse_jose_alg(&header)?;
-        if kb_alg != kb.device_alg {
+        if kb_alg != kb.device_alg || header.get("typ").and_then(Json::as_str) != Some("kb+jwt") {
             return Err(SdJwtError::KeyBindingMismatch);
         }
         verifier.verify(
@@ -260,6 +580,10 @@ impl SdJwtVc {
         let payload: Json =
             serde_json::from_slice(&payload_bytes).map_err(|_| SdJwtError::InvalidJson)?;
         let obj = payload.as_object().ok_or(SdJwtError::InvalidJson)?;
+
+        if obj.get("iat").and_then(Json::as_i64).is_none() {
+            return Err(SdJwtError::KeyBindingMismatch);
+        }
 
         if obj.get("aud").and_then(|v| v.as_str()) != Some(kb.expected_aud) {
             return Err(SdJwtError::KeyBindingMismatch);
@@ -290,6 +614,9 @@ impl SdJwtVc {
 
 /// Split a compact JWS into (decoded header JSON, decoded payload bytes, signing input, signature).
 fn split_jws(jwt: &str) -> Result<(Json, Vec<u8>, String, Vec<u8>), SdJwtError> {
+    if jwt.len() > MAX_JWS_BYTES {
+        return Err(SdJwtError::TooLarge);
+    }
     let parts: Vec<&str> = jwt.split('.').collect();
     if parts.len() != 3 {
         return Err(SdJwtError::Malformed);

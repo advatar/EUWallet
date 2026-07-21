@@ -7,7 +7,7 @@
 //! from an issuer over OID4VCI, its device key from the Secure Enclave, and its trusted list from
 //! the scheme operator. The demo generates equivalents in-process so the exact same core flow is
 //! exercisable offline on the simulator, where the Secure Enclave is unavailable. The keys are
-//! ephemeral (regenerated per `DemoWallet`), so nothing here is a credential of value.
+//! demo-only or fixed conformance keys, so nothing here is a credential of value.
 //!
 //! The device key lives in Rust ([`DemoWallet::sign_device`]) precisely so the shell's `Sign`
 //! effect resolves to a real ES256 signature over the key the core validates against — the
@@ -16,22 +16,26 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use base64ct::{Base64UrlUnpadded, Encoding};
+use base64ct::{Base64, Base64UrlUnpadded, Encoding};
 use crypto_backend::{AwsLc, SoftwareSigner};
 use crypto_traits::{Alg, Digest, KeyRef, Signer};
 use serde_json::json;
 
-// Real openssl-generated RP chain, reused from the x509 crate's conformance vectors: `rp.der`
-// (leaf reader cert) is issued by `ca.der`; `rp.pkcs8.der` is the leaf's private key. The demo
-// trusted list anchors `ca.der`, so in-core RP registration validates against a real chain.
+// Real openssl-generated certificates from the x509 conformance vectors. `rp.der` is the reader
+// leaf; the credential issuer uses a distinct leaf with exactly one HTTPS URI SAN. Both leaves use
+// the fixture private key and chain to `ca.der`, allowing one demo signer without conflating their
+// authenticated certificate profiles.
 const CA_DER: &[u8] = include_bytes!("../../x509/tests/vectors/ca.der");
 const RP_DER: &[u8] = include_bytes!("../../x509/tests/vectors/rp.der");
 const RP_PKCS8: &[u8] = include_bytes!("../../x509/tests/vectors/rp.pkcs8.der");
+const ISSUER_DER_B64: &str = include_str!("../../x509/tests/vectors/issuer.der.b64");
 
 /// A fixed clock inside the demo credential/trust-list validity windows.
 const DEMO_EPOCH: i64 = 1_790_000_000;
 /// The nonce the RP's request is bound to (echoed in the key-binding JWT).
 const DEMO_NONCE: u64 = 424_242;
+/// The authenticated direct-post endpoint carried by the demo RP registration.
+const DEMO_RESPONSE_URI: &str = "https://rp.example/response";
 
 /// A self-contained payment request (PSD2/TS12 shape). Static because it needs no signing —
 /// the SCA binding the user authorises is computed and signed in-core at approval time.
@@ -39,6 +43,10 @@ const PAYMENT_REQUEST_JSON: &[u8] = br#"{"creditor_name":"Acme Store","creditor_
 
 fn b64(bytes: &[u8]) -> String {
     Base64UrlUnpadded::encode_string(bytes)
+}
+
+fn issuer_certificate_der() -> Vec<u8> {
+    Base64::decode_vec(ISSUER_DER_B64.trim()).expect("embedded issuer certificate")
 }
 
 /// Everything the shell must load/feed to drive the demo flows against the real core.
@@ -60,7 +68,8 @@ pub struct DemoScenario {
     pub device_public_key: Vec<u8>,
     /// RP certificate chain (DER, leaf-first) the shell supplies on `resolveRpTrust`.
     pub rp_cert_chain: Vec<Vec<u8>>,
-    /// Redirect URIs registered for the RP (empty for the demo).
+    /// Authenticated delivery endpoints registered for the RP. The field keeps its legacy name for
+    /// compatibility with the native FFI contract.
     pub registered_redirect_uris: Vec<String>,
     /// RP-signed authorization request (compact JWS) requesting only `age_over_18`.
     pub presentation_request: Vec<u8>,
@@ -132,7 +141,9 @@ impl DemoWallet {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             device: SoftwareSigner::generate_p256().expect("device keygen"),
-            issuer: SoftwareSigner::generate_p256().expect("issuer keygen"),
+            // The issuer must sign with the key authenticated by the URI-SAN issuer certificate; a
+            // random unrelated key would make the credential cryptographically false.
+            issuer: SoftwareSigner::from_pkcs8_der(RP_PKCS8).expect("issuer key"),
             operator: SoftwareSigner::generate_p256().expect("operator keygen"),
             rp: SoftwareSigner::from_pkcs8_der(RP_PKCS8).expect("rp key"),
             wallet_provider: SoftwareSigner::generate_p256().expect("wp keygen"),
@@ -154,7 +165,7 @@ impl DemoWallet {
             operator_public_key: self.operator.public_key_raw().to_vec(),
             device_public_key: self.device.public_key_raw().to_vec(),
             rp_cert_chain: vec![RP_DER.to_vec()],
-            registered_redirect_uris: vec![],
+            registered_redirect_uris: vec![DEMO_RESPONSE_URI.into()],
             presentation_request: self.sign_request(DEMO_NONCE, &["age_over_18"]),
             payment_request: PAYMENT_REQUEST_JSON.to_vec(),
         }
@@ -185,7 +196,8 @@ impl DemoWallet {
             "client_id": "rp.example",
             "nonce": nonce,
             "aud": "wallet.example",
-            "response_uri": "https://rp.example/response",
+            "response_uri": DEMO_RESPONSE_URI,
+            "response_mode": "direct_post",
             "purpose": "Prove you are over 18 (mDL)",
             "dcql_query": {
                 "credentials": [{
@@ -279,11 +291,10 @@ impl DemoWallet {
             device_public_key: self.device.public_key_raw().to_vec(),
             wua_jwt: self.wua_jwt(),
             wallet_provider_public_key: self.wallet_provider.public_key_raw().to_vec(),
-            issuer_cert_chain: vec![RP_DER.to_vec()],
+            issuer_cert_chain: vec![issuer_certificate_der()],
             issuer_id: "https://issuer.example".into(),
-            offer:
-                br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#
-                    .to_vec(),
+            offer: br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#
+                .to_vec(),
             pid_credential_compact: Self::compact(&pid_jwt, &pid_claims),
             mdl_credential_compact: Self::compact(&mdl_jwt, &mdl_claims),
             passport_credential_compact: Self::compact(&passport_jwt, &passport_claims),
@@ -302,6 +313,7 @@ impl DemoWallet {
     pub fn scenario_with_response_uri(&self, response_uri: &str) -> DemoScenario {
         let mut s = self.scenario();
         s.presentation_request = self.sign_request_dcql(DEMO_NONCE, response_uri);
+        s.registered_redirect_uris = vec![response_uri.into()];
         s
     }
 
@@ -399,6 +411,7 @@ impl DemoWallet {
             "nonce": nonce,
             "aud": "wallet.example",
             "response_uri": response_uri,
+            "response_mode": "direct_post",
             "purpose": "Prove you are over 18",
             "dcql_query": {
                 "credentials": [{
@@ -448,7 +461,7 @@ impl DemoWallet {
         ];
         let mut name_spaces = BTreeMap::new();
         name_spaces.insert("org.iso.18013.5.1".to_string(), items);
-        let issued = build_and_sign(
+        let mut issued = build_and_sign(
             name_spaces,
             "org.iso.18013.5.1.mDL",
             Self::cose_key(self.device.public_key_raw()),
@@ -463,6 +476,8 @@ impl DemoWallet {
             Alg::Es256,
         )
         .expect("issue demo mdoc");
+        issued.issuer_auth.unprotected.x5chain =
+            Some(Box::new(cose::X5Chain::Single(issuer_certificate_der())));
         Base64UrlUnpadded::encode_string(&issued.to_value().to_canonical())
     }
 
@@ -476,6 +491,16 @@ impl DemoWallet {
             (Value::Nint(1), Value::Bytes(pubkey[1..33].to_vec())),
             (Value::Nint(2), Value::Bytes(pubkey[33..65].to_vec())),
         ])
+    }
+
+    /// RFC 7800 confirmation JWK for an uncompressed P-256 public point.
+    fn confirmation_jwk(pubkey: &[u8]) -> serde_json::Value {
+        json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": b64(&pubkey[1..33]),
+            "y": b64(&pubkey[33..65]),
+        })
     }
 
     /// Issue an SD-JWT VC of type `vct`; return (issuer_jwt, disclosures_by_claim). Mirrors the
@@ -500,9 +525,12 @@ impl DemoWallet {
         let header = b64(br#"{"alg":"ES256","typ":"dc+sd-jwt"}"#);
         let payload = b64(serde_json::to_string(&json!({
             "iss": "https://issuer.example",
+            "iat": DEMO_EPOCH,
+            "exp": 4_000_000_000i64,
             "vct": vct,
             "_sd_alg": "sha-256",
             "_sd": sd,
+            "cnf": { "jwk": Self::confirmation_jwk(self.device.public_key_raw()) },
         }))
         .expect("serialize issuer payload")
         .as_bytes());
@@ -522,11 +550,7 @@ impl DemoWallet {
     /// The compact SD-JWT serialization (`<issuer-jwt>~<disclosure>~…~`) a pre-authorized issuer
     /// hands back at the `/credential` endpoint — exactly what the live-I/O lifecycle test feeds.
     fn compact(issuer_jwt: &str, by_claim: &BTreeMap<String, String>) -> String {
-        let disclosures = by_claim
-            .values()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("~");
+        let disclosures = by_claim.values().cloned().collect::<Vec<_>>().join("~");
         format!("{issuer_jwt}~{disclosures}~")
     }
 
@@ -556,7 +580,8 @@ impl DemoWallet {
             "client_id": "rp.example",
             "nonce": nonce,
             "aud": "wallet.example",
-            "response_uri": "https://rp.example/response",
+            "response_uri": DEMO_RESPONSE_URI,
+            "response_mode": "direct_post",
             "purpose": "Prove you are over 18",
             "claims": requested,
         }))

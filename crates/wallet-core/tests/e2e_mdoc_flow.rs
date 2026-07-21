@@ -67,6 +67,7 @@ fn sign_mdoc_request(rp: &SoftwareSigner, nonce: u64) -> Vec<u8> {
         "nonce": nonce,
         "aud": "wallet.example",
         "response_uri": RESPONSE_URI,
+        "response_mode": "direct_post",
         "purpose": "Prove you are over 18",
         "dcql_query": {
             "credentials": [{
@@ -80,7 +81,9 @@ fn sign_mdoc_request(rp: &SoftwareSigner, nonce: u64) -> Vec<u8> {
     .unwrap()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = rp.sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = rp
+        .sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
@@ -95,10 +98,8 @@ fn map_get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
 }
 
 fn field(body: &str, key: &str) -> Option<String> {
-    body.split('&').find_map(|kv| {
-        kv.strip_prefix(&format!("{key}="))
-            .map(percent_decode)
-    })
+    body.split('&')
+        .find_map(|kv| kv.strip_prefix(&format!("{key}=")).map(percent_decode))
 }
 
 #[test]
@@ -144,7 +145,7 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
     .expect("issuer signs the mDL");
 
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_mdoc_credential(MdocHolding {
+    core.load_unverified_mdoc_for_testing(MdocHolding {
         doctype: DOCTYPE.into(),
         issuer_signed: issuer_signed.clone(),
     });
@@ -168,7 +169,7 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
     // ---- 2) Shell supplies the RP cert chain; core validates against the trusted list → consent. ----
     let fx = core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec![RESPONSE_URI.into()],
     });
     let screen = fx.iter().find_map(|e| match e {
         Effect::Render { screen } => Some(screen.clone()),
@@ -212,7 +213,7 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
     let vp_field = field(&body, "vp_token").expect("vp_token field");
     let mgn = field(&body, "mdoc_generated_nonce").expect("mdoc_generated_nonce field");
     let obj: serde_json::Value = serde_json::from_str(&vp_field).expect("vp_token JSON object");
-    let dr_b64 = obj["mdl"].as_str().expect("DCQL-keyed DeviceResponse");
+    let dr_b64 = obj["mdl"][0].as_str().expect("DCQL-keyed DeviceResponse");
     let dr_cbor = Base64UrlUnpadded::decode_vec(dr_b64).expect("base64url DeviceResponse");
     let dr = cbor::from_canonical_slice(&dr_cbor).expect("canonical DeviceResponse CBOR");
 
@@ -222,7 +223,10 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
         _ => panic!("documents array"),
     };
     assert_eq!(docs.len(), 1);
-    assert_eq!(map_get(&docs[0], "docType"), Some(&Value::Text(DOCTYPE.into())));
+    assert_eq!(
+        map_get(&docs[0], "docType"),
+        Some(&Value::Text(DOCTYPE.into()))
+    );
 
     // Data minimisation on the WIRE: parse the emitted issuerSigned and confirm only age_over_18
     // survived — family_name never left the wallet.
@@ -240,9 +244,11 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
     );
 
     // Rebuild the SessionTranscript from the verifier's own values + the conveyed mdoc_generated_nonce.
-    let transcript = oid4vp_session_transcript(&AwsLc, CLIENT_ID, RESPONSE_URI, &NONCE.to_string(), &mgn);
+    let transcript =
+        oid4vp_session_transcript(&AwsLc, CLIENT_ID, RESPONSE_URI, &NONCE.to_string(), &mgn);
     let expected_device_auth =
-        device_authentication_bytes(&transcript, DOCTYPE, &empty_device_namespaces_bytes()).unwrap();
+        device_authentication_bytes(&transcript, DOCTYPE, &empty_device_namespaces_bytes())
+            .unwrap();
 
     // deviceSigned.deviceAuth.deviceSignature = [protected, unprotected, payload(null), signature].
     let device_signed = map_get(&docs[0], "deviceSigned").unwrap();
@@ -254,7 +260,11 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
                 Value::Bytes(b) => b.clone(),
                 _ => panic!("protected bstr"),
             };
-            assert_eq!(a[2], Value::Null, "payload is detached (null) in mdoc DeviceAuth");
+            assert_eq!(
+                a[2],
+                Value::Null,
+                "payload is detached (null) in mdoc DeviceAuth"
+            );
             let s = match &a[3] {
                 Value::Bytes(b) => b.clone(),
                 _ => panic!("signature bstr"),

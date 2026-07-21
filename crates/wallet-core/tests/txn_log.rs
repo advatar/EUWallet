@@ -10,10 +10,10 @@ fn presentation_and_payment_are_logged_without_values() {
     let wallet = DemoWallet::new();
     let s = wallet.scenario();
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(HeldCredential {
+    core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt: s.issuer_jwt.clone(),
         disclosures_by_claim: serde_json::from_str(&s.disclosures_by_claim_json).unwrap(),
-        status_index: None,
+        status: None,
     });
     core.load_device_key(s.device_public_key.clone());
     core.handle_event(Event::SetClock { epoch: s.epoch });
@@ -56,6 +56,8 @@ fn presentation_and_payment_are_logged_without_values() {
     core.handle_event(Event::DeviceSignatureProduced {
         signature: wallet.sign_device(binding),
     });
+    // Producing an auth code is not completion; log only after the PSP acknowledges delivery.
+    core.handle_event(Event::PaymentAuthorizationDelivered);
 
     // --- The log must hold exactly two tamper-evident entries. ---
     let log = core.transaction_log();
@@ -96,7 +98,11 @@ fn presentation_and_payment_are_logged_without_values() {
     assert!(report.contains("rp.example") && report.contains("Acme Store"));
 
     // --- Deletion (TS07): erase the presentation; the chain stays intact. ---
-    assert!(core.redact_transaction(0));
+    assert_eq!(
+        core.handle_event(Event::RedactTransaction { seq: 0 }),
+        Vec::<Effect>::new(),
+        "history commands complete without native effects"
+    );
     assert!(
         core.transaction_log()
             .verify_integrity(&crypto_backend::AwsLc),
@@ -114,7 +120,18 @@ fn presentation_and_payment_are_logged_without_values() {
         "the erased presentation no longer counts"
     );
 
-    // Full wipe clears everything.
-    core.wipe_transaction_log();
+    // A missing sequence is a deterministic no-op and remains checkpointable by the shell.
+    let before_missing = core.transaction_log_json();
+    assert_eq!(
+        core.handle_event(Event::RedactTransaction { seq: u64::MAX }),
+        Vec::<Effect>::new()
+    );
+    assert_eq!(core.transaction_log_json(), before_missing);
+
+    // Full wipe is also a normal event transition and clears everything.
+    assert_eq!(
+        core.handle_event(Event::WipeTransactionLog),
+        Vec::<Effect>::new()
+    );
     assert_eq!(core.transaction_log().len(), 0);
 }

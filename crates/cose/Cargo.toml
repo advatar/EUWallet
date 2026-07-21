@@ -3,7 +3,8 @@ name = "cose"
 description = "COSE_Sign1 / COSE_Mac0 / COSE_Key (RFC 9052/9053) over crypto-traits."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Kani 0.67's Rust 1.93 toolchain verifies this crate; keep that proof closure buildable there.
+rust-version = "1.93"
 license.workspace = true
 publish.workspace = true
 

@@ -69,6 +69,7 @@ fn sign_request(rp: &SoftwareSigner, nonce: u64, requested: &[&str]) -> Vec<u8> 
         "nonce": nonce,
         "aud": "wallet.example",
         "response_uri": "https://rp.example/response",
+        "response_mode": "direct_post",
         "purpose": "Prove you are over 18",
         "claims": requested,
     }))
@@ -98,10 +99,10 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
         ],
     );
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(HeldCredential {
+    core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt: issuer_jwt.clone(),
         disclosures_by_claim: by_claim,
-        status_index: None,
+        status: None,
     });
     core.handle_event(Event::SetClock {
         epoch: 1_790_000_000,
@@ -128,7 +129,7 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
     //    (registration is NOT a shell boolean) → PersistNonce + Render(consent)
     let fx = core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec!["https://rp.example/response".into()],
     });
     let screen = fx.iter().find_map(|e| match e {
         Effect::Render { screen } => Some(screen.clone()),
@@ -209,10 +210,22 @@ fn json_ffi_surface_round_trips() {
     let out = core
         .handle_event_json(r#"{"type":"authorizationRequestReceived","request":[110,111]}"#)
         .unwrap();
-    // "no" is not a valid JWS → the machine aborts; no ResolveRpTrust effect is emitted.
-    assert_eq!(out, "[]");
+    // "no" is not a valid JWS → the machine visibly aborts and releases its active marker.
+    let effects: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(effects[0]["type"], "render");
+    assert_eq!(
+        effects[0]["screen"]["code"],
+        "presentation_request_malformed"
+    );
+    assert_eq!(effects[1]["type"], "close");
     assert!(matches!(
         core.state(),
         oid4vp::State::Aborted(oid4vp::AbortReason::MalformedRequest)
     ));
+    assert_eq!(
+        core.handle_event_json(r#"{"type":"wipeTransactionLog"}"#)
+            .unwrap(),
+        "[]",
+        "terminal presentation abort must not block a later history event"
+    );
 }

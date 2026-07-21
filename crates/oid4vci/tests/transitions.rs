@@ -56,6 +56,7 @@ fn happy_pre_authorized_no_pin_to_issued() {
         Input::CredentialResponse {
             format: CredentialFormat::DcSdJwt,
             bytes: cred,
+            issuer_authenticated: true,
         },
         &seen,
     );
@@ -234,11 +235,30 @@ fn abort_credential_invalid() {
         Input::CredentialResponse {
             format: CredentialFormat::DcSdJwt,
             bytes: b"not-a-sd-jwt".to_vec(),
+            issuer_authenticated: true,
         },
         &seen,
     )
     .0;
     assert_eq!(s, State::Aborted(AbortReason::CredentialInvalid));
+}
+
+#[test]
+fn aborts_structurally_valid_but_unauthenticated_credential() {
+    let seen: Vec<u64> = vec![];
+    let (s, out) = drive(
+        &State::RequestingCredential {
+            format: CredentialFormat::DcSdJwt,
+        },
+        Input::CredentialResponse {
+            format: CredentialFormat::DcSdJwt,
+            bytes: b"aGVhZGVy.cGF5bG9hZA.c2ln~".to_vec(),
+            issuer_authenticated: false,
+        },
+        &seen,
+    );
+    assert_eq!(s, State::Aborted(AbortReason::CredentialInvalid));
+    assert_eq!(out, vec![Output::Close]);
 }
 
 #[test]
@@ -251,6 +271,7 @@ fn abort_format_mismatch_on_response() {
         Input::CredentialResponse {
             format: CredentialFormat::MsoMdoc,
             bytes: b"x".to_vec(),
+            issuer_authenticated: true,
         },
         &seen,
     )

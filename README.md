@@ -4,7 +4,7 @@ A from-scratch European Digital Identity Wallet, built as a **sans-IO Rust behav
 with **thin native shells** (Swift/iOS now, Kotlin/Android later), and verified across **three
 formal tiers** (property/fuzz/Kani → Lean state-machine proofs → Tamarin protocol analysis).
 
-Grounded in the EUDI specification register (as of 2026-07-17): ARF v2.9.0, PID Rulebook v1.6,
+Grounded in the EUDI specification register (as of 2026-07-17): ARF v2.9.0, PID Rulebook v1.7,
 FCAF v0.0.7. See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — the full,
 junior-developer-followable build plan.
 

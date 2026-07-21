@@ -36,6 +36,10 @@ device/simulator networking path — see `ios/App/ConnectView.swift`.
 - It offers credentials in the SD-JWT VC format this wallet implements (11 configurations,
   including `eu.europa.ec.eudi.pid_vc_sd_jwt`).
 - The reference verifier is reachable.
+- The issuer's OAuth metadata advertises authorization, PAR, token, and JWKS
+  endpoints (`/oidc/authorization`, `/pushed_authorization`, `/oidc/token`,
+  `/oidc/static/jwks.json`); the credential endpoint is advertised by the
+  issuer metadata at `https://backend.issuer.eudiw.dev/credential`.
 
 **Does NOT cover (requires an external assessment — NOT closeable by our code alone):**
 
@@ -43,8 +47,9 @@ device/simulator networking path — see `ios/App/ConnectView.swift`.
   self-certification program opened 2026-02-26 and runs against the Foundation's own harness. No
   conformance pass is claimed here.
 - A completed **issuance or presentation round trip against the live reference issuer/verifier**.
-  The reference issuer's PID issuance requires a browser/eID authorization step, and a live
-  presentation requires pinning the reference trust anchors — both are integration work beyond
-  metadata reachability. Tracked as the next milestone; not claimed as done.
+  The EU services exist, but the wallet still needs registered client metadata, an allowed
+  callback/deep-link or HTTPS redirect, browser/eID authorisation, pinned trust anchors, and
+  proof that the raw callback is delivered exactly once into the coordinator. These are the
+  remaining integration steps; no round-trip result is claimed yet.
 
 No result on this page implies a conformance or certification pass.

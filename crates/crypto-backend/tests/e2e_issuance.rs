@@ -109,6 +109,7 @@ fn full_issuance_with_real_proof_of_possession() {
         &Input::CredentialResponse {
             format: CredentialFormat::DcSdJwt,
             bytes: credential.clone(),
+            issuer_authenticated: true,
         },
         &env,
     );

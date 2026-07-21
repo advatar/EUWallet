@@ -14,11 +14,11 @@ directly by a protocol/codec crate — they are reached only through `crypto-tra
 | `cose` | — | Canonical CBOR + COSE_Sign1 are hand-written; crypto via `crypto-traits`. |
 | `mdoc` | `cose` (path) | mdoc structures over the shared CBOR/COSE codec. |
 | `sdjwt` | `serde_json`, `base64ct` | Strict JSON parsing and base64url are not worth hand-rolling; both are small, vetted, and in the budget. Signatures via `crypto-traits`. |
-| `x509` | `der`, `x509-cert` | Vetted RustCrypto DER/X.509 parsers. Parsing + profile evaluation are *logic*, not crypto; certificate-signature verification goes through `crypto-traits`. |
+| `x509` | `der`, `pkcs1`, `x509-cert` | Vetted RustCrypto DER/X.509/PKCS#1 parsers. Parsing + profile evaluation are *logic*, not crypto; public-key and certificate-signature validation go through `crypto-traits`. `pkcs1` is used only to validate RSA SPKI modulus/exponent shape and strength. |
 | `oid4vp` | `serde_json`, `base64ct` | Parses the JOSE request object and builds the key-binding JWT (JSON + base64url). Signatures via `crypto-traits`. |
 | `presenter` | `cose` (path) | Canonical consent hashing via the shared CBOR codec. |
 | `oid4vci`,`iso18013-5`,`trust`,`status`,`wua` | (path deps only, so far) | Protocol/trust logic over the codecs + crypto boundary. |
-| `wallet-core` | (path deps only) | Facade; will add `uniffi` at the FFI step (Section 3). |
+| `wallet-core` | `uniffi`, `serde`, `serde_json`, `base64ct`, `zeroize` | UniFFI boundary; strict JSON event/effect DTOs; base64url for the compiled demo fixture; and compiler-resistant clearing of dormant delivery-ledger request/result/namespace buffers. Protocol and cryptographic behavior remains in path dependencies and `crypto-traits`. |
 
 ## Approved shared crates (`[workspace.dependencies]`)
 
@@ -28,6 +28,8 @@ directly by a protocol/codec crate — they are reached only through `crypto-tra
 - `hex`, `thiserror` — small ergonomics.
 - `aws-lc-rs` — the FIPS-capable backend that will implement `crypto-traits` at the platform-crypto step. Never called directly by protocol/codec crates.
 - `uniffi` — FFI bindings (Section 3).
+- `zeroize` — compiler-resistant clearing for bounded secret-bearing Core buffers; it does not
+  provide cryptography or replace platform memory/process isolation.
 
 ## Dev-only dependencies (never shipped)
 

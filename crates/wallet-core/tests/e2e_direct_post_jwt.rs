@@ -31,18 +31,27 @@ fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
     .to_string()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = operator.sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = operator
+        .sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
 fn issue_pid(issuer: &SoftwareSigner) -> (String, BTreeMap<String, String>) {
     let mut by_claim = BTreeMap::new();
     let mut sd = Vec::new();
-    for (i, (name, value)) in [("family_name", json!("Andersson")), ("age_over_18", json!(true))]
-        .iter()
-        .enumerate()
+    for (i, (name, value)) in [
+        ("family_name", json!("Andersson")),
+        ("age_over_18", json!(true)),
+    ]
+    .iter()
+    .enumerate()
     {
-        let raw = b64(serde_json::to_string(&json!([format!("s{i}"), name, value])).unwrap().as_bytes());
+        let raw = b64(
+            serde_json::to_string(&json!([format!("s{i}"), name, value]))
+                .unwrap()
+                .as_bytes(),
+        );
         sd.push(json!(b64(&AwsLc.sha256(raw.as_bytes()))));
         by_claim.insert((*name).to_string(), raw);
     }
@@ -53,7 +62,9 @@ fn issue_pid(issuer: &SoftwareSigner) -> (String, BTreeMap<String, String>) {
     .unwrap()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = issuer.sign(&KeyRef("i".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = issuer
+        .sign(&KeyRef("i".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     (format!("{si}.{}", b64(&sig)), by_claim)
 }
 
@@ -70,6 +81,8 @@ fn sign_encrypted_request(rp: &SoftwareSigner, nonce: u64, recipient_pub: &[u8])
         "response_mode": "direct_post.jwt",
         "purpose": "Prove you are over 18",
         "client_metadata": {
+            "authorization_encrypted_response_alg": "ECDH-ES",
+            "authorization_encrypted_response_enc": "A256GCM",
             "jwks": { "keys": [{
                 "kty": "EC", "crv": "P-256", "use": "enc", "alg": "ECDH-ES",
                 "x": b64(x), "y": b64(y)
@@ -87,7 +100,9 @@ fn sign_encrypted_request(rp: &SoftwareSigner, nonce: u64, recipient_pub: &[u8])
     .unwrap()
     .as_bytes());
     let si = format!("{header}.{payload}");
-    let sig = rp.sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes()).unwrap();
+    let sig = rp
+        .sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
@@ -101,22 +116,30 @@ fn encrypted_response_leaves_the_device_as_a_jwe_only_the_verifier_can_open() {
 
     let (issuer_jwt, by_claim) = issue_pid(&issuer);
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(HeldCredential {
+    core.load_unverified_credential_for_testing(HeldCredential {
         issuer_jwt,
         disclosures_by_claim: by_claim,
-        status_index: None,
+        status: None,
     });
-    core.handle_event(Event::SetClock { epoch: 1_790_000_000 });
-    core.load_trust_list(&signed_trust_list(&trust_operator), trust_operator.public_key_raw())
-        .expect("trust list loads");
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    core.load_trust_list(
+        &signed_trust_list(&trust_operator),
+        trust_operator.public_key_raw(),
+    )
+    .expect("trust list loads");
 
     // Drive: request → trust → consent → device signature → the posted response.
     let request = sign_encrypted_request(&rp, NONCE, verifier_enc.public_raw());
     let fx = core.handle_event(Event::AuthorizationRequestReceived { request });
-    assert!(matches!(fx.as_slice(), [Effect::ResolveRpTrust { .. }]), "got {fx:?}");
+    assert!(
+        matches!(fx.as_slice(), [Effect::ResolveRpTrust { .. }]),
+        "got {fx:?}"
+    );
     core.handle_event(Event::RpCertChainResolved {
         rp_cert_chain: vec![RP_DER.to_vec()],
-        registered_redirect_uris: vec![],
+        registered_redirect_uris: vec!["https://rp.example/response".into()],
     });
     let fx = core.handle_event(Event::UserConsented);
     let signing_input = fx
@@ -126,7 +149,9 @@ fn encrypted_response_leaves_the_device_as_a_jwe_only_the_verifier_can_open() {
             _ => None,
         })
         .expect("consent → Sign the KB-JWT");
-    let sig = device.sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input).unwrap();
+    let sig = device
+        .sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input)
+        .unwrap();
     let fx = core.handle_event(Event::DeviceSignatureProduced { signature: sig });
     let body = fx
         .iter()
@@ -137,19 +162,31 @@ fn encrypted_response_leaves_the_device_as_a_jwe_only_the_verifier_can_open() {
         .expect("an Http effect carries the response");
 
     // Confidential on the wire: an encrypted `response=<JWE>`, never a plaintext `vp_token=`.
-    assert!(body.starts_with("response="), "encrypted response body, got: {body}");
-    assert!(!body.contains("vp_token="), "the plaintext vp_token must NOT appear on the wire");
+    assert!(
+        body.starts_with("response="),
+        "encrypted response body, got: {body}"
+    );
+    assert!(
+        !body.contains("vp_token="),
+        "the plaintext vp_token must NOT appear on the wire"
+    );
     let compact = body.strip_prefix("response=").unwrap();
 
     // ---- VERIFIER: agree to Z with the private key, open the JWE, recover {vp_token, state}. ----
     let parts = jwe::parse_compact(compact).expect("parse compact JWE");
-    let z = verifier_enc.agree(&parts.ephemeral_public).expect("verifier agrees to Z");
-    let plaintext = parts.open(&z, &AwsLc, &AwsLc).expect("verifier opens the JWE");
+    let z = verifier_enc
+        .agree(&parts.ephemeral_public)
+        .expect("verifier agrees to Z");
+    let plaintext = parts
+        .open(&z, &AwsLc, &AwsLc)
+        .expect("verifier opens the JWE");
     let response: serde_json::Value = serde_json::from_slice(&plaintext).expect("response JSON");
 
     // The decrypted response is the OpenID4VP object: vp_token keyed by the DCQL id, with a
     // verifiable SD-JWT presentation that disclosed exactly age_over_18.
-    let presentation = response["vp_token"]["pid"].as_str().expect("DCQL-keyed vp_token");
+    let presentation = response["vp_token"]["pid"][0]
+        .as_str()
+        .expect("DCQL-keyed vp_token");
     let sd = sdjwt::SdJwtVc::parse(presentation).expect("SD-JWT presentation parses");
     let kb = sdjwt::KeyBindingCheck {
         device_public_key: device.public_key_raw(),
@@ -161,10 +198,16 @@ fn encrypted_response_leaves_the_device_as_a_jwe_only_the_verifier_can_open() {
         .verify_presentation(&AwsLc, &AwsLc, issuer.public_key_raw(), Alg::Es256, &kb)
         .expect("verifier accepts the decrypted presentation");
     assert_eq!(claims.get("age_over_18"), Some(&json!(true)));
-    assert!(claims.get("family_name").is_none(), "family_name stayed minimised AND encrypted");
+    assert!(
+        claims.get("family_name").is_none(),
+        "family_name stayed minimised AND encrypted"
+    );
 
     // A wrong key cannot open it (confidentiality really depends on the recipient key).
     let attacker = P256AgreementKey::generate().unwrap();
     let z_bad = attacker.agree(&parts.ephemeral_public).unwrap();
-    assert!(parts.open(&z_bad, &AwsLc, &AwsLc).is_err(), "only the intended verifier can decrypt");
+    assert!(
+        parts.open(&z_bad, &AwsLc, &AwsLc).is_err(),
+        "only the intended verifier can decrypt"
+    );
 }

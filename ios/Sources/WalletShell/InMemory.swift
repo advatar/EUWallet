@@ -10,11 +10,18 @@ public final class InMemoryStorage: SecureStorage {
 }
 
 public final class StubHttpClient: HttpClient {
-    public private(set) var posted: [(String, Data)] = []
+    public private(set) var posted: [(String, Data, HttpDeliveryProfile)] = []
     public init() {}
-    public func post(url: String, body: Data) async -> (UInt16, Data) {
-        posted.append((url, body))
-        return (200, Data())
+    public func post(
+        url: String,
+        body: Data,
+        profile: HttpDeliveryProfile
+    ) async throws -> HttpResponse {
+        posted.append((url, body, profile))
+        return HttpResponse(
+            statusCode: 200,
+            body: Data("{}".utf8),
+            contentType: "application/json")
     }
 }
 
