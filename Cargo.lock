@@ -677,7 +677,6 @@ name = "oid4vci"
 version = "0.0.1"
 dependencies = [
  "base64ct",
- "crypto-backend",
  "crypto-traits",
  "mdoc",
  "sdjwt",
@@ -736,16 +735,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
 dependencies = [
  "base64ct",
-]
-
-[[package]]
-name = "pkcs1"
-version = "0.7.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
-dependencies = [
- "der",
- "spki",
 ]
 
 [[package]]
@@ -1399,7 +1388,6 @@ dependencies = [
  "w2w",
  "wua",
  "x509",
- "zeroize",
 ]
 
 [[package]]
@@ -1458,10 +1446,8 @@ name = "x509"
 version = "0.0.1"
 dependencies = [
  "base64ct",
- "crypto-backend",
  "crypto-traits",
  "der",
- "pkcs1",
  "x509-cert",
 ]
 

@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use catalogue::IssuerTrustDomain;
 use crypto_backend::AwsLc;
 use crypto_traits::{Alg, Digest, Random};
 use oid4vp::{AbortReason, Env, Input, ResolvedTrust, SelectedCredential, State};
@@ -643,8 +644,32 @@ pub struct MdocHolding {
 struct CredentialProvenance {
     format: oid4vci::CredentialFormat,
     raw_credential: Vec<u8>,
-    issuer_cert_chain: Vec<Vec<u8>>,
-    issuer_id: String,
+    issuer: CredentialIssuerEvidence,
+}
+
+/// Path- and profile-validated issuer evidence retained with a verified holding. The service
+/// domain is selected by catalogue policy and was never inferred from shell metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CredentialIssuerEvidence {
+    identity: String,
+    service: IssuerTrustDomain,
+    public_key_raw: Vec<u8>,
+    certificate_path: Vec<Vec<u8>>,
+    not_before: i64,
+    not_after: i64,
+}
+
+impl CredentialIssuerEvidence {
+    fn is_internally_consistent(&self) -> bool {
+        !self.identity.is_empty()
+            && !self.public_key_raw.is_empty()
+            && !self.certificate_path.is_empty()
+            && self.not_before <= self.not_after
+            && matches!(
+                self.service,
+                IssuerTrustDomain::Pid | IssuerTrustDomain::Attestation
+            )
+    }
 }
 
 /// The explicitly named Rust-only fixture loaders remain source-compatible for existing tests;
@@ -679,6 +704,7 @@ pub enum CredentialIngestionError {
     UnsupportedAlgorithm,
     SignatureInvalid,
     IssuerMismatch,
+    IssuerServiceMismatch,
     UnknownCredentialType,
     CredentialTypeFormatMismatch,
     IssuerNotAllowedForType,
@@ -997,11 +1023,14 @@ pub struct Core {
     device_public_key: Vec<u8>,
     wua: Option<wua::WalletUnitAttestation>,
     issuer_trusted_current: bool,
+    /// Authenticated certificate identity used by the issuance machine and audit log.
     issuer_id_current: String,
     /// Full issuer path retained for revalidation throughout issuance and credential provenance.
     issuer_cert_chain_current: Vec<Vec<u8>>,
-    /// Public key from the leaf of the currently validated issuer path.
-    issuer_public_key_current: Vec<u8>,
+    /// Original shell assertion, retained only so the credential response can re-check it.
+    issuer_id_assertion_current: String,
+    /// Service-scoped path/profile results for the active issuer chain.
+    issuer_candidates_current: Vec<CredentialIssuerEvidence>,
     /// Parsed credential that crossed the authentication/policy boundary for this response.
     pending_verified_credential: Option<AuthenticatedCredential>,
     last_credential_ingestion_error: Option<CredentialIngestionError>,
@@ -1053,7 +1082,8 @@ impl Core {
             issuer_trusted_current: false,
             issuer_id_current: String::new(),
             issuer_cert_chain_current: Vec::new(),
-            issuer_public_key_current: Vec::new(),
+            issuer_id_assertion_current: String::new(),
+            issuer_candidates_current: Vec::new(),
             pending_verified_credential: None,
             last_credential_ingestion_error: None,
             status_lists: BTreeMap::new(),
@@ -1405,6 +1435,7 @@ impl Core {
     }
 
     fn store_verified_credential(&mut self, authenticated: AuthenticatedCredential) {
+        debug_assert!(authenticated.provenance.issuer.is_internally_consistent());
         let provenance = StoredProvenance::Authenticated(authenticated.provenance);
         match authenticated.credential {
             VerifiedCredential::SdJwt { holding, validity } => {
@@ -1447,19 +1478,17 @@ impl Core {
         format: oid4vci::CredentialFormat,
         bytes: &[u8],
         issuer_cert_chain: &[Vec<u8>],
-        issuer_id: &str,
+        issuer_id_assertion: &str,
     ) -> Result<AuthenticatedCredential, CredentialIngestionError> {
-        let issuer_key = self
-            .resolve_issuer_key(issuer_cert_chain)
-            .ok_or(CredentialIngestionError::UntrustedIssuer)?;
-        let credential = self.verify_received_credential(format, bytes, &issuer_key, issuer_id)?;
+        let issuers = self.resolve_credential_issuers(issuer_cert_chain);
+        let (credential, issuer) =
+            self.verify_received_credential(format, bytes, &issuers, issuer_id_assertion)?;
         Ok(AuthenticatedCredential {
             credential,
             provenance: CredentialProvenance {
                 format,
                 raw_credential: bytes.to_vec(),
-                issuer_cert_chain: issuer_cert_chain.to_vec(),
-                issuer_id: issuer_id.to_string(),
+                issuer,
             },
         })
     }
@@ -1495,7 +1524,13 @@ impl Core {
             .iter()
             .map(|stored| {
                 let c = &stored.holding;
-                let (vct, iss) = credential_vct_and_issuer(&c.issuer_jwt);
+                let (vct, jwt_issuer) = credential_vct_and_issuer(&c.issuer_jwt);
+                let issuer = match &stored.provenance {
+                    StoredProvenance::Authenticated(provenance) => {
+                        provenance.issuer.identity.as_str()
+                    }
+                    StoredProvenance::TestFixture => &jwt_issuer,
+                };
                 let disclosures = c
                     .disclosures_by_claim
                     .iter()
@@ -1504,7 +1539,7 @@ impl Core {
                     .join(",");
                 format!(
                     r#"{{"vct":{:?},"issuer":{:?},"format":"dc+sd-jwt","disclosuresByClaim":{{{}}}}}"#,
-                    vct, iss, disclosures
+                    vct, issuer, disclosures
                 )
             })
             .collect();
@@ -1512,6 +1547,10 @@ impl Core {
         // `claims` so the shell renders the card; `disclosuresByClaim` stays empty for this format.
         for stored in &self.mdoc_holdings {
             let h = &stored.holding;
+            let issuer = match &stored.provenance {
+                StoredProvenance::Authenticated(provenance) => provenance.issuer.identity.as_str(),
+                StoredProvenance::TestFixture => "ISO 18013-5 mdoc",
+            };
             let claims = h
                 .issuer_signed
                 .name_spaces
@@ -1527,8 +1566,8 @@ impl Core {
                 .collect::<Vec<_>>()
                 .join(",");
             items.push(format!(
-                r#"{{"vct":{:?},"issuer":"ISO 18013-5 mdoc","format":"mso_mdoc","claims":{{{}}},"disclosuresByClaim":{{}}}}"#,
-                h.doctype, claims
+                r#"{{"vct":{:?},"issuer":{:?},"format":"mso_mdoc","claims":{{{}}},"disclosuresByClaim":{{}}}}"#,
+                h.doctype, issuer, claims
             ));
         }
         format!("[{}]", items.join(","))
@@ -1872,13 +1911,21 @@ impl Core {
                 // machine to Idle so a wallet can be issued several credentials in one lifetime.
                 // Replay protection (`iss_seen_c_nonces`) deliberately persists across sessions.
                 self.issuance = oid4vci::State::Idle;
-                // Issuer trust is decided in-core against the trusted list (PID/attestation CAs).
                 self.issuer_cert_chain_current = issuer_cert_chain;
-                self.issuer_public_key_current = self
-                    .resolve_issuer_key(&self.issuer_cert_chain_current)
+                // Resolve each trusted-list service separately. The shell value is only a
+                // compatibility assertion; proof audience and audit identity come from the
+                // authenticated leaf URI and a mismatch keeps the issuance machine fail-closed.
+                let issuers = self.resolve_credential_issuers(&self.issuer_cert_chain_current);
+                let authenticated_identity = issuers
+                    .first()
+                    .map(|issuer| issuer.identity.clone())
                     .unwrap_or_default();
-                self.issuer_trusted_current = !self.issuer_public_key_current.is_empty();
-                self.issuer_id_current = issuer_id;
+                let consistent_path = Self::issuer_candidates_are_consistent(&issuers);
+                self.issuer_trusted_current =
+                    !issuers.is_empty() && consistent_path && issuer_id == authenticated_identity;
+                self.issuer_id_current = authenticated_identity;
+                self.issuer_id_assertion_current = issuer_id;
+                self.issuer_candidates_current = if consistent_path { issuers } else { Vec::new() };
                 self.pending_verified_credential = None;
                 self.last_credential_ingestion_error = None;
                 self.drive_issuance(oid4vci::Input::CredentialOffer(offer))
@@ -1907,7 +1954,7 @@ impl Core {
                     f,
                     &bytes,
                     &self.issuer_cert_chain_current,
-                    &self.issuer_id_current,
+                    &self.issuer_id_assertion_current,
                 ) {
                     Ok(verified) => {
                         self.pending_verified_credential = Some(verified);
@@ -2456,22 +2503,68 @@ impl Core {
         }
     }
 
-    /// Validate the issuer path against PID/attestation anchors and return only the authenticated
-    /// leaf key. A caller cannot accidentally use a key from an unvalidated chain.
-    fn resolve_issuer_key(&self, chain: &[Vec<u8>]) -> Option<Vec<u8>> {
-        let mut anchors = self
-            .trust_store
-            .parsed_anchors_at(ServiceType::PidProvider, self.now_epoch);
-        anchors.extend(
-            self.trust_store
-                .parsed_anchors_at(ServiceType::AttestationProvider, self.now_epoch),
-        );
-        if anchors.is_empty() {
-            return None;
-        }
-        x509::validate_path(chain, &anchors, self.now_epoch, &AwsLc)
-            .ok()
-            .and_then(|path| path.first().map(|leaf| leaf.public_key_raw.clone()))
+    /// Resolve a credential issuer independently in each catalogue-supported trust domain. The
+    /// returned values retain authenticated identity, leaf key and validity provenance; roots are
+    /// never unioned, and the signed credential type later selects exactly one required service.
+    fn resolve_credential_issuers(&self, chain: &[Vec<u8>]) -> Vec<CredentialIssuerEvidence> {
+        [IssuerTrustDomain::Pid, IssuerTrustDomain::Attestation]
+            .into_iter()
+            .filter_map(|service| {
+                let trust_service = match service {
+                    IssuerTrustDomain::Pid => ServiceType::PidProvider,
+                    IssuerTrustDomain::Attestation => ServiceType::AttestationProvider,
+                };
+                let anchors = self
+                    .trust_store
+                    .parsed_anchors_at(trust_service, self.now_epoch);
+                if anchors.is_empty() {
+                    return None;
+                }
+                x509::check_credential_issuer(chain, &anchors, self.now_epoch, &AwsLc)
+                    .ok()
+                    .map(|validated| CredentialIssuerEvidence {
+                        identity: validated.identity,
+                        service,
+                        public_key_raw: validated.public_key_raw,
+                        certificate_path: chain.to_vec(),
+                        not_before: validated.not_before,
+                        not_after: validated.not_after,
+                    })
+            })
+            .collect()
+    }
+
+    fn issuer_for_type<'a>(
+        &self,
+        issuers: &'a [CredentialIssuerEvidence],
+        credential_type: &str,
+    ) -> Result<&'a CredentialIssuerEvidence, CredentialIngestionError> {
+        let service = self
+            .catalogue
+            .issuer_trust_domain(credential_type)
+            .ok_or(CredentialIngestionError::UnknownCredentialType)?;
+        issuers
+            .iter()
+            .find(|issuer| issuer.service == service)
+            .ok_or(CredentialIngestionError::IssuerServiceMismatch)
+    }
+
+    /// Every service candidate comes from the same supplied leaf-first path. Reject any ambiguity
+    /// before a credential verifier is allowed to use one candidate's key and another candidate's
+    /// policy domain.
+    fn issuer_candidates_are_consistent(issuers: &[CredentialIssuerEvidence]) -> bool {
+        let Some(first) = issuers.first() else {
+            return false;
+        };
+        first.is_internally_consistent()
+            && issuers.iter().all(|issuer| {
+                issuer.is_internally_consistent()
+                    && issuer.identity == first.identity
+                    && issuer.public_key_raw == first.public_key_raw
+                    && issuer.certificate_path == first.certificate_path
+                    && issuer.not_before == first.not_before
+                    && issuer.not_after == first.not_after
+            })
     }
 
     /// Resolve a status-signing key only through anchors authorised for the StatusProvider
@@ -2496,13 +2589,13 @@ impl Core {
         &self,
         format: oid4vci::CredentialFormat,
         bytes: &[u8],
-        issuer_public_key: &[u8],
-        issuer_id: &str,
-    ) -> Result<VerifiedCredential, CredentialIngestionError> {
+        issuers: &[CredentialIssuerEvidence],
+        issuer_id_assertion: &str,
+    ) -> Result<(VerifiedCredential, CredentialIssuerEvidence), CredentialIngestionError> {
         if self.now_epoch <= 0 {
             return Err(CredentialIngestionError::ClockNotSet);
         }
-        if issuer_public_key.is_empty() {
+        if !Self::issuer_candidates_are_consistent(issuers) {
             return Err(CredentialIngestionError::UntrustedIssuer);
         }
         if self.device_public_key.is_empty() {
@@ -2510,10 +2603,10 @@ impl Core {
         }
         match format {
             oid4vci::CredentialFormat::DcSdJwt => {
-                self.verify_sdjwt_credential(bytes, issuer_public_key, issuer_id)
+                self.verify_sdjwt_credential(bytes, issuers, issuer_id_assertion)
             }
             oid4vci::CredentialFormat::MsoMdoc => {
-                self.verify_mdoc_credential(bytes, issuer_public_key, issuer_id)
+                self.verify_mdoc_credential(bytes, issuers, issuer_id_assertion)
             }
         }
     }
@@ -2521,9 +2614,9 @@ impl Core {
     fn verify_sdjwt_credential(
         &self,
         bytes: &[u8],
-        issuer_public_key: &[u8],
-        issuer_id: &str,
-    ) -> Result<VerifiedCredential, CredentialIngestionError> {
+        issuers: &[CredentialIssuerEvidence],
+        issuer_id_assertion: &str,
+    ) -> Result<(VerifiedCredential, CredentialIssuerEvidence), CredentialIngestionError> {
         let compact = core::str::from_utf8(bytes)
             .map_err(|_| CredentialIngestionError::MalformedCredential)?;
         let sd = sdjwt::SdJwtVc::parse(compact)
@@ -2537,7 +2630,7 @@ impl Core {
             return Err(CredentialIngestionError::UnsupportedAlgorithm);
         }
         let claims = sd
-            .verify_and_disclose(&AwsLc, &AwsLc, issuer_public_key, alg)
+            .verify_and_disclose(&AwsLc, &AwsLc, &issuers[0].public_key_raw, alg)
             .map_err(|_| CredentialIngestionError::SignatureInvalid)?;
         let issuer_payload = sd
             .issuer_payload()
@@ -2557,9 +2650,6 @@ impl Core {
             .get("iss")
             .and_then(|v| v.as_str())
             .ok_or(CredentialIngestionError::MalformedCredential)?;
-        if issuer.is_empty() || issuer != issuer_id {
-            return Err(CredentialIngestionError::IssuerMismatch);
-        }
         let vct = claims
             .get("vct")
             .and_then(|v| v.as_str())
@@ -2572,7 +2662,17 @@ impl Core {
         if credential_type.format != "dc+sd-jwt" {
             return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
         }
-        if !self.catalogue.issuer_allowed(vct, issuer) {
+        let authenticated_issuer = self.issuer_for_type(issuers, vct)?;
+        if issuer.is_empty()
+            || issuer != authenticated_issuer.identity
+            || issuer_id_assertion != authenticated_issuer.identity
+        {
+            return Err(CredentialIngestionError::IssuerMismatch);
+        }
+        if !self
+            .catalogue
+            .issuer_allowed(vct, &authenticated_issuer.identity)
+        {
             return Err(CredentialIngestionError::IssuerNotAllowedForType);
         }
         let held_claims: Vec<String> = claims.keys().cloned().collect();
@@ -2588,21 +2688,24 @@ impl Core {
         }
         let status = status_reference_from_claims(&claims)?;
         let holding = held_credential_from_verified_sd(&sd, status)?;
-        Ok(VerifiedCredential::SdJwt { holding, validity })
+        Ok((
+            VerifiedCredential::SdJwt { holding, validity },
+            authenticated_issuer.clone(),
+        ))
     }
 
     fn verify_mdoc_credential(
         &self,
         bytes: &[u8],
-        issuer_public_key: &[u8],
-        issuer_id: &str,
-    ) -> Result<VerifiedCredential, CredentialIngestionError> {
+        issuers: &[CredentialIssuerEvidence],
+        issuer_id_assertion: &str,
+    ) -> Result<(VerifiedCredential, CredentialIssuerEvidence), CredentialIngestionError> {
         let issuer_signed = decode_mdoc_credential(bytes)?;
         let mso = mdoc::verify_issuer_signed(
             &issuer_signed,
             &AwsLc,
             &AwsLc,
-            issuer_public_key,
+            &issuers[0].public_key_raw,
             Alg::Es256,
         )
         .map_err(|_| CredentialIngestionError::SignatureInvalid)?;
@@ -2616,7 +2719,14 @@ impl Core {
         if credential_type.format != "mso_mdoc" {
             return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
         }
-        if !self.catalogue.issuer_allowed(&mso.doc_type, issuer_id) {
+        let authenticated_issuer = self.issuer_for_type(issuers, &mso.doc_type)?;
+        if issuer_id_assertion != authenticated_issuer.identity {
+            return Err(CredentialIngestionError::IssuerMismatch);
+        }
+        if !self
+            .catalogue
+            .issuer_allowed(&mso.doc_type, &authenticated_issuer.identity)
+        {
             return Err(CredentialIngestionError::IssuerNotAllowedForType);
         }
         let mut held_claims = Vec::new();
@@ -2639,13 +2749,16 @@ impl Core {
         if !mdoc_device_binding_matches(&mso.device_key, &self.device_public_key) {
             return Err(CredentialIngestionError::DeviceBindingMismatch);
         }
-        Ok(VerifiedCredential::Mdoc {
-            holding: MdocHolding {
-                doctype: mso.doc_type,
-                issuer_signed,
+        Ok((
+            VerifiedCredential::Mdoc {
+                holding: MdocHolding {
+                    doctype: mso.doc_type,
+                    issuer_signed,
+                },
+                validity,
             },
-            validity,
-        })
+            authenticated_issuer.clone(),
+        ))
     }
 
     fn drive_issuance(&mut self, input: oid4vci::Input) -> Vec<Effect> {
@@ -2662,9 +2775,13 @@ impl Core {
                 )
             })
             .unwrap_or(false);
-        let issuer_trusted = self
-            .resolve_issuer_key(&self.issuer_cert_chain_current)
-            .is_some_and(|key| key == self.issuer_public_key_current);
+        let current_issuers = self.resolve_credential_issuers(&self.issuer_cert_chain_current);
+        let issuer_trusted = Self::issuer_candidates_are_consistent(&current_issuers)
+            && current_issuers == self.issuer_candidates_current
+            && current_issuers
+                .first()
+                .is_some_and(|issuer| issuer.identity == self.issuer_id_current)
+            && self.issuer_id_assertion_current == self.issuer_id_current;
         self.issuer_trusted_current = issuer_trusted;
 
         let (next, outputs) = {
@@ -2939,10 +3056,13 @@ impl Core {
             .authenticate_received_credential(
                 provenance.format,
                 &provenance.raw_credential,
-                &provenance.issuer_cert_chain,
-                &provenance.issuer_id,
+                &provenance.issuer.certificate_path,
+                &provenance.issuer.identity,
             )
             .map_err(Self::eligibility_from_ingestion_error)?;
+        if authenticated.provenance != *provenance {
+            return Err(PresentationEligibilityError::CredentialProvenanceInvalid);
+        }
         match authenticated.credential {
             VerifiedCredential::SdJwt { holding, validity }
                 if holding == stored.holding && validity == stored.validity =>
@@ -2968,10 +3088,13 @@ impl Core {
             .authenticate_received_credential(
                 provenance.format,
                 &provenance.raw_credential,
-                &provenance.issuer_cert_chain,
-                &provenance.issuer_id,
+                &provenance.issuer.certificate_path,
+                &provenance.issuer.identity,
             )
             .map_err(Self::eligibility_from_ingestion_error)?;
+        if authenticated.provenance != *provenance {
+            return Err(PresentationEligibilityError::CredentialProvenanceInvalid);
+        }
         match authenticated.credential {
             VerifiedCredential::Mdoc { holding, validity }
                 if holding == stored.holding && validity == stored.validity =>
@@ -3337,15 +3460,26 @@ impl Core {
         credential: &[u8],
         issuer_chain: &[Vec<u8>],
     ) -> bool {
-        let Some(issuer_key) = self.resolve_issuer_key(issuer_chain) else {
+        let issuers = self.resolve_credential_issuers(issuer_chain);
+        let Some(signing_issuer) = issuers.first() else {
             return false;
         };
         core::str::from_utf8(credential)
             .ok()
             .and_then(|s| sdjwt::SdJwtVc::parse(s).ok())
-            .map(|vc| {
-                vc.verify_and_disclose(&AwsLc, &AwsLc, &issuer_key, Alg::Es256)
-                    .is_ok()
+            .and_then(|vc| {
+                let claims = vc
+                    .verify_and_disclose(&AwsLc, &AwsLc, &signing_issuer.public_key_raw, Alg::Es256)
+                    .ok()?;
+                let issuer_id = claims.get("iss")?.as_str()?;
+                let credential_type = claims.get("vct")?.as_str()?;
+                let authenticated_issuer = self.issuer_for_type(&issuers, credential_type).ok()?;
+                Some(
+                    issuer_id == authenticated_issuer.identity
+                        && self
+                            .catalogue
+                            .issuer_allowed(credential_type, &authenticated_issuer.identity),
+                )
             })
             .unwrap_or(false)
     }
