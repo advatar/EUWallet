@@ -1,7 +1,5 @@
 package eu.advatar.wallet.shell
 
-import java.net.URI
-
 fun interface WalletSigner {
     fun sign(keyRef: String, payload: ByteArray): ByteArray
 }
@@ -9,16 +7,10 @@ fun interface WalletSigner {
 data class HttpResponse(
     val statusCode: Int,
     val body: ByteArray,
-    val contentType: String? = null,
 )
 
 fun interface WalletHttpClient {
-    fun post(url: String, body: ByteArray, profile: HttpDeliveryProfile): HttpResponse
-}
-
-/** Host-owned browser/app routing for one validated OpenID4VP response redirect. */
-fun interface OpenId4VpRedirectHandler {
-    fun handle(redirectUri: URI)
+    fun post(url: String, body: ByteArray): HttpResponse
 }
 
 fun interface WalletStorage {
@@ -35,7 +27,7 @@ fun interface TrustResolver {
 }
 
 fun interface ScreenRenderer {
-    fun render(operationId: Long?, authorizationHash: ByteArray?, screen: WalletScreen)
+    fun render(screen: WalletScreen)
 }
 
 data class TokenResult(
@@ -52,19 +44,4 @@ interface IssuerResponder {
     fun token(): TokenResult
 
     fun credential(proofJwt: ByteArray): CredentialResult
-}
-
-data class StatusListResolution(
-    val response: HttpResponse,
-    val providerCertificateChain: List<ByteArray>,
-)
-
-/** Fetches a Token Status List and the status provider's leaf-first certificate chain. */
-fun interface StatusListResolver {
-    fun fetch(uri: String): StatusListResolution
-}
-
-/** Publishes a TS09 transfer offer. Success means the wallet is waiting for peer input. */
-fun interface TransferOfferPublisher {
-    fun publish(offeredKey: ByteArray)
 }

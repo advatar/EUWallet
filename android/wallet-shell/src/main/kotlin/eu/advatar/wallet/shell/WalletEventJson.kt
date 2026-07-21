@@ -8,21 +8,13 @@ import org.json.JSONObject
 object WalletEventJson {
     fun setClock(epoch: Long): String = event("setClock").put("epoch", epoch).toString()
 
-    fun redactTransaction(seq: ULong): String = event("redactTransaction")
-        .put("seq", unsignedNumber(seq))
-        .toString()
-
-    fun wipeTransactionLog(): String = event("wipeTransactionLog").toString()
-
     fun authorizationRequestReceived(request: ByteArray): String = eventWithBytes(
         type = "authorizationRequestReceived",
         key = "request",
         bytes = request,
     )
 
-    fun rpCertChainResolved(operationId: Long, resolution: TrustResolution): String =
-        event("rpCertChainResolved")
-        .put("operationId", operationId)
+    fun rpCertChainResolved(resolution: TrustResolution): String = event("rpCertChainResolved")
         .put(
             "rpCertChain",
             JSONArray().apply {
@@ -32,38 +24,18 @@ object WalletEventJson {
         .put("registeredRedirectUris", JSONArray(resolution.registeredRedirectUris))
         .toString()
 
-    fun userConsented(operationId: Long, authorizationHash: ByteArray): String =
-        event("userConsented")
-        .put("operationId", operationId)
-        .put("authorizationHash", byteArray(authorizationHash))
-        .toString()
+    fun userConsented(): String = event("userConsented").toString()
 
     /** This builder is for an explicit UI rejection only; the executor never calls it on failure. */
-    fun userDeclined(operationId: Long): String = event("userDeclined")
-        .put("operationId", operationId)
-        .toString()
+    fun userDeclined(): String = event("userDeclined").toString()
 
-    fun deviceSignatureProduced(operationId: Long, signature: ByteArray): String = eventWithBytes(
+    fun deviceSignatureProduced(signature: ByteArray): String = eventWithBytes(
         type = "deviceSignatureProduced",
         key = "signature",
         bytes = signature,
-        operationId = operationId,
     )
 
-    fun presentationDelivered(operationId: Long): String = operationEvent(
-        "presentationDelivered",
-        operationId,
-    ).toString()
-
-    fun paymentAuthorizationDelivered(operationId: Long): String = operationEvent(
-        "paymentAuthorizationDelivered",
-        operationId,
-    ).toString()
-
-    fun qesAuthorizationDelivered(operationId: Long): String = operationEvent(
-        "qesAuthorizationDelivered",
-        operationId,
-    ).toString()
+    fun presentationDelivered(): String = event("presentationDelivered").toString()
 
     fun paymentAuthorizationRequestReceived(request: ByteArray): String = eventWithBytes(
         type = "paymentAuthorizationRequestReceived",
@@ -71,15 +43,9 @@ object WalletEventJson {
         bytes = request,
     )
 
-    fun paymentApproved(operationId: Long, authorizationHash: ByteArray): String = operationEvent(
-        "paymentApproved",
-        operationId,
-    ).put("authorizationHash", byteArray(authorizationHash)).toString()
+    fun paymentApproved(): String = event("paymentApproved").toString()
 
-    fun paymentDeclined(operationId: Long): String = operationEvent(
-        "paymentDeclined",
-        operationId,
-    ).toString()
+    fun paymentDeclined(): String = event("paymentDeclined").toString()
 
     fun qesSignRequestReceived(request: ByteArray): String = eventWithBytes(
         type = "qesSignRequestReceived",
@@ -87,15 +53,9 @@ object WalletEventJson {
         bytes = request,
     )
 
-    fun qesAuthorized(operationId: Long, authorizationHash: ByteArray): String = operationEvent(
-        "qesAuthorized",
-        operationId,
-    ).put("authorizationHash", byteArray(authorizationHash)).toString()
+    fun qesAuthorized(): String = event("qesAuthorized").toString()
 
-    fun qesDeclined(operationId: Long): String = operationEvent(
-        "qesDeclined",
-        operationId,
-    ).toString()
+    fun qesDeclined(): String = event("qesDeclined").toString()
 
     fun credentialOfferReceived(
         offer: ByteArray,
@@ -110,73 +70,31 @@ object WalletEventJson {
         .put("issuerId", issuerId)
         .toString()
 
-    fun parPushed(operationId: Long, pkceS256: Boolean): String = operationEvent(
-        "parPushed",
-        operationId,
-    )
+    fun parPushed(pkceS256: Boolean): String = event("parPushed")
         .put("pkceS256", pkceS256)
         .toString()
 
-    fun authorizationCodeReturned(operationId: Long, code: ByteArray): String = eventWithBytes(
+    fun authorizationCodeReturned(code: ByteArray): String = eventWithBytes(
         type = "authorizationCodeReturned",
         key = "code",
         bytes = code,
-        operationId = operationId,
     )
 
-    fun transactionCodeEntered(operationId: Long, code: ByteArray): String = eventWithBytes(
+    fun transactionCodeEntered(code: ByteArray): String = eventWithBytes(
         type = "transactionCodeEntered",
         key = "code",
         bytes = code,
-        operationId = operationId,
     )
 
-    fun tokenReceived(operationId: Long, result: TokenResult): String = operationEvent(
-        "tokenReceived",
-        operationId,
-    )
+    fun tokenReceived(result: TokenResult): String = event("tokenReceived")
         .put("bound", result.bound)
         .put("cNonce", unsignedNumber(result.cNonce))
         .toString()
 
-    fun credentialReceived(operationId: Long, result: CredentialResult): String = operationEvent(
-        "credentialReceived",
-        operationId,
-    )
+    fun credentialReceived(result: CredentialResult): String = event("credentialReceived")
         .put("format", result.format)
         .put("bytes", byteArray(result.bytes))
         .toString()
-
-    fun statusListReceived(
-        operationId: Long,
-        uri: String,
-        httpStatus: Int,
-        token: ByteArray,
-        providerCertificateChain: List<ByteArray>,
-    ): String = operationEvent("statusListReceived", operationId)
-        .put("uri", uri)
-        .put("httpStatus", httpStatus)
-        .put("token", byteArray(token))
-        .put(
-            "providerCertChain",
-            JSONArray().apply { providerCertificateChain.forEach { put(byteArray(it)) } },
-        )
-        .toString()
-
-    fun operationSucceeded(operationId: Long): String = operationEvent(
-        "operationSucceeded",
-        operationId,
-    ).toString()
-
-    fun operationFailed(operationId: Long, failure: WalletOperationFailure): String =
-        operationEvent("operationFailed", operationId)
-            .put("failure", failure.wireValue)
-            .toString()
-
-    fun operationCancelled(operationId: Long): String = operationEvent(
-        "operationCancelled",
-        operationId,
-    ).toString()
 
     fun walletTransferOfferCreated(): String = event("walletTransferOfferCreated").toString()
 
@@ -201,16 +119,7 @@ object WalletEventJson {
 
     private fun event(type: String): JSONObject = JSONObject().put("type", type)
 
-    private fun operationEvent(type: String, operationId: Long): JSONObject = event(type)
-        .put("operationId", operationId)
-
-    private fun eventWithBytes(
-        type: String,
-        key: String,
-        bytes: ByteArray,
-        operationId: Long? = null,
-    ): String = event(type)
-        .apply { operationId?.let { put("operationId", it) } }
+    private fun eventWithBytes(type: String, key: String, bytes: ByteArray): String = event(type)
         .put(key, byteArray(bytes))
         .toString()
 
@@ -219,17 +128,4 @@ object WalletEventJson {
     private fun byteArray(bytes: ByteArray): JSONArray = JSONArray().apply {
         bytes.forEach { put(it.toInt() and 0xff) }
     }
-}
-
-enum class WalletOperationFailure(val wireValue: String) {
-    TRUST("trust"),
-    STORAGE("storage"),
-    SIGNING("signing"),
-    TRANSPORT("transport"),
-    HTTP_STATUS("httpStatus"),
-    ISSUER("issuer"),
-    STATUS("status"),
-    RENDERING("rendering"),
-    MISSING_DEPENDENCY("missingDependency"),
-    UNSUPPORTED("unsupported"),
 }

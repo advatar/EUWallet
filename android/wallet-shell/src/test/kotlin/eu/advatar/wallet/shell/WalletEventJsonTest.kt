@@ -11,35 +11,11 @@ import org.junit.Test
 class WalletEventJsonTest {
     @Test
     fun emitsFullUInt64AsJsonNumberRatherThanString() {
-        val root = parse(WalletEventJson.tokenReceived(7, TokenResult(true, ULong.MAX_VALUE)))
+        val root = parse(WalletEventJson.tokenReceived(TokenResult(true, ULong.MAX_VALUE)))
         val nonce = root["cNonce"] as JsonPrimitive
 
         assertFalse(nonce.isString)
         assertEquals(ULong.MAX_VALUE.toString(), nonce.content)
-    }
-
-    @Test
-    fun transactionHistoryMutationsMatchTheCoreEventContract() {
-        val redact = parse(WalletEventJson.redactTransaction(ULong.MAX_VALUE))
-        val wipe = parse(WalletEventJson.wipeTransactionLog())
-
-        assertEquals(setOf("type", "seq"), redact.keys)
-        assertEquals("redactTransaction", (redact["type"] as JsonPrimitive).content)
-        val seq = redact["seq"] as JsonPrimitive
-        assertFalse(seq.isString)
-        assertEquals(ULong.MAX_VALUE.toString(), seq.content)
-        assertEquals(setOf("type"), wipe.keys)
-        assertEquals("wipeTransactionLog", (wipe["type"] as JsonPrimitive).content)
-    }
-
-    @Test
-    fun approvalEchoesOperationAndAuthorizationHash() {
-        val hash = ByteArray(32) { it.toByte() }
-        val root = parse(WalletEventJson.userConsented(42, hash))
-
-        assertEquals("42", (root["operationId"] as JsonPrimitive).content)
-        val emitted = root["authorizationHash"] as JsonArray
-        assertEquals((0..31).map(Int::toString), emitted.map { (it as JsonPrimitive).content })
     }
 
     @Test
