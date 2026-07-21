@@ -179,72 +179,37 @@ final class RealTransportTests: XCTestCase {
         }
     }
 
-    func testOpenId4VpPostUsesExactFormJsonAndBoundedResponsePolicy() async throws {
+    func testGenericPostUsesSameDestinationAndBoundedResponsePolicy() async throws {
         let client = makeClient(limit: 16)
         setResponse(
             status: 200,
             headers: ["Content-Type": "application/json; charset=utf-8"],
             body: Data("{}".utf8))
 
-        _ = try await client.post(
-            url: "https://api.example/response",
-            body: Data("vp_token=value".utf8),
-            profile: .openid4vpDirectPost)
+        _ = try await client.post(url: "https://api.example/token", body: Data("{}".utf8))
         XCTAssertEqual(WalletURLProtocol.lastRequest?.httpMethod, "POST")
         XCTAssertEqual(WalletURLProtocol.lastRequest?.value(forHTTPHeaderField: "Accept"),
-                       "application/json")
+                       "*/*")
         XCTAssertEqual(WalletURLProtocol.lastRequest?.value(forHTTPHeaderField: "Content-Type"),
-                       "application/x-www-form-urlencoded")
+                       "application/json")
 
+        // This transport also carries direct_post, payment and QES effects whose successful
+        // response contracts are not universally JSON. Typed adapters enforce endpoint MIME.
         setResponse(status: 200, headers: ["Content-Type": "text/plain"], body: Data("ok".utf8))
-        await assertHttpError(
-            .unacceptableContentType(expected: ["application/json"], actual: "text/plain")
-        ) {
-            try await client.post(
-                url: "https://api.example/response",
-                body: Data("vp_token=value".utf8),
-                profile: .openid4vpDirectPost)
-        }
+        let nonJSON = try await client.post(url: "https://api.example/response", body: Data())
+        XCTAssertEqual(nonJSON.contentType, "text/plain")
+        XCTAssertEqual(nonJSON.body, Data("ok".utf8))
 
         setResponse(status: 200, headers: [:], body: Data(repeating: 1, count: 17))
         await assertHttpError(.responseTooLarge(limit: 16)) {
-            try await client.post(
-                url: "https://api.example/response",
-                body: Data("vp_token=value".utf8),
-                profile: .openid4vpDirectPost)
+            try await client.post(url: "https://api.example/response", body: Data())
         }
         await assertHttpError(.invalidUrl("http://api.example/response")) {
-            try await client.post(
-                url: "http://api.example/response",
-                body: Data("vp_token=value".utf8),
-                profile: .openid4vpDirectPost)
+            try await client.post(url: "http://api.example/response", body: Data())
         }
 
-        await assertHttpError(
-            .invalidProtocolBody("OpenID4VP direct_post parameters must be UTF-8")
-        ) {
-            try await client.post(
-                url: "https://api.example/response",
-                body: Data([0xff]),
-                profile: .openid4vpDirectPost)
-        }
-    }
-
-    func testSharedProductionPostRejectsPaymentAndQesBeforeNetworkAccess() async {
-        let client = makeClient(limit: 16)
-        for profile in [
-            HttpDeliveryProfile.paymentAuthorization,
-            HttpDeliveryProfile.qesAuthorization,
-        ] {
-            WalletURLProtocol.lastRequest = nil
-            await assertHttpError(.unsupportedDeliveryProfile(profile)) {
-                try await client.post(
-                    url: "https://api.example/authorize",
-                    body: Data([1, 2, 3]),
-                    profile: profile)
-            }
-            XCTAssertNil(WalletURLProtocol.lastRequest)
-        }
+        setResponse(status: 204, headers: [:])
+        _ = try await client.post(url: "https://api.example/response", body: Data())
     }
 
     func testProtocolGetHelpersSetExactMimeAndEndpointPolicies() async throws {

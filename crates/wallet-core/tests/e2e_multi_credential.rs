@@ -236,7 +236,7 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
     let obj: serde_json::Value = serde_json::from_str(&vp).expect("vp_token JSON object");
 
     // 1) PID (SD-JWT): the KB-JWT verifies; only age_over_18 was disclosed.
-    let pid_pres = obj["pid"].as_str().expect("pid presentation");
+    let pid_pres = obj["pid"][0].as_str().expect("pid presentation");
     let sd = sdjwt::SdJwtVc::parse(pid_pres).expect("SD-JWT parses");
     let kb = sdjwt::KeyBindingCheck {
         device_public_key: device.public_key_raw(),
@@ -255,7 +255,7 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
 
     // 2) mDL (mdoc): the DeviceResponse device signature verifies over the SessionTranscript.
     let mgn = field(&body, "mdoc_generated_nonce").expect("mdoc_generated_nonce companion field");
-    let dr_b64 = obj["mdl"].as_str().expect("mdl DeviceResponse");
+    let dr_b64 = obj["mdl"][0].as_str().expect("mdl DeviceResponse");
     let dr = cbor::from_canonical_slice(&Base64UrlUnpadded::decode_vec(dr_b64).unwrap()).unwrap();
     let docs = match map_get(&dr, "documents") {
         Some(Value::Array(a)) => a,
