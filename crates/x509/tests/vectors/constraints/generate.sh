@@ -15,6 +15,14 @@ new_ec_request() {
         -subj "/CN=$subject" >/dev/null 2>&1
 }
 
+new_named_ec_request() {
+    name=$1
+    subject=$2
+    openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+        -keyout "$work_dir/$name.key" -out "$work_dir/$name.csr" \
+        -subj "$subject" >/dev/null 2>&1
+}
+
 new_rsa_request() {
     name=$1
     subject=$2
@@ -110,6 +118,19 @@ new_ec_request illegal-constraint-leaf "Illegal Constraint Leaf"
 ca_sign illegal-constraint-leaf constrained-root leaf_illegal_constraint 4003
 new_ec_request plain-leaf "Plain Leaf"
 ca_sign plain-leaf email-constraint-root leaf 4004
+for vector in allowed outside excluded; do
+    new_ec_request "email-$vector-leaf" "Email $vector Leaf"
+    ca_sign "email-$vector-leaf" email-constraint-root "leaf_email_$vector" \
+        "41$(printf '%02d' "$(printf '%s' "$vector" | wc -c)")"
+done
+new_named_ec_request directory-constraint-root "/C=DE/O=Example/CN=Directory Constraint Root"
+self_sign directory-constraint-root root_directory_constraint 4201
+new_named_ec_request directory-allowed-leaf "/C=DE/O=Example/OU=PID/CN=Allowed Wallet"
+ca_sign directory-allowed-leaf directory-constraint-root leaf 4202
+new_named_ec_request directory-outside-leaf "/C=DE/O=Other/OU=PID/CN=Outside Wallet"
+ca_sign directory-outside-leaf directory-constraint-root leaf 4203
+new_named_ec_request directory-excluded-leaf "/C=DE/O=Example/OU=Blocked/CN=Excluded Wallet"
+ca_sign directory-excluded-leaf directory-constraint-root leaf 4204
 new_ec_request noncritical-leaf "Noncritical Leaf"
 ca_sign noncritical-leaf noncritical-constraint-root leaf 4005
 
@@ -151,6 +172,8 @@ ca_sign sha1-leaf rsa-root leaf 5204 sha1
 for vector in constrained-root leaf-allowed leaf-dns-outside leaf-dns-excluded leaf-uri-apex \
     leaf-uri-no-authority leaf-uri-excluded leaf-ip-outside leaf-ip-excluded intersection-root \
     intersection-intermediate leaf-team-allowed leaf-team-outside email-constraint-root \
+    email-allowed-leaf email-outside-leaf email-excluded-leaf directory-constraint-root \
+    directory-allowed-leaf directory-outside-leaf directory-excluded-leaf \
     noncritical-constraint-root illegal-constraint-leaf plain-leaf noncritical-leaf rsa-root \
     rsa-signed-ec-leaf rsa-sha256-leaf rsa-sha512-leaf p256-sha384-root ec-signed-rsa-leaf \
     p384-root p384-leaf ed25519-root ed25519-leaf weak-rsa-root exponent-three-root p521-root \

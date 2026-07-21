@@ -24,6 +24,7 @@ use x509_cert::ext::pkix::{
     AuthorityKeyIdentifier, BasicConstraints, CertificatePolicies, ExtendedKeyUsage, KeyUsage,
     SubjectAltName, SubjectKeyIdentifier,
 };
+use x509_cert::name::Name;
 use x509_cert::spki::AlgorithmIdentifierOwned;
 use x509_cert::Certificate;
 
@@ -111,6 +112,8 @@ pub struct ParsedCert {
 struct CertificateConstraints {
     subject_der: Vec<u8>,
     issuer_der: Vec<u8>,
+    canonical_subject: CanonicalName,
+    canonical_issuer: CanonicalName,
     basic_constraints_present: bool,
     basic_constraints_critical: bool,
     path_len_constraint: Option<u8>,
@@ -133,15 +136,21 @@ type CertificatePublicKey = CertificatePublicKeyAlg;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct CertificateNames {
     dns: Vec<String>,
+    emails: Vec<String>,
     uris: Vec<String>,
     ips: Vec<Vec<u8>>,
+    directories: Vec<CanonicalName>,
 }
+
+type CanonicalName = Vec<Vec<(String, String)>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SupportedNameConstraint {
     Dns(String),
+    Email(String),
     UriHost(String),
     Ip { address: Vec<u8>, mask: Vec<u8> },
+    Directory(CanonicalName),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -152,6 +161,75 @@ struct ParsedNameConstraints {
 
 fn parameters_absent(algorithm: &AlgorithmIdentifierOwned) -> bool {
     algorithm.parameters.is_none()
+}
+
+fn canonical_directory_value(value: &der::asn1::Any) -> Option<String> {
+    let decoded = match value.tag() {
+        Tag::Utf8String => std::str::from_utf8(value.value()).ok()?.to_owned(),
+        Tag::PrintableString | Tag::Ia5String | Tag::TeletexString => value
+            .value()
+            .is_ascii()
+            .then(|| value.value().iter().map(|byte| char::from(*byte)).collect())?,
+        Tag::BmpString => {
+            let chunks = value.value().chunks_exact(2);
+            if !chunks.remainder().is_empty() {
+                return None;
+            }
+            char::decode_utf16(chunks.map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]])))
+                .collect::<Result<String, _>>()
+                .ok()?
+        }
+        _ => return None,
+    };
+    let folded = decoded
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    (!folded.is_empty()).then_some(folded)
+}
+
+fn canonical_name(name: &Name) -> Option<CanonicalName> {
+    if name.0.is_empty() || name.0.len() > MAX_GENERAL_NAMES_PER_CERTIFICATE {
+        return None;
+    }
+    name.0
+        .iter()
+        .map(|rdn| {
+            if rdn.0.is_empty() || rdn.0.len() > MAX_GENERAL_NAMES_PER_CERTIFICATE {
+                return None;
+            }
+            let mut attributes = rdn
+                .0
+                .iter()
+                .map(|attribute| {
+                    Some((
+                        attribute.oid.to_string(),
+                        canonical_directory_value(&attribute.value)?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            attributes.sort();
+            Some(attributes)
+        })
+        .collect()
+}
+
+fn canonical_email(value: &str, constraint: bool) -> Option<String> {
+    if value.is_empty() || !value.is_ascii() || value.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return None;
+    }
+    if let Some((local, domain)) = value.rsplit_once('@') {
+        if constraint && value.starts_with('.') || local.is_empty() {
+            return None;
+        }
+        let domain = canonical_dns_name(domain)?;
+        return Some(format!("{local}@{domain}"));
+    }
+    constraint
+        .then(|| canonical_uri_constraint(value))
+        .flatten()
 }
 
 fn parameters_absent_or_null(algorithm: &AlgorithmIdentifierOwned) -> bool {
@@ -338,6 +416,12 @@ fn parse_name_constraints(parsed: NameConstraints) -> Result<ParsedNameConstrain
                             .map(SupportedNameConstraint::UriHost)
                             .ok_or("malformed URI name constraint")
                     }
+                    GeneralName::Rfc822Name(email) => canonical_email(email.as_str(), true)
+                        .map(SupportedNameConstraint::Email)
+                        .ok_or("malformed rfc822Name constraint"),
+                    GeneralName::DirectoryName(name) => canonical_name(&name)
+                        .map(SupportedNameConstraint::Directory)
+                        .ok_or("malformed directoryName constraint"),
                     GeneralName::IpAddress(value) => {
                         let bytes = value.as_bytes();
                         let half = bytes.len() / 2;
@@ -351,9 +435,7 @@ fn parse_name_constraints(parsed: NameConstraints) -> Result<ParsedNameConstrain
                             mask: bytes[half..].to_vec(),
                         })
                     }
-                    GeneralName::Rfc822Name(_)
-                    | GeneralName::DirectoryName(_)
-                    | GeneralName::OtherName(_)
+                    GeneralName::OtherName(_)
                     | GeneralName::EdiPartyName(_)
                     | GeneralName::RegisteredId(_) => Err("unsupported name constraint form"),
                 }
@@ -401,6 +483,8 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
     let mut constraints = CertificateConstraints {
         subject_der: tbs.subject.to_der().map_err(|_| X509Error::Der)?,
         issuer_der: tbs.issuer.to_der().map_err(|_| X509Error::Der)?,
+        canonical_subject: canonical_name(&tbs.subject).ok_or(X509Error::Der)?,
+        canonical_issuer: canonical_name(&tbs.issuer).ok_or(X509Error::Der)?,
         signature_algorithms_match: tbs.signature == cert.signature_algorithm,
         public_key_algorithm: Some(public_key_algorithm),
         ..CertificateConstraints::default()
@@ -473,9 +557,16 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
                             GeneralName::IpAddress(address) => {
                                 constraints.names.ips.push(address.as_bytes().to_vec());
                             }
-                            GeneralName::Rfc822Name(_)
-                            | GeneralName::DirectoryName(_)
-                            | GeneralName::OtherName(_)
+                            GeneralName::Rfc822Name(email) => {
+                                constraints.names.emails.push(email.to_string());
+                            }
+                            GeneralName::DirectoryName(name) => {
+                                constraints
+                                    .names
+                                    .directories
+                                    .push(canonical_name(&name).ok_or(X509Error::Der)?);
+                            }
+                            GeneralName::OtherName(_)
                             | GeneralName::EdiPartyName(_)
                             | GeneralName::RegisteredId(_) => {}
                         }
@@ -518,6 +609,11 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
             }
         }
     }
+
+    constraints
+        .names
+        .directories
+        .push(constraints.canonical_subject.clone());
 
     if constraints.name_constraints_present
         && !is_ca
@@ -732,7 +828,7 @@ fn certificate_eq(left: &ParsedCert, right: &ParsedCert) -> bool {
 }
 
 fn issuer_name_matches(child: &ParsedCert, parent: &ParsedCert) -> bool {
-    child.constraints.issuer_der == parent.constraints.subject_der
+    child.constraints.canonical_issuer == parent.constraints.canonical_subject
 }
 
 fn authority_key_matches(child: &ParsedCert, parent: &ParsedCert) -> bool {
@@ -890,6 +986,21 @@ fn ip_constraint_matches(name: &[u8], address: &[u8], mask: &[u8]) -> bool {
             .all(|((name, address), mask)| name & mask == address & mask)
 }
 
+fn email_constraint_matches(email: &str, constraint: &str) -> bool {
+    if constraint.contains('@') {
+        return email == constraint;
+    }
+    let Some((_, domain)) = email.rsplit_once('@') else {
+        return false;
+    };
+    uri_constraint_matches(domain, constraint)
+        || (!constraint.starts_with('.') && dns_constraint_matches(domain, constraint))
+}
+
+fn directory_constraint_matches(name: &CanonicalName, constraint: &CanonicalName) -> bool {
+    name.len() >= constraint.len() && name[..constraint.len()] == constraint[..]
+}
+
 fn enforce_name_constraints(
     names: &CertificateNames,
     constraints: &ParsedNameConstraints,
@@ -925,6 +1036,45 @@ fn enforce_name_constraints(
             && !permitted_dns
                 .iter()
                 .any(|constraint| dns_constraint_matches(&name, constraint))
+        {
+            return Err(X509Error::PathInvalid(
+                "name constraints do not permit certificate name",
+            ));
+        }
+    }
+
+    let permitted_email = constraints
+        .permitted
+        .iter()
+        .filter_map(|constraint| match constraint {
+            SupportedNameConstraint::Email(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let excluded_email = constraints
+        .excluded
+        .iter()
+        .filter_map(|constraint| match constraint {
+            SupportedNameConstraint::Email(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for email in &names.emails {
+        let email = canonical_email(email, false).ok_or(X509Error::PathInvalid(
+            "constrained rfc822Name is malformed",
+        ))?;
+        if excluded_email
+            .iter()
+            .any(|constraint| email_constraint_matches(&email, constraint))
+        {
+            return Err(X509Error::PathInvalid(
+                "name constraints exclude certificate name",
+            ));
+        }
+        if !permitted_email.is_empty()
+            && !permitted_email
+                .iter()
+                .any(|constraint| email_constraint_matches(&email, constraint))
         {
             return Err(X509Error::PathInvalid(
                 "name constraints do not permit certificate name",
@@ -1013,6 +1163,42 @@ fn enforce_name_constraints(
             ));
         }
     }
+
+    let permitted_directory = constraints
+        .permitted
+        .iter()
+        .filter_map(|constraint| match constraint {
+            SupportedNameConstraint::Directory(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let excluded_directory = constraints
+        .excluded
+        .iter()
+        .filter_map(|constraint| match constraint {
+            SupportedNameConstraint::Directory(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for name in &names.directories {
+        if excluded_directory
+            .iter()
+            .any(|constraint| directory_constraint_matches(name, constraint))
+        {
+            return Err(X509Error::PathInvalid(
+                "name constraints exclude certificate name",
+            ));
+        }
+        if !permitted_directory.is_empty()
+            && !permitted_directory
+                .iter()
+                .any(|constraint| directory_constraint_matches(name, constraint))
+        {
+            return Err(X509Error::PathInvalid(
+                "name constraints do not permit certificate name",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1022,7 +1208,8 @@ fn validate_name_constraints(path: &[ParsedCert]) -> Result<(), X509Error> {
             continue;
         };
         for (subject_index, subject) in path[..issuer_index].iter().enumerate() {
-            let self_issued = subject.constraints.subject_der == subject.constraints.issuer_der;
+            let self_issued =
+                subject.constraints.canonical_subject == subject.constraints.canonical_issuer;
             if subject_index != 0 && self_issued {
                 continue;
             }
@@ -1078,19 +1265,16 @@ mod strict_constraint_unit_tests {
     }
 
     #[test]
-    fn unsupported_forms_and_distances_are_rejected_before_path_use() {
+    fn supported_additional_forms_and_distances_are_checked_before_path_use() {
         let email = subtree(GeneralName::Rfc822Name(
             Ia5String::new("user@example.com").unwrap(),
         ));
-        assert_eq!(
-            parse_name_constraints(permitted(vec![email])),
-            Err("unsupported name constraint form")
-        );
+        assert!(parse_name_constraints(permitted(vec![email])).is_ok());
 
         let directory = subtree(GeneralName::DirectoryName(Default::default()));
         assert_eq!(
             parse_name_constraints(permitted(vec![directory])),
-            Err("unsupported name constraint form")
+            Err("malformed directoryName constraint")
         );
 
         let mut distance = dns_subtree("allowed.example");
@@ -1105,6 +1289,44 @@ mod strict_constraint_unit_tests {
             parse_name_constraints(permitted(vec![maximum])),
             Err("unsupported name constraint distance")
         );
+    }
+
+    #[test]
+    fn canonical_names_and_new_constraint_forms_have_rfc_subtree_semantics() {
+        use std::str::FromStr;
+
+        let spaced = Name::from_str("CN= Alice   Example ,O=Example,C=DE").unwrap();
+        let folded = Name::from_str("CN=alice example,O=example,C=de").unwrap();
+        assert_eq!(canonical_name(&spaced), canonical_name(&folded));
+
+        let subject =
+            canonical_name(&Name::from_str("CN=Wallet Service,OU=PID,O=Example,C=DE").unwrap())
+                .unwrap();
+        let parent = canonical_name(&Name::from_str("O=Example,C=DE").unwrap()).unwrap();
+        let sibling = canonical_name(&Name::from_str("O=Other,C=DE").unwrap()).unwrap();
+        assert!(directory_constraint_matches(&subject, &parent));
+        assert!(!directory_constraint_matches(&subject, &sibling));
+
+        assert!(email_constraint_matches(
+            "holder@team.example.com",
+            "example.com"
+        ));
+        assert!(email_constraint_matches(
+            "holder@team.example.com",
+            ".example.com"
+        ));
+        assert!(!email_constraint_matches(
+            "holder@example.com",
+            ".example.com"
+        ));
+        assert!(email_constraint_matches(
+            "holder@example.com",
+            "holder@example.com"
+        ));
+        assert!(!email_constraint_matches(
+            "other@example.com",
+            "holder@example.com"
+        ));
     }
 
     #[test]
@@ -1333,7 +1555,8 @@ fn validate_built_path(
         let non_self_issued_ca_below = path[1..index]
             .iter()
             .filter(|subordinate| {
-                subordinate.constraints.subject_der != subordinate.constraints.issuer_der
+                subordinate.constraints.canonical_subject
+                    != subordinate.constraints.canonical_issuer
             })
             .count();
         if certificate
@@ -1384,8 +1607,10 @@ fn validate_built_path(
 /// algorithms and strength, AKI/SKI issuer selection, supported name constraints, unknown critical
 /// extensions, BasicConstraints/pathLen and role-specific KeyUsage. Duplicate bundles, cycles and
 /// multiple complete paths fail closed. Unsupported name-constraint forms/distances also fail
-/// closed. Certificate policy-tree processing, broader name forms/algorithms and final EUDI
-/// service profiles remain explicit follow-up work.
+/// closed. Canonical distinguished-name chaining and DNS, URI, IP, email and directory name
+/// constraints are enforced; unsupported GeneralName forms still fail closed. Certificate
+/// policy-tree processing, broader algorithms and final EUDI service profiles remain explicit
+/// follow-up work.
 /// The independently configured `trust_anchors` are the only trust authority: a peer bundle that
 /// redundantly supplies one of those roots is rejected instead of treating peer material as trust.
 ///

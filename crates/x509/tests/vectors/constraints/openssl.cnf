@@ -31,7 +31,23 @@ basicConstraints = critical,CA:true,pathlen:1
 keyUsage = critical,keyCertSign,cRLSign
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always
-nameConstraints = critical,permitted;email:.allowed.example
+nameConstraints = critical,permitted;email:.allowed.example,excluded;email:blocked.allowed.example
+
+[ root_directory_constraint ]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+nameConstraints = critical,permitted;dirName:permitted_directory,excluded;dirName:excluded_directory
+
+[ permitted_directory ]
+C = DE
+O = Example
+
+[ excluded_directory ]
+C = DE
+O = Example
+OU = Blocked
 
 [ root_noncritical_constraint ]
 basicConstraints = critical,CA:true,pathlen:1
@@ -52,6 +68,27 @@ basicConstraints = critical,CA:false
 keyUsage = critical,digitalSignature
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always
+
+[ leaf_email_allowed ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = email:holder@team.allowed.example
+
+[ leaf_email_outside ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = email:holder@outside.example
+
+[ leaf_email_excluded ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = email:holder@blocked.allowed.example
 
 [ leaf_allowed ]
 basicConstraints = critical,CA:false
