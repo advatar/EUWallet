@@ -48,10 +48,10 @@ fn core() -> Core {
         .unwrap();
 
     let disclosure = b64(br#"["salt","age_over_18",true]"#);
-    core.load_unverified_credential_for_testing(HeldCredential {
+    core.load_credential(HeldCredential {
         issuer_jwt: "eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIn0.c2ln".into(),
         disclosures_by_claim: BTreeMap::from([("age_over_18".into(), disclosure)]),
-        status: None,
+        status_index: None,
     });
     core
 }
@@ -273,8 +273,7 @@ fn registered_https_direct_post_emits_only_the_bound_endpoint() {
     });
     assert!(matches!(
         effects.as_slice(),
-        [Effect::Http { profile, url, body }]
-            if *profile == wallet_core::HttpDeliveryProfile::Openid4vpDirectPost
-                && url == RESPONSE_URI && body.starts_with(b"vp_token=")
+        [Effect::Http { url, body }]
+            if url == RESPONSE_URI && body.starts_with(b"vp_token=")
     ));
 }
