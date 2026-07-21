@@ -116,6 +116,7 @@ uniffi::setup_scaffolding!();
 mod demo;
 pub use demo::{DemoScenario, DemoWallet, IssuanceScenario};
 
+pub mod durable;
 pub mod export;
 
 /// Verify a wallet export bundle's integrity hash (TS10). Callable from the shell before re-import.
@@ -4416,12 +4417,110 @@ impl Core {
     }
 }
 
+const MAX_DURABLE_TRUST_LIST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DURABLE_WUA_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FfiDurableCheckpoint {
+    pub generation: u64,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]
+pub enum DurableFfiError {
+    InvalidLifecycleState,
+    InvalidEnvironment,
+    TrustEnvironmentRejected,
+    WuaEnvironmentRejected,
+    InvalidGeneration,
+    ResourceLimit,
+    MalformedCheckpoint,
+    UnsupportedCheckpointVersion,
+    ContextRejected,
+    ClockRejected,
+    DeviceKeyRejected,
+    TrustRejected,
+    WuaRejected,
+    AuditLogRejected,
+    CredentialRejected,
+}
+
+impl core::fmt::Display for DurableFfiError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidLifecycleState => "invalid_lifecycle_state",
+            Self::InvalidEnvironment => "invalid_environment",
+            Self::TrustEnvironmentRejected => "trust_environment_rejected",
+            Self::WuaEnvironmentRejected => "wua_environment_rejected",
+            Self::InvalidGeneration => "invalid_generation",
+            Self::ResourceLimit => "resource_limit",
+            Self::MalformedCheckpoint => "malformed_checkpoint",
+            Self::UnsupportedCheckpointVersion => "unsupported_checkpoint_version",
+            Self::ContextRejected => "context_rejected",
+            Self::ClockRejected => "clock_rejected",
+            Self::DeviceKeyRejected => "device_key_rejected",
+            Self::TrustRejected => "trust_rejected",
+            Self::WuaRejected => "wua_rejected",
+            Self::AuditLogRejected => "audit_log_rejected",
+            Self::CredentialRejected => "credential_rejected",
+        })
+    }
+}
+
+impl std::error::Error for DurableFfiError {}
+
+impl From<durable::DurableCheckpointError> for DurableFfiError {
+    fn from(error: durable::DurableCheckpointError) -> Self {
+        use durable::DurableCheckpointError as Error;
+        match error {
+            Error::ResourceLimit { .. } | Error::SizeOverflow => Self::ResourceLimit,
+            Error::Truncated | Error::NonCanonical | Error::Malformed => Self::MalformedCheckpoint,
+            Error::UnsupportedVersion(_) => Self::UnsupportedCheckpointVersion,
+            Error::InvalidGeneration | Error::GenerationMismatch { .. } => Self::InvalidGeneration,
+            Error::ContextMismatch(_) => Self::ContextRejected,
+            Error::ClockUnavailable | Error::ClockRollback { .. } => Self::ClockRejected,
+            Error::DeviceKeyUnavailable | Error::DeviceKeyInvalid => Self::DeviceKeyRejected,
+            Error::TrustListUnavailable
+            | Error::TrustListExpired
+            | Error::TrustListRollback { .. } => Self::TrustRejected,
+            Error::WuaUnavailable | Error::WuaInvalid => Self::WuaRejected,
+            Error::AuditLogUnavailable
+            | Error::AuditTimestampAfterClock { .. }
+            | Error::TransactionLog(_) => Self::AuditLogRejected,
+            Error::CredentialInvalid { .. }
+            | Error::CredentialEvidenceMismatch { .. }
+            | Error::DuplicateCredential => Self::CredentialRejected,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DurableEnginePhase {
+    Fresh,
+    Prepared,
+    Running,
+    Legacy,
+}
+
+struct WalletEngineInner {
+    core: Core,
+    durable_phase: DurableEnginePhase,
+}
+
+impl WalletEngineInner {
+    fn mark_legacy_if_fresh(&mut self) {
+        if self.durable_phase == DurableEnginePhase::Fresh {
+            self.durable_phase = DurableEnginePhase::Legacy;
+        }
+    }
+}
+
 /// The UniFFI-exposed handle the native shell (Swift now, Kotlin later) holds. It wraps [`Core`]
 /// behind a mutex and speaks the FFI-friendly JSON API. The whole native surface is intentionally
 /// tiny: construct, load a credential, and drive events.
 #[derive(uniffi::Object)]
 pub struct WalletEngine {
-    inner: Mutex<Core>,
+    inner: Mutex<WalletEngineInner>,
 }
 
 #[uniffi::export]
@@ -4430,16 +4529,95 @@ impl WalletEngine {
     #[uniffi::constructor]
     pub fn new(wallet_client_id: String, device_key_ref: String) -> Arc<Self> {
         Arc::new(WalletEngine {
-            inner: Mutex::new(Core::new(wallet_client_id, device_key_ref)),
+            inner: Mutex::new(WalletEngineInner {
+                core: Core::new(wallet_client_id, device_key_ref),
+                durable_phase: DurableEnginePhase::Fresh,
+            }),
         })
+    }
+
+    pub fn prepare_durable_environment(
+        &self,
+        clock_epoch: i64,
+        signed_trust_list: Vec<u8>,
+        operator_public_key: Vec<u8>,
+        device_public_key: Vec<u8>,
+        wua_jwt: Vec<u8>,
+        wua_provider_public_key: Vec<u8>,
+    ) -> Result<(), DurableFfiError> {
+        if clock_epoch <= 0
+            || signed_trust_list.is_empty()
+            || signed_trust_list.len() > MAX_DURABLE_TRUST_LIST_BYTES
+            || wua_jwt.is_empty()
+            || wua_jwt.len() > MAX_DURABLE_WUA_BYTES
+            || !matches!(operator_public_key.as_slice(), [0x04, ..] if operator_public_key.len() == 65)
+            || !matches!(device_public_key.as_slice(), [0x04, ..] if device_public_key.len() == 65)
+            || !matches!(wua_provider_public_key.as_slice(), [0x04, ..] if wua_provider_public_key.len() == 65)
+        {
+            return Err(DurableFfiError::InvalidEnvironment);
+        }
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.durable_phase != DurableEnginePhase::Fresh {
+            return Err(DurableFfiError::InvalidLifecycleState);
+        }
+        let mut staged = Core::new(
+            inner.core.config.wallet_client_id.clone(),
+            inner.core.config.device_key_ref.clone(),
+        );
+        if !staged
+            .handle_event(Event::SetClock { epoch: clock_epoch })
+            .is_empty()
+        {
+            return Err(DurableFfiError::InvalidEnvironment);
+        }
+        staged
+            .load_trust_list(&signed_trust_list, &operator_public_key)
+            .map_err(|_| DurableFfiError::TrustEnvironmentRejected)?;
+        staged.load_device_key(device_public_key);
+        staged
+            .load_wua(&wua_jwt, &wua_provider_public_key)
+            .map_err(|_| DurableFfiError::WuaEnvironmentRejected)?;
+        inner.core = staged;
+        inner.durable_phase = DurableEnginePhase::Prepared;
+        Ok(())
+    }
+
+    pub fn export_durable_checkpoint(
+        &self,
+        generation: u64,
+    ) -> Result<FfiDurableCheckpoint, DurableFfiError> {
+        let inner = self.inner.lock().expect("poisoned");
+        if !matches!(
+            inner.durable_phase,
+            DurableEnginePhase::Prepared | DurableEnginePhase::Running
+        ) {
+            return Err(DurableFfiError::InvalidLifecycleState);
+        }
+        let bytes = inner.core.export_durable_checkpoint(generation)?;
+        Ok(FfiDurableCheckpoint { generation, bytes })
+    }
+
+    pub fn restore_durable_checkpoint(
+        &self,
+        checkpoint: FfiDurableCheckpoint,
+    ) -> Result<(), DurableFfiError> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.durable_phase != DurableEnginePhase::Prepared {
+            return Err(DurableFfiError::InvalidLifecycleState);
+        }
+        inner
+            .core
+            .restore_durable_checkpoint(&checkpoint.bytes, checkpoint.generation)?;
+        inner.durable_phase = DurableEnginePhase::Running;
+        Ok(())
     }
 
     /// Install/update the signed trusted list. Returns "" on success, else an error string.
     pub fn load_trust_list(&self, signed_list: Vec<u8>, operator_public_key: Vec<u8>) -> String {
-        match self
-            .inner
-            .lock()
-            .expect("poisoned")
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.mark_legacy_if_fresh();
+        match inner
+            .core
             .load_trust_list(&signed_list, &operator_public_key)
         {
             Ok(()) => String::new(),
@@ -4449,10 +4627,9 @@ impl WalletEngine {
 
     /// Register the device public key the WUA attests (raw uncompressed point).
     pub fn load_device_key(&self, device_public_key: Vec<u8>) {
-        self.inner
-            .lock()
-            .expect("poisoned")
-            .load_device_key(device_public_key);
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.mark_legacy_if_fresh();
+        inner.core.load_device_key(device_public_key);
     }
 
     /// Verify + cache a URI-bound Token Status List from a trusted status-provider certificate.
@@ -4463,11 +4640,12 @@ impl WalletEngine {
         token: Vec<u8>,
         provider_cert_chain: Vec<Vec<u8>>,
     ) -> String {
-        match self.inner.lock().expect("poisoned").load_status_list(
-            &uri,
-            &token,
-            &provider_cert_chain,
-        ) {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.mark_legacy_if_fresh();
+        match inner
+            .core
+            .load_status_list(&uri, &token, &provider_cert_chain)
+        {
             Ok(()) => String::new(),
             Err(e) => format!("{e:?}"),
         }
@@ -4475,12 +4653,9 @@ impl WalletEngine {
 
     /// Verify + store the Wallet Unit Attestation. Returns "" on success, else an error string.
     pub fn load_wua(&self, wua_jwt: Vec<u8>, provider_public_key: Vec<u8>) -> String {
-        match self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .load_wua(&wua_jwt, &provider_public_key)
-        {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.mark_legacy_if_fresh();
+        match inner.core.load_wua(&wua_jwt, &provider_public_key) {
             Ok(()) => String::new(),
             Err(e) => e,
         }
@@ -4495,12 +4670,12 @@ impl WalletEngine {
         issuer_cert_chain: Vec<Vec<u8>>,
         issuer_id: String,
     ) -> String {
-        match self.inner.lock().expect("poisoned").ingest_credential(
-            &format,
-            &credential,
-            &issuer_cert_chain,
-            &issuer_id,
-        ) {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.mark_legacy_if_fresh();
+        match inner
+            .core
+            .ingest_credential(&format, &credential, &issuer_cert_chain, &issuer_id)
+        {
             Ok(()) => String::new(),
             Err(error) => format!("{error:?}"),
         }
@@ -4522,17 +4697,35 @@ impl WalletEngine {
     /// The transaction (audit) log as JSON — completed presentations, payments, issuances. Records
     /// claim paths + a committing consent hash, never raw claim values (TS06). For the history UI.
     pub fn transaction_log_json(&self) -> String {
-        self.inner.lock().expect("poisoned").transaction_log_json()
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .core
+            .transaction_log_json()
     }
 
     /// Erase one transaction-log entry (right to erasure, TS07). Chain-preserving tombstone.
     pub fn redact_transaction(&self, seq: u64) -> bool {
-        self.inner.lock().expect("poisoned").redact_transaction(seq)
+        let mut inner = self.inner.lock().expect("poisoned");
+        if !matches!(
+            inner.durable_phase,
+            DurableEnginePhase::Prepared | DurableEnginePhase::Running
+        ) {
+            inner.mark_legacy_if_fresh();
+        }
+        inner.core.redact_transaction(seq)
     }
 
     /// Erase the entire transaction log (TS07).
     pub fn wipe_transaction_log(&self) {
-        self.inner.lock().expect("poisoned").wipe_transaction_log();
+        let mut inner = self.inner.lock().expect("poisoned");
+        if !matches!(
+            inner.durable_phase,
+            DurableEnginePhase::Prepared | DurableEnginePhase::Running
+        ) {
+            inner.mark_legacy_if_fresh();
+        }
+        inner.core.wipe_transaction_log();
     }
 
     /// A privacy-preserving activity report as JSON (TS08).
@@ -4540,12 +4733,13 @@ impl WalletEngine {
         self.inner
             .lock()
             .expect("poisoned")
+            .core
             .transaction_report_json()
     }
 
     /// A portable, integrity-protected export of the holder's wallet data as JSON (TS10).
     pub fn export_json(&self) -> String {
-        self.inner.lock().expect("poisoned").export_json()
+        self.inner.lock().expect("poisoned").core.export_json()
     }
 
     /// The attestation catalogue as JSON (TS11): known credential types + their claims/issuers.
@@ -4553,27 +4747,75 @@ impl WalletEngine {
         self.inner
             .lock()
             .expect("poisoned")
+            .core
             .attestation_catalogue_json()
     }
 
     /// The credentials the wallet holds as a JSON array (`[{vct, issuer, disclosuresByClaim}]`),
     /// including any just obtained via issuance. The wallet home renders these as cards.
     pub fn held_credentials_json(&self) -> String {
-        self.inner.lock().expect("poisoned").held_credentials_json()
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .core
+            .held_credentials_json()
     }
 
     /// Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
     /// event, returns a `{"error": "..."}` object instead of an array.
     pub fn handle_event_json(&self, event_json: String) -> String {
-        match self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .handle_event_json(&event_json)
-        {
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.durable_phase == DurableEnginePhase::Fresh {
+            inner.durable_phase = DurableEnginePhase::Legacy;
+        } else if inner.durable_phase == DurableEnginePhase::Prepared {
+            inner.durable_phase = DurableEnginePhase::Running;
+        }
+        match inner.core.handle_event_json(&event_json) {
             Ok(effects) => effects,
             Err(err) => serde_json::json!({ "error": err }).to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod durable_ffi_contract_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_engine_rejects_checkpoint_export_and_restore() {
+        let engine = WalletEngine::new("wallet.example".into(), "device-key".into());
+
+        assert_eq!(
+            engine.export_durable_checkpoint(1).unwrap_err(),
+            DurableFfiError::InvalidLifecycleState
+        );
+        assert_eq!(
+            engine
+                .restore_durable_checkpoint(FfiDurableCheckpoint {
+                    generation: 1,
+                    bytes: Vec::new(),
+                })
+                .unwrap_err(),
+            DurableFfiError::InvalidLifecycleState
+        );
+    }
+
+    #[test]
+    fn invalid_environment_does_not_consume_fresh_lifecycle() {
+        let engine = WalletEngine::new("wallet.example".into(), "device-key".into());
+        let invalid = || {
+            engine.prepare_durable_environment(
+                0,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+
+        assert_eq!(invalid().unwrap_err(), DurableFfiError::InvalidEnvironment);
+        assert_eq!(invalid().unwrap_err(), DurableFfiError::InvalidEnvironment);
     }
 }
 

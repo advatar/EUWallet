@@ -8,7 +8,7 @@ final class CoreOnSimulatorTests: XCTestCase {
     private func makeExecutor(
         _ engine: WalletEngine, _ demo: DemoWallet, _ s: DemoScenario,
         issuer: IssuerResponder? = nil,
-        render: @escaping (ScreenDescription) -> Void
+        render: @escaping (UInt64?, Data?, ScreenDescription) throws -> Void
     ) -> EffectExecutor {
         EffectExecutor(
             engine: engine,
@@ -42,7 +42,7 @@ final class CoreOnSimulatorTests: XCTestCase {
         let issuer = DemoIssuer(
             credentialCompact: Data(issuance.pidCredentialCompact.utf8),
             cNonce: 43)
-        let issuanceExecutor = makeExecutor(engine, demo, s, issuer: issuer) { _ in }
+        let issuanceExecutor = makeExecutor(engine, demo, s, issuer: issuer) { _, _, _ in }
         try await issuanceExecutor.send(
             eventJson: WalletEventJSON.credentialOfferReceived(
                 offer: issuance.offer,
@@ -50,7 +50,13 @@ final class CoreOnSimulatorTests: XCTestCase {
                 issuerId: issuance.issuerId))
 
         var screens: [ScreenDescription] = []
-        let exec = makeExecutor(engine, demo, s) { screens.append($0) }
+        var consentOperationId: UInt64?
+        var consentAuthorizationHash: Data?
+        let exec = makeExecutor(engine, demo, s) { operationId, authorizationHash, screen in
+            consentOperationId = operationId
+            consentAuthorizationHash = authorizationHash
+            screens.append(screen)
+        }
 
         try await exec.send(
             eventJson: WalletEventJSON.authorizationRequestReceived(s.presentationRequest))
@@ -64,7 +70,11 @@ final class CoreOnSimulatorTests: XCTestCase {
 
         // Consent → device signs (demo key) → vp_token assembled + delivered. No throw/crash means
         // the sign + key-binding path ran with the simulator's real crypto.
-        try await exec.send(eventJson: WalletEventJSON.userConsented())
+        let operationId = try XCTUnwrap(consentOperationId)
+        let authorizationHash = try XCTUnwrap(consentAuthorizationHash)
+        try await exec.send(
+            eventJson: WalletEventJSON.userConsented(
+                operationId: operationId, authorizationHash: authorizationHash))
     }
 
     func testPaymentRunsOnSimulator() async throws {
@@ -73,7 +83,13 @@ final class CoreOnSimulatorTests: XCTestCase {
         let s = demo.scenario()
 
         var screens: [ScreenDescription] = []
-        let exec = makeExecutor(engine, demo, s) { screens.append($0) }
+        var paymentOperationId: UInt64?
+        var paymentAuthorizationHash: Data?
+        let exec = makeExecutor(engine, demo, s) { operationId, authorizationHash, screen in
+            paymentOperationId = operationId
+            paymentAuthorizationHash = authorizationHash
+            screens.append(screen)
+        }
 
         try await exec.send(eventJson: WalletEventJSON.setClock(epoch: s.epoch))
         try await exec.send(
@@ -87,6 +103,10 @@ final class CoreOnSimulatorTests: XCTestCase {
         XCTAssertEqual(currency, "EUR")
 
         // Approve → device signs the dynamic-linking binding (SCA) → auth code posted.
-        try await exec.send(eventJson: WalletEventJSON.paymentApproved())
+        let operationId = try XCTUnwrap(paymentOperationId)
+        let authorizationHash = try XCTUnwrap(paymentAuthorizationHash)
+        try await exec.send(
+            eventJson: WalletEventJSON.paymentApproved(
+                operationId: operationId, authorizationHash: authorizationHash))
     }
 }
