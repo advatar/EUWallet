@@ -55,7 +55,7 @@ const JWT_JSON_LIMITS: JsonLimits = JsonLimits {
     max_bytes: MAX_KEY_ATTESTATION_SEGMENT_BYTES,
     max_depth: 8,
     max_container_entries: 32,
-    max_string_bytes: 16 * 1024,
+    max_string_bytes: 8 * 1024,
 };
 
 /// Stable diagnostics. No variant includes attacker-controlled or secret material.
@@ -1887,8 +1887,7 @@ fn validate_sd_jwt_pid(compact: &str, expected_issuer: &str) -> Result<Vec<u8>, 
     if !(1..=MAX_SD_JWT_COMPONENT_SEPARATORS).contains(&separators) {
         return Err(CredentialError::CredentialFormatMismatch);
     }
-    let parsed =
-        sdjwt::SdJwtVc::parse(compact).map_err(|_| CredentialError::CredentialFormatMismatch)?;
+    let parsed = sdjwt::SdJwtVc::parse(compact).map_err(|_| CredentialError::CredentialFormatMismatch)?;
     if parsed.key_binding_jwt.is_some() {
         return Err(CredentialError::CredentialFormatMismatch);
     }
