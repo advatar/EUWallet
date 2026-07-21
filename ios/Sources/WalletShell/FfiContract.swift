@@ -156,6 +156,25 @@ public enum WalletEffect: Decodable {
         }
     }
 
+    private struct CoreErrorEnvelope: Decodable {
+        let error: String
+    }
+
+    /// Decode the core's complete response. The response must be either an effect array or the
+    /// documented `{ "error": "..." }` envelope; unknown effect types are malformed contract data.
+    public static func decodeCoreOutput(_ json: String) throws -> [WalletEffect] {
+        let data = Data(json.utf8)
+        let decoder = JSONDecoder()
+        if let envelope = try? decoder.decode(CoreErrorEnvelope.self, from: data) {
+            throw FfiContractError.coreRejected(envelope.error)
+        }
+        do {
+            return try decoder.decode([WalletEffect].self, from: data)
+        } catch {
+            throw FfiContractError.malformedCoreOutput(String(describing: error))
+        }
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .type) {
