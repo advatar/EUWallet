@@ -13,7 +13,9 @@
 use base64ct::{Base64UrlUnpadded, Encoding};
 use serde_json::Value as Json;
 
+pub mod authorization;
 pub mod bounded_json;
+pub mod credential;
 pub mod foundation;
 
 /// The only two grant types HAIP permits. There is deliberately no "other" variant.
