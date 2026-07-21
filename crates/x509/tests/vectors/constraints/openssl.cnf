@@ -4,6 +4,12 @@ keyUsage = critical,keyCertSign,cRLSign
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always
 
+[ policy_root_ca ]
+basicConstraints = critical,CA:true,pathlen:2
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
 [ root_name_constraints ]
 basicConstraints = critical,CA:true,pathlen:1
 keyUsage = critical,keyCertSign,cRLSign
@@ -63,6 +69,63 @@ subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always
 nameConstraints = critical,permitted;DNS:team.allowed.example
 
+[ intermediate_policy_mapped ]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+certificatePolicies = critical,1.2.3.4
+policyMappings = critical,1.2.3.4:1.2.3.5
+policyConstraints = critical,requireExplicitPolicy:0
+
+[ intermediate_policy_unmapped ]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+certificatePolicies = critical,1.2.3.4
+policyConstraints = critical,requireExplicitPolicy:0
+
+[ intermediate_policy_mapping_inhibited ]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+certificatePolicies = critical,1.2.3.4
+policyMappings = critical,1.2.3.4:1.2.3.5
+policyConstraints = critical,requireExplicitPolicy:0
+
+[ intermediate_policy_inhibitor ]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+certificatePolicies = critical,1.2.3.4
+policyConstraints = critical,inhibitPolicyMapping:0
+
+[ intermediate_policy_any_allowed ]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+certificatePolicies = critical,2.5.29.32.0
+
+[ intermediate_policy_any_inhibited ]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+certificatePolicies = critical,2.5.29.32.0
+inhibitAnyPolicy = critical,0
+
+[ intermediate_policy_any_inhibitor ]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+certificatePolicies = critical,2.5.29.32.0
+inhibitAnyPolicy = critical,0
+
 [ leaf ]
 basicConstraints = critical,CA:false
 keyUsage = critical,digitalSignature
@@ -89,6 +152,13 @@ keyUsage = critical,digitalSignature
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always
 subjectAltName = email:holder@blocked.allowed.example
+
+[ leaf_policy_b ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+certificatePolicies = critical,1.2.3.5
 
 [ leaf_allowed ]
 basicConstraints = critical,CA:false

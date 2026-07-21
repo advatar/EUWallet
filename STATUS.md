@@ -69,6 +69,9 @@ operational solution needed to enter those processes.
     - [x] [#21](https://github.com/advatar/EUWallet/issues/21): implement bounded canonical DN
           chaining plus `directoryName` and `rfc822Name` constraint processing with positive and
           adversarial vectors; policy-tree processing and RSASSA-PSS remain separate work.
+    - [x] [#22](https://github.com/advatar/EUWallet/issues/22): implement bounded RFC 5280
+          certificate policy processing across the path, including mappings, constraints and
+          `anyPolicy`; RSASSA-PSS and final EUDI service policy profiles remain separate work.
   - [ ] Freeze and enforce the normative algorithm and certificate profiles for EUDI PID,
         (Q)EAA/mdoc, RP, status and WUA/WIA services.
   - [ ] Prove those final profiles against official EUDI/PKITS suites and production certificate
