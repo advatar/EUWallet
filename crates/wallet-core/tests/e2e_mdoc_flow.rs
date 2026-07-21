@@ -74,7 +74,10 @@ fn sign_mdoc_request(rp: &SoftwareSigner, nonce: u64) -> Vec<u8> {
                 "id": "mdl",
                 "format": "mso_mdoc",
                 "meta": { "doctype_value": DOCTYPE },
-                "claims": [{ "path": [NS, "age_over_18"] }]
+                "claims": [{
+                    "path": [NS, "age_over_18"],
+                    "intent_to_retain": true
+                }]
             }]
         },
     }))
@@ -178,7 +181,10 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
     match screen {
         Some(presenter::ScreenDescription::Consent(c)) => {
             // Data minimisation: only the requested (namespaced) mdoc element is offered.
-            assert_eq!(c.requested_claims, vec![format!("{NS}.age_over_18")]);
+            assert_eq!(
+                c.requested_claims,
+                vec![format!("{NS}.age_over_18 [retained]")]
+            );
         }
         other => panic!("expected a consent screen, got {other:?}"),
     }
@@ -289,6 +295,11 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
     let fx = core.handle_event(Event::PresentationDelivered);
     assert!(fx.iter().any(|e| matches!(e, Effect::Close)));
     assert_eq!(core.state(), &oid4vp::State::Done);
+    assert!(
+        core.transaction_log_json()
+            .contains(&format!(r#"{NS}.age_over_18 [retained]"#)),
+        "the completed audit record preserves the exact authorized retention declaration"
+    );
 }
 
 fn percent_decode(s: &str) -> String {

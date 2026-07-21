@@ -93,6 +93,11 @@ operational solution needed to enter those processes.
         selection and per-query VP Token arrays across authenticated holdings without partial
         required-set responses or silent single-credential downgrade. Selection is capped at 16
         eligible holdings per query and fails atomically above the cap; absent/false stays singular.
+  - [x] [#31](https://github.com/advatar/EUWallet/issues/31): bind selected mdoc
+        `intent_to_retain` declarations into holder-visible consent, authorization hashing and the
+        transaction audit record; malformed and unsupported retention requests fail atomically.
+        Retained elements use a canonical `[retained]` consent/audit label while absent/false stays
+        transient, with no expansion of the minimized mdoc disclosure sent on the wire.
 - [x] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths
       ([#6](https://github.com/advatar/EUWallet/issues/6)).
   - [x] Require and emit canonical CBOR tag-0 RFC 3339 `tdate` validity values, with malformed
