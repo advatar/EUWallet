@@ -381,86 +381,26 @@ fn mdoc_device_binding_matches(device_key: &cose::cbor::Value, key: &[u8]) -> bo
         && matches!(y, Some(Value::Bytes(bytes)) if bytes.as_slice() == &key[33..65])
 }
 
-/// Parse the simplified mdoc profile's canonical UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`).
-fn mdoc_datetime_epoch(value: &str) -> Option<i64> {
-    let bytes = value.as_bytes();
-    if bytes.len() != 20
-        || bytes[4] != b'-'
-        || bytes[7] != b'-'
-        || bytes[10] != b'T'
-        || bytes[13] != b':'
-        || bytes[16] != b':'
-        || bytes[19] != b'Z'
-    {
-        return None;
-    }
-    let number = |start: usize, end: usize| -> Option<i64> {
-        bytes[start..end].iter().try_fold(0i64, |n, b| {
-            b.is_ascii_digit().then_some(n * 10 + i64::from(b - b'0'))
-        })
-    };
-    let (year, month, day, hour, minute, second) = (
-        number(0, 4)?,
-        number(5, 7)?,
-        number(8, 10)?,
-        number(11, 13)?,
-        number(14, 16)?,
-        number(17, 19)?,
-    );
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let month_days = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    if !(1970..=9999).contains(&year)
-        || !(1..=12).contains(&month)
-        || day < 1
-        || day > month_days[(month - 1) as usize]
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return None;
-    }
-    // Howard Hinnant's civil-date conversion, with the supported years constrained to positive
-    // values above. The constant makes 1970-01-01 day zero.
-    let adjusted_year = year - i64::from(month <= 2);
-    let era = adjusted_year / 400;
-    let year_of_era = adjusted_year - era * 400;
-    let shifted_month = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    let days = era * 146_097 + day_of_era - 719_468;
-    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
-}
-
 fn mdoc_validity(
     validity: &mdoc::ValidityInfo,
     now: i64,
 ) -> Result<CredentialValidity, CredentialIngestionError> {
-    let signed = mdoc_datetime_epoch(&validity.signed)
+    let signed = mdoc::TDate::parse(&validity.signed)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
-    let valid_from = mdoc_datetime_epoch(&validity.valid_from)
+    let valid_from = mdoc::TDate::parse(&validity.valid_from)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
-    let valid_until = mdoc_datetime_epoch(&validity.valid_until)
+    let valid_until = mdoc::TDate::parse(&validity.valid_until)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
     if signed > valid_until || valid_from > valid_until {
         return Err(CredentialIngestionError::MalformedCredential);
     }
     let validity = CredentialValidity {
-        issued_at: Some(signed),
-        not_before: Some(valid_from),
-        expires_at: Some(valid_until),
+        // The shell clock has whole-second precision. Ceiling fractional bounds preserves exact
+        // `TDate` semantics: an instant at `...00.5` is still future at `...00` and expires before
+        // `...01`, while an integral timestamp remains unchanged.
+        issued_at: Some(signed.unix_seconds_ceil()),
+        not_before: Some(valid_from.unix_seconds_ceil()),
+        expires_at: Some(valid_until.unix_seconds_ceil()),
     };
     validity.validate_at(now)?;
     Ok(validity)
@@ -1120,7 +1060,7 @@ impl Core {
                     .map(|c| {
                         format!(
                             r#"{{"path":{:?},"displayName":{:?},"mandatory":{}}}"#,
-                            c.path, c.display_name, c.mandatory
+                            c.path.request_path(), c.display_name, c.mandatory
                         )
                     })
                     .collect::<Vec<_>>()
@@ -2732,13 +2672,12 @@ impl Core {
         let mut held_claims = Vec::new();
         for (namespace, items) in &issuer_signed.name_spaces {
             for item in items {
-                held_claims.push(item.element_id.clone());
-                held_claims.push(format!("{namespace}.{}", item.element_id));
+                held_claims.push((namespace.clone(), item.element_id.clone()));
             }
         }
         if !self
             .catalogue
-            .satisfies_mandatory(&mso.doc_type, &held_claims)
+            .satisfies_mandatory_mdoc(&mso.doc_type, &held_claims)
         {
             return Err(CredentialIngestionError::MandatoryClaimsMissing);
         }
