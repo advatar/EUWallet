@@ -13,9 +13,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use catalogue::IssuerTrustDomain;
 use crypto_backend::AwsLc;
-use crypto_traits::{Alg, Digest, Random};
+use crypto_traits::{Alg, Digest};
 use oid4vp::{AbortReason, Env, Input, ResolvedTrust, SelectedCredential, State};
 use presenter::{minimum_claim_set, ConsentScreen, PaymentScreen, ScreenDescription, SignScreen};
 use serde::{Deserialize, Serialize};
@@ -31,84 +30,6 @@ enum ActiveFlow {
     Issuance,
     Qes,
     WalletTransfer,
-}
-
-/// Failure classes the native shells can report for a correlated operation. Values are deliberately
-/// stable and low-cardinality: implementation details remain in device-local diagnostics rather
-/// than crossing the core boundary or being rendered to the holder.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum OperationFailure {
-    Trust,
-    Storage,
-    Signing,
-    Transport,
-    HttpStatus,
-    Issuer,
-    Status,
-    Rendering,
-    MissingDependency,
-    Unsupported,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum OperationResultKind {
-    RpCertChain,
-    Persisted,
-    Signature,
-    PresentationDelivery,
-    PaymentDelivery,
-    QesDelivery,
-    Par,
-    AuthorizationCode,
-    TransactionCode,
-    Token,
-    Credential,
-    StatusList { uri: String },
-    TransferOfferPublished,
-    PresentationDecision,
-    PaymentDecision,
-    QesDecision,
-}
-
-impl OperationResultKind {
-    fn result_type(&self) -> &'static str {
-        match self {
-            Self::RpCertChain => "rpCertChainResolved",
-            Self::Persisted | Self::TransferOfferPublished => "operationSucceeded",
-            Self::Signature => "deviceSignatureProduced",
-            Self::PresentationDelivery => "presentationDelivered",
-            Self::PaymentDelivery => "paymentAuthorizationDelivered",
-            Self::QesDelivery => "qesAuthorizationDelivered",
-            Self::Par => "parPushed",
-            Self::AuthorizationCode => "authorizationCodeReturned",
-            Self::TransactionCode => "transactionCodeEntered",
-            Self::Token => "tokenReceived",
-            Self::Credential => "credentialReceived",
-            Self::StatusList { .. } => "statusListReceived",
-            Self::PresentationDecision => "presentationDecision",
-            Self::PaymentDecision => "paymentDecision",
-            Self::QesDecision => "qesDecision",
-        }
-    }
-
-    fn accepts_event(&self, event_type: &str) -> bool {
-        match self {
-            Self::PresentationDecision => matches!(event_type, "userConsented" | "userDeclined"),
-            Self::PaymentDecision => {
-                matches!(event_type, "paymentApproved" | "paymentDeclined")
-            }
-            Self::QesDecision => matches!(event_type, "qesAuthorized" | "qesDeclined"),
-            _ => self.result_type() == event_type,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PendingOperation {
-    flow: ActiveFlow,
-    result: OperationResultKind,
-    authorization_hash: Option<[u8; 32]>,
 }
 
 uniffi::setup_scaffolding!();
@@ -153,14 +74,6 @@ fn format_name(f: oid4vci::CredentialFormat) -> &'static str {
     }
 }
 
-fn operation_id_seed() -> u64 {
-    let mut random = [0u8; 8];
-    AwsLc.fill(&mut random);
-    // Start uniformly in 1..=2^62. This gives every process a ~62-bit restart namespace while
-    // reserving at least ~2^62 signed-range values for monotonic increments.
-    (u64::from_be_bytes(random) & ((1u64 << 62) - 1)) + 1
-}
-
 /// Convert an already authenticated SD-JWT VC into the wallet's presentation holding.
 fn held_credential_from_verified_sd(
     sd: &sdjwt::SdJwtVc,
@@ -192,24 +105,6 @@ fn decode_mdoc_credential(bytes: &[u8]) -> Result<mdoc::IssuerSigned, Credential
     let cbor = Base64UrlUnpadded::decode_vec(compact.trim())
         .map_err(|_| CredentialIngestionError::MalformedCredential)?;
     mdoc::IssuerSigned::parse(&cbor).map_err(|_| CredentialIngestionError::MalformedCredential)
-}
-
-/// Extract bounded RFC 9360 issuer-certificate evidence from the credential itself. The COSE
-/// parser has already rejected malformed, colliding and over-budget header values; this function
-/// deliberately does not fall back to a path supplied alongside the credential.
-fn embedded_mdoc_issuer_chain(
-    issuer_signed: &mdoc::IssuerSigned,
-) -> Result<Vec<Vec<u8>>, CredentialIngestionError> {
-    let chain = issuer_signed
-        .issuer_auth
-        .x5chain()
-        .map_err(|_| CredentialIngestionError::MalformedCredential)?
-        .ok_or(CredentialIngestionError::UntrustedIssuer)?;
-    Ok(chain
-        .certificates()
-        .into_iter()
-        .map(<[u8]>::to_vec)
-        .collect())
 }
 
 fn json_epoch_claim(
@@ -399,26 +294,86 @@ fn mdoc_device_binding_matches(device_key: &cose::cbor::Value, key: &[u8]) -> bo
         && matches!(y, Some(Value::Bytes(bytes)) if bytes.as_slice() == &key[33..65])
 }
 
+/// Parse the simplified mdoc profile's canonical UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`).
+fn mdoc_datetime_epoch(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
+        return None;
+    }
+    let number = |start: usize, end: usize| -> Option<i64> {
+        bytes[start..end].iter().try_fold(0i64, |n, b| {
+            b.is_ascii_digit().then_some(n * 10 + i64::from(b - b'0'))
+        })
+    };
+    let (year, month, day, hour, minute, second) = (
+        number(0, 4)?,
+        number(5, 7)?,
+        number(8, 10)?,
+        number(11, 13)?,
+        number(14, 16)?,
+        number(17, 19)?,
+    );
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if !(1970..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || day < 1
+        || day > month_days[(month - 1) as usize]
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    // Howard Hinnant's civil-date conversion, with the supported years constrained to positive
+    // values above. The constant makes 1970-01-01 day zero.
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year / 400;
+    let year_of_era = adjusted_year - era * 400;
+    let shifted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
 fn mdoc_validity(
     validity: &mdoc::ValidityInfo,
     now: i64,
 ) -> Result<CredentialValidity, CredentialIngestionError> {
-    let signed = mdoc::TDate::parse(&validity.signed)
+    let signed = mdoc_datetime_epoch(&validity.signed)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
-    let valid_from = mdoc::TDate::parse(&validity.valid_from)
+    let valid_from = mdoc_datetime_epoch(&validity.valid_from)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
-    let valid_until = mdoc::TDate::parse(&validity.valid_until)
+    let valid_until = mdoc_datetime_epoch(&validity.valid_until)
         .ok_or(CredentialIngestionError::MalformedCredential)?;
     if signed > valid_until || valid_from > valid_until {
         return Err(CredentialIngestionError::MalformedCredential);
     }
     let validity = CredentialValidity {
-        // The shell clock has whole-second precision. Ceiling fractional bounds preserves exact
-        // `TDate` semantics: an instant at `...00.5` is still future at `...00` and expires before
-        // `...01`, while an integral timestamp remains unchanged.
-        issued_at: Some(signed.unix_seconds_ceil()),
-        not_before: Some(valid_from.unix_seconds_ceil()),
-        expires_at: Some(valid_until.unix_seconds_ceil()),
+        issued_at: Some(signed),
+        not_before: Some(valid_from),
+        expires_at: Some(valid_until),
     };
     validity.validate_at(now)?;
     Ok(validity)
@@ -602,32 +557,8 @@ pub struct MdocHolding {
 struct CredentialProvenance {
     format: oid4vci::CredentialFormat,
     raw_credential: Vec<u8>,
-    issuer: CredentialIssuerEvidence,
-}
-
-/// Path- and profile-validated issuer evidence retained with a verified holding. The service
-/// domain is selected by catalogue policy and was never inferred from shell metadata.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CredentialIssuerEvidence {
-    identity: String,
-    service: IssuerTrustDomain,
-    public_key_raw: Vec<u8>,
-    certificate_path: Vec<Vec<u8>>,
-    not_before: i64,
-    not_after: i64,
-}
-
-impl CredentialIssuerEvidence {
-    fn is_internally_consistent(&self) -> bool {
-        !self.identity.is_empty()
-            && !self.public_key_raw.is_empty()
-            && !self.certificate_path.is_empty()
-            && self.not_before <= self.not_after
-            && matches!(
-                self.service,
-                IssuerTrustDomain::Pid | IssuerTrustDomain::Attestation
-            )
-    }
+    issuer_cert_chain: Vec<Vec<u8>>,
+    issuer_id: String,
 }
 
 /// The explicitly named Rust-only fixture loaders remain source-compatible for existing tests;
@@ -662,7 +593,6 @@ pub enum CredentialIngestionError {
     UnsupportedAlgorithm,
     SignatureInvalid,
     IssuerMismatch,
-    IssuerServiceMismatch,
     UnknownCredentialType,
     CredentialTypeFormatMismatch,
     IssuerNotAllowedForType,
@@ -812,21 +742,6 @@ pub enum Event {
     DeviceSignatureProduced { signature: Vec<u8> },
     /// The shell confirmed the vp_token reached the response_uri.
     PresentationDelivered,
-    /// The payment service acknowledged the dynamically linked authorization code.
-    PaymentAuthorizationDelivered,
-    /// The QTSP acknowledged the QES authorization response.
-    QesAuthorizationDelivered,
-    /// A correlated operation without a protocol-specific payload completed (currently durable
-    /// nonce persistence and peer-offer publication).
-    OperationSucceeded { operation_id: u64 },
-    /// A correlated native operation failed. The JSON boundary validates `operation_id` before
-    /// this transition can reset the owning flow.
-    OperationFailed {
-        operation_id: u64,
-        failure: OperationFailure,
-    },
-    /// The OS or holder cancelled a correlated native operation.
-    OperationCancelled { operation_id: u64 },
     /// A payment authorization request (PSD2/TS12) arrived.
     PaymentAuthorizationRequestReceived { request: Vec<u8> },
     /// The user approved the payment confirmation screen.
@@ -930,7 +845,6 @@ pub enum Effect {
 
 const MAX_CACHED_STATUS_LISTS: usize = 8;
 const MAX_STATUS_LISTS_PER_PRESENTATION: usize = 8;
-const MAX_PENDING_OPERATIONS: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum StatusGate {
@@ -968,11 +882,6 @@ pub struct Core {
     pay_seen_nonces: Vec<u64>,
     pay_pending: Option<(String, u64)>, // (response_uri, nonce) of the in-flight payment
     active: ActiveFlow,
-    /// Monotonic, process-local correlation sequence. IDs are never reused, even after a flow is
-    /// cancelled, so a delayed native callback cannot target a later operation.
-    next_operation_id: u64,
-    /// Operations emitted over the production JSON boundary and still awaiting their exact result.
-    pending_operations: BTreeMap<u64, PendingOperation>,
     // Trust: the verified trusted list, used to decide RP registration in-core (not shell-supplied).
     trust_store: TrustStore,
     // Issuance (OID4VCI) flow.
@@ -981,14 +890,11 @@ pub struct Core {
     device_public_key: Vec<u8>,
     wua: Option<wua::WalletUnitAttestation>,
     issuer_trusted_current: bool,
-    /// Authenticated certificate identity used by the issuance machine and audit log.
     issuer_id_current: String,
     /// Full issuer path retained for revalidation throughout issuance and credential provenance.
     issuer_cert_chain_current: Vec<Vec<u8>>,
-    /// Original shell assertion, retained only so the credential response can re-check it.
-    issuer_id_assertion_current: String,
-    /// Service-scoped path/profile results for the active issuer chain.
-    issuer_candidates_current: Vec<CredentialIssuerEvidence>,
+    /// Public key from the leaf of the currently validated issuer path.
+    issuer_public_key_current: Vec<u8>,
     /// Parsed credential that crossed the authentication/policy boundary for this response.
     pending_verified_credential: Option<AuthenticatedCredential>,
     last_credential_ingestion_error: Option<CredentialIngestionError>,
@@ -1030,8 +936,6 @@ impl Core {
             pay_seen_nonces: Vec::new(),
             pay_pending: None,
             active: ActiveFlow::None,
-            next_operation_id: operation_id_seed(),
-            pending_operations: BTreeMap::new(),
             trust_store: TrustStore::new(),
             issuance: oid4vci::State::Idle,
             iss_seen_c_nonces: Vec::new(),
@@ -1040,8 +944,7 @@ impl Core {
             issuer_trusted_current: false,
             issuer_id_current: String::new(),
             issuer_cert_chain_current: Vec::new(),
-            issuer_id_assertion_current: String::new(),
-            issuer_candidates_current: Vec::new(),
+            issuer_public_key_current: Vec::new(),
             pending_verified_credential: None,
             last_credential_ingestion_error: None,
             status_lists: BTreeMap::new(),
@@ -1078,7 +981,7 @@ impl Core {
                     .map(|c| {
                         format!(
                             r#"{{"path":{:?},"displayName":{:?},"mandatory":{}}}"#,
-                            c.path.request_path(), c.display_name, c.mandatory
+                            c.path, c.display_name, c.mandatory
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1393,7 +1296,6 @@ impl Core {
     }
 
     fn store_verified_credential(&mut self, authenticated: AuthenticatedCredential) {
-        debug_assert!(authenticated.provenance.issuer.is_internally_consistent());
         let provenance = StoredProvenance::Authenticated(authenticated.provenance);
         match authenticated.credential {
             VerifiedCredential::SdJwt { holding, validity } => {
@@ -1436,51 +1338,25 @@ impl Core {
         format: oid4vci::CredentialFormat,
         bytes: &[u8],
         issuer_cert_chain: &[Vec<u8>],
-        issuer_id_assertion: &str,
+        issuer_id: &str,
     ) -> Result<AuthenticatedCredential, CredentialIngestionError> {
-        if self.now_epoch <= 0 {
-            return Err(CredentialIngestionError::ClockNotSet);
-        }
-        if self.device_public_key.is_empty() {
-            return Err(CredentialIngestionError::DeviceBindingMissing);
-        }
-
-        let (credential, issuer) = match format {
-            oid4vci::CredentialFormat::DcSdJwt => {
-                // SD-JWT VC has no COSE issuerAuth header, so its authenticated transport/restore
-                // boundary still supplies the issuer certificate bundle explicitly.
-                let issuers = self.resolve_credential_issuers(issuer_cert_chain);
-                if !Self::issuer_candidates_are_consistent(&issuers) {
-                    return Err(CredentialIngestionError::UntrustedIssuer);
-                }
-                self.verify_sdjwt_credential(bytes, &issuers, issuer_id_assertion)?
-            }
-            oid4vci::CredentialFormat::MsoMdoc => {
-                // For mdoc, the credential's own bounded x5chain is the sole certificate evidence
-                // used to authenticate issuerAuth. A caller path can neither rescue nor replace it.
-                let issuer_signed = decode_mdoc_credential(bytes)?;
-                let embedded_chain = embedded_mdoc_issuer_chain(&issuer_signed)?;
-                let issuers = self.resolve_credential_issuers(&embedded_chain);
-                if !Self::issuer_candidates_are_consistent(&issuers) {
-                    return Err(CredentialIngestionError::UntrustedIssuer);
-                }
-                self.verify_mdoc_credential(issuer_signed, &issuers, issuer_id_assertion)?
-            }
-        };
+        let issuer_key = self
+            .resolve_issuer_key(issuer_cert_chain)
+            .ok_or(CredentialIngestionError::UntrustedIssuer)?;
+        let credential = self.verify_received_credential(format, bytes, &issuer_key, issuer_id)?;
         Ok(AuthenticatedCredential {
             credential,
             provenance: CredentialProvenance {
                 format,
                 raw_credential: bytes.to_vec(),
-                issuer,
+                issuer_cert_chain: issuer_cert_chain.to_vec(),
+                issuer_id: issuer_id.to_string(),
             },
         })
     }
 
     /// Authenticate, validate and store a credential obtained outside the active issuance
     /// session (for example during a verified restore). This is the production storage boundary.
-    /// `issuer_cert_chain` authenticates SD-JWT VC inputs; an mdoc is authenticated exclusively
-    /// with the bounded `x5chain` embedded in its `issuerAuth` COSE header.
     pub fn ingest_credential(
         &mut self,
         format: &str,
@@ -1510,13 +1386,7 @@ impl Core {
             .iter()
             .map(|stored| {
                 let c = &stored.holding;
-                let (vct, jwt_issuer) = credential_vct_and_issuer(&c.issuer_jwt);
-                let issuer = match &stored.provenance {
-                    StoredProvenance::Authenticated(provenance) => {
-                        provenance.issuer.identity.as_str()
-                    }
-                    StoredProvenance::TestFixture => &jwt_issuer,
-                };
+                let (vct, iss) = credential_vct_and_issuer(&c.issuer_jwt);
                 let disclosures = c
                     .disclosures_by_claim
                     .iter()
@@ -1525,7 +1395,7 @@ impl Core {
                     .join(",");
                 format!(
                     r#"{{"vct":{:?},"issuer":{:?},"format":"dc+sd-jwt","disclosuresByClaim":{{{}}}}}"#,
-                    vct, issuer, disclosures
+                    vct, iss, disclosures
                 )
             })
             .collect();
@@ -1533,10 +1403,6 @@ impl Core {
         // `claims` so the shell renders the card; `disclosuresByClaim` stays empty for this format.
         for stored in &self.mdoc_holdings {
             let h = &stored.holding;
-            let issuer = match &stored.provenance {
-                StoredProvenance::Authenticated(provenance) => provenance.issuer.identity.as_str(),
-                StoredProvenance::TestFixture => "ISO 18013-5 mdoc",
-            };
             let claims = h
                 .issuer_signed
                 .name_spaces
@@ -1552,156 +1418,11 @@ impl Core {
                 .collect::<Vec<_>>()
                 .join(",");
             items.push(format!(
-                r#"{{"vct":{:?},"issuer":{:?},"format":"mso_mdoc","claims":{{{}}},"disclosuresByClaim":{{}}}}"#,
-                h.doctype, issuer, claims
+                r#"{{"vct":{:?},"issuer":"ISO 18013-5 mdoc","format":"mso_mdoc","claims":{{{}}},"disclosuresByClaim":{{}}}}"#,
+                h.doctype, claims
             ));
         }
         format!("[{}]", items.join(","))
-    }
-
-    fn clear_pending_operations(&mut self, flow: ActiveFlow) {
-        self.pending_operations
-            .retain(|_, pending| pending.flow != flow);
-    }
-
-    /// Reset only ephemeral state. Replay sets, stored credentials, the trusted clock and audit
-    /// log intentionally survive cancellation/failure.
-    fn reset_flow(&mut self, flow: ActiveFlow) {
-        self.clear_pending_operations(flow);
-        match flow {
-            ActiveFlow::Presentation => {
-                self.vp = State::Idle;
-                self.session = None;
-                self.pending_rp_provenance = None;
-                self.pending_status_references.clear();
-            }
-            ActiveFlow::Payment => {
-                self.payment = payment::State::Idle;
-                self.pay_pending = None;
-                self.pay_summary = None;
-                self.pay_consent_hash = [0u8; 32];
-            }
-            ActiveFlow::Issuance => {
-                self.issuance = oid4vci::State::Idle;
-                self.issuer_trusted_current = false;
-                self.issuer_id_current.clear();
-                self.issuer_cert_chain_current.clear();
-                self.issuer_public_key_current.clear();
-                self.pending_verified_credential = None;
-            }
-            ActiveFlow::Qes => {
-                self.qes = qes::QesState::Idle;
-                self.qes_consent_hash = [0u8; 32];
-            }
-            ActiveFlow::WalletTransfer => {
-                self.w2w = w2w::State::Idle;
-            }
-            ActiveFlow::None => {}
-        }
-        if self.active == flow {
-            self.active = ActiveFlow::None;
-        }
-    }
-
-    fn begin_flow(&mut self, flow: ActiveFlow) {
-        if self.active != ActiveFlow::None {
-            self.reset_flow(self.active);
-        }
-        // Also reset a terminal machine whose active marker was already cleared.
-        self.reset_flow(flow);
-        self.active = flow;
-    }
-
-    /// Complete a successful exchange without erasing the protocol machine's exact terminal
-    /// state. This preserves observable `Done`/`Authorized`/`Signed` outcomes for diagnostics and
-    /// direct-core callers while scrubbing ephemeral context and making the next flow reusable.
-    fn finish_flow(&mut self, flow: ActiveFlow) {
-        self.clear_pending_operations(flow);
-        match flow {
-            ActiveFlow::Presentation => {
-                self.session = None;
-                self.pending_rp_provenance = None;
-                self.pending_status_references.clear();
-            }
-            ActiveFlow::Payment => {
-                self.pay_pending = None;
-                self.pay_summary = None;
-                self.pay_consent_hash = [0u8; 32];
-            }
-            ActiveFlow::Issuance => {
-                self.issuer_trusted_current = false;
-                self.issuer_id_current.clear();
-                self.issuer_cert_chain_current.clear();
-                self.issuer_public_key_current.clear();
-                self.pending_verified_credential = None;
-            }
-            ActiveFlow::Qes => {
-                self.qes_consent_hash = [0u8; 32];
-            }
-            ActiveFlow::WalletTransfer | ActiveFlow::None => {}
-        }
-        if self.active == flow {
-            self.active = ActiveFlow::None;
-        }
-    }
-
-    fn operation_terminal_effects(
-        &mut self,
-        pending: PendingOperation,
-        failure: Option<OperationFailure>,
-    ) -> Vec<Effect> {
-        self.reset_flow(pending.flow);
-        let (code, message) = match failure {
-            None => (
-                "operation_cancelled",
-                "The wallet operation was cancelled before it completed.",
-            ),
-            Some(OperationFailure::Trust) => (
-                "operation_trust_failed",
-                "Current authenticated trust information could not be resolved.",
-            ),
-            Some(OperationFailure::Storage) => (
-                "operation_storage_failed",
-                "Required wallet state could not be stored securely.",
-            ),
-            Some(OperationFailure::Signing) => (
-                "operation_signing_failed",
-                "The protected device key could not complete the operation.",
-            ),
-            Some(OperationFailure::Transport | OperationFailure::HttpStatus) => (
-                "operation_delivery_failed",
-                "The remote service did not acknowledge the wallet operation.",
-            ),
-            Some(OperationFailure::Issuer) => (
-                "operation_issuer_failed",
-                "The credential issuer operation failed.",
-            ),
-            Some(OperationFailure::Status) => (
-                "operation_status_failed",
-                "Current authenticated credential status could not be obtained.",
-            ),
-            Some(OperationFailure::Rendering) => (
-                "operation_rendering_failed",
-                "The wallet could not show the confirmation securely.",
-            ),
-            Some(OperationFailure::MissingDependency) => (
-                "operation_dependency_missing",
-                "A required wallet service is not available.",
-            ),
-            Some(OperationFailure::Unsupported) => (
-                "operation_unsupported",
-                "This wallet operation is not supported by the native client.",
-            ),
-        };
-        vec![
-            Effect::Render {
-                screen: ScreenDescription::Error {
-                    code: code.into(),
-                    message: message.into(),
-                },
-            },
-            Effect::Close,
-        ]
     }
 
     /// The single entry point. Same state + same event ⇒ same effects (I/O is all in the shell).
@@ -1723,7 +1444,9 @@ impl Core {
                 Vec::new()
             }
             Event::AuthorizationRequestReceived { request } => {
-                self.begin_flow(ActiveFlow::Presentation);
+                self.active = ActiveFlow::Presentation;
+                self.pending_rp_provenance = None;
+                self.pending_status_references.clear();
                 self.drive(Input::AuthorizationRequest(request))
             }
             Event::RpCertChainResolved {
@@ -1774,11 +1497,7 @@ impl Core {
             }
             Event::UserDeclined => {
                 self.pending_status_references.clear();
-                let effects = self.drive(Input::ConsentDeclined);
-                if matches!(self.vp, State::Aborted(AbortReason::UserDeclined)) {
-                    self.reset_flow(ActiveFlow::Presentation);
-                }
-                effects
+                self.drive(Input::ConsentDeclined)
             }
             Event::DeviceSignatureProduced { signature } => match self.active {
                 // Route the device signature to whichever flow requested it.
@@ -1800,63 +1519,21 @@ impl Core {
                 }
                 _ => self.drive(Input::DeviceSignatureProduced(signature)),
             },
-            Event::PresentationDelivered => {
-                let effects = self.drive(Input::PresentationDelivered);
-                if matches!(self.vp, State::Done) {
-                    self.finish_flow(ActiveFlow::Presentation);
-                }
-                effects
-            }
-            Event::PaymentAuthorizationDelivered => {
-                if self.active != ActiveFlow::Payment
-                    || !matches!(self.payment, payment::State::Authorized { .. })
-                {
-                    return Vec::new();
-                }
-                self.record_payment();
-                self.finish_flow(ActiveFlow::Payment);
-                vec![Effect::Close]
-            }
-            Event::QesAuthorizationDelivered => {
-                if self.active != ActiveFlow::Qes
-                    || !matches!(self.qes, qes::QesState::Signed { .. })
-                {
-                    return Vec::new();
-                }
-                self.finish_flow(ActiveFlow::Qes);
-                vec![Effect::Close]
-            }
-            Event::OperationSucceeded { operation_id } => {
-                self.pending_operations.remove(&operation_id);
-                Vec::new()
-            }
-            Event::OperationFailed {
-                operation_id,
-                failure,
-            } => self
-                .pending_operations
-                .remove(&operation_id)
-                .map(|pending| self.operation_terminal_effects(pending, Some(failure)))
-                .unwrap_or_default(),
-            Event::OperationCancelled { operation_id } => self
-                .pending_operations
-                .remove(&operation_id)
-                .map(|pending| self.operation_terminal_effects(pending, None))
-                .unwrap_or_default(),
+            Event::PresentationDelivered => self.drive(Input::PresentationDelivered),
             Event::PaymentAuthorizationRequestReceived { request } => {
-                self.begin_flow(ActiveFlow::Payment);
+                self.active = ActiveFlow::Payment;
                 self.drive_payment(payment::Input::PaymentAuthorizationRequest(request))
             }
             Event::PaymentApproved => self.drive_payment(payment::Input::UserApproved),
             Event::PaymentDeclined => self.drive_payment(payment::Input::UserDeclined),
             Event::QesSignRequestReceived { request } => {
-                self.begin_flow(ActiveFlow::Qes);
+                self.active = ActiveFlow::Qes;
                 self.drive_qes(qes::Input::SignatureRequest(request))
             }
             Event::QesAuthorized => self.drive_qes(qes::Input::UserAuthorized),
             Event::QesDeclined => self.drive_qes(qes::Input::UserDeclined),
             Event::WalletTransferOfferCreated => {
-                self.begin_flow(ActiveFlow::WalletTransfer);
+                self.active = ActiveFlow::WalletTransfer;
                 self.drive_w2w(w2w::Input::CreateOffer)
             }
             Event::WalletTransferReceived {
@@ -1892,26 +1569,18 @@ impl Core {
                 issuer_cert_chain,
                 issuer_id,
             } => {
-                self.begin_flow(ActiveFlow::Issuance);
+                self.active = ActiveFlow::Issuance;
                 // A new offer begins a FRESH OpenID4VCI session: reset the (one-shot) issuance
                 // machine to Idle so a wallet can be issued several credentials in one lifetime.
                 // Replay protection (`iss_seen_c_nonces`) deliberately persists across sessions.
                 self.issuance = oid4vci::State::Idle;
+                // Issuer trust is decided in-core against the trusted list (PID/attestation CAs).
                 self.issuer_cert_chain_current = issuer_cert_chain;
-                // Resolve each trusted-list service separately. The shell value is only a
-                // compatibility assertion; proof audience and audit identity come from the
-                // authenticated leaf URI and a mismatch keeps the issuance machine fail-closed.
-                let issuers = self.resolve_credential_issuers(&self.issuer_cert_chain_current);
-                let authenticated_identity = issuers
-                    .first()
-                    .map(|issuer| issuer.identity.clone())
+                self.issuer_public_key_current = self
+                    .resolve_issuer_key(&self.issuer_cert_chain_current)
                     .unwrap_or_default();
-                let consistent_path = Self::issuer_candidates_are_consistent(&issuers);
-                self.issuer_trusted_current =
-                    !issuers.is_empty() && consistent_path && issuer_id == authenticated_identity;
-                self.issuer_id_current = authenticated_identity;
-                self.issuer_id_assertion_current = issuer_id;
-                self.issuer_candidates_current = if consistent_path { issuers } else { Vec::new() };
+                self.issuer_trusted_current = !self.issuer_public_key_current.is_empty();
+                self.issuer_id_current = issuer_id;
                 self.pending_verified_credential = None;
                 self.last_credential_ingestion_error = None;
                 self.drive_issuance(oid4vci::Input::CredentialOffer(offer))
@@ -1940,7 +1609,7 @@ impl Core {
                     f,
                     &bytes,
                     &self.issuer_cert_chain_current,
-                    &self.issuer_id_assertion_current,
+                    &self.issuer_id_current,
                 ) {
                     Ok(verified) => {
                         self.pending_verified_credential = Some(verified);
@@ -2019,278 +1688,9 @@ impl Core {
 
     /// FFI-friendly wrapper: takes a JSON `Event`, returns a JSON array of `Effect`s.
     pub fn handle_event_json(&mut self, event_json: &str) -> Result<String, String> {
-        let value: serde_json::Value =
-            serde_json::from_str(event_json).map_err(|e| e.to_string())?;
-        let event_type = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "event type must be a string".to_string())?;
-        let event: Event = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
-
-        if Self::is_operation_result_event(event_type) {
-            let operation_id = value
-                .get("operationId")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| format!("missing or invalid operationId for {event_type}"))?;
-            let pending = self
-                .pending_operations
-                .get(&operation_id)
-                .cloned()
-                .ok_or_else(|| format!("stale or unknown operationId {operation_id}"))?;
-            if pending.flow != self.active {
-                return Err(format!(
-                    "operationId {operation_id} belongs to an inactive wallet flow"
-                ));
-            }
-
-            let is_terminal = matches!(
-                &event,
-                Event::OperationFailed { .. } | Event::OperationCancelled { .. }
-            );
-            if !is_terminal && !pending.result.accepts_event(event_type) {
-                return Err(format!(
-                    "operationId {operation_id} expects {}, got {event_type}",
-                    pending.result.result_type()
-                ));
-            }
-            if matches!(
-                event_type,
-                "userConsented" | "paymentApproved" | "qesAuthorized"
-            ) {
-                let expected_hash = pending.authorization_hash.ok_or_else(|| {
-                    format!("operationId {operation_id} has no authorization hash")
-                })?;
-                let actual_hash = Self::wire_authorization_hash(&value, event_type)?;
-                if actual_hash != expected_hash {
-                    return Err(format!(
-                        "operationId {operation_id} authorizationHash does not match the rendered screen"
-                    ));
-                }
-            }
-            if !is_terminal && !self.operation_result_state_is_valid(event_type) {
-                return Err(format!(
-                    "operationId {operation_id} result {event_type} is invalid in the current state"
-                ));
-            }
-            if let (
-                OperationResultKind::StatusList { uri: expected },
-                Event::StatusListReceived { uri: actual, .. },
-            ) = (&pending.result, &event)
-            {
-                if expected != actual {
-                    return Err(format!(
-                        "operationId {operation_id} is bound to a different status resource"
-                    ));
-                }
-            }
-
-            // Generic terminal events remove/reset through `handle_event`; exact protocol results
-            // are consumed here before the state transition so duplicates are immediately stale.
-            if !matches!(
-                &event,
-                Event::OperationSucceeded { .. }
-                    | Event::OperationFailed { .. }
-                    | Event::OperationCancelled { .. }
-            ) {
-                self.pending_operations.remove(&operation_id);
-            }
-        }
-
+        let event: Event = serde_json::from_str(event_json).map_err(|e| e.to_string())?;
         let effects = self.handle_event(event);
-        match self.serialize_wire_effects(effects) {
-            Ok(json) => Ok(json),
-            Err(error) => {
-                // `handle_event` may already have advanced a protocol machine. If its resulting
-                // effects cannot be represented atomically on the native wire, no shell callback
-                // can ever complete that state. Tear down the ephemeral flow and every pending
-                // callback so the next request starts cleanly instead of inheriting a zombie.
-                let active = self.active;
-                if active != ActiveFlow::None {
-                    self.reset_flow(active);
-                }
-                self.pending_operations.clear();
-                Err(error)
-            }
-        }
-    }
-
-    fn is_operation_result_event(event_type: &str) -> bool {
-        matches!(
-            event_type,
-            "rpCertChainResolved"
-                | "deviceSignatureProduced"
-                | "presentationDelivered"
-                | "paymentAuthorizationDelivered"
-                | "qesAuthorizationDelivered"
-                | "parPushed"
-                | "authorizationCodeReturned"
-                | "transactionCodeEntered"
-                | "tokenReceived"
-                | "credentialReceived"
-                | "statusListReceived"
-                | "userConsented"
-                | "userDeclined"
-                | "paymentApproved"
-                | "paymentDeclined"
-                | "qesAuthorized"
-                | "qesDeclined"
-                | "operationSucceeded"
-                | "operationFailed"
-                | "operationCancelled"
-        )
-    }
-
-    fn operation_result_state_is_valid(&self, event_type: &str) -> bool {
-        match event_type {
-            "presentationDelivered" => matches!(self.vp, State::Presenting),
-            "paymentAuthorizationDelivered" => {
-                matches!(self.payment, payment::State::Authorized { .. })
-            }
-            "qesAuthorizationDelivered" => matches!(self.qes, qes::QesState::Signed { .. }),
-            _ => true,
-        }
-    }
-
-    fn wire_authorization_hash(
-        value: &serde_json::Value,
-        event_type: &str,
-    ) -> Result<[u8; 32], String> {
-        let bytes = value
-            .get("authorizationHash")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| format!("missing or invalid authorizationHash for {event_type}"))?;
-        if bytes.len() != 32 {
-            return Err(format!(
-                "missing or invalid authorizationHash for {event_type}"
-            ));
-        }
-        let mut hash = [0u8; 32];
-        for (index, byte) in bytes.iter().enumerate() {
-            let byte = byte
-                .as_u64()
-                .filter(|value| *value <= u8::MAX as u64)
-                .ok_or_else(|| format!("authorizationHash[{index}] must be an unsigned byte"))?;
-            hash[index] = byte as u8;
-        }
-        Ok(hash)
-    }
-
-    fn operation_result_for_effect(
-        &self,
-        effect: &Effect,
-    ) -> Result<Option<PendingOperation>, String> {
-        let mut authorization_hash = None;
-        let result = match effect {
-            Effect::ResolveRpTrust { .. } => OperationResultKind::RpCertChain,
-            Effect::PersistNonce { .. } => OperationResultKind::Persisted,
-            Effect::Sign { .. } => OperationResultKind::Signature,
-            Effect::Http { .. } => match self.active {
-                ActiveFlow::Presentation => OperationResultKind::PresentationDelivery,
-                ActiveFlow::Payment => OperationResultKind::PaymentDelivery,
-                ActiveFlow::Qes => OperationResultKind::QesDelivery,
-                flow => return Err(format!("HTTP effect emitted for unsupported flow {flow:?}")),
-            },
-            Effect::PushPar => OperationResultKind::Par,
-            Effect::OpenAuthBrowser => OperationResultKind::AuthorizationCode,
-            Effect::PromptTxCode => OperationResultKind::TransactionCode,
-            Effect::RequestToken => OperationResultKind::Token,
-            Effect::RequestCredential { .. } => OperationResultKind::Credential,
-            Effect::FetchStatusList { uri } => OperationResultKind::StatusList { uri: uri.clone() },
-            Effect::PublishTransferOffer { .. } => OperationResultKind::TransferOfferPublished,
-            Effect::Render { screen } => {
-                let (result, stored_hash) = match screen {
-                    ScreenDescription::Consent(_) => (
-                        OperationResultKind::PresentationDecision,
-                        self.session.as_ref().map(|session| session.consent_hash),
-                    ),
-                    ScreenDescription::PaymentConfirmation(_) => (
-                        OperationResultKind::PaymentDecision,
-                        Some(self.pay_consent_hash),
-                    ),
-                    ScreenDescription::SignConfirmation(_) => (
-                        OperationResultKind::QesDecision,
-                        Some(self.qes_consent_hash),
-                    ),
-                    _ => return Ok(None),
-                };
-                let computed_hash = presenter::consent_hash(&AwsLc, screen);
-                let stored_hash = stored_hash.ok_or_else(|| {
-                    "interactive render has no core authorization hash".to_string()
-                })?;
-                if stored_hash != computed_hash {
-                    return Err("interactive render authorization hash is inconsistent".into());
-                }
-                authorization_hash = Some(stored_hash);
-                result
-            }
-            Effect::Close => return Ok(None),
-        };
-        Ok(Some(PendingOperation {
-            flow: self.active,
-            result,
-            authorization_hash,
-        }))
-    }
-
-    fn serialize_wire_effects(&mut self, effects: Vec<Effect>) -> Result<String, String> {
-        let prepared: Vec<(Effect, Option<PendingOperation>)> = effects
-            .into_iter()
-            .map(|effect| {
-                let pending = self.operation_result_for_effect(&effect)?;
-                Ok((effect, pending))
-            })
-            .collect::<Result<_, String>>()?;
-        let operation_count = prepared
-            .iter()
-            .filter(|(_, pending)| pending.is_some())
-            .count();
-        if self.pending_operations.len() + operation_count > MAX_PENDING_OPERATIONS {
-            return Err("too many pending wallet operations".into());
-        }
-
-        // Android's public contract uses a signed Long. Never emit an ID outside that common
-        // Swift/Kotlin range, and preflight the complete batch before mutating the sequence/map.
-        let operation_count_u64 =
-            u64::try_from(operation_count).map_err(|_| "too many wallet operations")?;
-        let next_after_batch = self
-            .next_operation_id
-            .checked_add(operation_count_u64)
-            .ok_or_else(|| "wallet operationId space exhausted".to_string())?;
-        if operation_count > 0 && next_after_batch - 1 > i64::MAX as u64 {
-            return Err("wallet operationId space exhausted".into());
-        }
-
-        let mut next_id = self.next_operation_id;
-        let mut values = Vec::with_capacity(prepared.len());
-        let mut staged = Vec::with_capacity(operation_count);
-        for (effect, pending) in prepared {
-            let mut value = serde_json::to_value(effect).map_err(|e| e.to_string())?;
-            if let Some(pending) = pending {
-                let operation_id = next_id;
-                next_id += 1;
-                let result_type = pending.result.result_type();
-                let object = value
-                    .as_object_mut()
-                    .ok_or_else(|| "effect did not serialize as an object".to_string())?;
-                object.insert("operationId".into(), operation_id.into());
-                object.insert(
-                    "resultType".into(),
-                    serde_json::Value::String(result_type.into()),
-                );
-                if let Some(hash) = pending.authorization_hash {
-                    object.insert(
-                        "authorizationHash".into(),
-                        serde_json::to_value(hash).map_err(|e| e.to_string())?,
-                    );
-                }
-                staged.push((operation_id, pending));
-            }
-            values.push(value);
-        }
-        let json = serde_json::to_string(&values).map_err(|e| e.to_string())?;
-        self.next_operation_id = next_after_batch;
-        self.pending_operations.extend(staged);
-        Ok(json)
+        serde_json::to_string(&effects).map_err(|e| e.to_string())
     }
 
     fn drive(&mut self, input: Input) -> Vec<Effect> {
@@ -2441,7 +1841,6 @@ impl Core {
         self.session = None;
         self.pending_rp_provenance = None;
         self.pending_status_references.clear();
-        self.clear_pending_operations(ActiveFlow::Presentation);
         self.active = ActiveFlow::None;
         Self::presentation_error_effects(reason).unwrap_or_default()
     }
@@ -2489,68 +1888,22 @@ impl Core {
         }
     }
 
-    /// Resolve a credential issuer independently in each catalogue-supported trust domain. The
-    /// returned values retain authenticated identity, leaf key and validity provenance; roots are
-    /// never unioned, and the signed credential type later selects exactly one required service.
-    fn resolve_credential_issuers(&self, chain: &[Vec<u8>]) -> Vec<CredentialIssuerEvidence> {
-        [IssuerTrustDomain::Pid, IssuerTrustDomain::Attestation]
-            .into_iter()
-            .filter_map(|service| {
-                let trust_service = match service {
-                    IssuerTrustDomain::Pid => ServiceType::PidProvider,
-                    IssuerTrustDomain::Attestation => ServiceType::AttestationProvider,
-                };
-                let anchors = self
-                    .trust_store
-                    .parsed_anchors_at(trust_service, self.now_epoch);
-                if anchors.is_empty() {
-                    return None;
-                }
-                x509::check_credential_issuer(chain, &anchors, self.now_epoch, &AwsLc)
-                    .ok()
-                    .map(|validated| CredentialIssuerEvidence {
-                        identity: validated.identity,
-                        service,
-                        public_key_raw: validated.public_key_raw,
-                        certificate_path: chain.to_vec(),
-                        not_before: validated.not_before,
-                        not_after: validated.not_after,
-                    })
-            })
-            .collect()
-    }
-
-    fn issuer_for_type<'a>(
-        &self,
-        issuers: &'a [CredentialIssuerEvidence],
-        credential_type: &str,
-    ) -> Result<&'a CredentialIssuerEvidence, CredentialIngestionError> {
-        let service = self
-            .catalogue
-            .issuer_trust_domain(credential_type)
-            .ok_or(CredentialIngestionError::UnknownCredentialType)?;
-        issuers
-            .iter()
-            .find(|issuer| issuer.service == service)
-            .ok_or(CredentialIngestionError::IssuerServiceMismatch)
-    }
-
-    /// Every service candidate comes from the same bounded certificate bundle. Reject any
-    /// ambiguity before a credential verifier is allowed to use one candidate's key and another
-    /// candidate's policy domain.
-    fn issuer_candidates_are_consistent(issuers: &[CredentialIssuerEvidence]) -> bool {
-        let Some(first) = issuers.first() else {
-            return false;
-        };
-        first.is_internally_consistent()
-            && issuers.iter().all(|issuer| {
-                issuer.is_internally_consistent()
-                    && issuer.identity == first.identity
-                    && issuer.public_key_raw == first.public_key_raw
-                    && issuer.certificate_path == first.certificate_path
-                    && issuer.not_before == first.not_before
-                    && issuer.not_after == first.not_after
-            })
+    /// Validate the issuer path against PID/attestation anchors and return only the authenticated
+    /// leaf key. A caller cannot accidentally use a key from an unvalidated chain.
+    fn resolve_issuer_key(&self, chain: &[Vec<u8>]) -> Option<Vec<u8>> {
+        let mut anchors = self
+            .trust_store
+            .parsed_anchors_at(ServiceType::PidProvider, self.now_epoch);
+        anchors.extend(
+            self.trust_store
+                .parsed_anchors_at(ServiceType::AttestationProvider, self.now_epoch),
+        );
+        if anchors.is_empty() {
+            return None;
+        }
+        x509::validate_path(chain, &anchors, self.now_epoch, &AwsLc)
+            .ok()
+            .and_then(|path| path.first().map(|leaf| leaf.public_key_raw.clone()))
     }
 
     /// Resolve a status-signing key only through anchors authorised for the StatusProvider
@@ -2571,12 +1924,38 @@ impl Core {
             })
     }
 
+    fn verify_received_credential(
+        &self,
+        format: oid4vci::CredentialFormat,
+        bytes: &[u8],
+        issuer_public_key: &[u8],
+        issuer_id: &str,
+    ) -> Result<VerifiedCredential, CredentialIngestionError> {
+        if self.now_epoch <= 0 {
+            return Err(CredentialIngestionError::ClockNotSet);
+        }
+        if issuer_public_key.is_empty() {
+            return Err(CredentialIngestionError::UntrustedIssuer);
+        }
+        if self.device_public_key.is_empty() {
+            return Err(CredentialIngestionError::DeviceBindingMissing);
+        }
+        match format {
+            oid4vci::CredentialFormat::DcSdJwt => {
+                self.verify_sdjwt_credential(bytes, issuer_public_key, issuer_id)
+            }
+            oid4vci::CredentialFormat::MsoMdoc => {
+                self.verify_mdoc_credential(bytes, issuer_public_key, issuer_id)
+            }
+        }
+    }
+
     fn verify_sdjwt_credential(
         &self,
         bytes: &[u8],
-        issuers: &[CredentialIssuerEvidence],
-        issuer_id_assertion: &str,
-    ) -> Result<(VerifiedCredential, CredentialIssuerEvidence), CredentialIngestionError> {
+        issuer_public_key: &[u8],
+        issuer_id: &str,
+    ) -> Result<VerifiedCredential, CredentialIngestionError> {
         let compact = core::str::from_utf8(bytes)
             .map_err(|_| CredentialIngestionError::MalformedCredential)?;
         let sd = sdjwt::SdJwtVc::parse(compact)
@@ -2590,7 +1969,7 @@ impl Core {
             return Err(CredentialIngestionError::UnsupportedAlgorithm);
         }
         let claims = sd
-            .verify_and_disclose(&AwsLc, &AwsLc, &issuers[0].public_key_raw, alg)
+            .verify_and_disclose(&AwsLc, &AwsLc, issuer_public_key, alg)
             .map_err(|_| CredentialIngestionError::SignatureInvalid)?;
         let issuer_payload = sd
             .issuer_payload()
@@ -2610,6 +1989,9 @@ impl Core {
             .get("iss")
             .and_then(|v| v.as_str())
             .ok_or(CredentialIngestionError::MalformedCredential)?;
+        if issuer.is_empty() || issuer != issuer_id {
+            return Err(CredentialIngestionError::IssuerMismatch);
+        }
         let vct = claims
             .get("vct")
             .and_then(|v| v.as_str())
@@ -2622,17 +2004,7 @@ impl Core {
         if credential_type.format != "dc+sd-jwt" {
             return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
         }
-        let authenticated_issuer = self.issuer_for_type(issuers, vct)?;
-        if issuer.is_empty()
-            || issuer != authenticated_issuer.identity
-            || issuer_id_assertion != authenticated_issuer.identity
-        {
-            return Err(CredentialIngestionError::IssuerMismatch);
-        }
-        if !self
-            .catalogue
-            .issuer_allowed(vct, &authenticated_issuer.identity)
-        {
+        if !self.catalogue.issuer_allowed(vct, issuer) {
             return Err(CredentialIngestionError::IssuerNotAllowedForType);
         }
         let held_claims: Vec<String> = claims.keys().cloned().collect();
@@ -2648,23 +2020,21 @@ impl Core {
         }
         let status = status_reference_from_claims(&claims)?;
         let holding = held_credential_from_verified_sd(&sd, status)?;
-        Ok((
-            VerifiedCredential::SdJwt { holding, validity },
-            authenticated_issuer.clone(),
-        ))
+        Ok(VerifiedCredential::SdJwt { holding, validity })
     }
 
     fn verify_mdoc_credential(
         &self,
-        issuer_signed: mdoc::IssuerSigned,
-        issuers: &[CredentialIssuerEvidence],
-        issuer_id_assertion: &str,
-    ) -> Result<(VerifiedCredential, CredentialIssuerEvidence), CredentialIngestionError> {
+        bytes: &[u8],
+        issuer_public_key: &[u8],
+        issuer_id: &str,
+    ) -> Result<VerifiedCredential, CredentialIngestionError> {
+        let issuer_signed = decode_mdoc_credential(bytes)?;
         let mso = mdoc::verify_issuer_signed(
             &issuer_signed,
             &AwsLc,
             &AwsLc,
-            &issuers[0].public_key_raw,
+            issuer_public_key,
             Alg::Es256,
         )
         .map_err(|_| CredentialIngestionError::SignatureInvalid)?;
@@ -2678,25 +2048,19 @@ impl Core {
         if credential_type.format != "mso_mdoc" {
             return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
         }
-        let authenticated_issuer = self.issuer_for_type(issuers, &mso.doc_type)?;
-        if issuer_id_assertion != authenticated_issuer.identity {
-            return Err(CredentialIngestionError::IssuerMismatch);
-        }
-        if !self
-            .catalogue
-            .issuer_allowed(&mso.doc_type, &authenticated_issuer.identity)
-        {
+        if !self.catalogue.issuer_allowed(&mso.doc_type, issuer_id) {
             return Err(CredentialIngestionError::IssuerNotAllowedForType);
         }
         let mut held_claims = Vec::new();
         for (namespace, items) in &issuer_signed.name_spaces {
             for item in items {
-                held_claims.push((namespace.clone(), item.element_id.clone()));
+                held_claims.push(item.element_id.clone());
+                held_claims.push(format!("{namespace}.{}", item.element_id));
             }
         }
         if !self
             .catalogue
-            .satisfies_mandatory_mdoc(&mso.doc_type, &held_claims)
+            .satisfies_mandatory(&mso.doc_type, &held_claims)
         {
             return Err(CredentialIngestionError::MandatoryClaimsMissing);
         }
@@ -2707,16 +2071,13 @@ impl Core {
         if !mdoc_device_binding_matches(&mso.device_key, &self.device_public_key) {
             return Err(CredentialIngestionError::DeviceBindingMismatch);
         }
-        Ok((
-            VerifiedCredential::Mdoc {
-                holding: MdocHolding {
-                    doctype: mso.doc_type,
-                    issuer_signed,
-                },
-                validity,
+        Ok(VerifiedCredential::Mdoc {
+            holding: MdocHolding {
+                doctype: mso.doc_type,
+                issuer_signed,
             },
-            authenticated_issuer.clone(),
-        ))
+            validity,
+        })
     }
 
     fn drive_issuance(&mut self, input: oid4vci::Input) -> Vec<Effect> {
@@ -2733,13 +2094,9 @@ impl Core {
                 )
             })
             .unwrap_or(false);
-        let current_issuers = self.resolve_credential_issuers(&self.issuer_cert_chain_current);
-        let issuer_trusted = Self::issuer_candidates_are_consistent(&current_issuers)
-            && current_issuers == self.issuer_candidates_current
-            && current_issuers
-                .first()
-                .is_some_and(|issuer| issuer.identity == self.issuer_id_current)
-            && self.issuer_id_assertion_current == self.issuer_id_current;
+        let issuer_trusted = self
+            .resolve_issuer_key(&self.issuer_cert_chain_current)
+            .is_some_and(|key| key == self.issuer_public_key_current);
         self.issuer_trusted_current = issuer_trusted;
 
         let (next, outputs) = {
@@ -2823,6 +2180,7 @@ impl Core {
             };
             payment::step(&self.payment, &input, &env)
         };
+        let was_authorized = matches!(self.payment, payment::State::Authorized { .. });
         self.payment = next;
 
         // Capture the response endpoint + nonce when the confirmation screen is reached.
@@ -2838,27 +2196,14 @@ impl Core {
             }
         }
 
-        let mut effects: Vec<Effect> = outputs
+        let effects: Vec<Effect> = outputs
             .into_iter()
             .flat_map(|o| self.translate_payment(o))
             .collect();
 
-        // `Authorized` means the device produced a dynamically linked code; completion requires a
-        // distinct payment-service acknowledgement. Validation/user-decline aborts are terminal
-        // locally and must leave the reusable machine recoverable.
-        if let payment::State::Aborted(reason) = &self.payment {
-            if !effects.iter().any(|effect| matches!(effect, Effect::Close)) {
-                if *reason != payment::AbortReason::UserDeclined {
-                    effects.push(Effect::Render {
-                        screen: ScreenDescription::Error {
-                            code: "payment_aborted".into(),
-                            message: "The payment authorization could not be completed.".into(),
-                        },
-                    });
-                }
-                effects.push(Effect::Close);
-            }
-            self.reset_flow(ActiveFlow::Payment);
+        // Record a completed payment the moment the machine reaches Authorized (once).
+        if !was_authorized && matches!(self.payment, payment::State::Authorized { .. }) {
+            self.record_payment();
         }
         effects
     }
@@ -2902,9 +2247,6 @@ impl Core {
                     .unwrap_or_default();
                 vec![Effect::Http { url, body: code }]
             }
-            // The pure payment machine closes after producing the authorization. The facade waits
-            // for `PaymentAuthorizationDelivered`; a decline still closes immediately.
-            PO::Close if matches!(self.payment, payment::State::Authorized { .. }) => Vec::new(),
             PO::Close => vec![Effect::Close],
         }
     }
@@ -2928,26 +2270,10 @@ impl Core {
                 self.qes_seen_nonces.push(req.nonce);
             }
         }
-        let mut effects: Vec<Effect> = outputs
+        outputs
             .into_iter()
             .flat_map(|o| self.translate_qes(o))
-            .collect();
-        if let qes::QesState::Aborted(reason) = &self.qes {
-            if *reason != qes::AbortReason::UserDeclined {
-                effects.push(Effect::Render {
-                    screen: ScreenDescription::Error {
-                        code: "qes_aborted".into(),
-                        message: "The qualified-signature authorization could not be completed."
-                            .into(),
-                    },
-                });
-            }
-            if !effects.iter().any(|effect| matches!(effect, Effect::Close)) {
-                effects.push(Effect::Close);
-            }
-            self.reset_flow(ActiveFlow::Qes);
-        }
-        effects
+            .collect()
     }
 
     fn translate_qes(&mut self, output: qes::Output) -> Vec<Effect> {
@@ -2979,8 +2305,6 @@ impl Core {
                 url: String::new(),
                 body,
             }],
-            // A produced QES authorization is not completion until the QTSP acknowledges it.
-            QO::Close if matches!(self.qes, qes::QesState::Signed { .. }) => Vec::new(),
             QO::Close => vec![Effect::Close],
         }
     }
@@ -3014,13 +2338,10 @@ impl Core {
             .authenticate_received_credential(
                 provenance.format,
                 &provenance.raw_credential,
-                &provenance.issuer.certificate_path,
-                &provenance.issuer.identity,
+                &provenance.issuer_cert_chain,
+                &provenance.issuer_id,
             )
             .map_err(Self::eligibility_from_ingestion_error)?;
-        if authenticated.provenance != *provenance {
-            return Err(PresentationEligibilityError::CredentialProvenanceInvalid);
-        }
         match authenticated.credential {
             VerifiedCredential::SdJwt { holding, validity }
                 if holding == stored.holding && validity == stored.validity =>
@@ -3046,13 +2367,10 @@ impl Core {
             .authenticate_received_credential(
                 provenance.format,
                 &provenance.raw_credential,
-                &provenance.issuer.certificate_path,
-                &provenance.issuer.identity,
+                &provenance.issuer_cert_chain,
+                &provenance.issuer_id,
             )
             .map_err(Self::eligibility_from_ingestion_error)?;
-        if authenticated.provenance != *provenance {
-            return Err(PresentationEligibilityError::CredentialProvenanceInvalid);
-        }
         match authenticated.credential {
             VerifiedCredential::Mdoc { holding, validity }
                 if holding == stored.holding && validity == stored.validity =>
@@ -3418,26 +2736,15 @@ impl Core {
         credential: &[u8],
         issuer_chain: &[Vec<u8>],
     ) -> bool {
-        let issuers = self.resolve_credential_issuers(issuer_chain);
-        let Some(signing_issuer) = issuers.first() else {
+        let Some(issuer_key) = self.resolve_issuer_key(issuer_chain) else {
             return false;
         };
         core::str::from_utf8(credential)
             .ok()
             .and_then(|s| sdjwt::SdJwtVc::parse(s).ok())
-            .and_then(|vc| {
-                let claims = vc
-                    .verify_and_disclose(&AwsLc, &AwsLc, &signing_issuer.public_key_raw, Alg::Es256)
-                    .ok()?;
-                let issuer_id = claims.get("iss")?.as_str()?;
-                let credential_type = claims.get("vct")?.as_str()?;
-                let authenticated_issuer = self.issuer_for_type(&issuers, credential_type).ok()?;
-                Some(
-                    issuer_id == authenticated_issuer.identity
-                        && self
-                            .catalogue
-                            .issuer_allowed(credential_type, &authenticated_issuer.identity),
-                )
+            .map(|vc| {
+                vc.verify_and_disclose(&AwsLc, &AwsLc, &issuer_key, Alg::Es256)
+                    .is_ok()
             })
             .unwrap_or(false)
     }
@@ -3771,422 +3078,5 @@ impl WalletEngine {
             Ok(effects) => effects,
             Err(err) => serde_json::json!({ "error": err }).to_string(),
         }
-    }
-}
-
-#[cfg(test)]
-mod operation_contract_tests {
-    use super::*;
-
-    fn operation_id(output: &str) -> u64 {
-        serde_json::from_str::<serde_json::Value>(output).unwrap()[0]["operationId"]
-            .as_u64()
-            .unwrap()
-    }
-
-    fn emit(core: &mut Core, flow: ActiveFlow, effect: Effect) -> u64 {
-        core.active = flow;
-        let output = core.serialize_wire_effects(vec![effect]).unwrap();
-        operation_id(&output)
-    }
-
-    fn fail(core: &mut Core, operation_id: u64) -> String {
-        core.handle_event_json(&format!(
-            r#"{{"type":"operationFailed","operationId":{operation_id},"failure":"transport"}}"#
-        ))
-        .unwrap()
-    }
-
-    #[test]
-    fn missing_mismatched_and_stale_callbacks_are_rejected() {
-        let mut core = Core::new("wallet.example", "device-key");
-        let sign_id = emit(
-            &mut core,
-            ActiveFlow::Presentation,
-            Effect::Sign {
-                key_ref: "device-key".into(),
-                payload: vec![1],
-            },
-        );
-
-        assert!(core
-            .handle_event_json(r#"{"type":"deviceSignatureProduced","signature":[1]}"#)
-            .unwrap_err()
-            .contains("missing or invalid operationId"));
-        assert!(core
-            .handle_event_json(&format!(
-                r#"{{"type":"presentationDelivered","operationId":{sign_id}}}"#
-            ))
-            .unwrap_err()
-            .contains("expects deviceSignatureProduced"));
-        assert!(fail(&mut core, sign_id).contains("operation_delivery_failed"));
-        assert!(core
-            .handle_event_json(&format!(
-                r#"{{"type":"deviceSignatureProduced","operationId":{sign_id},"signature":[1]}}"#
-            ))
-            .unwrap_err()
-            .contains("stale or unknown operationId"));
-    }
-
-    #[test]
-    fn stale_http_status_and_credential_callbacks_are_rejected_after_recovery() {
-        let cases = [
-            (
-                ActiveFlow::Presentation,
-                Effect::Http {
-                    url: "https://rp.example/cb".into(),
-                    body: vec![],
-                },
-                "presentationDelivered",
-                String::new(),
-            ),
-            (
-                ActiveFlow::Presentation,
-                Effect::FetchStatusList {
-                    uri: "https://status.example/list".into(),
-                },
-                "statusListReceived",
-                r#","uri":"https://status.example/list","httpStatus":200,"token":[],"providerCertChain":[]"#.into(),
-            ),
-            (
-                ActiveFlow::Issuance,
-                Effect::RequestCredential { proof_jwt: vec![1] },
-                "credentialReceived",
-                r#","format":"dc+sd-jwt","bytes":[]"#.into(),
-            ),
-        ];
-
-        for (flow, effect, event_type, fields) in cases {
-            let mut core = Core::new("wallet.example", "device-key");
-            let operation_id = emit(&mut core, flow, effect);
-            fail(&mut core, operation_id);
-            let error = core
-                .handle_event_json(&format!(
-                    r#"{{"type":"{event_type}","operationId":{operation_id}{fields}}}"#
-                ))
-                .unwrap_err();
-            assert!(error.contains("stale or unknown operationId"), "{error}");
-        }
-    }
-
-    #[test]
-    fn status_operation_is_bound_to_the_exact_resource() {
-        let mut core = Core::new("wallet.example", "device-key");
-        let operation_id = emit(
-            &mut core,
-            ActiveFlow::Presentation,
-            Effect::FetchStatusList {
-                uri: "https://status.example/one".into(),
-            },
-        );
-        let error = core
-            .handle_event_json(&format!(
-                r#"{{"type":"statusListReceived","operationId":{operation_id},"uri":"https://status.example/two","httpStatus":200,"token":[],"providerCertChain":[]}}"#
-            ))
-            .unwrap_err();
-        assert!(error.contains("different status resource"));
-        assert!(core.pending_operations.contains_key(&operation_id));
-    }
-
-    #[test]
-    fn callback_is_rejected_when_its_owning_flow_is_not_active() {
-        let mut core = Core::new("wallet.example", "device-key");
-        let operation_id = emit(
-            &mut core,
-            ActiveFlow::Presentation,
-            Effect::Sign {
-                key_ref: "device-key".into(),
-                payload: vec![1],
-            },
-        );
-        // Model a corrupted/raced active marker without clearing the map. The JSON boundary must
-        // verify both possession of the operation id and ownership by the currently active flow.
-        core.active = ActiveFlow::Payment;
-
-        let error = core
-            .handle_event_json(&format!(
-                r#"{{"type":"deviceSignatureProduced","operationId":{operation_id},"signature":[1]}}"#
-            ))
-            .unwrap_err();
-
-        assert!(error.contains("inactive wallet flow"));
-        assert!(core.pending_operations.contains_key(&operation_id));
-    }
-
-    #[test]
-    fn delivery_acknowledgements_are_rejected_before_the_protocol_is_ready() {
-        let cases = [
-            (ActiveFlow::Presentation, "presentationDelivered"),
-            (ActiveFlow::Payment, "paymentAuthorizationDelivered"),
-            (ActiveFlow::Qes, "qesAuthorizationDelivered"),
-        ];
-
-        for (flow, event_type) in cases {
-            let mut core = Core::new("wallet.example", "device-key");
-            let operation_id = emit(
-                &mut core,
-                flow,
-                Effect::Http {
-                    url: "https://service.example/callback".into(),
-                    body: vec![],
-                },
-            );
-
-            let error = core
-                .handle_event_json(&format!(
-                    r#"{{"type":"{event_type}","operationId":{operation_id}}}"#
-                ))
-                .unwrap_err();
-
-            assert!(error.contains("invalid in the current state"), "{error}");
-            assert!(core.pending_operations.contains_key(&operation_id));
-        }
-    }
-
-    #[test]
-    fn old_consent_cannot_authorize_a_newer_flow() {
-        let consent = || Effect::Render {
-            screen: ScreenDescription::Consent(ConsentScreen {
-                rp_display_name: "RP".into(),
-                purpose: "age".into(),
-                requested_claims: vec!["age_over_18".into()],
-            }),
-        };
-        let mut core = Core::new("wallet.example", "device-key");
-        core.begin_flow(ActiveFlow::Presentation);
-        let old_effect = consent();
-        let Effect::Render { screen: old_screen } = &old_effect else {
-            unreachable!()
-        };
-        core.session = Some(SessionInfo {
-            consent_hash: presenter::consent_hash(&AwsLc, old_screen),
-            ..SessionInfo::default()
-        });
-        let old_id = operation_id(&core.serialize_wire_effects(vec![old_effect]).unwrap());
-        core.begin_flow(ActiveFlow::Presentation);
-        let current_effect = consent();
-        let Effect::Render {
-            screen: current_screen,
-        } = &current_effect
-        else {
-            unreachable!()
-        };
-        core.session = Some(SessionInfo {
-            consent_hash: presenter::consent_hash(&AwsLc, current_screen),
-            ..SessionInfo::default()
-        });
-        let current_id = operation_id(&core.serialize_wire_effects(vec![current_effect]).unwrap());
-
-        let error = core
-            .handle_event_json(&format!(
-                r#"{{"type":"userConsented","operationId":{old_id}}}"#
-            ))
-            .unwrap_err();
-        assert!(error.contains("stale or unknown operationId"));
-        assert!(core.pending_operations.contains_key(&current_id));
-        assert!(core
-            .handle_event_json(&format!(
-                r#"{{"type":"operationCancelled","operationId":{current_id}}}"#
-            ))
-            .unwrap()
-            .contains("operation_cancelled"));
-    }
-
-    #[test]
-    fn approval_requires_the_exact_rendered_authorization_hash() {
-        let screen = ScreenDescription::Consent(ConsentScreen {
-            rp_display_name: "RP".into(),
-            purpose: "age".into(),
-            requested_claims: vec!["age_over_18".into()],
-        });
-        let expected_hash = presenter::consent_hash(&AwsLc, &screen);
-        let mut core = Core::new("wallet.example", "device-key");
-        core.active = ActiveFlow::Presentation;
-        core.session = Some(SessionInfo {
-            consent_hash: expected_hash,
-            ..SessionInfo::default()
-        });
-        let output = core
-            .serialize_wire_effects(vec![Effect::Render { screen }])
-            .unwrap();
-        let operation_id = operation_id(&output);
-        let wire_hash = serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]
-            ["authorizationHash"]
-            .clone();
-        assert_eq!(wire_hash, serde_json::to_value(expected_hash).unwrap());
-
-        let missing = core
-            .handle_event_json(&format!(
-                r#"{{"type":"userConsented","operationId":{operation_id}}}"#
-            ))
-            .unwrap_err();
-        assert!(missing.contains("missing or invalid authorizationHash"));
-        let wrong_hash = serde_json::to_string(&[0u8; 32]).unwrap();
-        let mismatch = core
-            .handle_event_json(&format!(
-                r#"{{"type":"userConsented","operationId":{operation_id},"authorizationHash":{wrong_hash}}}"#
-            ))
-            .unwrap_err();
-        assert!(mismatch.contains("does not match the rendered screen"));
-        assert!(core.pending_operations.contains_key(&operation_id));
-
-        let different_screen = ScreenDescription::Consent(ConsentScreen {
-            rp_display_name: "Other RP".into(),
-            purpose: "different".into(),
-            requested_claims: vec!["family_name".into()],
-        });
-        let cross_screen_hash =
-            serde_json::to_string(&presenter::consent_hash(&AwsLc, &different_screen)).unwrap();
-        let cross_screen = core
-            .handle_event_json(&format!(
-                r#"{{"type":"userConsented","operationId":{operation_id},"authorizationHash":{cross_screen_hash}}}"#
-            ))
-            .unwrap_err();
-        assert!(cross_screen.contains("does not match the rendered screen"));
-    }
-
-    #[test]
-    fn infrastructure_failure_resets_each_reusable_machine() {
-        let mut presentation = Core::new("wallet.example", "device-key");
-        presentation.vp = State::Aborted(AbortReason::MalformedRequest);
-        let id = emit(
-            &mut presentation,
-            ActiveFlow::Presentation,
-            Effect::Sign {
-                key_ref: "key".into(),
-                payload: vec![],
-            },
-        );
-        fail(&mut presentation, id);
-        assert!(matches!(presentation.vp, State::Idle));
-
-        let mut payment = Core::new("wallet.example", "device-key");
-        payment.payment = payment::State::Aborted(payment::AbortReason::MalformedRequest);
-        let id = emit(
-            &mut payment,
-            ActiveFlow::Payment,
-            Effect::Sign {
-                key_ref: "key".into(),
-                payload: vec![],
-            },
-        );
-        fail(&mut payment, id);
-        assert!(matches!(payment.payment, payment::State::Idle));
-
-        let mut issuance = Core::new("wallet.example", "device-key");
-        issuance.issuance = oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid);
-        let id = emit(&mut issuance, ActiveFlow::Issuance, Effect::RequestToken);
-        fail(&mut issuance, id);
-        assert!(matches!(issuance.issuance, oid4vci::State::Idle));
-
-        let mut qes = Core::new("wallet.example", "device-key");
-        qes.qes = qes::QesState::Aborted(qes::AbortReason::MalformedRequest);
-        let id = emit(
-            &mut qes,
-            ActiveFlow::Qes,
-            Effect::Sign {
-                key_ref: "key".into(),
-                payload: vec![],
-            },
-        );
-        fail(&mut qes, id);
-        assert!(matches!(qes.qes, qes::QesState::Idle));
-    }
-
-    #[test]
-    fn wire_effect_batch_is_atomic_at_id_exhaustion() {
-        let mut core = Core::new("wallet.example", "device-key");
-        core.active = ActiveFlow::Presentation;
-        core.next_operation_id = i64::MAX as u64;
-        let error = core
-            .serialize_wire_effects(vec![
-                Effect::ResolveRpTrust {
-                    client_id: "rp.example".into(),
-                },
-                Effect::PersistNonce { nonce: 1 },
-            ])
-            .unwrap_err();
-        assert!(error.contains("operationId space exhausted"));
-        assert!(core.pending_operations.is_empty());
-        assert_eq!(core.next_operation_id, i64::MAX as u64);
-    }
-
-    #[test]
-    fn wire_id_exhaustion_resets_progressed_flow_before_returning_error() {
-        let mut core = Core::new("wallet.example", "device-key");
-        core.next_operation_id = i64::MAX as u64 + 1;
-
-        let error = core
-            .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
-            .unwrap_err();
-
-        assert!(error.contains("operationId space exhausted"));
-        assert_eq!(core.active, ActiveFlow::None);
-        assert!(matches!(core.w2w, w2w::State::Idle));
-        assert!(core.pending_operations.is_empty());
-
-        // Exhaustion is practically unreachable and intentionally does not wrap/reuse IDs. Reset
-        // the injected boundary value to prove the protocol machine itself is cleanly reusable.
-        core.next_operation_id = 1;
-        let output = core
-            .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
-            .unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]["type"],
-            "publishTransferOffer"
-        );
-        assert_eq!(core.active, ActiveFlow::WalletTransfer);
-        assert!(matches!(core.w2w, w2w::State::AwaitingTransfer));
-    }
-
-    #[test]
-    fn pending_cap_failure_clears_all_callbacks_and_allows_a_new_flow() {
-        let mut core = Core::new("wallet.example", "device-key");
-        for operation_id in 1..=MAX_PENDING_OPERATIONS as u64 {
-            core.pending_operations.insert(
-                operation_id,
-                PendingOperation {
-                    flow: ActiveFlow::Presentation,
-                    result: OperationResultKind::Persisted,
-                    authorization_hash: None,
-                },
-            );
-        }
-
-        let error = core
-            .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
-            .unwrap_err();
-
-        assert!(error.contains("too many pending wallet operations"));
-        assert_eq!(core.active, ActiveFlow::None);
-        assert!(matches!(core.w2w, w2w::State::Idle));
-        assert!(core.pending_operations.is_empty());
-
-        let output = core
-            .handle_event_json(r#"{"type":"walletTransferOfferCreated"}"#)
-            .unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&output).unwrap()[0]["type"],
-            "publishTransferOffer"
-        );
-        assert_eq!(core.active, ActiveFlow::WalletTransfer);
-    }
-
-    #[test]
-    fn operation_ids_are_positive_signed_range_and_monotonic() {
-        let mut core = Core::new("wallet.example", "device-key");
-        assert!((1..=(1u64 << 62)).contains(&core.next_operation_id));
-        let first = emit(
-            &mut core,
-            ActiveFlow::Presentation,
-            Effect::PersistNonce { nonce: 1 },
-        );
-        let second = emit(
-            &mut core,
-            ActiveFlow::Presentation,
-            Effect::PersistNonce { nonce: 2 },
-        );
-        assert!((1..=i64::MAX as u64).contains(&first));
-        assert_eq!(second, first + 1);
     }
 }

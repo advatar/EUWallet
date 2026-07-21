@@ -14,8 +14,7 @@ use serde_json::json;
 use wallet_core::{Core, Effect, Event};
 
 const CA_DER: &[u8] = include_bytes!("../../x509/tests/vectors/ca.der");
-const RP_DER: &[u8] = include_bytes!("../../x509/tests/vectors/rp.der");
-const ISSUER_DER_B64: &str = include_str!("../../x509/tests/vectors/issuer.der.b64");
+const ISSUER_DER: &[u8] = include_bytes!("../../x509/tests/vectors/rp.der");
 const ISSUER_PKCS8: &[u8] = include_bytes!("../../x509/tests/vectors/rp.pkcs8.der");
 const NOW: i64 = 1_790_000_000; // 2026-09-21T14:13:20Z
 const EXPIRY: i64 = NOW + 10;
@@ -28,32 +27,16 @@ fn b64(bytes: &[u8]) -> String {
     Base64UrlUnpadded::encode_string(bytes)
 }
 
-fn issuer_der() -> Vec<u8> {
-    use base64ct::Base64;
-
-    Base64::decode_vec(ISSUER_DER_B64.trim()).expect("valid issuer certificate vector")
-}
-
-fn signed_trust_list_for_services(
-    operator: &SoftwareSigner,
-    sequence: u64,
-    pid: bool,
-    attestation: bool,
-) -> Vec<u8> {
-    let mut anchors =
-        vec![json!({ "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" })];
-    if pid {
-        anchors.push(json!({ "cert": b64(CA_DER), "service": "pid", "status": "granted" }));
-    }
-    if attestation {
-        anchors.push(json!({ "cert": b64(CA_DER), "service": "attestation", "status": "granted" }));
-    }
+fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
     let header = b64(br#"{"alg":"ES256"}"#);
     let payload = b64(json!({
-        "seq": sequence,
+        "seq": 1,
         "valid_from": 0,
         "valid_until": 4_000_000_000i64,
-        "anchors": anchors,
+        "anchors": [
+            { "cert": b64(CA_DER), "service": "pid", "status": "granted" },
+            { "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" }
+        ]
     })
     .to_string()
     .as_bytes());
@@ -66,10 +49,6 @@ fn signed_trust_list_for_services(
         )
         .unwrap();
     format!("{signing_input}.{}", b64(&signature)).into_bytes()
-}
-
-fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
-    signed_trust_list_for_services(operator, 1, true, true)
 }
 
 fn device_jwk(device_public_key: &[u8]) -> serde_json::Value {
@@ -163,7 +142,7 @@ fn issued_mdoc(issuer: &SoftwareSigner, device_public_key: &[u8]) -> Vec<u8> {
             },
         ],
     );
-    let mut credential = build_and_sign(
+    let credential = build_and_sign(
         name_spaces,
         MDOC_TYPE,
         cose_key(device_public_key),
@@ -178,8 +157,6 @@ fn issued_mdoc(issuer: &SoftwareSigner, device_public_key: &[u8]) -> Vec<u8> {
         Alg::Es256,
     )
     .unwrap();
-    credential.issuer_auth.unprotected.x5chain =
-        Some(Box::new(cose::X5Chain::Single(issuer_der())));
     b64(&credential.to_value().to_canonical()).into_bytes()
 }
 
@@ -219,7 +196,7 @@ fn signed_request(rp: &SoftwareSigner, mdoc: bool) -> Vec<u8> {
     format!("{signing_input}.{}", b64(&signature)).into_bytes()
 }
 
-fn authenticated_core(mdoc: bool) -> (Core, SoftwareSigner, SoftwareSigner, SoftwareSigner) {
+fn authenticated_core(mdoc: bool) -> (Core, SoftwareSigner, SoftwareSigner) {
     let issuer_and_rp = SoftwareSigner::from_pkcs8_der(ISSUER_PKCS8).unwrap();
     let device = SoftwareSigner::generate_p256().unwrap();
     let operator = SoftwareSigner::generate_p256().unwrap();
@@ -236,11 +213,11 @@ fn authenticated_core(mdoc: bool) -> (Core, SoftwareSigner, SoftwareSigner, Soft
     core.ingest_credential(
         if mdoc { "mso_mdoc" } else { "dc+sd-jwt" },
         &credential,
-        &[issuer_der()],
+        &[ISSUER_DER.to_vec()],
         ISSUER_ID,
     )
     .unwrap();
-    (core, device, issuer_and_rp, operator)
+    (core, device, issuer_and_rp)
 }
 
 fn drive_to_consent(core: &mut Core, rp: &SoftwareSigner, mdoc: bool) {
@@ -252,7 +229,7 @@ fn drive_to_consent(core: &mut Core, rp: &SoftwareSigner, mdoc: bool) {
         [Effect::ResolveRpTrust { .. }]
     ));
     let effects = core.handle_event(Event::RpCertChainResolved {
-        rp_cert_chain: vec![RP_DER.to_vec()],
+        rp_cert_chain: vec![ISSUER_DER.to_vec()],
         registered_redirect_uris: vec![RESPONSE_URI.into()],
     });
     assert!(effects.iter().any(|effect| matches!(
@@ -278,7 +255,7 @@ fn assert_terminal_error(effects: &[Effect], expected_code: &str) {
 
 #[test]
 fn sd_jwt_expiring_at_consent_is_rejected_before_signing() {
-    let (mut core, _device, rp, _operator) = authenticated_core(false);
+    let (mut core, _device, rp) = authenticated_core(false);
     drive_to_consent(&mut core, &rp, false);
 
     assert!(core
@@ -290,7 +267,7 @@ fn sd_jwt_expiring_at_consent_is_rejected_before_signing() {
 
 #[test]
 fn mdoc_expiring_at_consent_is_rejected_before_signing() {
-    let (mut core, _device, rp, _operator) = authenticated_core(true);
+    let (mut core, _device, rp) = authenticated_core(true);
     drive_to_consent(&mut core, &rp, true);
 
     assert!(core
@@ -301,35 +278,8 @@ fn mdoc_expiring_at_consent_is_rejected_before_signing() {
 }
 
 #[test]
-fn credential_provenance_cannot_switch_trust_domain_at_presentation() {
-    // A PID cannot be rescued by an attestation anchor, and an mdoc cannot be rescued by a PID
-    // anchor, even though these test services happen to use the same root and leaf key.
-    for (mdoc, keep_pid, keep_attestation) in [(false, false, true), (true, true, false)] {
-        let (mut core, _device, rp, operator) = authenticated_core(mdoc);
-        core.load_trust_list(
-            &signed_trust_list_for_services(&operator, 2, keep_pid, keep_attestation),
-            operator.public_key_raw(),
-        )
-        .unwrap();
-
-        let effects = core.handle_event(Event::AuthorizationRequestReceived {
-            request: signed_request(&rp, mdoc),
-        });
-        assert!(matches!(
-            effects.as_slice(),
-            [Effect::ResolveRpTrust { .. }]
-        ));
-        let effects = core.handle_event(Event::RpCertChainResolved {
-            rp_cert_chain: vec![RP_DER.to_vec()],
-            registered_redirect_uris: vec![RESPONSE_URI.into()],
-        });
-        assert_terminal_error(&effects, "credential_provenance_invalid");
-    }
-}
-
-#[test]
 fn sd_jwt_expiring_while_a_device_signature_is_pending_cannot_be_delivered() {
-    let (mut core, device, rp, _operator) = authenticated_core(false);
+    let (mut core, device, rp) = authenticated_core(false);
     drive_to_consent(&mut core, &rp, false);
     let signing_effects = core.handle_event(Event::UserConsented);
     let payload = signing_effects
@@ -352,7 +302,7 @@ fn sd_jwt_expiring_while_a_device_signature_is_pending_cannot_be_delivered() {
 
 #[test]
 fn clock_rollback_aborts_a_presentation_with_a_signature_pending() {
-    let (mut core, device, rp, _operator) = authenticated_core(false);
+    let (mut core, device, rp) = authenticated_core(false);
     drive_to_consent(&mut core, &rp, false);
 
     // Equal and forward updates are deterministic no-ops apart from advancing the high-water mark.
