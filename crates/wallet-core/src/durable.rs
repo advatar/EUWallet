@@ -12,25 +12,18 @@
 //! authenticated envelope pins the complete checkpoint; the internal head alone is not rollback
 //! protection.
 //!
-//! Production export/restore remains schema v1. A private, dormant schema-v2 codec models an Idle
-//! aggregate plus the delivery ledger, but it is intentionally not accepted by the public restore
-//! boundary until every resumable protocol aggregate is persisted. This prevents false Idle
-//! checkpoints and v2-to-v1 downgrade. Schema v1 preserves the current replay representation for
-//! OID4VCI `c_nonce`: a numeric `u64`; the final string nonce model still requires migration.
+//! Schema v1 preserves the current replay representation for OID4VCI `c_nonce`: a numeric `u64`.
+//! The final OpenID4VCI string nonce model therefore requires an explicit future schema migration,
+//! never an in-place reinterpretation of v1 bytes.
 
 use core::cmp::Ordering;
 
 use crypto_traits::Digest;
-use zeroize::Zeroizing;
 
 use super::*;
 
 /// Maximum authenticated plaintext checkpoint accepted from a platform store.
-///
-/// The platform envelope itself is capped at 32 MiB. Android has the larger fixed envelope
-/// overhead (120 bytes), so this cross-platform plaintext contract leaves exactly enough room for
-/// either native store to authenticate and encrypt every checkpoint Core accepts.
-pub const MAX_CHECKPOINT_BYTES: usize = 32 * 1024 * 1024 - 120;
+pub const MAX_CHECKPOINT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum number of authenticated production credentials in one checkpoint.
 pub const MAX_CREDENTIALS: usize = 128;
 /// Maximum encoded source credential size.
@@ -48,17 +41,13 @@ pub const MAX_REPLAY_VALUES: usize = 65_536;
 
 const MAGIC: &[u8] = b"EUWALLET-CHECKPOINT";
 const VERSION: u64 = 1;
-const DORMANT_VERSION_V2: u64 = 2;
-// Exact canonical maximum for Idle + zero live entries + 64 maximum-width tombstones:
-// continuation framing (8) + ledger framing excluding tombstones (86) + 64 * 140 bytes.
-const MAX_DORMANT_CONTINUATION_BYTES: usize = 9_054;
 const MAX_CONTEXT_VALUE_BYTES: usize = 16 * 1024;
 const MAX_SCHEMA_DEPTH: usize = 8;
 const MAX_CONTAINER_ITEMS: usize = MAX_REPLAY_VALUES;
 const MAX_MAP_PAIRS: usize = 16;
 const MAX_STRUCTURAL_NODES: usize = 1_000_000;
-// The structural scanner must accept every byte string that the domain budgets and shared native
-// plaintext ceiling can produce. Per-field and aggregate credential/log limits remain tighter.
+// The structural scanner must accept every byte string that the domain budgets and 32 MiB
+// encoder can produce. Per-field and aggregate credential/log limits remain the tighter guards.
 const MAX_DECODED_PAYLOAD_BYTES: usize = MAX_CHECKPOINT_BYTES;
 const CONTEXT_HASH_DOMAIN: &[u8] = b"eudi-wallet-checkpoint-context-v1";
 
@@ -79,8 +68,6 @@ pub enum Resource {
     StructuralNodes,
     ContainerItems,
     DecodedPayloadBytes,
-    ContinuationBytes,
-    DeliveryReservedBytes,
     Credentials,
     RawCredentialBytes,
     IssuerIdentityBytes,
@@ -139,9 +126,6 @@ pub enum DurableCheckpointError {
         index: usize,
     },
     DuplicateCredential,
-    DormantDeliveryLedgerNotPristine,
-    IdleAggregateHasLiveDeliveries,
-    InvalidDeliveryLedger,
     TransactionLog(txnlog::Error),
 }
 
@@ -210,12 +194,6 @@ struct Checkpoint {
     replay: ReplaySets,
     transaction_entries: Vec<txnlog::Entry>,
     transaction_head: [u8; 32],
-    continuation: Option<Continuation>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Continuation {
-    delivery_ledger: delivery::DeliveryLedger,
 }
 
 fn resource_limit(resource: Resource, max: usize, actual: usize) -> DurableCheckpointError {
@@ -375,117 +353,6 @@ fn validate_record_parts(
     Ok(())
 }
 
-fn authenticated_provenances(core: &Core) -> impl Iterator<Item = &CredentialProvenance> {
-    core.credentials
-        .iter()
-        .filter_map(|stored| match &stored.provenance {
-            StoredProvenance::Authenticated(provenance) => Some(provenance),
-            StoredProvenance::TestFixture => None,
-        })
-        .chain(
-            core.mdoc_holdings
-                .iter()
-                .filter_map(|stored| match &stored.provenance {
-                    StoredProvenance::Authenticated(provenance) => Some(provenance),
-                    StoredProvenance::TestFixture => None,
-                }),
-        )
-}
-
-fn matching_authenticated_provenance<'a>(
-    core: &'a Core,
-    candidate: &AuthenticatedCredential,
-) -> Option<&'a CredentialProvenance> {
-    match &candidate.credential {
-        VerifiedCredential::SdJwt { holding, .. } => core
-            .credentials
-            .iter()
-            .find(|stored| stored.holding == *holding)
-            .and_then(|stored| match &stored.provenance {
-                StoredProvenance::Authenticated(provenance) => Some(provenance),
-                StoredProvenance::TestFixture => None,
-            }),
-        VerifiedCredential::Mdoc { holding, .. } => core
-            .mdoc_holdings
-            .iter()
-            .find(|stored| stored.holding == *holding)
-            .and_then(|stored| match &stored.provenance {
-                StoredProvenance::Authenticated(provenance) => Some(provenance),
-                StoredProvenance::TestFixture => None,
-            }),
-    }
-}
-
-fn record_evidence_bytes(
-    provenance: &CredentialProvenance,
-) -> Result<usize, DurableCheckpointError> {
-    let mut total = 0usize;
-    validate_record_parts(
-        &provenance.raw_credential,
-        &provenance.issuer.identity,
-        &provenance.issuer.certificate_path,
-        &mut total,
-    )?;
-    Ok(total)
-}
-
-/// Project the exact authenticated upsert before any holding changes. This shares the component
-/// and aggregate limits with checkpoint export so an accepted credential can never make the
-/// in-memory wallet impossible to commit solely because of credential count/evidence capacity.
-pub(super) fn ensure_credential_storage_admission(
-    core: &Core,
-    candidate: &AuthenticatedCredential,
-) -> Result<(), CredentialIngestionError> {
-    ensure_credential_storage_admission_with_limits(
-        core,
-        candidate,
-        MAX_CREDENTIALS,
-        MAX_CREDENTIAL_EVIDENCE_BYTES,
-    )
-}
-
-fn ensure_credential_storage_admission_with_limits(
-    core: &Core,
-    candidate: &AuthenticatedCredential,
-    max_credentials: usize,
-    max_evidence_bytes: usize,
-) -> Result<(), CredentialIngestionError> {
-    let current_count = authenticated_provenances(core).count();
-    let replaced = matching_authenticated_provenance(core, candidate);
-    let projected_count = current_count
-        .checked_add(usize::from(replaced.is_none()))
-        .ok_or(CredentialIngestionError::CredentialStoreFull)?;
-    if projected_count > max_credentials {
-        return Err(CredentialIngestionError::CredentialStoreFull);
-    }
-
-    let mut current_evidence = 0usize;
-    for provenance in authenticated_provenances(core) {
-        validate_record_parts(
-            &provenance.raw_credential,
-            &provenance.issuer.identity,
-            &provenance.issuer.certificate_path,
-            &mut current_evidence,
-        )
-        .map_err(|_| CredentialIngestionError::CredentialEvidenceLimitExceeded)?;
-    }
-    let replaced_evidence = replaced
-        .map(record_evidence_bytes)
-        .transpose()
-        .map_err(|_| CredentialIngestionError::CredentialEvidenceLimitExceeded)?
-        .unwrap_or(0);
-    let candidate_evidence = record_evidence_bytes(&candidate.provenance)
-        .map_err(|_| CredentialIngestionError::CredentialEvidenceLimitExceeded)?;
-    let projected_evidence = current_evidence
-        .checked_sub(replaced_evidence)
-        .and_then(|total| total.checked_add(candidate_evidence))
-        .ok_or(CredentialIngestionError::CredentialEvidenceLimitExceeded)?;
-    if projected_evidence > max_evidence_bytes {
-        return Err(CredentialIngestionError::CredentialEvidenceLimitExceeded);
-    }
-    Ok(())
-}
-
 fn authenticated_records(core: &Core) -> Result<Vec<CredentialRecord>, DurableCheckpointError> {
     let authenticated_count = core
         .credentials
@@ -631,9 +498,6 @@ impl Core {
         if envelope_generation == 0 {
             return Err(DurableCheckpointError::InvalidGeneration);
         }
-        if !self.delivery_ledger.is_pristine() {
-            return Err(DurableCheckpointError::DormantDeliveryLedgerNotPristine);
-        }
         let context = current_context(self)?;
         let trust_sequence_high_water = require_current_environment(self)?;
         if !self.audit_log_available {
@@ -669,7 +533,6 @@ impl Core {
             replay,
             transaction_entries,
             transaction_head,
-            continuation: None,
         })
     }
 
@@ -685,9 +548,6 @@ impl Core {
     ) -> Result<(), DurableCheckpointError> {
         if authenticated_envelope_generation == 0 {
             return Err(DurableCheckpointError::InvalidGeneration);
-        }
-        if !self.delivery_ledger.is_pristine() {
-            return Err(DurableCheckpointError::DormantDeliveryLedgerNotPristine);
         }
         let checkpoint = decode_checkpoint(bytes)?;
         if checkpoint.generation != authenticated_envelope_generation {
@@ -786,7 +646,6 @@ impl Core {
             checkpoint.transaction_entries,
             checkpoint.transaction_head,
         )?;
-        let staged_delivery_ledger = delivery::DeliveryLedger::new();
         let mut staged_next_operation_id = operation_id_seed();
         if staged_next_operation_id == self.next_operation_id {
             // Preserve the random 62-bit namespace while making a collision with this live Core's
@@ -815,7 +674,6 @@ impl Core {
         self.active = ActiveFlow::None;
         self.next_operation_id = staged_next_operation_id;
         self.pending_operations.clear();
-        self.delivery_ledger = staged_delivery_ledger;
         self.issuance = oid4vci::State::Idle;
         self.issuer_trusted_current = false;
         self.issuer_id_current.clear();
@@ -922,34 +780,12 @@ impl Encoder {
 }
 
 fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Vec<u8>, DurableCheckpointError> {
-    if checkpoint.continuation.is_some() {
-        return Err(DurableCheckpointError::DormantDeliveryLedgerNotPristine);
-    }
-    encode_checkpoint_version(checkpoint, VERSION)
-}
-
-#[allow(dead_code)]
-fn encode_checkpoint_v2(checkpoint: &Checkpoint) -> Result<Vec<u8>, DurableCheckpointError> {
-    let continuation = checkpoint
-        .continuation
-        .as_ref()
-        .ok_or(DurableCheckpointError::InvalidDeliveryLedger)?;
-    if continuation.delivery_ledger.live_len() != 0 {
-        return Err(DurableCheckpointError::IdleAggregateHasLiveDeliveries);
-    }
-    encode_checkpoint_version(checkpoint, DORMANT_VERSION_V2)
-}
-
-fn encode_checkpoint_version(
-    checkpoint: &Checkpoint,
-    version: u64,
-) -> Result<Vec<u8>, DurableCheckpointError> {
     let mut out = Encoder::new();
-    out.map(if version == VERSION { 8 } else { 9 })?;
+    out.map(8)?;
     out.uint(1)?;
     out.bytes(MAGIC)?;
     out.uint(2)?;
-    out.uint(version)?;
+    out.uint(VERSION)?;
     out.uint(3)?;
     out.uint(checkpoint.generation)?;
     out.uint(4)?;
@@ -1005,131 +841,7 @@ fn encode_checkpoint_version(
     }
     out.uint(2)?;
     out.bytes(&checkpoint.transaction_head)?;
-    if version == DORMANT_VERSION_V2 {
-        out.uint(9)?;
-        let continuation_start = out.bytes.len();
-        encode_continuation(
-            &mut out,
-            checkpoint
-                .continuation
-                .as_ref()
-                .ok_or(DurableCheckpointError::InvalidDeliveryLedger)?,
-        )?;
-        let continuation_bytes = out
-            .bytes
-            .len()
-            .checked_sub(continuation_start)
-            .ok_or(DurableCheckpointError::SizeOverflow)?;
-        if continuation_bytes > MAX_DORMANT_CONTINUATION_BYTES {
-            return Err(resource_limit(
-                Resource::ContinuationBytes,
-                MAX_DORMANT_CONTINUATION_BYTES,
-                continuation_bytes,
-            ));
-        }
-    }
     Ok(out.bytes)
-}
-
-fn encode_continuation(
-    out: &mut Encoder,
-    continuation: &Continuation,
-) -> Result<(), DurableCheckpointError> {
-    out.map(2)?;
-    out.uint(1)?;
-    // Fixed aggregate envelope. Only Idle is defined while the v2 capability is dormant.
-    out.map(2)?;
-    out.uint(1)?;
-    out.uint(0)?;
-    out.uint(2)?;
-    out.null()?;
-    out.uint(2)?;
-    encode_delivery_ledger(out, &continuation.delivery_ledger)
-}
-
-fn encode_delivery_ledger(
-    out: &mut Encoder,
-    ledger: &delivery::DeliveryLedger,
-) -> Result<(), DurableCheckpointError> {
-    out.map(5)?;
-    out.uint(1)?;
-    out.bytes(ledger.namespace())?;
-    out.uint(2)?;
-    out.uint(ledger.next_sequence())?;
-    out.uint(3)?;
-    out.array(ledger.live_len())?;
-    for entry in ledger.live_entries() {
-        out.map(12)?;
-        out.uint(1)?;
-        out.bytes(entry.id().as_bytes())?;
-        out.uint(2)?;
-        out.uint(entry.sequence())?;
-        out.uint(3)?;
-        out.uint(u64::from(entry.kind().tag()))?;
-        out.uint(4)?;
-        out.uint(u64::from(entry.recovery_policy().tag()))?;
-        out.uint(5)?;
-        out.uint(u64::from(entry.state().tag()))?;
-        out.uint(6)?;
-        out.bytes(entry.request())?;
-        out.uint(7)?;
-        out.bytes(entry.request_hash())?;
-        out.uint(8)?;
-        out.uint(
-            u64::try_from(entry.result_capacity())
-                .map_err(|_| DurableCheckpointError::SizeOverflow)?,
-        )?;
-        out.uint(9)?;
-        if let Some(result) = entry.result() {
-            out.bytes(result)?;
-        } else {
-            out.null()?;
-        }
-        out.uint(10)?;
-        if let Some(result_hash) = entry.result_hash() {
-            out.bytes(result_hash)?;
-        } else {
-            out.null()?;
-        }
-        out.uint(11)?;
-        out.uint(u64::from(entry.attempt()))?;
-        out.uint(12)?;
-        if let Some(adapter_contract) = entry.adapter_contract() {
-            out.uint(adapter_contract)?;
-        } else {
-            out.null()?;
-        }
-    }
-    out.uint(4)?;
-    out.array(ledger.tombstone_len())?;
-    for tombstone in ledger.tombstones() {
-        out.map(10)?;
-        out.uint(1)?;
-        out.bytes(tombstone.id().as_bytes())?;
-        out.uint(2)?;
-        out.uint(tombstone.sequence())?;
-        out.uint(3)?;
-        out.uint(u64::from(tombstone.kind().tag()))?;
-        out.uint(4)?;
-        out.uint(u64::from(tombstone.recovery_policy().tag()))?;
-        out.uint(5)?;
-        out.bytes(tombstone.request_hash())?;
-        out.uint(6)?;
-        out.uint(
-            u64::try_from(tombstone.result_capacity())
-                .map_err(|_| DurableCheckpointError::SizeOverflow)?,
-        )?;
-        out.uint(7)?;
-        out.uint(u64::from(tombstone.attempt()))?;
-        out.uint(8)?;
-        out.uint(tombstone.adapter_contract())?;
-        out.uint(9)?;
-        out.bytes(tombstone.result_hash())?;
-        out.uint(10)?;
-        out.uint(u64::from(tombstone.disposition().tag()))?;
-    }
-    out.uint(5)?;
-    out.bytes(&ledger.digest())
 }
 
 fn encode_transaction_entry(
@@ -1479,46 +1191,12 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn consume_null(&mut self) -> bool {
-        if self.bytes.get(self.position) == Some(&0xf6) {
-            self.position += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn optional_borrowed_bytes(
-        &mut self,
-        max: usize,
-    ) -> Result<Option<&'a [u8]>, DurableCheckpointError> {
-        if self.consume_null() {
-            return Ok(None);
-        }
-        self.borrowed_bytes(max).map(Some)
-    }
-
-    fn optional_hash(&mut self) -> Result<Option<[u8; 32]>, DurableCheckpointError> {
-        if self.consume_null() {
-            Ok(None)
-        } else {
-            self.hash().map(Some)
-        }
-    }
-
-    fn optional_uint(&mut self) -> Result<Option<u64>, DurableCheckpointError> {
-        if self.consume_null() {
-            Ok(None)
-        } else {
-            self.uint().map(Some)
-        }
-    }
-
     fn null_or_payment(
         &mut self,
         transaction_payload_bytes: &mut usize,
     ) -> Result<Option<txnlog::PaymentSummary>, DurableCheckpointError> {
-        if self.consume_null() {
+        if self.bytes.get(self.position) == Some(&0xf6) {
+            self.position += 1;
             return Ok(None);
         }
         self.exact_map(3)?;
@@ -1541,33 +1219,17 @@ impl<'a> Cursor<'a> {
 }
 
 fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, DurableCheckpointError> {
-    decode_checkpoint_version(bytes, VERSION)
-}
-
-#[allow(dead_code)]
-fn decode_checkpoint_v2(bytes: &[u8]) -> Result<Checkpoint, DurableCheckpointError> {
-    decode_checkpoint_version(bytes, DORMANT_VERSION_V2)
-}
-
-fn decode_checkpoint_version(
-    bytes: &[u8],
-    expected_version: u64,
-) -> Result<Checkpoint, DurableCheckpointError> {
     structural_preflight(bytes)?;
     let mut input = Cursor::new(bytes);
-    let root_fields = input.container(5, MAX_MAP_PAIRS)?;
+    input.exact_map(8)?;
     input.key(1)?;
     if input.borrowed_bytes(MAGIC.len())? != MAGIC {
         return Err(DurableCheckpointError::Malformed);
     }
     input.key(2)?;
     let version = input.uint()?;
-    if version != expected_version {
+    if version != VERSION {
         return Err(DurableCheckpointError::UnsupportedVersion(version));
-    }
-    let expected_root_fields = if version == VERSION { 8 } else { 9 };
-    if root_fields != expected_root_fields {
-        return Err(DurableCheckpointError::Malformed);
     }
     input.key(3)?;
     let generation = input.uint()?;
@@ -1679,35 +1341,6 @@ fn decode_checkpoint_version(
     }
     input.key(2)?;
     let transaction_head = input.hash()?;
-    let continuation = if version == DORMANT_VERSION_V2 {
-        input.key(9)?;
-        let continuation_start = input.position;
-        let mut continuation_budget = ScanBudget {
-            remaining_nodes: MAX_STRUCTURAL_NODES,
-            payload_bytes: 0,
-        };
-        let continuation_end = scan_item(bytes, continuation_start, 0, &mut continuation_budget)?;
-        let continuation_bytes = continuation_end
-            .checked_sub(continuation_start)
-            .ok_or(DurableCheckpointError::SizeOverflow)?;
-        if continuation_bytes > MAX_DORMANT_CONTINUATION_BYTES {
-            return Err(resource_limit(
-                Resource::ContinuationBytes,
-                MAX_DORMANT_CONTINUATION_BYTES,
-                continuation_bytes,
-            ));
-        }
-        let continuation = decode_continuation(&mut input)?;
-        if input.position != continuation_end {
-            return Err(DurableCheckpointError::Malformed);
-        }
-        if continuation.delivery_ledger.live_len() != 0 {
-            return Err(DurableCheckpointError::IdleAggregateHasLiveDeliveries);
-        }
-        Some(continuation)
-    } else {
-        None
-    };
     if input.position != bytes.len() {
         return Err(DurableCheckpointError::NonCanonical);
     }
@@ -1729,163 +1362,7 @@ fn decode_checkpoint_version(
         },
         transaction_entries,
         transaction_head,
-        continuation,
     })
-}
-
-fn decode_continuation(input: &mut Cursor<'_>) -> Result<Continuation, DurableCheckpointError> {
-    input.exact_map(2)?;
-    input.key(1)?;
-    input.exact_map(2)?;
-    input.key(1)?;
-    if input.uint()? != 0 {
-        return Err(DurableCheckpointError::Malformed);
-    }
-    input.key(2)?;
-    if !input.consume_null() {
-        return Err(DurableCheckpointError::Malformed);
-    }
-    input.key(2)?;
-    Ok(Continuation {
-        delivery_ledger: decode_delivery_ledger(input)?,
-    })
-}
-
-fn decode_delivery_ledger(
-    input: &mut Cursor<'_>,
-) -> Result<delivery::DeliveryLedger, DurableCheckpointError> {
-    input.exact_map(5)?;
-    input.key(1)?;
-    let namespace = Zeroizing::new(input.hash()?);
-    input.key(2)?;
-    let next_sequence = input.uint()?;
-    input.key(3)?;
-    let live_count = input.container(4, delivery::MAX_LIVE_DELIVERIES)?;
-    let mut live = Vec::with_capacity(live_count);
-    let mut reserved_delivery_bytes = 0usize;
-    for _ in 0..live_count {
-        input.exact_map(12)?;
-        input.key(1)?;
-        let id = input.hash()?;
-        input.key(2)?;
-        let sequence = input.uint()?;
-        input.key(3)?;
-        let kind = delivery::DeliveryKind::from_tag(input.uint()?)
-            .ok_or(DurableCheckpointError::Malformed)?;
-        input.key(4)?;
-        let recovery_policy = delivery::RecoveryPolicy::from_tag(input.uint()?)
-            .ok_or(DurableCheckpointError::Malformed)?;
-        input.key(5)?;
-        let state = delivery::DeliveryState::from_tag(input.uint()?)
-            .ok_or(DurableCheckpointError::Malformed)?;
-        input.key(6)?;
-        let request = input.borrowed_bytes(delivery::MAX_DELIVERY_BLOB_BYTES)?;
-        input.key(7)?;
-        let request_hash = input.hash()?;
-        input.key(8)?;
-        let result_capacity = usize_argument(input.uint()?)?;
-        if result_capacity > delivery::MAX_DELIVERY_BLOB_BYTES {
-            return Err(resource_limit(
-                Resource::DecodedPayloadBytes,
-                delivery::MAX_DELIVERY_BLOB_BYTES,
-                result_capacity,
-            ));
-        }
-        input.key(9)?;
-        let result = input.optional_borrowed_bytes(delivery::MAX_DELIVERY_BLOB_BYTES)?;
-        input.key(10)?;
-        let result_hash = input.optional_hash()?;
-        input.key(11)?;
-        let attempt = u8::try_from(input.uint()?).map_err(|_| DurableCheckpointError::Malformed)?;
-        input.key(12)?;
-        let adapter_contract = input.optional_uint()?;
-        if result.is_some_and(|value| value.len() > result_capacity) {
-            return Err(DurableCheckpointError::InvalidDeliveryLedger);
-        }
-        let reservation = request
-            .len()
-            .checked_add(result_capacity)
-            .ok_or(DurableCheckpointError::SizeOverflow)?;
-        reserved_delivery_bytes = reserved_delivery_bytes
-            .checked_add(reservation)
-            .ok_or(DurableCheckpointError::SizeOverflow)?;
-        if reserved_delivery_bytes > delivery::MAX_RESERVED_DELIVERY_BYTES {
-            return Err(resource_limit(
-                Resource::DeliveryReservedBytes,
-                delivery::MAX_RESERVED_DELIVERY_BYTES,
-                reserved_delivery_bytes,
-            ));
-        }
-        // No fallible domain parsing follows these copies before they enter the zeroizing DTO.
-        let request = delivery::SensitiveBytes::new(request.to_vec());
-        let result = result.map(|value| delivery::SensitiveBytes::new(value.to_vec()));
-        live.push(delivery::RestoredDelivery::from_sensitive_parts(
-            id,
-            sequence,
-            kind,
-            recovery_policy,
-            state,
-            request,
-            request_hash,
-            result_capacity,
-            result,
-            result_hash,
-            attempt,
-            adapter_contract,
-        ));
-    }
-    input.key(4)?;
-    let tombstone_count = input.container(4, delivery::MAX_DELIVERY_TOMBSTONES)?;
-    let mut tombstones = Vec::with_capacity(tombstone_count);
-    for _ in 0..tombstone_count {
-        input.exact_map(10)?;
-        input.key(1)?;
-        let id = input.hash()?;
-        input.key(2)?;
-        let sequence = input.uint()?;
-        input.key(3)?;
-        let kind = delivery::DeliveryKind::from_tag(input.uint()?)
-            .ok_or(DurableCheckpointError::Malformed)?;
-        input.key(4)?;
-        let recovery_policy = delivery::RecoveryPolicy::from_tag(input.uint()?)
-            .ok_or(DurableCheckpointError::Malformed)?;
-        input.key(5)?;
-        let request_hash = input.hash()?;
-        input.key(6)?;
-        let result_capacity = usize_argument(input.uint()?)?;
-        if result_capacity > delivery::MAX_DELIVERY_BLOB_BYTES {
-            return Err(resource_limit(
-                Resource::DecodedPayloadBytes,
-                delivery::MAX_DELIVERY_BLOB_BYTES,
-                result_capacity,
-            ));
-        }
-        input.key(7)?;
-        let attempt = u8::try_from(input.uint()?).map_err(|_| DurableCheckpointError::Malformed)?;
-        input.key(8)?;
-        let adapter_contract = input.uint()?;
-        input.key(9)?;
-        let result_hash = input.hash()?;
-        input.key(10)?;
-        let disposition = delivery::TombstoneDisposition::from_tag(input.uint()?)
-            .ok_or(DurableCheckpointError::Malformed)?;
-        tombstones.push(delivery::RestoredTombstone::new(
-            id,
-            sequence,
-            kind,
-            recovery_policy,
-            request_hash,
-            result_capacity,
-            attempt,
-            adapter_contract,
-            result_hash,
-            disposition,
-        ));
-    }
-    input.key(5)?;
-    let digest = input.hash()?;
-    delivery::DeliveryLedger::restore_checked(namespace, next_sequence, live, tombstones, digest)
-        .map_err(|_| DurableCheckpointError::InvalidDeliveryLedger)
 }
 
 fn decode_replay(input: &mut Cursor<'_>) -> Result<Vec<u64>, DurableCheckpointError> {
@@ -2007,22 +1484,6 @@ mod tests {
         core
     }
 
-    fn assert_replay_capacity_effects(effects: &[Effect]) {
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            Effect::Render {
-                screen: ScreenDescription::Error { code, .. }
-            } if code == "durable_replay_capacity_exhausted"
-        )));
-        assert!(effects.iter().any(|effect| matches!(effect, Effect::Close)));
-        assert!(effects.iter().all(|effect| matches!(
-            effect,
-            Effect::Render {
-                screen: ScreenDescription::Error { .. }
-            } | Effect::Close
-        )));
-    }
-
     fn append_history(core: &mut Core) {
         core.log
             .append(
@@ -2134,144 +1595,7 @@ mod tests {
             },
             transaction_entries: Vec::new(),
             transaction_head: [0u8; 32],
-            continuation: None,
         }
-    }
-
-    fn dormant_checkpoint(ledger: delivery::DeliveryLedger) -> Checkpoint {
-        let mut checkpoint = empty_checkpoint();
-        checkpoint.continuation = Some(Continuation {
-            delivery_ledger: ledger,
-        });
-        checkpoint
-    }
-
-    fn fixed_delivery_ledger() -> delivery::DeliveryLedger {
-        delivery::DeliveryLedger::with_namespace_for_testing([0x5a; 32])
-    }
-
-    fn enqueue_delivery(
-        ledger: &mut delivery::DeliveryLedger,
-        kind: delivery::DeliveryKind,
-        request: &[u8],
-        result_capacity: usize,
-    ) -> delivery::DeliveryId {
-        let prepared = ledger
-            .prepare(kind, request.to_vec(), result_capacity)
-            .unwrap();
-        ledger.enqueue(prepared).unwrap()
-    }
-
-    fn encode_ledger_bytes(ledger: &delivery::DeliveryLedger) -> Vec<u8> {
-        let mut encoder = Encoder::new();
-        encode_delivery_ledger(&mut encoder, ledger).unwrap();
-        encoder.bytes
-    }
-
-    fn decode_ledger_bytes(
-        bytes: &[u8],
-    ) -> Result<delivery::DeliveryLedger, DurableCheckpointError> {
-        structural_preflight(bytes)?;
-        let mut cursor = Cursor::new(bytes);
-        let ledger = decode_delivery_ledger(&mut cursor)?;
-        if cursor.position != bytes.len() {
-            return Err(DurableCheckpointError::NonCanonical);
-        }
-        Ok(ledger)
-    }
-
-    fn encode_hostile_queued_delivery(
-        out: &mut Encoder,
-        sequence: u64,
-        kind_tag: u64,
-        recovery_tag: u64,
-        state_tag: u64,
-        request: &[u8],
-        result_capacity: usize,
-    ) {
-        out.map(12).unwrap();
-        out.uint(1).unwrap();
-        out.bytes(&[0; 32]).unwrap();
-        out.uint(2).unwrap();
-        out.uint(sequence).unwrap();
-        out.uint(3).unwrap();
-        out.uint(kind_tag).unwrap();
-        out.uint(4).unwrap();
-        out.uint(recovery_tag).unwrap();
-        out.uint(5).unwrap();
-        out.uint(state_tag).unwrap();
-        out.uint(6).unwrap();
-        out.bytes(request).unwrap();
-        out.uint(7).unwrap();
-        out.bytes(&[0; 32]).unwrap();
-        out.uint(8).unwrap();
-        out.uint(u64::try_from(result_capacity).unwrap()).unwrap();
-        out.uint(9).unwrap();
-        out.null().unwrap();
-        out.uint(10).unwrap();
-        out.null().unwrap();
-        out.uint(11).unwrap();
-        out.uint(0).unwrap();
-        out.uint(12).unwrap();
-        out.null().unwrap();
-    }
-
-    fn encode_hostile_single_live_ledger(
-        kind_tag: u64,
-        recovery_tag: u64,
-        state_tag: u64,
-    ) -> Vec<u8> {
-        let mut out = Encoder::new();
-        out.map(5).unwrap();
-        out.uint(1).unwrap();
-        out.bytes(&[0x5a; 32]).unwrap();
-        out.uint(2).unwrap();
-        out.uint(2).unwrap();
-        out.uint(3).unwrap();
-        out.array(1).unwrap();
-        encode_hostile_queued_delivery(&mut out, 1, kind_tag, recovery_tag, state_tag, &[], 0);
-        out.uint(4).unwrap();
-        out.array(0).unwrap();
-        out.uint(5).unwrap();
-        out.bytes(&[0; 32]).unwrap();
-        out.bytes
-    }
-
-    fn encode_hostile_tombstone_ledger(disposition_tag: u64) -> Vec<u8> {
-        let mut out = Encoder::new();
-        out.map(5).unwrap();
-        out.uint(1).unwrap();
-        out.bytes(&[0x5a; 32]).unwrap();
-        out.uint(2).unwrap();
-        out.uint(2).unwrap();
-        out.uint(3).unwrap();
-        out.array(0).unwrap();
-        out.uint(4).unwrap();
-        out.array(1).unwrap();
-        out.map(10).unwrap();
-        out.uint(1).unwrap();
-        out.bytes(&[0; 32]).unwrap();
-        out.uint(2).unwrap();
-        out.uint(1).unwrap();
-        out.uint(3).unwrap();
-        out.uint(5).unwrap();
-        out.uint(4).unwrap();
-        out.uint(2).unwrap();
-        out.uint(5).unwrap();
-        out.bytes(&[0; 32]).unwrap();
-        out.uint(6).unwrap();
-        out.uint(0).unwrap();
-        out.uint(7).unwrap();
-        out.uint(1).unwrap();
-        out.uint(8).unwrap();
-        out.uint(7).unwrap();
-        out.uint(9).unwrap();
-        out.bytes(&[0; 32]).unwrap();
-        out.uint(10).unwrap();
-        out.uint(disposition_tag).unwrap();
-        out.uint(5).unwrap();
-        out.bytes(&[0; 32]).unwrap();
-        out.bytes
     }
 
     fn record(first_byte: u8, raw_len: usize) -> CredentialRecord {
@@ -2297,7 +1621,6 @@ mod tests {
         active: ActiveFlow,
         next_operation_id: u64,
         pending_operations: BTreeMap<u64, PendingOperation>,
-        delivery_ledger: delivery::DeliveryLedger,
         issuance: oid4vci::State,
         seen_nonces: Vec<u64>,
         pay_seen_nonces: Vec<u64>,
@@ -2338,7 +1661,6 @@ mod tests {
             active: core.active,
             next_operation_id: core.next_operation_id,
             pending_operations: core.pending_operations.clone(),
-            delivery_ledger: core.delivery_ledger.clone(),
             issuance: core.issuance.clone(),
             seen_nonces: core.seen_nonces.clone(),
             pay_seen_nonces: core.pay_seen_nonces.clone(),
@@ -2380,15 +1702,6 @@ mod tests {
         issued_at: i64,
         expires_at: i64,
     ) -> Vec<u8> {
-        signed_pid_variant(device_public_key, issued_at, expires_at, 0)
-    }
-
-    fn signed_pid_variant(
-        device_public_key: &[u8],
-        issued_at: i64,
-        expires_at: i64,
-        variant: usize,
-    ) -> Vec<u8> {
         let issuer = SoftwareSigner::from_pkcs8_der(ISSUER_PKCS8).unwrap();
         let claims = [
             ("family_name", json!("Andersson")),
@@ -2399,7 +1712,7 @@ mod tests {
         let mut digests = Vec::new();
         for (index, (name, value)) in claims.into_iter().enumerate() {
             let disclosure = Base64UrlUnpadded::encode_string(
-                serde_json::to_string(&json!([format!("s{variant}-{index}"), name, value]))
+                serde_json::to_string(&json!([format!("s{index}"), name, value]))
                     .unwrap()
                     .as_bytes(),
             );
@@ -2444,222 +1757,6 @@ mod tests {
     }
 
     #[test]
-    fn projected_credential_admission_accounts_for_replacement_promotion_and_evidence() {
-        let scenario = DemoWallet::new().issuance_scenario();
-        let mut core = configured_core(&scenario, "wallet.example", "device-key");
-        let first_raw = signed_pid_variant(
-            &scenario.device_public_key,
-            scenario.epoch,
-            scenario.epoch + 10_000,
-            1,
-        );
-        let second_raw = signed_pid_variant(
-            &scenario.device_public_key,
-            scenario.epoch,
-            scenario.epoch + 10_000,
-            2,
-        );
-        let first = core
-            .authenticate_received_credential(
-                oid4vci::CredentialFormat::DcSdJwt,
-                &first_raw,
-                &scenario.issuer_cert_chain,
-                &scenario.issuer_id,
-            )
-            .unwrap();
-        let second = core
-            .authenticate_received_credential(
-                oid4vci::CredentialFormat::DcSdJwt,
-                &second_raw,
-                &scenario.issuer_cert_chain,
-                &scenario.issuer_id,
-            )
-            .unwrap();
-        let VerifiedCredential::SdJwt { holding, .. } = &first.credential else {
-            panic!("PID test credential must be SD-JWT");
-        };
-        core.load_unverified_credential_for_testing(holding.clone());
-        let fixture_checkpoint = core.export_durable_checkpoint(21).unwrap();
-        let fixture_log = core.log.clone();
-
-        assert_eq!(
-            ensure_credential_storage_admission_with_limits(
-                &core,
-                &first,
-                0,
-                MAX_CREDENTIAL_EVIDENCE_BYTES,
-            ),
-            Err(CredentialIngestionError::CredentialStoreFull),
-            "promoting a fixture consumes one authenticated slot"
-        );
-        assert_eq!(
-            core.export_durable_checkpoint(21).unwrap(),
-            fixture_checkpoint
-        );
-        assert_eq!(core.log, fixture_log);
-
-        core.store_verified_credential(first.clone()).unwrap();
-        let admitted_checkpoint = core.export_durable_checkpoint(22).unwrap();
-        let admitted_log = core.log.clone();
-        let first_evidence = record_evidence_bytes(&first.provenance).unwrap();
-        let second_evidence = record_evidence_bytes(&second.provenance).unwrap();
-        let combined = first_evidence.checked_add(second_evidence).unwrap();
-
-        assert!(
-            ensure_credential_storage_admission_with_limits(&core, &second, 2, combined,).is_ok()
-        );
-        assert_eq!(
-            ensure_credential_storage_admission_with_limits(&core, &second, 2, combined - 1,),
-            Err(CredentialIngestionError::CredentialEvidenceLimitExceeded),
-            "aggregate evidence is checked before appending a distinct credential"
-        );
-
-        let mut larger_replacement = first;
-        larger_replacement.provenance.raw_credential.push(b' ');
-        let replacement_evidence = record_evidence_bytes(&larger_replacement.provenance).unwrap();
-        assert!(ensure_credential_storage_admission_with_limits(
-            &core,
-            &larger_replacement,
-            1,
-            replacement_evidence,
-        )
-        .is_ok());
-        assert_eq!(
-            ensure_credential_storage_admission_with_limits(
-                &core,
-                &larger_replacement,
-                1,
-                replacement_evidence - 1,
-            ),
-            Err(CredentialIngestionError::CredentialEvidenceLimitExceeded),
-            "replacement subtracts old evidence and admits only the projected new total"
-        );
-        assert_eq!(
-            core.export_durable_checkpoint(22).unwrap(),
-            admitted_checkpoint
-        );
-        assert_eq!(core.log, admitted_log);
-    }
-
-    #[test]
-    fn count_capacity_rejects_direct_and_issuance_storage_without_wedging_checkpoint() {
-        let scenario = DemoWallet::new().issuance_scenario();
-        let mut core = configured_core(&scenario, "wallet.example", "device-key");
-        let mut first_raw = None;
-        for variant in 0..MAX_CREDENTIALS {
-            let raw = signed_pid_variant(
-                &scenario.device_public_key,
-                scenario.epoch,
-                scenario.epoch + 10_000,
-                100 + variant,
-            );
-            if first_raw.is_none() {
-                first_raw = Some(raw.clone());
-            }
-            core.ingest_credential(
-                "dc+sd-jwt",
-                &raw,
-                &scenario.issuer_cert_chain,
-                &scenario.issuer_id,
-            )
-            .unwrap();
-        }
-        let checkpoint = core.export_durable_checkpoint(23).unwrap();
-        let audit = core.log.clone();
-
-        core.ingest_credential(
-            "dc+sd-jwt",
-            &first_raw.unwrap(),
-            &scenario.issuer_cert_chain,
-            &scenario.issuer_id,
-        )
-        .expect("replacing an authenticated holding does not consume another slot");
-        assert_eq!(core.export_durable_checkpoint(23).unwrap(), checkpoint);
-
-        let overflow_raw = signed_pid_variant(
-            &scenario.device_public_key,
-            scenario.epoch,
-            scenario.epoch + 10_000,
-            10_000,
-        );
-        assert_eq!(
-            core.ingest_credential(
-                "dc+sd-jwt",
-                &overflow_raw,
-                &scenario.issuer_cert_chain,
-                &scenario.issuer_id,
-            ),
-            Err(CredentialIngestionError::CredentialStoreFull)
-        );
-        assert_eq!(core.export_durable_checkpoint(23).unwrap(), checkpoint);
-        assert_eq!(core.log, audit);
-
-        let overflow = core
-            .authenticate_received_credential(
-                oid4vci::CredentialFormat::DcSdJwt,
-                &overflow_raw,
-                &scenario.issuer_cert_chain,
-                &scenario.issuer_id,
-            )
-            .unwrap();
-        let VerifiedCredential::SdJwt { holding, .. } = &overflow.credential else {
-            panic!("PID test credential must be SD-JWT");
-        };
-        core.load_unverified_credential_for_testing(holding.clone());
-        assert_eq!(
-            core.ingest_credential(
-                "dc+sd-jwt",
-                &overflow_raw,
-                &scenario.issuer_cert_chain,
-                &scenario.issuer_id,
-            ),
-            Err(CredentialIngestionError::CredentialStoreFull),
-            "promoting a fixture must not bypass the combined authenticated count"
-        );
-        assert_eq!(core.export_durable_checkpoint(23).unwrap(), checkpoint);
-        assert_eq!(core.log, audit);
-
-        core.active = ActiveFlow::Issuance;
-        core.issuance = oid4vci::State::RequestingCredential {
-            format: oid4vci::CredentialFormat::DcSdJwt,
-        };
-        core.issuer_cert_chain_current = scenario.issuer_cert_chain.clone();
-        core.issuer_id_current = scenario.issuer_id.clone();
-        core.issuer_id_assertion_current = scenario.issuer_id.clone();
-        core.issuer_candidates_current =
-            core.resolve_credential_issuers(&core.issuer_cert_chain_current);
-        core.issuer_trusted_current = true;
-        let effects = core.handle_event(Event::CredentialReceived {
-            format: "dc+sd-jwt".into(),
-            bytes: overflow_raw,
-        });
-        assert_eq!(
-            core.last_credential_ingestion_error(),
-            Some(&CredentialIngestionError::CredentialStoreFull)
-        );
-        assert!(matches!(
-            core.issuance,
-            oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid)
-        ));
-        assert!(core.pending_verified_credential.is_none());
-        assert!(matches!(
-            effects.as_slice(),
-            [
-                Effect::Render {
-                    screen: ScreenDescription::Error { code, .. }
-                },
-                Effect::Close
-            ] if code == "credential_issuance_rejected"
-        ));
-        assert_eq!(core.active, ActiveFlow::None);
-        assert_eq!(core.export_durable_checkpoint(23).unwrap(), checkpoint);
-        assert_eq!(
-            core.log, audit,
-            "capacity rejection must not append issuance audit"
-        );
-    }
-
-    #[test]
     fn round_trip_reauthenticates_state_and_resets_every_ephemeral_machine() {
         let demo = DemoWallet::new();
         let scenario = demo.issuance_scenario();
@@ -2674,7 +1771,6 @@ mod tests {
         let retained_clock = target.now_epoch;
         let retained_wua = target.wua.clone();
         let retained_device_key = target.device_public_key.clone();
-        let prior_delivery_namespace = *target.delivery_ledger.namespace();
 
         target.load_unverified_credential_for_testing(HeldCredential {
             issuer_jwt: "fixture".into(),
@@ -2736,11 +1832,6 @@ mod tests {
         assert!(target.session.is_none());
         assert!(target.pending_rp_provenance.is_none());
         assert!(target.pending_operations.is_empty());
-        assert!(target.delivery_ledger.is_pristine());
-        assert_ne!(
-            *target.delivery_ledger.namespace(),
-            prior_delivery_namespace
-        );
         assert!((1..=(1u64 << 62)).contains(&target.next_operation_id));
         assert_ne!(target.next_operation_id, 42);
         assert!(target.status_lists.is_empty());
@@ -2765,88 +1856,6 @@ mod tests {
             .handle_event_json(r#"{"type":"operationSucceeded","operationId":42}"#)
             .unwrap_err();
         assert!(stale.contains("stale or unknown operationId 42"));
-    }
-
-    #[test]
-    fn history_mutation_events_fail_closed_during_flows_and_round_trip_durably() {
-        let scenario = DemoWallet::new().issuance_scenario();
-        let mut source = configured_core(&scenario, "wallet.example", "device-key");
-        append_history(&mut source);
-        let original = source.export_durable_checkpoint(30).unwrap();
-
-        source.active = ActiveFlow::Presentation;
-        for effects in [
-            source.handle_event(Event::RedactTransaction { seq: 0 }),
-            source.handle_event(Event::WipeTransactionLog),
-        ] {
-            assert!(matches!(
-                effects.as_slice(),
-                [Effect::Render {
-                    screen: ScreenDescription::Error { code, .. }
-                }] if code == "history_mutation_in_progress"
-            ));
-        }
-        assert_eq!(source.active, ActiveFlow::Presentation);
-        source.active = ActiveFlow::None;
-        assert_eq!(
-            source.export_durable_checkpoint(30).unwrap(),
-            original,
-            "history must not change while a protocol flow is active"
-        );
-
-        source.pending_operations.insert(
-            42,
-            PendingOperation {
-                flow: ActiveFlow::Presentation,
-                result: OperationResultKind::Persisted,
-                authorization_hash: None,
-            },
-        );
-        for effects in [
-            source.handle_event(Event::RedactTransaction { seq: 0 }),
-            source.handle_event(Event::WipeTransactionLog),
-        ] {
-            assert!(matches!(
-                effects.as_slice(),
-                [Effect::Render {
-                    screen: ScreenDescription::Error { code, .. }
-                }] if code == "history_mutation_in_progress"
-            ));
-        }
-        assert!(source.pending_operations.contains_key(&42));
-        source.pending_operations.clear();
-        assert_eq!(
-            source.export_durable_checkpoint(30).unwrap(),
-            original,
-            "history must not change while a native callback is pending"
-        );
-
-        assert!(source
-            .handle_event(Event::RedactTransaction { seq: 0 })
-            .is_empty());
-        assert!(source.log.entries()[0].redacted);
-        let redacted_checkpoint = source.export_durable_checkpoint(31).unwrap();
-
-        let mut redacted_target = configured_core(&scenario, "wallet.example", "device-key");
-        redacted_target
-            .restore_durable_checkpoint(&redacted_checkpoint, 31)
-            .unwrap();
-        assert_eq!(redacted_target.log, source.log);
-        assert!(redacted_target.log.entries()[0].redacted);
-        assert!(redacted_target.log.verify_integrity(&AwsLc));
-
-        source.audit_log_available = false;
-        assert!(source.handle_event(Event::WipeTransactionLog).is_empty());
-        assert!(source.audit_log_available);
-        assert!(source.log.is_empty());
-        let wiped_checkpoint = source.export_durable_checkpoint(32).unwrap();
-
-        let mut wiped_target = configured_core(&scenario, "wallet.example", "device-key");
-        wiped_target
-            .restore_durable_checkpoint(&wiped_checkpoint, 32)
-            .unwrap();
-        assert!(wiped_target.log.is_empty());
-        assert!(wiped_target.audit_log_available);
     }
 
     #[test]
@@ -2907,249 +1916,6 @@ mod tests {
             production.export_durable_checkpoint(4),
             Err(DurableCheckpointError::DuplicateCredential)
         );
-    }
-
-    #[test]
-    fn production_boundary_remains_canonical_v1_and_rejects_dormant_v2() {
-        let checkpoint = empty_checkpoint();
-        let v1 = encode_checkpoint(&checkpoint).unwrap();
-        assert_eq!(
-            v1[0], 0xa8,
-            "production schema keeps the exact eight-field map"
-        );
-        let mut cursor = Cursor::new(&v1);
-        cursor.exact_map(8).unwrap();
-        cursor.key(1).unwrap();
-        assert_eq!(cursor.borrowed_bytes(MAGIC.len()).unwrap(), MAGIC);
-        cursor.key(2).unwrap();
-        assert_eq!(cursor.uint().unwrap(), VERSION);
-        assert_eq!(decode_checkpoint(&v1).unwrap(), checkpoint);
-        assert_eq!(
-            hex_bytes(&AwsLc.sha256(&v1)),
-            "bb65949db0a7b9f7a33bd52e458e7d543eed681efc95be9b24fcf0517c549cfb"
-        );
-
-        let v2_checkpoint = dormant_checkpoint(fixed_delivery_ledger());
-        let v2 = encode_checkpoint_v2(&v2_checkpoint).unwrap();
-        assert_eq!(v2[0], 0xa9);
-        assert_eq!(
-            hex_bytes(&AwsLc.sha256(&v2)),
-            "05a428e705ae64cd215f6710d916e2b4d4c279f8bf838725319f42a66a8a0c45"
-        );
-        assert_eq!(decode_checkpoint_v2(&v2).unwrap(), v2_checkpoint);
-        assert_eq!(
-            decode_checkpoint(&v2),
-            Err(DurableCheckpointError::UnsupportedVersion(2))
-        );
-
-        let scenario = DemoWallet::new().issuance_scenario();
-        let mut core = configured_core(&scenario, "wallet.example", "device-key");
-        assert_eq!(
-            atomic_error(&mut core, &v2, 1),
-            DurableCheckpointError::UnsupportedVersion(2)
-        );
-        let exported = core.export_durable_checkpoint(1).unwrap();
-        let mut exported_cursor = Cursor::new(&exported);
-        exported_cursor.exact_map(8).unwrap();
-        exported_cursor.key(1).unwrap();
-        exported_cursor.borrowed_bytes(MAGIC.len()).unwrap();
-        exported_cursor.key(2).unwrap();
-        assert_eq!(exported_cursor.uint().unwrap(), VERSION);
-    }
-
-    #[test]
-    fn dormant_ledger_codec_round_trips_all_states_without_enabling_idle_live_work() {
-        let mut queued = fixed_delivery_ledger();
-        enqueue_delivery(&mut queued, delivery::DeliveryKind::Http, b"queued", 8);
-
-        let mut dispatching = fixed_delivery_ledger();
-        enqueue_delivery(
-            &mut dispatching,
-            delivery::DeliveryKind::Http,
-            b"dispatching",
-            8,
-        );
-        let dispatching_correlation = dispatching.claim_oldest(7).unwrap().correlation().clone();
-
-        let mut ambiguous = dispatching.clone();
-        ambiguous.mark_ambiguous(&dispatching_correlation).unwrap();
-
-        let mut ready = fixed_delivery_ledger();
-        enqueue_delivery(&mut ready, delivery::DeliveryKind::Http, b"ready", 8);
-        let ready_correlation = ready.claim_oldest(7).unwrap().correlation().clone();
-        ready
-            .record_result(&ready_correlation, b"result".to_vec())
-            .unwrap();
-
-        let mut terminal = ready.clone();
-        terminal.consume_ready(&ready_correlation).unwrap();
-
-        for ledger in [queued, dispatching, ambiguous, ready, terminal.clone()] {
-            let bytes = encode_ledger_bytes(&ledger);
-            assert_eq!(decode_ledger_bytes(&bytes).unwrap(), ledger);
-            assert_eq!(
-                encode_ledger_bytes(&decode_ledger_bytes(&bytes).unwrap()),
-                bytes
-            );
-        }
-
-        let terminal_checkpoint = dormant_checkpoint(terminal);
-        let bytes = encode_checkpoint_v2(&terminal_checkpoint).unwrap();
-        assert_eq!(decode_checkpoint_v2(&bytes).unwrap(), terminal_checkpoint);
-
-        let mut live_checkpoint = dormant_checkpoint(fixed_delivery_ledger());
-        enqueue_delivery(
-            &mut live_checkpoint
-                .continuation
-                .as_mut()
-                .unwrap()
-                .delivery_ledger,
-            delivery::DeliveryKind::Close,
-            &[],
-            0,
-        );
-        assert_eq!(
-            encode_checkpoint_v2(&live_checkpoint),
-            Err(DurableCheckpointError::IdleAggregateHasLiveDeliveries)
-        );
-        let hostile = encode_checkpoint_version(&live_checkpoint, DORMANT_VERSION_V2).unwrap();
-        assert_eq!(
-            decode_checkpoint_v2(&hostile),
-            Err(DurableCheckpointError::IdleAggregateHasLiveDeliveries)
-        );
-    }
-
-    #[test]
-    fn dormant_continuation_exact_bound_and_one_over_fail_before_decode() {
-        let maximal = delivery::DeliveryLedger::maximal_tombstone_ledger_for_testing();
-        let continuation = Continuation {
-            delivery_ledger: maximal,
-        };
-        let mut encoded = Encoder::new();
-        encode_continuation(&mut encoded, &continuation).unwrap();
-        assert_eq!(encoded.bytes.len(), MAX_DORMANT_CONTINUATION_BYTES);
-
-        let checkpoint = dormant_checkpoint(continuation.delivery_ledger);
-        let exact = encode_checkpoint_v2(&checkpoint).unwrap();
-        assert_eq!(decode_checkpoint_v2(&exact).unwrap(), checkpoint);
-
-        let mut hostile = encode_checkpoint(&empty_checkpoint()).unwrap();
-        hostile[0] = 0xa9;
-        let mut cursor = Cursor::new(&hostile);
-        cursor.exact_map(9).unwrap();
-        cursor.key(1).unwrap();
-        cursor.borrowed_bytes(MAGIC.len()).unwrap();
-        cursor.key(2).unwrap();
-        let version_position = cursor.position;
-        hostile[version_position] = DORMANT_VERSION_V2 as u8;
-        hostile.push(9);
-        cose::cbor::write_head(
-            &mut hostile,
-            2,
-            u64::try_from(MAX_DORMANT_CONTINUATION_BYTES - 2).unwrap(),
-        );
-        hostile.extend(std::iter::repeat_n(0, MAX_DORMANT_CONTINUATION_BYTES - 2));
-        assert!(matches!(
-            decode_checkpoint_v2(&hostile),
-            Err(DurableCheckpointError::ResourceLimit {
-                resource: Resource::ContinuationBytes,
-                max: MAX_DORMANT_CONTINUATION_BYTES,
-                actual,
-            }) if actual == MAX_DORMANT_CONTINUATION_BYTES + 1
-        ));
-    }
-
-    #[test]
-    fn ledger_decoder_rejects_aggregate_and_variant_bounds_before_reconstruction() {
-        let mut over_aggregate = Encoder::new();
-        over_aggregate.map(5).unwrap();
-        over_aggregate.uint(1).unwrap();
-        over_aggregate.bytes(&[0x5a; 32]).unwrap();
-        over_aggregate.uint(2).unwrap();
-        over_aggregate.uint(4).unwrap();
-        over_aggregate.uint(3).unwrap();
-        over_aggregate.array(3).unwrap();
-        let exact_blob = vec![7; delivery::MAX_DELIVERY_BLOB_BYTES];
-        encode_hostile_queued_delivery(&mut over_aggregate, 1, 5, 2, 1, &exact_blob, 0);
-        encode_hostile_queued_delivery(&mut over_aggregate, 2, 5, 2, 1, &exact_blob, 0);
-        encode_hostile_queued_delivery(&mut over_aggregate, 3, 5, 2, 1, &[], 1);
-        over_aggregate.uint(4).unwrap();
-        over_aggregate.array(0).unwrap();
-        over_aggregate.uint(5).unwrap();
-        over_aggregate.bytes(&[0; 32]).unwrap();
-        assert!(matches!(
-            decode_ledger_bytes(&over_aggregate.bytes),
-            Err(DurableCheckpointError::ResourceLimit {
-                resource: Resource::DeliveryReservedBytes,
-                max: delivery::MAX_RESERVED_DELIVERY_BYTES,
-                actual,
-            }) if actual == delivery::MAX_RESERVED_DELIVERY_BYTES + 1
-        ));
-
-        for hostile in [
-            encode_hostile_single_live_ledger(14, 2, 1),
-            encode_hostile_single_live_ledger(5, 5, 1),
-            encode_hostile_single_live_ledger(5, 2, 5),
-            encode_hostile_tombstone_ledger(2),
-        ] {
-            assert_eq!(
-                decode_ledger_bytes(&hostile),
-                Err(DurableCheckpointError::Malformed)
-            );
-        }
-    }
-
-    #[test]
-    fn dormant_ledger_rejects_duplicate_and_non_shortest_map_keys() {
-        let valid = encode_ledger_bytes(&fixed_delivery_ledger());
-        let mut cursor = Cursor::new(&valid);
-        cursor.exact_map(5).unwrap();
-        let key_one_position = cursor.position;
-        cursor.key(1).unwrap();
-        cursor.borrowed_bytes(32).unwrap();
-        let key_two_position = cursor.position;
-        assert_eq!(valid[key_one_position], 1);
-        assert_eq!(valid[key_two_position], 2);
-
-        let mut duplicate = valid.clone();
-        duplicate[key_two_position] = 1;
-        assert_eq!(
-            decode_ledger_bytes(&duplicate),
-            Err(DurableCheckpointError::NonCanonical)
-        );
-
-        let mut non_shortest = Vec::with_capacity(valid.len() + 1);
-        non_shortest.extend_from_slice(&valid[..key_one_position]);
-        non_shortest.extend_from_slice(&[0x18, 0x01]);
-        non_shortest.extend_from_slice(&valid[key_one_position + 1..]);
-        assert_eq!(
-            decode_ledger_bytes(&non_shortest),
-            Err(DurableCheckpointError::NonCanonical)
-        );
-    }
-
-    #[test]
-    fn non_pristine_dormant_ledger_can_neither_be_omitted_nor_wiped_by_v1() {
-        let scenario = DemoWallet::new().issuance_scenario();
-        let source = configured_core(&scenario, "wallet.example", "device-key");
-        let v1 = source.export_durable_checkpoint(1).unwrap();
-        let mut target = configured_core(&scenario, "wallet.example", "device-key");
-        enqueue_delivery(
-            &mut target.delivery_ledger,
-            delivery::DeliveryKind::Close,
-            &[],
-            0,
-        );
-        let before = snapshot(&target);
-        assert_eq!(
-            target.export_durable_checkpoint(1),
-            Err(DurableCheckpointError::DormantDeliveryLedgerNotPristine)
-        );
-        assert_eq!(
-            target.restore_durable_checkpoint(&v1, 1),
-            Err(DurableCheckpointError::DormantDeliveryLedgerNotPristine)
-        );
-        assert_eq!(snapshot(&target), before);
     }
 
     #[test]
@@ -3407,139 +2173,6 @@ mod tests {
     }
 
     #[test]
-    fn full_replay_sets_reject_each_valid_flow_before_mutation_and_remain_exportable() {
-        let wallet = DemoWallet::new();
-        let scenario = wallet.issuance_scenario();
-        let exact_values: Vec<u64> = (0..MAX_REPLAY_VALUES as u64).collect();
-
-        let mut presentation_core = configured_core(&scenario, "wallet.example", "device-key");
-        presentation_core.seen_nonces = exact_values.clone();
-        let before = presentation_core.export_durable_checkpoint(1).unwrap();
-        let effects = presentation_core.handle_event(Event::AuthorizationRequestReceived {
-            request: wallet.presentation_request(u64::MAX),
-        });
-        assert_replay_capacity_effects(&effects);
-        assert_eq!(presentation_core.seen_nonces, exact_values);
-        assert_eq!(
-            presentation_core.export_durable_checkpoint(1).unwrap(),
-            before
-        );
-        assert!(matches!(presentation_core.vp, State::Idle));
-
-        let mut payment_core = configured_core(&scenario, "wallet.example", "device-key");
-        payment_core.pay_seen_nonces = exact_values.clone();
-        let before = payment_core.export_durable_checkpoint(1).unwrap();
-        let effects = payment_core.handle_event(Event::PaymentAuthorizationRequestReceived {
-            request: wallet.payment_request(u64::MAX),
-        });
-        assert_replay_capacity_effects(&effects);
-        assert_eq!(payment_core.pay_seen_nonces, exact_values);
-        assert_eq!(payment_core.export_durable_checkpoint(1).unwrap(), before);
-        assert!(matches!(payment_core.payment, payment::State::Idle));
-
-        let mut issuance_core = configured_core(&scenario, "wallet.example", "device-key");
-        issuance_core.iss_seen_c_nonces = exact_values.clone();
-        let before = issuance_core.export_durable_checkpoint(1).unwrap();
-        let effects = issuance_core.handle_event(Event::CredentialOfferReceived {
-            offer: scenario.offer.clone(),
-            issuer_cert_chain: scenario.issuer_cert_chain.clone(),
-            issuer_id: scenario.issuer_id.clone(),
-        });
-        assert_replay_capacity_effects(&effects);
-        assert_eq!(issuance_core.iss_seen_c_nonces, exact_values);
-        assert_eq!(issuance_core.export_durable_checkpoint(1).unwrap(), before);
-        assert!(matches!(issuance_core.issuance, oid4vci::State::Idle));
-
-        let mut qes_core = configured_core(&scenario, "wallet.example", "device-key");
-        qes_core.qes_seen_nonces = exact_values.clone();
-        let before = qes_core.export_durable_checkpoint(1).unwrap();
-        let effects = qes_core.handle_event(Event::QesSignRequestReceived {
-            request: br#"{"document_name":"Contract.pdf","document_hash_hex":"deadbeef","qtsp_id":"qtsp.example","nonce":18446744073709551615}"#.to_vec(),
-        });
-        assert_replay_capacity_effects(&effects);
-        assert_eq!(qes_core.qes_seen_nonces, exact_values);
-        assert_eq!(qes_core.export_durable_checkpoint(1).unwrap(), before);
-        assert!(matches!(qes_core.qes, qes::QesState::Idle));
-    }
-
-    #[test]
-    fn final_available_replay_slot_is_admitted_and_exports_at_the_exact_count() {
-        let scenario = DemoWallet::new().issuance_scenario();
-        let mut core = configured_core(&scenario, "wallet.example", "device-key");
-        core.qes_seen_nonces = (0..(MAX_REPLAY_VALUES as u64 - 1)).collect();
-
-        let effects = core.handle_event(Event::QesSignRequestReceived {
-            request: br#"{"document_name":"Contract.pdf","document_hash_hex":"deadbeef","qtsp_id":"qtsp.example","nonce":18446744073709551615}"#.to_vec(),
-        });
-
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            Effect::Render {
-                screen: ScreenDescription::SignConfirmation(_)
-            }
-        )));
-        assert_eq!(core.qes_seen_nonces.len(), MAX_REPLAY_VALUES);
-        assert!(core.qes_seen_nonces.contains(&u64::MAX));
-        let checkpoint = core.export_durable_checkpoint(2).unwrap();
-        assert_eq!(
-            decode_checkpoint(&checkpoint).unwrap().replay.qes.len(),
-            MAX_REPLAY_VALUES
-        );
-    }
-
-    #[test]
-    fn reservation_rejection_resets_the_active_flow_and_duplicate_output_never_pushes() {
-        let wallet = DemoWallet::new();
-        let scenario = wallet.issuance_scenario();
-        let mut core = configured_core(&scenario, "wallet.example", "device-key");
-        core.iss_seen_c_nonces = (0..(MAX_REPLAY_VALUES as u64 - 1)).collect();
-        let started = core.handle_event(Event::CredentialOfferReceived {
-            offer: scenario.offer.clone(),
-            issuer_cert_chain: scenario.issuer_cert_chain.clone(),
-            issuer_id: scenario.issuer_id.clone(),
-        });
-        assert!(started
-            .iter()
-            .any(|effect| matches!(effect, Effect::RequestToken)));
-        assert_eq!(core.active, ActiveFlow::Issuance);
-        assert!(matches!(
-            core.issuance,
-            oid4vci::State::RequestingToken { .. }
-        ));
-
-        core.iss_seen_c_nonces.push(MAX_REPLAY_VALUES as u64 - 1);
-        core.pending_operations.insert(
-            7,
-            PendingOperation {
-                flow: ActiveFlow::Issuance,
-                result: OperationResultKind::Token,
-                authorization_hash: None,
-            },
-        );
-        let before = core.export_durable_checkpoint(3).unwrap();
-        let rejected = core.handle_event(Event::TokenReceived {
-            bound: true,
-            c_nonce: u64::MAX,
-        });
-        assert_replay_capacity_effects(&rejected);
-        assert_eq!(core.active, ActiveFlow::None);
-        assert!(matches!(core.issuance, oid4vci::State::Idle));
-        assert!(!core.pending_operations.contains_key(&7));
-        assert_eq!(core.export_durable_checkpoint(3).unwrap(), before);
-
-        let mut presentation = configured_core(&scenario, "wallet.example", "device-key");
-        presentation.active = ActiveFlow::Presentation;
-        presentation.seen_nonces = vec![42];
-        let before = presentation.export_durable_checkpoint(4).unwrap();
-        let rejected = presentation.translate(oid4vp::Output::PersistNonce(42));
-        assert_replay_capacity_effects(&rejected);
-        assert_eq!(presentation.seen_nonces, vec![42]);
-        assert_eq!(presentation.active, ActiveFlow::None);
-        assert!(matches!(presentation.vp, State::Idle));
-        assert_eq!(presentation.export_durable_checkpoint(4).unwrap(), before);
-    }
-
-    #[test]
     fn transaction_head_chain_and_canonical_tombstones_are_checked_atomically() {
         let scenario = DemoWallet::new().issuance_scenario();
         let source = populated_core(&scenario);
@@ -3688,7 +2321,6 @@ mod tests {
 
     #[test]
     fn hostile_declared_lengths_and_depth_fail_before_allocation_and_are_atomic() {
-        assert_eq!(MAX_CHECKPOINT_BYTES, 33_554_312);
         let scenario = DemoWallet::new().issuance_scenario();
         let mut target = configured_core(&scenario, "wallet.example", "device-key");
         let cases = [
