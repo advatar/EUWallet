@@ -52,6 +52,23 @@ tools/interop/pid-auth-probe.sh
 
 **Bottom line:** we are *not* "ready for certification." We have now proven the first live wire leg
 against the production issuer, established the client/redirect policy as fact, and pinned+validated
-the EU trust anchors. The remaining round-trip is gated on the interactive eID step and on M1
-(wiring the already-built token/credential transports to the native callback), and OIDF conformance
-remains a separate, not-yet-run external gate.
+the EU trust anchors. The remaining round-trip is gated on the reference-issuer's own reliability
+(below) and on M1 (wiring the already-built token/credential transports to the native callback), and
+OIDF conformance remains a separate, not-yet-run external gate.
+
+## Update (2026-07-21) — the reference-issuer authorization is UI-test automatable
+
+Correcting an earlier assumption: for the **reference** issuer, item 3 does **not** require a human.
+`issuer.eudiw.dev` authenticates via a plain **web form** ("Test Credentials Provider" → *FormEU* →
+a PID data form → a "Review & Send" **Authorize** page), not a hardware eID/NFC flow. A headless
+Playwright UI test (`tools/interop/pid-uitest/`) drives the whole thing with synthetic test data:
+PAR → country form (FormEU) → PID form (family/given name, birthdate, nationality, place of birth) →
+and it **reaches the issuer's Authorize consent page with the real PID preview rendered**
+(Andersson / Astrid / SE / est. expiry / "Test PID issuer" / issuing country FC).
+
+Capturing the final authorization `code` is currently blocked only by the reference issuer's
+`/dynamic/form` endpoint returning **intermittent HTTP 500s** (a server-side reliability problem on
+`eudiw.dev` — one run with identical data reached the consent page; six later retries all 500'd).
+So item 3 is **automated, not manual**, for the reference/sandbox path; the code capture is a rerun
+away once the EU service is healthy. (The German **production** path via AusweisApp + a real eID card
+is separate and does need hardware.)

@@ -1,0 +1,12 @@
+{
+  "name": "pid-uitest",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Headless UI test that drives live PID issuance against the EU reference issuer (issuer.eudiw.dev).",
+  "scripts": {
+    "issue": "node issue-pid.js"
+  },
+  "dependencies": {
+    "playwright": "1.49.1"
+  }
+}
