@@ -1887,7 +1887,8 @@ fn validate_sd_jwt_pid(compact: &str, expected_issuer: &str) -> Result<Vec<u8>, 
     if !(1..=MAX_SD_JWT_COMPONENT_SEPARATORS).contains(&separators) {
         return Err(CredentialError::CredentialFormatMismatch);
     }
-    let parsed = sdjwt::SdJwtVc::parse(compact).map_err(|_| CredentialError::CredentialFormatMismatch)?;
+    let parsed =
+        sdjwt::SdJwtVc::parse(compact).map_err(|_| CredentialError::CredentialFormatMismatch)?;
     if parsed.key_binding_jwt.is_some() {
         return Err(CredentialError::CredentialFormatMismatch);
     }
