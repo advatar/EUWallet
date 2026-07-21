@@ -118,6 +118,35 @@ fn sign_multi_request(rp: &SoftwareSigner, nonce: u64) -> Vec<u8> {
     format!("{si}.{}", b64(&sig)).into_bytes()
 }
 
+fn sign_pid_multiple_request(rp: &SoftwareSigner, nonce: u64, multiple: Option<bool>) -> Vec<u8> {
+    let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
+    let mut credential = json!({
+        "id": "pid",
+        "format": "dc+sd-jwt",
+        "meta": { "vct_values": ["urn:eudi:pid:1"] },
+        "claims": [{ "path": ["age_over_18"] }]
+    });
+    if let Some(multiple) = multiple {
+        credential["multiple"] = json!(multiple);
+    }
+    let payload = b64(serde_json::to_string(&json!({
+        "client_id": "rp.example",
+        "nonce": nonce,
+        "aud": "wallet.example",
+        "response_uri": RESPONSE_URI,
+        "response_mode": "direct_post",
+        "purpose": "Prove adult status from available PIDs",
+        "dcql_query": { "credentials": [credential] },
+    }))
+    .unwrap()
+    .as_bytes());
+    let si = format!("{header}.{payload}");
+    let sig = rp
+        .sign(&KeyRef("r".into()), Alg::Es256, si.as_bytes())
+        .unwrap();
+    format!("{si}.{}", b64(&sig)).into_bytes()
+}
+
 fn map_get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     match v {
         Value::Map(p) => p
@@ -296,6 +325,159 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
     let fx = core.handle_event(Event::PresentationDelivered);
     assert!(fx.iter().any(|e| matches!(e, Effect::Close)));
     assert_eq!(core.state(), &oid4vp::State::Done);
+}
+
+#[test]
+fn multiple_true_returns_every_matching_pid_under_one_query_id() {
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let device = SoftwareSigner::generate_p256().unwrap();
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let trust_operator = SoftwareSigner::generate_p256().unwrap();
+    let (first_jwt, first_claims) = issue_pid(&issuer);
+    let (second_jwt, second_claims) = issue_pid(&issuer);
+
+    let mut core = Core::new("wallet.example", "device-key");
+    for (issuer_jwt, disclosures_by_claim) in
+        [(first_jwt, first_claims), (second_jwt, second_claims)]
+    {
+        core.load_unverified_credential_for_testing(HeldCredential {
+            issuer_jwt,
+            disclosures_by_claim,
+            status: None,
+        });
+    }
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    core.load_trust_list(
+        &signed_trust_list(&trust_operator),
+        trust_operator.public_key_raw(),
+    )
+    .unwrap();
+    core.handle_event(Event::AuthorizationRequestReceived {
+        request: sign_pid_multiple_request(&rp, NONCE, Some(true)),
+    });
+    core.handle_event(Event::RpCertChainResolved {
+        rp_cert_chain: vec![RP_DER.to_vec()],
+        registered_redirect_uris: vec![RESPONSE_URI.into()],
+    });
+
+    let effects = core.handle_event(Event::UserConsented);
+    let first = next_sign(&effects).expect("first PID signature");
+    let effects = core.handle_event(Event::DeviceSignatureProduced {
+        signature: device
+            .sign(&KeyRef("device-key".into()), Alg::Es256, &first)
+            .unwrap(),
+    });
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Http { .. })));
+    let second = next_sign(&effects).expect("second PID signature");
+    let effects = core.handle_event(Event::DeviceSignatureProduced {
+        signature: device
+            .sign(&KeyRef("device-key".into()), Alg::Es256, &second)
+            .unwrap(),
+    });
+    let body = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Http { body, .. } => String::from_utf8(body.clone()).ok(),
+            _ => None,
+        })
+        .expect("complete response");
+    let vp: serde_json::Value = serde_json::from_str(&field(&body, "vp_token").unwrap()).unwrap();
+    assert_eq!(vp["pid"].as_array().map(Vec::len), Some(2));
+}
+
+#[test]
+fn absent_or_false_multiple_returns_only_the_first_matching_pid() {
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let device = SoftwareSigner::generate_p256().unwrap();
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let trust_operator = SoftwareSigner::generate_p256().unwrap();
+
+    for multiple in [None, Some(false)] {
+        let mut core = Core::new("wallet.example", "device-key");
+        for _ in 0..2 {
+            let (issuer_jwt, disclosures_by_claim) = issue_pid(&issuer);
+            core.load_unverified_credential_for_testing(HeldCredential {
+                issuer_jwt,
+                disclosures_by_claim,
+                status: None,
+            });
+        }
+        core.handle_event(Event::SetClock {
+            epoch: 1_790_000_000,
+        });
+        core.load_trust_list(
+            &signed_trust_list(&trust_operator),
+            trust_operator.public_key_raw(),
+        )
+        .unwrap();
+        core.handle_event(Event::AuthorizationRequestReceived {
+            request: sign_pid_multiple_request(&rp, NONCE, multiple),
+        });
+        core.handle_event(Event::RpCertChainResolved {
+            rp_cert_chain: vec![RP_DER.to_vec()],
+            registered_redirect_uris: vec![RESPONSE_URI.into()],
+        });
+        let effects = core.handle_event(Event::UserConsented);
+        let signing_input = next_sign(&effects).expect("one PID signature");
+        let effects = core.handle_event(Event::DeviceSignatureProduced {
+            signature: device
+                .sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input)
+                .unwrap(),
+        });
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Http { .. })));
+        assert!(next_sign(&effects).is_none(), "no second PID is selected");
+    }
+}
+
+#[test]
+fn multiple_true_fails_closed_when_eligible_holdings_exceed_the_response_bound() {
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let trust_operator = SoftwareSigner::generate_p256().unwrap();
+    let mut core = Core::new("wallet.example", "device-key");
+    for _ in 0..17 {
+        let (issuer_jwt, disclosures_by_claim) = issue_pid(&issuer);
+        core.load_unverified_credential_for_testing(HeldCredential {
+            issuer_jwt,
+            disclosures_by_claim,
+            status: None,
+        });
+    }
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    core.load_trust_list(
+        &signed_trust_list(&trust_operator),
+        trust_operator.public_key_raw(),
+    )
+    .unwrap();
+    core.handle_event(Event::AuthorizationRequestReceived {
+        request: sign_pid_multiple_request(&rp, NONCE, Some(true)),
+    });
+    let effects = core.handle_event(Event::RpCertChainResolved {
+        rp_cert_chain: vec![RP_DER.to_vec()],
+        registered_redirect_uris: vec![RESPONSE_URI.into()],
+    });
+
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Error { code, .. }
+        } if code == "no_eligible_credential"
+    )));
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::Consent(_)
+        } | Effect::Sign { .. }
+            | Effect::Http { .. }
+    )));
 }
 
 #[test]

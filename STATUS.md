@@ -87,8 +87,12 @@ operational solution needed to enter those processes.
 - [x] Bound DCQL request/query/path/value cardinality and fail closed on malformed queries or
       unsupported selection, trust and transaction-data modifiers.
 - [ ] [#14](https://github.com/advatar/EUWallet/issues/14): implement final DCQL
-      `credential_sets`, `claim_sets`, `trusted_authorities`, multiple-return, retention-intent and
-      `transaction_data` semantics; they are rejected until enforceable end to end.
+      holder choice/optional-set opt-in, `trusted_authorities`, retention-intent and
+      `transaction_data` semantics; unsupported modifiers remain rejected until enforceable.
+  - [x] [#29](https://github.com/advatar/EUWallet/issues/29): implement bounded `multiple:true`
+        selection and per-query VP Token arrays across authenticated holdings without partial
+        required-set responses or silent single-credential downgrade. Selection is capped at 16
+        eligible holdings per query and fails atomically above the cap; absent/false stays singular.
 - [x] Accept genuine mdoc tagged dates and `x5chain`, and enforce exact doctype/namespace paths
       ([#6](https://github.com/advatar/EUWallet/issues/6)).
   - [x] Require and emit canonical CBOR tag-0 RFC 3339 `tdate` validity values, with malformed

@@ -1137,8 +1137,8 @@ struct SessionInfo {
     /// The verifier's response-encryption key (uncompressed P-256), present iff `direct_post.jwt`.
     response_encryption_key: Option<Vec<u8>>,
     /// The full DCQL query when present. Its set planner selects the complete required subset and
-    /// omits optional sets without holder opt-in, with at most one held credential per supported
-    /// query until `multiple=true` lands.
+    /// omits optional sets without holder opt-in. Queries select one holding by default or every
+    /// eligible holding within a fixed bound when `multiple=true` is explicit.
     dcql: Option<oid4vp::dcql::DcqlQuery>,
     /// Exact credentials selected before consent. Later phases revalidate these values instead of
     /// silently switching to a different holding after the user approved the screen.
@@ -1321,6 +1321,7 @@ pub enum Effect {
 const MAX_CACHED_STATUS_LISTS: usize = 8;
 const MAX_STATUS_LISTS_PER_PRESENTATION: usize = 8;
 const MAX_PENDING_OPERATIONS: usize = 32;
+const MAX_PRESENTATIONS_PER_DCQL_QUERY: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum StatusGate {
@@ -3758,9 +3759,9 @@ impl Core {
                 if indices.is_empty() {
                     return Err(PresentationEligibilityError::NoEligibleCredential);
                 }
-                let mut prepared = Vec::with_capacity(indices.len());
+                let mut prepared = Vec::new();
                 for index in indices {
-                    prepared.push(
+                    prepared.extend(
                         candidates[index]
                             .take()
                             .ok_or(PresentationEligibilityError::NoEligibleCredential)?,
@@ -3804,7 +3805,7 @@ impl Core {
         &self,
         sess: &SessionInfo,
         q: &oid4vp::dcql::CredentialQuery,
-    ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
+    ) -> Result<Vec<PreparedPresentationCredential>, PresentationEligibilityError> {
         let options = q
             .claim_selection_options()
             .ok_or(PresentationEligibilityError::NoEligibleCredential)?;
@@ -3822,20 +3823,22 @@ impl Core {
         Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
     }
 
-    /// Select one holding for one already-resolved claim-set option. The caller tries options in
-    /// verifier preference order and commits only the first complete match.
+    /// Select the bounded holding set for one already-resolved claim-set option. The caller tries
+    /// options in verifier preference order and commits only the first complete match.
     fn select_for_query_claims(
         &self,
         sess: &SessionInfo,
         q: &oid4vp::dcql::CredentialQuery,
         requested_claims: &[&oid4vp::dcql::ClaimQuery],
-    ) -> Result<PreparedPresentationCredential, PresentationEligibilityError> {
+    ) -> Result<Vec<PreparedPresentationCredential>, PresentationEligibilityError> {
         let claims: Vec<String> = requested_claims
             .iter()
             .map(|c| c.path_string())
             .filter(|s| !s.is_empty())
             .collect();
         let dcql_id = Some(q.id.clone());
+        let multiple = q.multiple == Some(true);
+        let mut selected = Vec::new();
 
         // A DCQL `values` constraint means the RP only accepts a credential whose claim value is one
         // of the listed values (e.g. `age_over_18 ∈ [true]`). A candidate that can't satisfy it is
@@ -3901,20 +3904,30 @@ impl Core {
                     &sess.nonce.to_string(),
                     &mgn,
                 );
-                return Ok(PreparedPresentationCredential {
+                selected.push(PreparedPresentationCredential {
                     selected: SelectedCredential::Mdoc {
                         doctype: holding.doctype.clone(),
                         issuer_signed,
                         session_transcript,
                         device_namespaces: mdoc::empty_device_namespaces_bytes(),
                         mdoc_generated_nonce: mgn,
-                        dcql_id,
+                        dcql_id: dcql_id.clone(),
                     },
                     source: PresentationCredentialReference::Mdoc(holding.clone()),
                     revealed_claims: mdoc_claim_labels.clone(),
                 });
+                if !multiple {
+                    break;
+                }
+                if selected.len() > MAX_PRESENTATIONS_PER_DCQL_QUERY {
+                    return Err(PresentationEligibilityError::NoEligibleCredential);
+                }
             }
-            return Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential));
+            return if selected.is_empty() {
+                Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
+            } else {
+                Ok(selected)
+            };
         }
         if q.format != "dc+sd-jwt" {
             return Err(PresentationEligibilityError::NoEligibleCredential);
@@ -3987,11 +4000,11 @@ impl Core {
                         first_error.get_or_insert(error);
                         continue;
                     }
-                    return Ok(PreparedPresentationCredential {
+                    selected.push(PreparedPresentationCredential {
                         selected: SelectedCredential::SdJwt {
                             issuer_jwt: credential.issuer_jwt.clone(),
                             disclosures: selection.disclosures,
-                            dcql_id,
+                            dcql_id: dcql_id.clone(),
                         },
                         source: PresentationCredentialReference::SdJwt {
                             holding: credential.clone(),
@@ -4023,11 +4036,11 @@ impl Core {
                         .iter()
                         .filter_map(|claim| credential.disclosures_by_claim.get(claim).cloned())
                         .collect();
-                    return Ok(PreparedPresentationCredential {
+                    selected.push(PreparedPresentationCredential {
                         selected: SelectedCredential::SdJwt {
                             issuer_jwt: credential.issuer_jwt.clone(),
                             disclosures,
-                            dcql_id,
+                            dcql_id: dcql_id.clone(),
                         },
                         source: PresentationCredentialReference::SdJwt {
                             holding: credential.clone(),
@@ -4041,8 +4054,18 @@ impl Core {
                         .get_or_insert(PresentationEligibilityError::CredentialProvenanceInvalid);
                 }
             }
+            if !selected.is_empty() && !multiple {
+                break;
+            }
+            if selected.len() > MAX_PRESENTATIONS_PER_DCQL_QUERY {
+                return Err(PresentationEligibilityError::NoEligibleCredential);
+            }
         }
-        Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
+        if selected.is_empty() {
+            Err(first_error.unwrap_or(PresentationEligibilityError::NoEligibleCredential))
+        } else {
+            Ok(selected)
+        }
     }
 
     /// The legacy flat-`claims` path (no DCQL): one SD-JWT, minimised to the requested claims, sent

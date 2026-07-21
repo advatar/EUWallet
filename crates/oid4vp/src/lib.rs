@@ -700,10 +700,12 @@ fn assemble_direct_post_body(done: &[CompletedPresentation], state: Option<&str>
     } else {
         let mut obj = serde_json::Map::new();
         for c in done {
-            obj.insert(
-                c.dcql_id.clone().unwrap_or_default(),
-                serde_json::Value::Array(vec![serde_json::Value::String(c.vp_token.clone())]),
-            );
+            let values = obj
+                .entry(c.dcql_id.clone().unwrap_or_default())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if let serde_json::Value::Array(values) = values {
+                values.push(serde_json::Value::String(c.vp_token.clone()));
+            }
         }
         serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
     };
@@ -1121,6 +1123,23 @@ mod response_tests {
         assert!(
             body.contains("&mdoc_generated_nonce=mgn-xyz"),
             "the mdoc entry contributes its nonce"
+        );
+    }
+
+    #[test]
+    fn multiple_presentations_for_one_query_share_one_ordered_array() {
+        let body = assemble_direct_post_body(
+            &[
+                entry(Some("pid"), "first.jwt~kb.jwt", None),
+                entry(Some("pid"), "second.jwt~kb.jwt", None),
+            ],
+            None,
+        );
+        let vp = body.strip_prefix("vp_token=").map(percent_decode).unwrap();
+        let obj: serde_json::Value = serde_json::from_str(&vp).unwrap();
+        assert_eq!(
+            obj["pid"],
+            serde_json::json!(["first.jwt~kb.jwt", "second.jwt~kb.jwt"])
         );
     }
 
