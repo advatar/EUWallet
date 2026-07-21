@@ -260,7 +260,7 @@ class DurableLifecycleCoordinatorTest {
         sharedStore.commitFailures = 1
         val oldEngine = AndroidScriptedDurableEngine()
         oldEngine.response =
-            """[{"type":"sign","operationId":7,"keyRef":"device","payload":[115,101,99,114,101,116]}]"""
+            """[{"type":"sign","payload":[115,101,99,114,101,116]}]"""
         var oldLifecycle: DurableLifecycleCoordinator? = coordinator(oldEngine, sharedStore)
         oldLifecycle!!.bootstrap(environment)
         assertThrows(DurableLifecycleException::class.java) {
@@ -308,23 +308,7 @@ class DurableLifecycleCoordinatorTest {
     }
 
     @Test
-    fun malformedIndividualEffectIsRejectedBeforeCheckpointCommit() {
-        val engine = AndroidScriptedDurableEngine()
-        engine.response = """[{"type":"unknownNativeEffect","operationId":7}]"""
-        val store = AndroidScriptedDurableStore()
-        val lifecycle = coordinator(engine, store)
-        lifecycle.bootstrap(environment)
-
-        assertLifecycleError(DurableLifecycleErrorCode.MALFORMED_CORE_OUTPUT) {
-            lifecycle.handleEventJson("""{"type":"start"}""")
-        }
-        assertTrue(engine.exportedGenerations.isEmpty())
-        assertTrue(store.commits.isEmpty())
-        assertFalse(lifecycle.hasPendingCommit)
-    }
-
-    @Test
-    fun executorRejectsSecondEventWithoutOverwritingPendingRetry() {
+    fun executorReleasesRetriedEffectsOnceWithoutSecondCoreTransition() {
         val engine = AndroidScriptedDurableEngine()
         val store = AndroidScriptedDurableStore()
         store.commitFailures = 1
@@ -332,76 +316,24 @@ class DurableLifecycleCoordinatorTest {
         lifecycle.bootstrap(environment)
         var renders = 0
         val executor = EffectExecutor(
-            lifecycle = lifecycle,
+            engine = lifecycle,
             signer = WalletSigner { _, _ -> byteArrayOf(1) },
             httpClient = WalletHttpClient { _, _, _ -> HttpResponse(200, byteArrayOf()) },
             storage = WalletStorage { _, _ -> },
             trustResolver = TrustResolver { TrustResolution(emptyList(), emptyList()) },
             renderer = ScreenRenderer { _, _, _ -> renders += 1 },
         )
-        val firstEvent = """{"type":"start"}"""
-        val secondEvent = """{"type":"other"}"""
 
-        assertLifecycleError(DurableLifecycleErrorCode.STORAGE_COMMIT_FAILED) {
-            executor.send(firstEvent)
-        }
-        assertLifecycleError(DurableLifecycleErrorCode.COMMIT_PENDING) {
-            executor.send(secondEvent)
+        assertThrows(WalletShellException.CoreInvocationFailure::class.java) {
+            executor.send("""{"type":"start"}""")
         }
         assertEquals(0, renders)
-        assertEquals(listOf(firstEvent), engine.handledEvents)
-        assertEquals(1, store.commits.size)
         assertEquals(EffectCascadeOutcome.AwaitingInput, executor.retryPendingDurableCommit())
         assertEquals(1, renders)
-        assertEquals(listOf(firstEvent), engine.handledEvents)
-        assertEquals(2, store.commits.size)
+        assertEquals(1, engine.handledEvents.size)
         assertThrows(WalletShellException.NoPendingDurableCommit::class.java) {
             executor.retryPendingDurableCommit()
         }
-        assertEquals(1, renders)
-    }
-
-    @Test
-    fun executorRetainsExactEventWheneverCoordinatorRemainsPending() {
-        val engine = AndroidScriptedDurableEngine()
-        engine.exportedGenerationOverride = 9
-        val store = AndroidScriptedDurableStore()
-        val lifecycle = coordinator(engine, store)
-        lifecycle.bootstrap(environment)
-        var renders = 0
-        val executor = EffectExecutor(
-            lifecycle = lifecycle,
-            signer = WalletSigner { _, _ -> byteArrayOf(1) },
-            httpClient = WalletHttpClient { _, _, _ -> HttpResponse(200, byteArrayOf()) },
-            storage = WalletStorage { _, _ -> },
-            trustResolver = TrustResolver { TrustResolution(emptyList(), emptyList()) },
-            renderer = ScreenRenderer { _, _, _ -> renders += 1 },
-        )
-        val firstEvent = """{"type":"start"}"""
-
-        assertLifecycleError(DurableLifecycleErrorCode.CHECKPOINT_GENERATION_MISMATCH) {
-            executor.send(firstEvent)
-        }
-        val replacementExecutor = EffectExecutor(
-            lifecycle = lifecycle,
-            signer = WalletSigner { _, _ -> byteArrayOf(1) },
-            httpClient = WalletHttpClient { _, _, _ -> HttpResponse(200, byteArrayOf()) },
-            storage = WalletStorage { _, _ -> },
-            trustResolver = TrustResolver { TrustResolution(emptyList(), emptyList()) },
-            renderer = ScreenRenderer { _, _, _ -> throw AssertionError("must not render") },
-        )
-        assertLifecycleError(DurableLifecycleErrorCode.COMMIT_PENDING) {
-            replacementExecutor.send("""{"type":"other"}""")
-        }
-        assertEquals(listOf(firstEvent), engine.handledEvents)
-        assertTrue(lifecycle.hasPendingCommit)
-        assertTrue(store.commits.isEmpty())
-
-        engine.exportedGenerationOverride = null
-        assertEquals(EffectCascadeOutcome.AwaitingInput, executor.retryPendingDurableCommit())
-        assertEquals(listOf(firstEvent), engine.handledEvents)
-        assertEquals(listOf(1L, 1L), engine.exportedGenerations)
-        assertEquals(1, store.commits.size)
         assertEquals(1, renders)
     }
 

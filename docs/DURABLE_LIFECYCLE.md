@@ -25,38 +25,18 @@ The coordinator serializes Core events. For every successful JSON effect-array r
 
 1. reserves `current generation + 1` with checked arithmetic;
 2. handles the event exactly once in Core;
-3. decodes and validates every individual effect with the exact native executor contract;
-4. exports a non-empty, bounded checkpoint embedding that exact next generation;
-5. compare-and-swap commits the bytes from the current to the next platform-store generation; and
-6. returns the retained effect array only after the store returns the exact generation and bytes.
+3. exports a non-empty, bounded checkpoint embedding that exact next generation;
+4. compare-and-swap commits the bytes from the current to the next platform-store generation; and
+5. returns the retained effect array only after the store returns the exact generation and bytes.
 
-A Core error envelope is returned without advancing the generation. A malformed individual effect
-poisons the coordinator before checkpoint export or commit. Generation mismatch and oversized state
-also fail closed and never release effects.
-
-Core and both native stores share a 33,554,312-byte checkpoint plaintext ceiling, derived from the
-32 MiB Android envelope and its 120-byte fixed overhead. Replay-set cardinality is admitted before
-each flow and again at the exact reservation transition; exhaustion resets the typed flow, clears
-its callbacks and leaves the prior durable checkpoint exportable. Direct and OID4VCI credential
-ingestion also project authenticated record count, each evidence component and aggregate evidence
-before the successful storage transition. The projection follows exact upsert semantics, including
-replacement and test-fixture promotion; rejection leaves the prior checkpoint and audit unchanged.
-
-Transaction redaction and full history wipe are Core events under the same commit boundary. Core
-admits them only when no protocol flow or native callback is pending, and the native shells report a
-blocked mutation as an error rather than an idle success. Successful and aborted terminal issuance,
-presentation, payment, QES and wallet-to-wallet transitions release their active marker and pending
-callbacks before a later history event can be admitted.
+A Core error envelope is returned without advancing the generation. Malformed output, generation
+mismatch and oversized state fail closed and never release effects.
 
 ## Failure and retry semantics
 
 An export or commit failure retains the exact event and effect batch in process memory. A retry is
 accepted only for byte-for-byte identical event JSON. Export may be retried when no checkpoint was
 produced; once produced, the exact checkpoint is reused. Core is never called a second time.
-While either export or commit remains pending, every other event is rejected before Core is called;
-the pending event cannot be overwritten even by a replacement executor. The coordinator state is
-authoritative, and native callers receive the original typed lifecycle failure rather than a
-generic Core error.
 
 After an ambiguous commit error, retry first repeats the exact compare-and-swap. If that fails, the
 coordinator loads the store and accepts success only when both the next generation and plaintext
@@ -76,28 +56,15 @@ durable outbox and does not provide exactly-once network, signing, storage or UI
 particular, process death after the checkpoint commit but before an external effect completes loses
 that pending effect by design.
 
-The non-dispatching checkpoint-v2 and delivery-ledger target is specified in
-[`DURABLE_EFFECT_DELIVERY.md`](DURABLE_EFFECT_DELIVERY.md). That target requires resumable Core
-aggregate state and adapter-specific ambiguity handling; a native-only queue is explicitly
-insufficient.
-
 ## Diagnostics and remaining integration
 
 FFI and coordinator failures are stable, low-cardinality codes without source errors, identifiers,
 generations, events, effects, credential material or checkpoint bytes. Native environment and
 checkpoint wrappers have redacted string/debug representations and defensively copy byte arrays.
 
-Both native effect executors now require a concrete coordinator, and their public behavior is tested
-through coordinator-backed engines. The current iOS application routes protocol and history events
-through that coordinator; a file-private adapter owns generated-engine mutation, and a CI
-architecture test guards the current application sources against direct construction or known raw
-mutators. The generated binding remains a public compatibility surface, so this is source-level
-composition enforcement rather than proof that arbitrary future client code cannot bypass it.
-
-The iOS demo deliberately uses a process-local CAS store because its fixture identities rotate on
-every launch. Production composition must instead inject `AppleDurableStateStore` with stable,
-device-bound installation identities. Android still needs generated Rust bindings, a durable-engine
-adapter and an application entry point, so the cross-platform sole-event-path parent remains open.
-Both clients also need migration/recovery UX, physical-device evidence and a provider monotonic
-receipt (or evaluated platform monotonic anchor) before stronger rollback or delivery claims are
-justified.
+The coordinators are production-facing seams, but application composition is still open. The iOS
+app must make the coordinator the sole owner-facing Core event path. Android still needs generated
+Rust bindings, a durable-engine adapter and an application entry point. Both clients also need an
+explicit checkpoint-capacity admission policy, migration/recovery UX, physical-device evidence and
+a provider monotonic receipt (or evaluated platform monotonic anchor) before stronger rollback or
+delivery claims are justified.

@@ -288,6 +288,7 @@ public enum EffectExecutorError: Error, Equatable {
     case ffi(FfiContractError)
     case coreInvocationFailed
     case noPendingDurableCommit
+    case durableRetryUnavailable
     case signingFailed(String)
     case storageFailed(String)
     case transportFailed(HttpClientError)
@@ -305,6 +306,7 @@ extension EffectExecutorError: LocalizedError {
         case .ffi(let error): return error.localizedDescription
         case .coreInvocationFailed: return "Wallet core invocation failed"
         case .noPendingDurableCommit: return "No durable wallet transition is awaiting retry"
+        case .durableRetryUnavailable: return "The wallet engine has no durable retry seam"
         case .signingFailed(let reason): return "Device signing failed: \(reason)"
         case .storageFailed(let reason): return "Secure storage failed: \(reason)"
         case .transportFailed(let error): return error.localizedDescription
@@ -355,7 +357,7 @@ public enum EffectCascadeOutcome: Equatable {
 /// This is the whole "shell" contract (plan Section 2/8). Device signing (`.sign`) goes to the
 /// Secure Enclave; the private key never crosses the FFI.
 public final class EffectExecutor {
-    private let lifecycle: DurableLifecycleCoordinator
+    private let engine: WalletEngineDriving
     private let signer: Signer
     private let http: HttpClient
     private let storage: SecureStorage
@@ -365,11 +367,10 @@ public final class EffectExecutor {
     private let transferOffers: TransferOfferPublisher?
     private let presentationRedirectHandler: OpenID4VPRedirectHandler?
     private let render: (UInt64?, Data?, ScreenDescription) throws -> Void
-    private let durableStateLock = NSLock()
     private var pendingDurableEventJson: String?
 
     public init(
-        lifecycle: DurableLifecycleCoordinator,
+        engine: WalletEngineDriving,
         signer: Signer,
         http: HttpClient,
         storage: SecureStorage,
@@ -380,7 +381,7 @@ public final class EffectExecutor {
         presentationRedirectHandler: OpenID4VPRedirectHandler? = nil,
         render: @escaping (UInt64?, Data?, ScreenDescription) throws -> Void
     ) {
-        self.lifecycle = lifecycle
+        self.engine = engine
         self.signer = signer
         self.http = http
         self.storage = storage
@@ -406,7 +407,19 @@ public final class EffectExecutor {
     /// invoking Core again; draining then continues from that batch.
     @discardableResult
     public func retryPendingDurableCommit() async throws -> EffectCascadeOutcome {
-        let (eventJson, output) = try retryPendingCoreOutput()
+        guard let eventJson = pendingDurableEventJson else {
+            throw EffectExecutorError.noPendingDurableCommit
+        }
+        guard let retrying = engine as? any DurableLifecycleRetrying else {
+            throw EffectExecutorError.durableRetryUnavailable
+        }
+        let output: String
+        do {
+            output = try retrying.retryPendingEvent(eventJson: eventJson)
+        } catch {
+            throw EffectExecutorError.coreInvocationFailed
+        }
+        pendingDurableEventJson = nil
         return try await drain(
             initialCoreOutput: output,
             initialEventType: Self.eventType(eventJson))
@@ -446,21 +459,18 @@ public final class EffectExecutor {
             }
             if let followUp = try await execute(effect) {
                 let followUpType = Self.eventType(followUp)
-                // A native completion callback is only an acknowledgement after Core has
-                // durably accepted it and its returned batch has decoded without an error render.
-                // Marking success before this boundary can turn a rejected credential callback
-                // into a false-positive issuance result.
-                let followUpEffects = try decode(invokeCore(followUp))
-                if Self.completionEventTypes.contains(followUpType ?? ""),
-                   !followUpEffects.contains(where: Self.isErrorRender)
-                {
+                switch followUpType {
+                case "presentationDelivered", "paymentAuthorizationDelivered",
+                     "qesAuthorizationDelivered", "credentialReceived":
                     acknowledged = true
+                default:
+                    break
                 }
                 if case .publishTransferOffer = effect,
                    followUpType == "operationSucceeded" {
                     awaitingExternalInput = true
                 }
-                queue.append(contentsOf: followUpEffects)
+                queue.append(contentsOf: try decode(invokeCore(followUp)))
             }
         }
 
@@ -483,53 +493,15 @@ public final class EffectExecutor {
     }
 
     private func invokeCore(_ eventJson: String) throws -> String {
-        durableStateLock.lock()
-        defer { durableStateLock.unlock() }
-        // Never replace the exact event associated with a retained checkpoint/effect batch. A
-        // second event cannot be handled until the first event's commit has succeeded or failed
-        // terminally.
-        guard pendingDurableEventJson == nil else {
-            throw DurableLifecycleError.commitPending
-        }
-        // A newly-created executor must also respect a transition retained by the coordinator;
-        // never adopt the new event as if it were the original pending event.
-        guard !lifecycle.hasPendingCommit else {
-            throw DurableLifecycleError.commitPending
-        }
         pendingDurableEventJson = eventJson
         do {
-            let output = try lifecycle.handleEventJson(eventJson: eventJson)
+            let output = try engine.handleEventJson(eventJson: eventJson)
             pendingDurableEventJson = nil
             return output
-        } catch let error as DurableLifecycleError {
-            if !lifecycle.hasPendingCommit {
-                pendingDurableEventJson = nil
-            }
-            // Preserve the stable lifecycle category so callers can distinguish an exact retry
-            // from a poisoned lifecycle or persistence divergence.
-            throw error
         } catch {
-            pendingDurableEventJson = nil
-            throw EffectExecutorError.coreInvocationFailed
-        }
-    }
-
-    private func retryPendingCoreOutput() throws -> (eventJson: String, output: String) {
-        durableStateLock.lock()
-        defer { durableStateLock.unlock() }
-        guard let eventJson = pendingDurableEventJson else {
-            throw EffectExecutorError.noPendingDurableCommit
-        }
-        do {
-            let output = try lifecycle.retryPendingEvent(eventJson: eventJson)
-            pendingDurableEventJson = nil
-            return (eventJson, output)
-        } catch let error as DurableLifecycleError {
-            if !lifecycle.hasPendingCommit {
-                pendingDurableEventJson = nil
-            }
-            throw error
-        } catch {
+            // Retain only the exact event in process memory so the durable coordinator can retry
+            // its already-computed checkpoint/effects. Never attach the event or source error to a
+            // diagnostic value.
             throw EffectExecutorError.coreInvocationFailed
         }
     }
@@ -734,21 +706,10 @@ public final class EffectExecutor {
     }
 
     private static let maximumEffectsPerCascade = 1_024
-    private static let completionEventTypes: Set<String> = [
-        "credentialReceived", "paymentAuthorizationDelivered", "presentationDelivered",
-        "qesAuthorizationDelivered",
-    ]
     private static let declineEventTypes: Set<String> = [
         "userDeclined", "paymentDeclined", "qesDeclined",
     ]
-    private static let idleEventTypes: Set<String> = [
-        "redactTransaction", "setClock", "wipeTransactionLog",
-    ]
-
-    private static func isErrorRender(_ effect: WalletEffect) -> Bool {
-        if case .render(_, _, .error) = effect { return true }
-        return false
-    }
+    private static let idleEventTypes: Set<String> = ["setClock"]
 }
 
 public protocol HttpClient {

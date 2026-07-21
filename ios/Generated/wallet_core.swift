@@ -831,9 +831,7 @@ public protocol WalletEngineProtocol : AnyObject {
     func prepareDurableEnvironment(clockEpoch: Int64, signedTrustList: Data, operatorPublicKey: Data, devicePublicKey: Data, wuaJwt: Data, wuaProviderPublicKey: Data) throws
 
     /**
-     * Legacy compatibility entry point for transaction redaction. Durable engines must send the
-     * `redactTransaction` event through their lifecycle coordinator; this method refuses prepared
-     * and running engines so it cannot mutate state outside the coordinator's commit gate.
+     * Erase one transaction-log entry (right to erasure, TS07). Chain-preserving tombstone.
      */
     func redactTransaction(seq: UInt64)  -> Bool
 
@@ -855,10 +853,7 @@ public protocol WalletEngineProtocol : AnyObject {
     func transactionReportJson()  -> String
 
     /**
-     * Legacy compatibility entry point for full history erasure. Durable engines must send the
-     * `wipeTransactionLog` event through their lifecycle coordinator. This void method cannot
-     * report a refusal, so coordinated application adapters must not expose it; prepared/running
-     * engines deterministically leave their state unchanged.
+     * Erase the entire transaction log (TS07).
      */
     func wipeTransactionLog()
 
@@ -1080,9 +1075,7 @@ open func prepareDurableEnvironment(clockEpoch: Int64, signedTrustList: Data, op
 }
 
     /**
-     * Legacy compatibility entry point for transaction redaction. Durable engines must send the
-     * `redactTransaction` event through their lifecycle coordinator; this method refuses prepared
-     * and running engines so it cannot mutate state outside the coordinator's commit gate.
+     * Erase one transaction-log entry (right to erasure, TS07). Chain-preserving tombstone.
      */
 open func redactTransaction(seq: UInt64) -> Bool {
     return try!  FfiConverterBool.lift(try! rustCall() {
@@ -1125,10 +1118,7 @@ open func transactionReportJson() -> String {
 }
 
     /**
-     * Legacy compatibility entry point for full history erasure. Durable engines must send the
-     * `wipeTransactionLog` event through their lifecycle coordinator. This void method cannot
-     * report a refusal, so coordinated application adapters must not expose it; prepared/running
-     * engines deterministically leave their state unchanged.
+     * Erase the entire transaction log (TS07).
      */
 open func wipeTransactionLog() {try! rustCall() {
     uniffi_wallet_core_fn_method_walletengine_wipe_transaction_log(self.uniffiClonePointer(),$0
@@ -2030,7 +2020,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallet_core_checksum_method_walletengine_prepare_durable_environment() != 20679) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_wallet_core_checksum_method_walletengine_redact_transaction() != 49738) {
+    if (uniffi_wallet_core_checksum_method_walletengine_redact_transaction() != 36608) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_restore_durable_checkpoint() != 5321) {
@@ -2042,7 +2032,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallet_core_checksum_method_walletengine_transaction_report_json() != 312) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_wallet_core_checksum_method_walletengine_wipe_transaction_log() != 51792) {
+    if (uniffi_wallet_core_checksum_method_walletengine_wipe_transaction_log() != 37351) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_constructor_demowallet_new() != 41997) {

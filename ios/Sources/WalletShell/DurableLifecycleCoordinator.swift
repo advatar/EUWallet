@@ -58,6 +58,12 @@ public protocol DurableWalletEngineDriving: WalletEngineDriving {
     func restoreDurableCheckpointRecord(_ checkpoint: CoreDurableCheckpoint) throws
 }
 
+/// Retry seam consumed by `EffectExecutor`. The exact event must match the blocked transition;
+/// implementations commit the already-computed checkpoint and return its already-computed effects.
+public protocol DurableLifecycleRetrying: AnyObject {
+    func retryPendingEvent(eventJson: String) throws -> String
+}
+
 /// Stable coordinator failures. No case carries an underlying error, event, effect, identifier or
 /// checkpoint; callers may log the case without leaking wallet material.
 public enum DurableLifecycleError: Error, Equatable, Sendable {
@@ -151,7 +157,8 @@ public enum DurableLifecycleContextFactory {
 /// new coordinator restores only the last anchored checkpoint. Protocol sessions and pending effects
 /// are intentionally not durable, so this seam provides at-most-once release after persistence—not
 /// a durable outbox or exactly-once external delivery. Production host composition remains required.
-public final class DurableLifecycleCoordinator: WalletEngineDriving, CustomDebugStringConvertible
+public final class DurableLifecycleCoordinator: WalletEngineDriving, DurableLifecycleRetrying,
+    CustomDebugStringConvertible
 {
     public static let maximumCheckpointBytes = AppleDurableStateStore.maximumPlaintextBytes
 
@@ -286,16 +293,7 @@ public final class DurableLifecycleCoordinator: WalletEngineDriving, CustomDebug
             state = .failed
             throw DurableLifecycleError.malformedCoreOutput
         case .effects:
-            // JSON-array shape alone is not enough: an unknown effect type, missing correlated
-            // operation identifier or otherwise malformed individual effect must be rejected
-            // before Core state is exported or committed. Use the exact decoder the executor will
-            // use after persistence so a committed batch is always executable by this shell.
-            do {
-                _ = try WalletEffect.decodeCoreOutput(output)
-            } catch {
-                state = .failed
-                throw DurableLifecycleError.malformedCoreOutput
-            }
+            break
         }
 
         let pending = PendingExport(

@@ -52,6 +52,11 @@ interface DurableWalletEngineDriving : WalletEngineDriving {
     fun restoreDurableCheckpointRecord(checkpoint: CoreDurableCheckpoint)
 }
 
+/** Exact retry seam consumed by [EffectExecutor]. */
+fun interface DurableLifecycleRetrying {
+    fun retryPendingEvent(eventJson: String): String
+}
+
 enum class DurableLifecycleErrorCode(val stableMessage: String) {
     INVALID_IDENTITY("durable_lifecycle_invalid_identity"),
     ALREADY_BOOTSTRAPPED("durable_lifecycle_already_bootstrapped"),
@@ -126,7 +131,7 @@ class DurableLifecycleCoordinator(
     private val engine: DurableWalletEngineDriving,
     private val store: DurableStateStore,
     private val context: DurableStateContext,
-) : WalletEngineDriving {
+) : WalletEngineDriving, DurableLifecycleRetrying {
     private sealed interface State {
         data object Uninitialized : State
         data object Bootstrapping : State
@@ -225,15 +230,7 @@ class DurableLifecycleCoordinator(
                 state = State.Failed
                 fail(DurableLifecycleErrorCode.MALFORMED_CORE_OUTPUT)
             }
-            CoreOutputKind.EFFECTS -> try {
-                // Validate every individual effect with the exact decoder used by EffectExecutor
-                // before exporting or committing the mutated Core state. Array shape alone would
-                // otherwise allow a committed batch that the native shell cannot execute.
-                WalletEffectDecoder.decodeCoreOutput(output)
-            } catch (_: Exception) {
-                state = State.Failed
-                fail(DurableLifecycleErrorCode.MALFORMED_CORE_OUTPUT)
-            }
+            CoreOutputKind.EFFECTS -> Unit
         }
 
         val pending = Export(generation, nextGeneration, eventJson, output)
@@ -245,7 +242,7 @@ class DurableLifecycleCoordinator(
     }
 
     @Synchronized
-    fun retryPendingEvent(eventJson: String): String = when (val current = state) {
+    override fun retryPendingEvent(eventJson: String): String = when (val current = state) {
         is State.PendingExport -> {
             if (current.value.eventJson != eventJson) {
                 fail(DurableLifecycleErrorCode.RETRY_EVENT_MISMATCH)
