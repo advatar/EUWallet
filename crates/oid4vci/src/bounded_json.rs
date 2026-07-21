@@ -10,14 +10,14 @@ use serde_json::{Map, Value};
 pub const ABSOLUTE_MAX_JSON_BYTES: usize = 256 * 1024;
 pub const ABSOLUTE_MAX_JSON_DEPTH: usize = 16;
 pub const ABSOLUTE_MAX_CONTAINER_ENTRIES: usize = 128;
-pub const ABSOLUTE_MAX_STRING_BYTES: usize = 224 * 1024;
+pub const ABSOLUTE_MAX_STRING_BYTES: usize = 8 * 1024;
 
 /// Conservative hard limits shared by Credential Offers and discovery metadata.
 pub const DEFAULT_JSON_LIMITS: JsonLimits = JsonLimits {
     max_bytes: ABSOLUTE_MAX_JSON_BYTES,
     max_depth: ABSOLUTE_MAX_JSON_DEPTH,
     max_container_entries: ABSOLUTE_MAX_CONTAINER_ENTRIES,
-    max_string_bytes: 8 * 1024,
+    max_string_bytes: ABSOLUTE_MAX_STRING_BYTES,
 };
 
 /// Independent limits enforced before a JSON DOM is allocated.

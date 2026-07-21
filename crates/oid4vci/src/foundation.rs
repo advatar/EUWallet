@@ -21,20 +21,11 @@ pub const MAX_SCOPE_BYTES: usize = 512;
 pub const MAX_OPAQUE_VALUE_BYTES: usize = 2_048;
 pub const MAX_TRANSACTION_CODE_LENGTH: u64 = 64;
 pub const MAX_BATCH_SIZE: u64 = 64;
-/// Operational ceiling for a TS3 status-maintenance preference. Ten leap-years accommodates
-/// long-lived credentials while preventing hostile metadata from demanding absurd retention.
-pub const MAX_PREFERRED_CLIENT_STATUS_PERIOD_SECONDS: u64 = 10 * 366 * 24 * 60 * 60;
 
 pub const AUTHORIZATION_CODE_GRANT: &str = "authorization_code";
 pub const PRE_AUTHORIZED_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:pre-authorized_code";
 pub const MDOC_PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 pub const SD_JWT_PID_VCT: &str = "urn:eudi:pid:1";
-/// Operational resource bound for issuer-advertised status-maintenance preferences.
-///
-/// Ten leap years is deliberately much larger than the TS3 minimum while preventing hostile
-/// metadata from creating effectively unbounded retention requirements or overflowing later time
-/// arithmetic.
-pub const MAX_PREFERRED_KEY_STORAGE_STATUS_PERIOD_SECONDS: u64 = 10 * 366 * 24 * 60 * 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UrlSyntaxError {
@@ -637,7 +628,6 @@ pub enum AlgorithmIdentifier {
 pub struct KeyAttestationRequirement {
     pub key_storage: Option<Vec<String>>,
     pub user_authentication: Option<Vec<String>>,
-    pub preferred_key_storage_status_period: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -673,7 +663,6 @@ pub struct CredentialIssuerMetadata {
     pub authorization_servers: Vec<HttpsIdentifier>,
     pub credential_endpoint: HttpsEndpoint,
     pub nonce_endpoint: Option<HttpsEndpoint>,
-    pub preferred_client_status_period: Option<u64>,
     pub deferred_credential_endpoint: Option<HttpsEndpoint>,
     pub notification_endpoint: Option<HttpsEndpoint>,
     pub credential_configurations_supported: BTreeMap<String, CredentialConfiguration>,
@@ -730,17 +719,6 @@ pub fn parse_credential_issuer_metadata_with_limits(
     let credential_endpoint = metadata_endpoint(&object, "credential_endpoint", true)?
         .ok_or(MetadataError::MissingField("credential_endpoint"))?;
     let nonce_endpoint = metadata_endpoint(&object, "nonce_endpoint", false)?;
-    let preferred_client_status_period = object
-        .get("preferred_client_status_period")
-        .map(|value| {
-            value
-                .as_u64()
-                .filter(|period| *period <= MAX_PREFERRED_CLIENT_STATUS_PERIOD_SECONDS)
-                .ok_or(MetadataError::InvalidField(
-                    "preferred_client_status_period",
-                ))
-        })
-        .transpose()?;
     let deferred_credential_endpoint =
         metadata_endpoint(&object, "deferred_credential_endpoint", false)?;
     let notification_endpoint = metadata_endpoint(&object, "notification_endpoint", false)?;
@@ -807,7 +785,6 @@ pub fn parse_credential_issuer_metadata_with_limits(
         authorization_servers,
         credential_endpoint,
         nonce_endpoint,
-        preferred_client_status_period,
         deferred_credential_endpoint,
         notification_endpoint,
         credential_configurations_supported,
@@ -931,21 +908,16 @@ fn parse_key_attestation_requirement(
         .get("user_authentication")
         .map(|value| parse_string_list(value, "user_authentication", MAX_LIST_VALUES, 128))
         .transpose()?;
-    let preferred_key_storage_status_period = object
-        .get("preferred_key_storage_status_period")
-        .map(|period| {
-            period
-                .as_u64()
-                .filter(|period| *period <= MAX_PREFERRED_KEY_STORAGE_STATUS_PERIOD_SECONDS)
-                .ok_or(MetadataError::InvalidField(
-                    "preferred_key_storage_status_period",
-                ))
-        })
-        .transpose()?;
+    if let Some(period) = object.get("preferred_key_storage_status_period") {
+        if period.as_u64().is_none() {
+            return Err(MetadataError::InvalidField(
+                "preferred_key_storage_status_period",
+            ));
+        }
+    }
     Ok(KeyAttestationRequirement {
         key_storage,
         user_authentication,
-        preferred_key_storage_status_period,
     })
 }
 
@@ -1191,9 +1163,6 @@ pub struct AuthorizationServerFeatureFlags {
     pub pkce_s256: bool,
     pub dpop_es256: bool,
     pub authorization_response_issuer: bool,
-    pub attestation_client_auth: bool,
-    pub client_attestation_es256: bool,
-    pub client_attestation_pop_es256: bool,
 }
 
 impl AuthorizationServerFeatureFlags {
@@ -1204,9 +1173,6 @@ impl AuthorizationServerFeatureFlags {
             && self.pkce_s256
             && self.dpop_es256
             && self.authorization_response_issuer
-            && self.attestation_client_auth
-            && self.client_attestation_es256
-            && self.client_attestation_pop_es256
     }
 }
 
@@ -1216,16 +1182,12 @@ pub struct AuthorizationServerMetadata {
     pub authorization_endpoint: Option<HttpsEndpoint>,
     pub token_endpoint: Option<HttpsEndpoint>,
     pub pushed_authorization_request_endpoint: Option<HttpsEndpoint>,
-    pub challenge_endpoint: Option<HttpsEndpoint>,
     pub jwks_uri: Option<HttpsEndpoint>,
     pub scopes_supported: Option<Vec<String>>,
     pub grant_types_supported: Vec<String>,
     pub response_types_supported: Vec<String>,
     pub code_challenge_methods_supported: Vec<String>,
     pub dpop_signing_alg_values_supported: Vec<String>,
-    pub token_endpoint_auth_methods_supported: Vec<String>,
-    pub client_attestation_signing_alg_values_supported: Vec<String>,
-    pub client_attestation_pop_signing_alg_values_supported: Vec<String>,
     pub features: AuthorizationServerFeatureFlags,
 }
 
@@ -1255,7 +1217,6 @@ pub fn parse_authorization_server_metadata_with_limits(
     let token_endpoint = metadata_endpoint(&object, "token_endpoint", false)?;
     let pushed_authorization_request_endpoint =
         metadata_endpoint(&object, "pushed_authorization_request_endpoint", false)?;
-    let challenge_endpoint = metadata_endpoint(&object, "challenge_endpoint", false)?;
     let jwks_uri = metadata_endpoint(&object, "jwks_uri", false)?;
     let response_types_supported = parse_string_list(
         object
@@ -1304,42 +1265,6 @@ pub fn parse_authorization_server_metadata_with_limits(
         })
         .transpose()?
         .unwrap_or_default();
-    let token_endpoint_auth_methods_supported = object
-        .get("token_endpoint_auth_methods_supported")
-        .map(|value| {
-            parse_string_list(
-                value,
-                "token_endpoint_auth_methods_supported",
-                MAX_LIST_VALUES,
-                128,
-            )
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let client_attestation_signing_alg_values_supported = object
-        .get("client_attestation_signing_alg_values_supported")
-        .map(|value| {
-            parse_string_list(
-                value,
-                "client_attestation_signing_alg_values_supported",
-                MAX_LIST_VALUES,
-                128,
-            )
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let client_attestation_pop_signing_alg_values_supported = object
-        .get("client_attestation_pop_signing_alg_values_supported")
-        .map(|value| {
-            parse_string_list(
-                value,
-                "client_attestation_pop_signing_alg_values_supported",
-                MAX_LIST_VALUES,
-                128,
-            )
-        })
-        .transpose()?
-        .unwrap_or_default();
     let par_required = object
         .get("require_pushed_authorization_requests")
         .map(|value| {
@@ -1375,31 +1300,18 @@ pub fn parse_authorization_server_metadata_with_limits(
             .iter()
             .any(|algorithm| algorithm == "ES256"),
         authorization_response_issuer,
-        attestation_client_auth: token_endpoint_auth_methods_supported
-            .iter()
-            .any(|method| method == "attest_jwt_client_auth"),
-        client_attestation_es256: client_attestation_signing_alg_values_supported
-            .iter()
-            .any(|algorithm| algorithm == "ES256"),
-        client_attestation_pop_es256: client_attestation_pop_signing_alg_values_supported
-            .iter()
-            .any(|algorithm| algorithm == "ES256"),
     };
     Ok(AuthorizationServerMetadata {
         issuer,
         authorization_endpoint,
         token_endpoint,
         pushed_authorization_request_endpoint,
-        challenge_endpoint,
         jwks_uri,
         scopes_supported,
         grant_types_supported,
         response_types_supported,
         code_challenge_methods_supported,
         dpop_signing_alg_values_supported,
-        token_endpoint_auth_methods_supported,
-        client_attestation_signing_alg_values_supported,
-        client_attestation_pop_signing_alg_values_supported,
         features,
     })
 }
@@ -1440,12 +1352,9 @@ pub struct GermanPidIssuancePlan {
     pub proof_signing_algorithm: String,
     pub credential_endpoint: HttpsEndpoint,
     pub nonce_endpoint: HttpsEndpoint,
-    pub preferred_client_status_period: Option<u64>,
-    pub preferred_key_storage_status_period: Option<u64>,
     pub authorization_endpoint: HttpsEndpoint,
     pub token_endpoint: HttpsEndpoint,
     pub pushed_authorization_request_endpoint: HttpsEndpoint,
-    pub attestation_challenge_endpoint: Option<HttpsEndpoint>,
     pub pid_provider_trust: PidProviderTrust,
 }
 
@@ -1461,15 +1370,10 @@ pub enum ProfileSelectionError {
     BindingMethodMissing,
     CredentialSigningAlgorithmMissing,
     JwtProofMissing,
-    AttestationProofMissing,
     ProofAlgorithmMissing,
-    AttestationProofAlgorithmMissing,
     KeyAttestationMissing,
-    AttestationKeyAttestationMissing,
     HighKeyStorageMissing,
-    AttestationHighKeyStorageMissing,
     HighUserAuthenticationMissing,
-    AttestationHighUserAuthenticationMissing,
     NonceEndpointMissing,
     CredentialRequestEncryptionRequired,
     CredentialResponseEncryptionRequired,
@@ -1486,9 +1390,6 @@ pub enum ProfileSelectionError {
     PkceS256Unsupported,
     DpopEs256Unsupported,
     AuthorizationResponseIssuerUnsupported,
-    AttestationClientAuthenticationUnsupported,
-    ClientAttestationAlgorithmUnsupported,
-    ClientAttestationPopAlgorithmUnsupported,
     ScopeUnsupportedByAuthorizationServer,
 }
 
@@ -1621,9 +1522,6 @@ pub fn select_german_first_enrolment(
     let jwt = proof_types
         .get("jwt")
         .ok_or(ProfileSelectionError::JwtProofMissing)?;
-    let attestation = proof_types
-        .get("attestation")
-        .ok_or(ProfileSelectionError::AttestationProofMissing)?;
     if !jwt
         .signing_algorithms
         .iter()
@@ -1632,20 +1530,6 @@ pub fn select_german_first_enrolment(
         return Err(ProfileSelectionError::ProofAlgorithmMissing);
     }
     if jwt
-        .signing_algorithms
-        .iter()
-        .any(|algorithm| matches!(algorithm, AlgorithmIdentifier::Cose(_)))
-    {
-        return Err(ProfileSelectionError::MixedAlgorithmIdentifiers);
-    }
-    if !attestation
-        .signing_algorithms
-        .iter()
-        .any(|algorithm| matches!(algorithm, AlgorithmIdentifier::Jose(value) if value == "ES256"))
-    {
-        return Err(ProfileSelectionError::AttestationProofAlgorithmMissing);
-    }
-    if attestation
         .signing_algorithms
         .iter()
         .any(|algorithm| matches!(algorithm, AlgorithmIdentifier::Cose(_)))
@@ -1664,22 +1548,6 @@ pub fn select_german_first_enrolment(
         "iso_18045_high",
     ) {
         return Err(ProfileSelectionError::HighUserAuthenticationMissing);
-    }
-    let attestation_key_attestation = attestation
-        .key_attestations_required
-        .as_ref()
-        .ok_or(ProfileSelectionError::AttestationKeyAttestationMissing)?;
-    if !contains_value(
-        attestation_key_attestation.key_storage.as_deref(),
-        "iso_18045_high",
-    ) {
-        return Err(ProfileSelectionError::AttestationHighKeyStorageMissing);
-    }
-    if !contains_value(
-        attestation_key_attestation.user_authentication.as_deref(),
-        "iso_18045_high",
-    ) {
-        return Err(ProfileSelectionError::AttestationHighUserAuthenticationMissing);
     }
 
     let (format, holder_binding, credential_signing_algorithm) = match configuration.format.as_str()
@@ -1762,15 +1630,6 @@ pub fn select_german_first_enrolment(
     if !authorization_server.features.authorization_response_issuer {
         return Err(ProfileSelectionError::AuthorizationResponseIssuerUnsupported);
     }
-    if !authorization_server.features.attestation_client_auth {
-        return Err(ProfileSelectionError::AttestationClientAuthenticationUnsupported);
-    }
-    if !authorization_server.features.client_attestation_es256 {
-        return Err(ProfileSelectionError::ClientAttestationAlgorithmUnsupported);
-    }
-    if !authorization_server.features.client_attestation_pop_es256 {
-        return Err(ProfileSelectionError::ClientAttestationPopAlgorithmUnsupported);
-    }
 
     Ok(GermanPidIssuancePlan {
         credential_issuer: issuer.credential_issuer.clone(),
@@ -1783,12 +1642,9 @@ pub fn select_german_first_enrolment(
         proof_signing_algorithm: "ES256".to_owned(),
         credential_endpoint: issuer.credential_endpoint.clone(),
         nonce_endpoint,
-        preferred_client_status_period: issuer.preferred_client_status_period,
-        preferred_key_storage_status_period: key_attestation.preferred_key_storage_status_period,
         authorization_endpoint,
         token_endpoint,
         pushed_authorization_request_endpoint,
-        attestation_challenge_endpoint: authorization_server.challenge_endpoint.clone(),
         pid_provider_trust: PidProviderTrust::Unresolved,
     })
 }
