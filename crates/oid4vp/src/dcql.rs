@@ -558,18 +558,22 @@ fn contains_unsupported_selection_modifier(value: &serde_json::Value) -> bool {
                         || credential
                             .get("multiple")
                             .is_some_and(|value| !value.is_boolean())
-                        || (credential.get("format").and_then(serde_json::Value::as_str)
-                            == Some("mso_mdoc")
-                            && credential
-                                .get("claims")
-                                .and_then(serde_json::Value::as_array)
-                                .is_some_and(|claims| {
-                                    claims.iter().any(|claim| {
-                                        claim.as_object().is_some_and(|claim| {
-                                            claim.contains_key("intent_to_retain")
+                        || credential
+                            .get("claims")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|claims| {
+                                claims.iter().any(|claim| {
+                                    claim.as_object().is_some_and(|claim| {
+                                        claim.get("intent_to_retain").is_some_and(|intent| {
+                                            credential
+                                                .get("format")
+                                                .and_then(serde_json::Value::as_str)
+                                                != Some("mso_mdoc")
+                                                || !intent.is_boolean()
                                         })
                                     })
-                                }))
+                                })
+                            })
                 })
             })
         })
@@ -1067,18 +1071,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_meta_retention_and_ambiguous_values() {
+    fn rejects_missing_meta_and_ambiguous_values() {
         for query in [
             serde_json::json!({"credentials":[{"id":"pid", "format":"dc+sd-jwt"}]}),
             serde_json::json!({"credentials":[{"id":"pid", "format":"dc+sd-jwt",
                 "meta":{"vct_values":[]}}]}),
             serde_json::json!({"credentials":[{"id":"mdl", "format":"mso_mdoc",
                 "meta":{}}]}),
-            serde_json::json!({"credentials":[{"id":"mdl", "format":"mso_mdoc",
-            "meta":{"doctype_value":"org.iso.18013.5.1.mDL"}, "claims":[{
-                "path":["org.iso.18013.5.1", "age_over_18"],
-                "intent_to_retain":false
-            }]}]}),
             serde_json::json!({"credentials":[{"id":"pid", "format":"dc+sd-jwt",
             "meta":{"vct_values":["v1"]}, "claims":[
                 {"path":["age"], "values":[18]},
@@ -1098,6 +1097,38 @@ mod tests {
                 "id":"pid", "format":"dc+sd-jwt", "meta":{"vct_values":["v1"]},
                 "claims":[{"path":["age"], "values":[invalid_value]}]
             }]});
+            assert!(DcqlQuery::from_value(&query).is_none(), "accepted {query}");
+        }
+    }
+
+    #[test]
+    fn retention_intent_is_boolean_and_mdoc_only() {
+        for intent in [false, true] {
+            let query = serde_json::json!({"credentials":[{
+                "id":"mdl", "format":"mso_mdoc",
+                "meta":{"doctype_value":"org.iso.18013.5.1.mDL"}, "claims":[{
+                    "path":["org.iso.18013.5.1", "age_over_18"],
+                    "intent_to_retain":intent
+                }]
+            }]});
+            assert_eq!(
+                DcqlQuery::from_value(&query).unwrap().credentials[0].claims[0].intent_to_retain,
+                Some(intent)
+            );
+        }
+        for query in [
+            serde_json::json!({"credentials":[{
+                "id":"mdl", "format":"mso_mdoc",
+                "meta":{"doctype_value":"org.iso.18013.5.1.mDL"}, "claims":[{
+                    "path":["org.iso.18013.5.1", "age_over_18"],
+                    "intent_to_retain":null
+                }]
+            }]}),
+            serde_json::json!({"credentials":[{
+                "id":"pid", "format":"dc+sd-jwt", "meta":{"vct_values":["v1"]},
+                "claims":[{"path":["age"], "intent_to_retain":false}]
+            }]}),
+        ] {
             assert!(DcqlQuery::from_value(&query).is_none(), "accepted {query}");
         }
     }

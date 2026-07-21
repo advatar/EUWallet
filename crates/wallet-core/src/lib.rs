@@ -3862,7 +3862,15 @@ impl Core {
                 .ok_or(PresentationEligibilityError::NoEligibleCredential)?;
             let mdoc_claim_labels: Vec<String> = requested_mdoc_paths
                 .iter()
-                .map(|(namespace, element)| format!("{namespace}.{element}"))
+                .zip(requested_claims)
+                .map(|((namespace, element), claim)| {
+                    let path = format!("{namespace}.{element}");
+                    if claim.intent_to_retain == Some(true) {
+                        format!("{path} [retained]")
+                    } else {
+                        path
+                    }
+                })
                 .collect();
             let mdoc_values_ok = |issued: &mdoc::IssuerSigned| -> bool {
                 requested_claims
