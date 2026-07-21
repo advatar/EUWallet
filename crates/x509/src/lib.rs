@@ -13,10 +13,13 @@
 //! cryptographic step — verifying each certificate's signature — goes through
 //! [`crypto_traits::Verifier`]; this crate never implements a signature algorithm.
 
+use std::collections::BTreeSet;
+
 use crypto_traits::{Alg, Verifier};
 use der::{Decode, Encode};
 use x509_cert::ext::pkix::{
-    name::GeneralName, BasicConstraints, CertificatePolicies, ExtendedKeyUsage, SubjectAltName,
+    name::GeneralName, AuthorityKeyIdentifier, BasicConstraints, CertificatePolicies,
+    ExtendedKeyUsage, KeyUsage, SubjectAltName, SubjectKeyIdentifier,
 };
 use x509_cert::Certificate;
 
@@ -31,6 +34,19 @@ const OID_EKU: &str = "2.5.29.37";
 const OID_POLICIES: &str = "2.5.29.32";
 const OID_BASIC_CONSTRAINTS: &str = "2.5.29.19";
 const OID_SUBJECT_ALT_NAME: &str = "2.5.29.17";
+const OID_KEY_USAGE: &str = "2.5.29.15";
+const OID_SUBJECT_KEY_IDENTIFIER: &str = "2.5.29.14";
+const OID_AUTHORITY_KEY_IDENTIFIER: &str = "2.5.29.35";
+
+// Explicit resource budgets for hostile certificate bundles. The first strict slice intentionally
+// supports short wallet trust paths rather than exposing an unbounded graph search.
+const MAX_SUPPLIED_CERTIFICATES: usize = 8;
+const MAX_TRUST_ANCHORS: usize = 64;
+const MAX_CERTIFICATE_DER_BYTES: usize = 64 * 1024;
+const MAX_EXTENSIONS_PER_CERTIFICATE: usize = 32;
+const MAX_ISSUER_CANDIDATES: usize = 16;
+const MAX_PATH_BUILD_STEPS: usize = 256;
+const MAX_COMPLETE_PATHS: usize = MAX_PATH_BUILD_STEPS;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum X509Error {
@@ -64,6 +80,23 @@ pub struct ParsedCert {
     pub is_ca: bool,
     pub eku: Vec<String>,
     pub policies: Vec<String>,
+    constraints: CertificateConstraints,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CertificateConstraints {
+    subject_der: Vec<u8>,
+    issuer_der: Vec<u8>,
+    basic_constraints_present: bool,
+    basic_constraints_critical: bool,
+    path_len_constraint: Option<u8>,
+    key_usage_present: bool,
+    digital_signature: bool,
+    key_cert_sign: bool,
+    subject_key_identifier: Option<Vec<u8>>,
+    authority_key_identifier: Option<Vec<u8>>,
+    unsupported_critical_extension: bool,
+    signature_algorithms_match: bool,
 }
 
 fn map_sig_alg(oid: &str) -> Result<Alg, X509Error> {
@@ -77,6 +110,9 @@ fn map_sig_alg(oid: &str) -> Result<Alg, X509Error> {
 
 /// Parse a DER certificate into the reduced [`ParsedCert`].
 pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
+    if der_bytes.is_empty() || der_bytes.len() > MAX_CERTIFICATE_DER_BYTES {
+        return Err(X509Error::Der);
+    }
     let cert = Certificate::from_der(der_bytes).map_err(|_| X509Error::Der)?;
     let tbs = &cert.tbs_certificate;
 
@@ -101,26 +137,59 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
     let mut eku = Vec::new();
     let mut policies = Vec::new();
     let mut uri_sans = Vec::new();
+    let mut constraints = CertificateConstraints {
+        subject_der: tbs.subject.to_der().map_err(|_| X509Error::Der)?,
+        issuer_der: tbs.issuer.to_der().map_err(|_| X509Error::Der)?,
+        signature_algorithms_match: tbs.signature == cert.signature_algorithm,
+        ..CertificateConstraints::default()
+    };
 
     if let Some(exts) = &tbs.extensions {
+        if exts.len() > MAX_EXTENSIONS_PER_CERTIFICATE {
+            return Err(X509Error::Der);
+        }
+        let mut seen_oids = BTreeSet::new();
         for ext in exts {
-            match ext.extn_id.to_string().as_str() {
+            let oid = ext.extn_id.to_string();
+            if !seen_oids.insert(oid.clone()) {
+                return Err(X509Error::Der);
+            }
+            match oid.as_str() {
                 OID_BASIC_CONSTRAINTS => {
-                    if let Ok(bc) = BasicConstraints::from_der(ext.extn_value.as_bytes()) {
-                        is_ca = bc.ca;
+                    let bc = BasicConstraints::from_der(ext.extn_value.as_bytes())
+                        .map_err(|_| X509Error::Der)?;
+                    if !bc.ca && bc.path_len_constraint.is_some() {
+                        return Err(X509Error::Der);
                     }
+                    is_ca = bc.ca;
+                    constraints.basic_constraints_present = true;
+                    constraints.basic_constraints_critical = ext.critical;
+                    constraints.path_len_constraint = bc.path_len_constraint;
+                }
+                OID_KEY_USAGE => {
+                    let usage = KeyUsage::from_der(ext.extn_value.as_bytes())
+                        .map_err(|_| X509Error::Der)?;
+                    constraints.key_usage_present = true;
+                    constraints.digital_signature = usage.digital_signature();
+                    constraints.key_cert_sign = usage.key_cert_sign();
                 }
                 OID_EKU => {
-                    if let Ok(e) = ExtendedKeyUsage::from_der(ext.extn_value.as_bytes()) {
-                        eku = e.0.iter().map(|o| o.to_string()).collect();
-                    }
+                    let parsed = ExtendedKeyUsage::from_der(ext.extn_value.as_bytes())
+                        .map_err(|_| X509Error::Der)?;
+                    eku = parsed.0.iter().map(|value| value.to_string()).collect();
                 }
                 OID_POLICIES => {
-                    if let Ok(p) = CertificatePolicies::from_der(ext.extn_value.as_bytes()) {
-                        policies =
-                            p.0.iter()
-                                .map(|pi| pi.policy_identifier.to_string())
-                                .collect();
+                    let parsed = CertificatePolicies::from_der(ext.extn_value.as_bytes())
+                        .map_err(|_| X509Error::Der)?;
+                    policies = parsed
+                        .0
+                        .iter()
+                        .map(|policy| policy.policy_identifier.to_string())
+                        .collect();
+                    // Policy processing is explicitly outside this bounded slice. A non-critical
+                    // policy remains available to the RP profile; a critical one must fail closed.
+                    if ext.critical {
+                        constraints.unsupported_critical_extension = true;
                     }
                 }
                 OID_SUBJECT_ALT_NAME => {
@@ -131,6 +200,25 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
                         _ => None,
                     }));
                 }
+                OID_SUBJECT_KEY_IDENTIFIER => {
+                    let identifier = SubjectKeyIdentifier::from_der(ext.extn_value.as_bytes())
+                        .map_err(|_| X509Error::Der)?;
+                    constraints.subject_key_identifier = Some(identifier.0.as_bytes().to_vec());
+                    if ext.critical {
+                        constraints.unsupported_critical_extension = true;
+                    }
+                }
+                OID_AUTHORITY_KEY_IDENTIFIER => {
+                    let identifier = AuthorityKeyIdentifier::from_der(ext.extn_value.as_bytes())
+                        .map_err(|_| X509Error::Der)?;
+                    constraints.authority_key_identifier = identifier
+                        .key_identifier
+                        .map(|value| value.as_bytes().to_vec());
+                    if ext.critical {
+                        constraints.unsupported_critical_extension = true;
+                    }
+                }
+                _ if ext.critical => constraints.unsupported_critical_extension = true,
                 _ => {}
             }
         }
@@ -150,6 +238,7 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
         is_ca,
         eku,
         policies,
+        constraints,
     })
 }
 
@@ -320,9 +409,213 @@ mod issuer_identity_tests {
     }
 }
 
-/// Step 1 — path validation (a pragmatic RFC 5280 subset): chain the leaf up to a trust anchor,
-/// checking validity windows, issuer/subject linkage, that each issuer is a CA, and each
-/// signature (via the crypto boundary). Returns the validated path (leaf-first, incl. anchor).
+#[derive(Clone, Debug)]
+struct BuiltPath {
+    supplied_indices: Vec<usize>,
+    anchor_index: usize,
+}
+
+#[derive(Debug, Default)]
+struct PathSearch {
+    complete: Vec<BuiltPath>,
+    steps: usize,
+    saw_loop: bool,
+    saw_authority_key_mismatch: bool,
+    budget_exceeded: bool,
+}
+
+fn certificate_eq(left: &ParsedCert, right: &ParsedCert) -> bool {
+    left.tbs_der == right.tbs_der && left.signature == right.signature
+}
+
+fn issuer_name_matches(child: &ParsedCert, parent: &ParsedCert) -> bool {
+    child.constraints.issuer_der == parent.constraints.subject_der
+}
+
+fn authority_key_matches(child: &ParsedCert, parent: &ParsedCert) -> bool {
+    match (
+        child.constraints.authority_key_identifier.as_ref(),
+        parent.constraints.subject_key_identifier.as_ref(),
+    ) {
+        (Some(authority), Some(subject)) => authority == subject,
+        _ => true,
+    }
+}
+
+fn count_step(search: &mut PathSearch) -> bool {
+    search.steps += 1;
+    if search.steps > MAX_PATH_BUILD_STEPS {
+        search.budget_exceeded = true;
+        false
+    } else {
+        true
+    }
+}
+
+fn explore_paths(
+    current: usize,
+    supplied: &[ParsedCert],
+    anchors: &[ParsedCert],
+    path: &mut Vec<usize>,
+    search: &mut PathSearch,
+) {
+    if search.budget_exceeded || !count_step(search) {
+        return;
+    }
+
+    let child = &supplied[current];
+    let mut issuer_candidates = 0usize;
+
+    for (anchor_index, anchor) in anchors.iter().enumerate() {
+        if !issuer_name_matches(child, anchor) {
+            continue;
+        }
+        if !authority_key_matches(child, anchor) {
+            search.saw_authority_key_mismatch = true;
+            continue;
+        }
+        issuer_candidates += 1;
+        if issuer_candidates > MAX_ISSUER_CANDIDATES || !count_step(search) {
+            search.budget_exceeded = true;
+            return;
+        }
+        if search.complete.len() >= MAX_COMPLETE_PATHS {
+            search.budget_exceeded = true;
+            return;
+        }
+        search.complete.push(BuiltPath {
+            supplied_indices: path.clone(),
+            anchor_index,
+        });
+    }
+
+    for (parent_index, parent) in supplied.iter().enumerate() {
+        if parent_index == current || !issuer_name_matches(child, parent) {
+            continue;
+        }
+        if !authority_key_matches(child, parent) {
+            search.saw_authority_key_mismatch = true;
+            continue;
+        }
+        issuer_candidates += 1;
+        if issuer_candidates > MAX_ISSUER_CANDIDATES || !count_step(search) {
+            search.budget_exceeded = true;
+            return;
+        }
+        if path.contains(&parent_index) {
+            search.saw_loop = true;
+            continue;
+        }
+        path.push(parent_index);
+        explore_paths(parent_index, supplied, anchors, path, search);
+        path.pop();
+        if search.budget_exceeded {
+            return;
+        }
+    }
+}
+
+fn validate_built_path(
+    path: &[ParsedCert],
+    now: i64,
+    verifier: &dyn Verifier,
+) -> Result<(), X509Error> {
+    let leaf = path
+        .first()
+        .ok_or(X509Error::PathInvalid("empty constructed path"))?;
+
+    for certificate in path {
+        if !certificate.constraints.signature_algorithms_match {
+            return Err(X509Error::PathInvalid(
+                "TBSCertificate and outer signature algorithms differ",
+            ));
+        }
+        if certificate.constraints.unsupported_critical_extension {
+            return Err(X509Error::PathInvalid(
+                "unsupported critical certificate extension",
+            ));
+        }
+        if now < certificate.not_before || now > certificate.not_after {
+            return Err(X509Error::PathInvalid(
+                "certificate expired or not yet valid",
+            ));
+        }
+    }
+
+    if leaf.is_ca {
+        return Err(X509Error::PathInvalid("leaf certificate is a CA"));
+    }
+    if !leaf.constraints.key_usage_present {
+        return Err(X509Error::PathInvalid("leaf KeyUsage is missing"));
+    }
+    if !leaf.constraints.digital_signature {
+        return Err(X509Error::PathInvalid(
+            "leaf KeyUsage lacks digitalSignature",
+        ));
+    }
+
+    for (index, certificate) in path.iter().enumerate().skip(1) {
+        if !certificate.constraints.basic_constraints_present || !certificate.is_ca {
+            return Err(X509Error::PathInvalid(
+                "issuer BasicConstraints does not authorize a CA",
+            ));
+        }
+        if !certificate.constraints.basic_constraints_critical {
+            return Err(X509Error::PathInvalid(
+                "issuer BasicConstraints is not critical",
+            ));
+        }
+        if !certificate.constraints.key_usage_present {
+            return Err(X509Error::PathInvalid("issuer KeyUsage is missing"));
+        }
+        if !certificate.constraints.key_cert_sign {
+            return Err(X509Error::PathInvalid("issuer KeyUsage lacks keyCertSign"));
+        }
+        let non_self_issued_ca_below = path[1..index]
+            .iter()
+            .filter(|subordinate| {
+                subordinate.constraints.subject_der != subordinate.constraints.issuer_der
+            })
+            .count();
+        if certificate
+            .constraints
+            .path_len_constraint
+            .is_some_and(|limit| non_self_issued_ca_below > usize::from(limit))
+        {
+            return Err(X509Error::PathInvalid(
+                "BasicConstraints pathLenConstraint exceeded",
+            ));
+        }
+    }
+
+    for pair in path.windows(2) {
+        let child = &pair[0];
+        let parent = &pair[1];
+        if !issuer_name_matches(child, parent) {
+            return Err(X509Error::PathInvalid("issuer/subject mismatch"));
+        }
+        if !authority_key_matches(child, parent) {
+            return Err(X509Error::PathInvalid("authority key identifier mismatch"));
+        }
+        verifier
+            .verify(
+                child.sig_alg,
+                &parent.public_key_raw,
+                &child.tbs_der,
+                &child.signature,
+            )
+            .map_err(|_| X509Error::PathInvalid("signature verification failed"))?;
+    }
+    Ok(())
+}
+
+/// Step 1 — build one deterministic, bounded leaf-to-anchor path from an unordered certificate
+/// bundle, then validate the first strict RFC 5280 slice: time, signatures, AKI/SKI issuer
+/// selection, unknown critical extensions, BasicConstraints/pathLen and role-specific KeyUsage.
+/// Duplicate bundles, cycles and multiple complete paths fail closed. Name constraints, policy
+/// processing, algorithm profiles and EUDI service profiles remain explicit follow-up work.
+/// The independently configured `trust_anchors` are the only trust authority: a peer bundle that
+/// redundantly supplies one of those roots is rejected instead of treating peer material as trust.
 ///
 /// `now` is a Unix timestamp (seconds) supplied by the shell — the core has no clock.
 pub fn validate_path(
@@ -334,49 +627,132 @@ pub fn validate_path(
     if chain_der.is_empty() {
         return Err(X509Error::PathInvalid("empty chain"));
     }
-    let mut path: Vec<ParsedCert> = chain_der
-        .iter()
-        .map(|d| parse_cert(d))
-        .collect::<Result<_, _>>()?;
-
-    // Find the anchor that issued the top of the supplied chain and append it.
-    let top_issuer = path.last().unwrap().issuer.clone();
-    let anchor = trust_anchors
-        .iter()
-        .find(|a| a.subject == top_issuer)
-        .ok_or(X509Error::PathInvalid("no trust anchor for chain"))?;
-    path.push(anchor.clone());
-
-    // Every certificate authorizing the path, including the appended trust anchor, must be
-    // current. Otherwise a cached path could remain usable after its root expires.
-    for certificate in &path {
-        if now < certificate.not_before || now > certificate.not_after {
+    if chain_der.len() > MAX_SUPPLIED_CERTIFICATES || trust_anchors.len() > MAX_TRUST_ANCHORS {
+        return Err(X509Error::PathInvalid(
+            "certificate path resource budget exceeded",
+        ));
+    }
+    if trust_anchors.is_empty() {
+        return Err(X509Error::PathInvalid("no trust anchor for chain"));
+    }
+    for (index, certificate) in chain_der.iter().enumerate() {
+        if chain_der[..index].iter().any(|prior| prior == certificate) {
             return Err(X509Error::PathInvalid(
-                "certificate expired or not yet valid",
+                "duplicate certificate in supplied chain",
             ));
         }
     }
-
-    // Walk child→parent: linkage, parent-is-CA, signature.
-    for i in 0..path.len() - 1 {
-        let child = &path[i];
-        let parent = &path[i + 1];
-        if child.issuer != parent.subject {
-            return Err(X509Error::PathInvalid("issuer/subject mismatch"));
+    for (index, anchor) in trust_anchors.iter().enumerate() {
+        if trust_anchors[..index]
+            .iter()
+            .any(|prior| certificate_eq(prior, anchor))
+        {
+            return Err(X509Error::PathInvalid("duplicate trust anchor"));
         }
-        if !parent.is_ca {
-            return Err(X509Error::PathInvalid("issuer is not a CA"));
-        }
-        verifier
-            .verify(
-                child.sig_alg,
-                &parent.public_key_raw,
-                &child.tbs_der,
-                &child.signature,
-            )
-            .map_err(|_| X509Error::PathInvalid("signature verification failed"))?;
     }
-    Ok(path)
+
+    let mut supplied = chain_der
+        .iter()
+        .map(|certificate| parse_cert(certificate))
+        .collect::<Result<Vec<_>, _>>()?;
+    supplied.sort_by(|left, right| {
+        left.tbs_der
+            .cmp(&right.tbs_der)
+            .then_with(|| left.signature.cmp(&right.signature))
+    });
+    let mut anchors = trust_anchors.to_vec();
+    anchors.sort_by(|left, right| {
+        left.tbs_der
+            .cmp(&right.tbs_der)
+            .then_with(|| left.signature.cmp(&right.signature))
+    });
+    if supplied.iter().any(|certificate| {
+        anchors
+            .iter()
+            .any(|anchor| certificate_eq(certificate, anchor))
+    }) {
+        return Err(X509Error::PathInvalid(
+            "trust anchor must not be supplied in the certificate chain",
+        ));
+    }
+
+    // A leaf is the one supplied certificate that does not issue another supplied certificate.
+    // Name-only relationships identify the topology; AKI/SKI is applied while traversing so a
+    // mismatch produces a path error rather than manufacturing a second apparent leaf.
+    let mut is_parent = vec![false; supplied.len()];
+    for (child_index, child) in supplied.iter().enumerate() {
+        for (parent_index, parent) in supplied.iter().enumerate() {
+            if child_index != parent_index && issuer_name_matches(child, parent) {
+                is_parent[parent_index] = true;
+            }
+        }
+    }
+    let leaves = is_parent
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parent)| (!parent).then_some(index))
+        .collect::<Vec<_>>();
+    let leaf_index = match leaves.as_slice() {
+        [leaf] => *leaf,
+        [] => return Err(X509Error::PathInvalid("certificate path contains a loop")),
+        _ => {
+            return Err(X509Error::PathInvalid(
+                "certificate bundle has ambiguous leaves",
+            ));
+        }
+    };
+
+    let mut search = PathSearch::default();
+    let mut current_path = vec![leaf_index];
+    explore_paths(
+        leaf_index,
+        &supplied,
+        &anchors,
+        &mut current_path,
+        &mut search,
+    );
+    if search.budget_exceeded {
+        return Err(X509Error::PathInvalid(
+            "certificate path resource budget exceeded",
+        ));
+    }
+    // Topology alone is not ambiguity: a same-subject decoy may fail signature or role checks.
+    // Validate every bounded completion and require exactly one cryptographically valid path.
+    let mut valid_path = None;
+    let mut first_validation_error = None;
+    for built in search.complete {
+        let mut candidate = built
+            .supplied_indices
+            .iter()
+            .map(|index| supplied[*index].clone())
+            .collect::<Vec<_>>();
+        candidate.push(anchors[built.anchor_index].clone());
+        match validate_built_path(&candidate, now, verifier) {
+            Ok(()) if valid_path.is_none() => valid_path = Some(candidate),
+            Ok(()) => {
+                return Err(X509Error::PathInvalid(
+                    "certificate bundle has ambiguous trust paths",
+                ));
+            }
+            Err(error) if first_validation_error.is_none() => {
+                first_validation_error = Some(error);
+            }
+            Err(_) => {}
+        }
+    }
+    if let Some(path) = valid_path {
+        return Ok(path);
+    }
+    if let Some(error) = first_validation_error {
+        return Err(error);
+    }
+    if search.saw_loop {
+        return Err(X509Error::PathInvalid("certificate path contains a loop"));
+    }
+    if search.saw_authority_key_mismatch {
+        return Err(X509Error::PathInvalid("authority key identifier mismatch"));
+    }
+    Err(X509Error::PathInvalid("no trust anchor for chain"))
 }
 
 /// The profile-checked result — NOT mere chain validity. The `registered` flag can only be set
