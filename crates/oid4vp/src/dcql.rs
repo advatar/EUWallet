@@ -104,11 +104,12 @@ pub struct CredentialQuery {
     /// Preference-ordered alternative combinations of claim identifiers.
     #[serde(default)]
     pub claim_sets: Option<Vec<ClaimSet>>,
-    /// These final-spec modifiers are parsed but rejected until the selector implements them.
+    /// Trust matching remains rejected until authenticated authority evidence is wired end to end.
     #[serde(default)]
     pub trusted_authorities: Option<serde_json::Value>,
     #[serde(default)]
     pub require_cryptographic_holder_binding: Option<bool>,
+    /// Return every eligible holding rather than the stable first match when explicitly true.
     #[serde(default)]
     pub multiple: Option<bool>,
 }
@@ -232,7 +233,6 @@ impl DcqlQuery {
                         && credential.format.len() <= MAX_IDENTIFIER_BYTES
                         && credential.claims.len() <= MAX_CLAIMS_PER_QUERY
                         && credential.trusted_authorities.is_none()
-                        && credential.multiple != Some(true)
                         && credential.meta.is_some()
                         && credential.meta.as_ref().is_none_or(|meta| {
                             meta.vct_values.len() <= MAX_META_VALUES
@@ -1067,15 +1067,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_meta_multiple_retention_and_ambiguous_values() {
+    fn rejects_missing_meta_retention_and_ambiguous_values() {
         for query in [
             serde_json::json!({"credentials":[{"id":"pid", "format":"dc+sd-jwt"}]}),
             serde_json::json!({"credentials":[{"id":"pid", "format":"dc+sd-jwt",
                 "meta":{"vct_values":[]}}]}),
             serde_json::json!({"credentials":[{"id":"mdl", "format":"mso_mdoc",
                 "meta":{}}]}),
-            serde_json::json!({"credentials":[{"id":"pid", "format":"dc+sd-jwt",
-                "meta":{"vct_values":["v1"]}, "multiple":true}]}),
             serde_json::json!({"credentials":[{"id":"mdl", "format":"mso_mdoc",
             "meta":{"doctype_value":"org.iso.18013.5.1.mDL"}, "claims":[{
                 "path":["org.iso.18013.5.1", "age_over_18"],
@@ -1101,6 +1099,31 @@ mod tests {
                 "claims":[{"path":["age"], "values":[invalid_value]}]
             }]});
             assert!(DcqlQuery::from_value(&query).is_none(), "accepted {query}");
+        }
+    }
+
+    #[test]
+    fn accepts_boolean_multiple_and_rejects_non_boolean_values() {
+        for multiple in [false, true] {
+            let query = serde_json::json!({"credentials":[{
+                "id":"pid", "format":"dc+sd-jwt", "meta":{"vct_values":["v1"]},
+                "multiple": multiple
+            }]});
+            assert_eq!(
+                DcqlQuery::from_value(&query).unwrap().credentials[0].multiple,
+                Some(multiple)
+            );
+        }
+        for multiple in [
+            serde_json::Value::Null,
+            serde_json::json!(1),
+            serde_json::json!("true"),
+        ] {
+            let query = serde_json::json!({"credentials":[{
+                "id":"pid", "format":"dc+sd-jwt", "meta":{"vct_values":["v1"]},
+                "multiple": multiple
+            }]});
+            assert!(DcqlQuery::from_value(&query).is_none());
         }
     }
 
