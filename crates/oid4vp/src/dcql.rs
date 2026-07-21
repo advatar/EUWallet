@@ -336,18 +336,13 @@ impl DcqlQuery {
 
     /// Compute a deterministic, atomic Credential Query plan from candidate availability.
     ///
-    /// Without `credential_sets`, every Credential Query is required. With sets, all combinations
-    /// of satisfiable required options are evaluated in a bitmask space bounded by the maximum 16
-    /// Credential Queries. The plan with the fewest unique queries wins; equal-size plans prefer
-    /// lower original query indices independently of set and option order. Any unavailable required
-    /// set rejects the complete plan. Optional sets are omitted until an explicit holder opt-in
-    /// contract exists. Returned indices always follow original `credentials` order, so signing,
-    /// consent and response assembly remain stable.
+    /// Without `credential_sets`, every Credential Query is required. With sets, the first
+    /// satisfiable option of each required set is selected and any unavailable required set
+    /// rejects the complete plan. Optional sets are omitted until an explicit holder opt-in
+    /// contract exists. The returned indices always follow original `credentials` order, so
+    /// signing, consent and response assembly remain stable.
     pub fn credential_selection_plan(&self, satisfiable: &[bool]) -> Option<Vec<usize>> {
-        if satisfiable.len() != self.credentials.len()
-            || self.credentials.is_empty()
-            || self.credentials.len() > MAX_CREDENTIAL_QUERIES
-        {
+        if satisfiable.len() != self.credentials.len() {
             return None;
         }
         let Some(credential_sets) = &self.credential_sets else {
@@ -357,12 +352,7 @@ impl DcqlQuery {
                 .then(|| (0..self.credentials.len()).collect());
         };
 
-        // There are at most 2^16 distinct unions. Deduplicating after every required set keeps the
-        // search bounded even when all 16 sets expose all 16 options (rather than exploring 16^16
-        // option tuples). This deliberately retains dominated masks until the final comparison:
-        // the fixed state-space bound is small and makes the result independent of iteration order.
-        let plan_space = 1usize << self.credentials.len();
-        let mut plans = vec![0u16];
+        let mut selected = vec![false; self.credentials.len()];
         for credential_set in credential_sets {
             // `required=false` permits the wallet to return the set; it does not justify automatic
             // extra disclosure. A future holder-choice contract can explicitly opt into one of
@@ -370,51 +360,28 @@ impl DcqlQuery {
             if !credential_set.required {
                 continue;
             }
-
-            let mut option_masks = Vec::with_capacity(credential_set.options.len());
-            for option in &credential_set.options {
-                let mut mask = 0u16;
-                let mut complete = true;
-                for id in &option.0 {
-                    let index = self
-                        .credentials
+            let option = credential_set.options.iter().find(|option| {
+                option.0.iter().all(|id| {
+                    self.credentials
                         .iter()
-                        .position(|credential| credential.id == *id)?;
-                    if !satisfiable[index] {
-                        complete = false;
-                        break;
-                    }
-                    mask |= 1u16 << index;
-                }
-                if complete && !option_masks.contains(&mask) {
-                    option_masks.push(mask);
-                }
+                        .position(|credential| credential.id == *id)
+                        .is_some_and(|index| satisfiable[index])
+                })
+            });
+            let option = option?;
+            for id in &option.0 {
+                let index = self
+                    .credentials
+                    .iter()
+                    .position(|credential| credential.id == *id)?;
+                selected[index] = true;
             }
-            if option_masks.is_empty() {
-                return None;
-            }
-
-            let mut seen = vec![false; plan_space];
-            let mut next = Vec::new();
-            for plan in plans {
-                for option in &option_masks {
-                    let combined = plan | option;
-                    let index = usize::from(combined);
-                    if !seen[index] {
-                        seen[index] = true;
-                        next.push(combined);
-                    }
-                }
-            }
-            plans = next;
         }
-
-        let selected = plans.into_iter().min_by(|left, right| {
-            compare_credential_plan_masks(*left, *right, self.credentials.len())
-        })?;
         Some(
-            (0..self.credentials.len())
-                .filter(|index| selected & (1u16 << index) != 0)
+            selected
+                .iter()
+                .enumerate()
+                .filter_map(|(index, selected)| selected.then_some(index))
                 .collect(),
         )
     }
@@ -494,27 +461,6 @@ fn valid_dcql_id(id: &str) -> bool {
 
 fn same_identifier_set(left: &[String], right: &[String]) -> bool {
     left.len() == right.len() && left.iter().all(|id| right.contains(id))
-}
-
-fn compare_credential_plan_masks(
-    left: u16,
-    right: u16,
-    credential_count: usize,
-) -> core::cmp::Ordering {
-    match left.count_ones().cmp(&right.count_ones()) {
-        core::cmp::Ordering::Equal => {}
-        ordering => return ordering,
-    }
-    for index in 0..credential_count {
-        match (left & (1u16 << index) != 0, right & (1u16 << index) != 0) {
-            // `min_by` treats `Less` as preferred. At the first different index, including the
-            // lower original query is the stable tie-break, regardless of wire option ordering.
-            (true, false) => return core::cmp::Ordering::Less,
-            (false, true) => return core::cmp::Ordering::Greater,
-            _ => {}
-        }
-    }
-    core::cmp::Ordering::Equal
 }
 
 fn known_optional_arrays_are_non_empty(value: &serde_json::Value) -> bool {
@@ -859,12 +805,10 @@ mod tests {
             query.credential_selection_plan(&[true, false, true, true]),
             Some(vec![0, 2])
         );
-        // All required options are complete. Choosing each set's first option independently would
-        // disclose `a`, `b` and `c`; the global plan instead recognizes that `a` + `c` satisfies
-        // both required sets. Satisfiable optional `d` remains omitted.
+        // Both preferred required options are complete. Their stable union omits optional `d`.
         assert_eq!(
             query.credential_selection_plan(&[true, true, true, true]),
-            Some(vec![0, 2])
+            Some(vec![0, 1, 2])
         );
         // The first required set could use `c`, but the second required set is incomplete: the
         // entire plan fails instead of returning the first set as a partial response.
@@ -888,72 +832,6 @@ mod tests {
         assert_eq!(
             optional_only.credential_selection_plan(&[true]),
             Some(vec![])
-        );
-    }
-
-    #[test]
-    fn credential_set_plan_is_option_order_independent_with_a_stable_lower_index_tie_break() {
-        let credentials = serde_json::json!([
-            {"id":"a", "format":"dc+sd-jwt", "meta":{"vct_values":["a"]}},
-            {"id":"b", "format":"dc+sd-jwt", "meta":{"vct_values":["b"]}},
-            {"id":"c", "format":"dc+sd-jwt", "meta":{"vct_values":["c"]}},
-            {"id":"d", "format":"dc+sd-jwt", "meta":{"vct_values":["d"]}}
-        ]);
-        let orderings = [
-            serde_json::json!([
-                {"options":[["b"], ["a"]]},
-                {"options":[["d"], ["c"]]}
-            ]),
-            serde_json::json!([
-                {"options":[["c"], ["d"]]},
-                {"options":[["a"], ["b"]]}
-            ]),
-        ];
-
-        for credential_sets in orderings {
-            let query = DcqlQuery::from_value(&serde_json::json!({
-                "credentials": credentials,
-                "credential_sets": credential_sets
-            }))
-            .unwrap();
-            // Every combination contains two queries. Original query indices therefore break the
-            // tie as `a` + `c`, regardless of the order of sets or their wire options.
-            assert_eq!(
-                query.credential_selection_plan(&[true, true, true, true]),
-                Some(vec![0, 2])
-            );
-        }
-    }
-
-    #[test]
-    fn credential_set_global_planner_stays_within_the_maximum_bitmask_space() {
-        let credentials: Vec<serde_json::Value> = (0..MAX_CREDENTIAL_QUERIES)
-            .map(|index| {
-                let id = format!("q{index}");
-                serde_json::json!({
-                    "id": id,
-                    "format": "dc+sd-jwt",
-                    "meta": {"vct_values": [format!("v{index}")]}
-                })
-            })
-            .collect();
-        let options: Vec<serde_json::Value> = (0..MAX_CREDENTIAL_SET_OPTIONS)
-            .map(|index| serde_json::json!([format!("q{index}")]))
-            .collect();
-        let credential_sets: Vec<serde_json::Value> = (0..MAX_CREDENTIAL_SET_QUERIES)
-            .map(|_| serde_json::json!({"options": options.clone()}))
-            .collect();
-        let query = DcqlQuery::from_value(&serde_json::json!({
-            "credentials": credentials,
-            "credential_sets": credential_sets
-        }))
-        .expect("maximum bounded query");
-
-        // This reaches the configured 2^16 union space (instead of the unbounded 16^16 option
-        // tuple space). Every singleton satisfies every set, and the lower-index tie-break is q0.
-        assert_eq!(
-            query.credential_selection_plan(&[true; MAX_CREDENTIAL_QUERIES]),
-            Some(vec![0])
         );
     }
 
