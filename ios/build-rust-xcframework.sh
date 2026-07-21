@@ -6,6 +6,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."   # euwallet/
 
+# Xcode and Homebrew may put a different Cargo ahead of rustup. Use the pinned
+# repository toolchain explicitly so its Apple targets (and UniFFI ABI) match
+# the generated Swift bindings.
+RUST_TOOLCHAIN_BIN="$(dirname "$(rustup which --toolchain 1.97.1 rustc)")"
+export PATH="$RUST_TOOLCHAIN_BIN:$PATH"
+
 LIB=libwallet_core.a
 OUT=ios/WalletCore.xcframework
 GEN=ios/Generated

@@ -28,6 +28,21 @@ targets:
       - framework: WalletCore.xcframework
         embed: false
         link: true
+    preBuildScripts:
+      - name: Regenerate WalletCore UniFFI artifacts
+        basedOnDependencyAnalysis: true
+        inputFiles:
+          - $(SRCROOT)/../crates/wallet-core/src
+          - $(SRCROOT)/../crates/oid4vp/src
+          - $(SRCROOT)/../crates/oid4vci/src
+          - $(SRCROOT)/../Cargo.lock
+          - $(SRCROOT)/build-rust-xcframework.sh
+        outputFiles:
+          - $(SRCROOT)/Generated/wallet_core.swift
+          - $(SRCROOT)/WalletCore.xcframework
+        script: |
+          set -euo pipefail
+          "${SRCROOT}/build-rust-xcframework.sh"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.demo

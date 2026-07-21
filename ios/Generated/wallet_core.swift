@@ -519,46 +519,46 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
  * the simulator, where no Secure Enclave exists.
  */
 public protocol DemoWalletProtocol : AnyObject {
-
+    
     /**
      * The full issuance setup + the issuer-signed credentials the stub endpoint returns per type.
      * Everything the shell needs to run a REAL OpenID4VCI issuance through the core (see
      * [`IssuanceScenario`]).
      */
     func issuanceScenario()  -> IssuanceScenario
-
+    
     /**
      * An RP-signed OpenID4VP request carrying a DCQL `mso_mdoc` query for the mDL's `age_over_18`,
      * bound to a caller-chosen `nonce`. Feeding this drives the wallet's mdoc-over-OpenID4VP path:
      * the core selects the held mDL by doctype and answers with a signed ISO `DeviceResponse`.
      */
     func mdocPresentationRequest(nonce: UInt64)  -> Data
-
+    
     /**
      * A PSD2/TS12 payment authorization request bound to a caller-chosen `nonce` (and a matching
      * unique transaction id), for the same fresh-per-run reason as [`Self::presentation_request`].
      */
     func paymentRequest(nonce: UInt64)  -> Data
-
+    
     /**
      * An RP-signed OpenID4VP presentation request for `age_over_18`, bound to a caller-chosen
      * `nonce`. A persistent wallet engine records used nonces (replay protection), so each new
      * presentation must carry a fresh one — this lets the shell mint one per run.
      */
     func presentationRequest(nonce: UInt64)  -> Data
-
+    
     /**
      * Build the full demo scenario (credential, trusted list, signed request, payment request).
      */
     func scenario()  -> DemoScenario
-
+    
     /**
      * Sign as the demo device key — the simulator stand-in for the Secure Enclave. The shell
      * routes its `Sign` effect here; the resulting ES256 signature validates against
      * [`DemoScenario::device_public_key`].
      */
     func signDevice(payload: Data)  -> Data
-
+    
 }
 
 /**
@@ -622,9 +622,9 @@ public convenience init() {
         try! rustCall { uniffi_wallet_core_fn_free_demowallet(pointer, $0) }
     }
 
+    
 
-
-
+    
     /**
      * The full issuance setup + the issuer-signed credentials the stub endpoint returns per type.
      * Everything the shell needs to run a REAL OpenID4VCI issuance through the core (see
@@ -636,7 +636,7 @@ open func issuanceScenario() -> IssuanceScenario {
     )
 })
 }
-
+    
     /**
      * An RP-signed OpenID4VP request carrying a DCQL `mso_mdoc` query for the mDL's `age_over_18`,
      * bound to a caller-chosen `nonce`. Feeding this drives the wallet's mdoc-over-OpenID4VP path:
@@ -649,7 +649,7 @@ open func mdocPresentationRequest(nonce: UInt64) -> Data {
     )
 })
 }
-
+    
     /**
      * A PSD2/TS12 payment authorization request bound to a caller-chosen `nonce` (and a matching
      * unique transaction id), for the same fresh-per-run reason as [`Self::presentation_request`].
@@ -661,7 +661,7 @@ open func paymentRequest(nonce: UInt64) -> Data {
     )
 })
 }
-
+    
     /**
      * An RP-signed OpenID4VP presentation request for `age_over_18`, bound to a caller-chosen
      * `nonce`. A persistent wallet engine records used nonces (replay protection), so each new
@@ -674,7 +674,7 @@ open func presentationRequest(nonce: UInt64) -> Data {
     )
 })
 }
-
+    
     /**
      * Build the full demo scenario (credential, trusted list, signed request, payment request).
      */
@@ -684,7 +684,7 @@ open func scenario() -> DemoScenario {
     )
 })
 }
-
+    
     /**
      * Sign as the demo device key — the simulator stand-in for the Secure Enclave. The shell
      * routes its `Sign` effect here; the resulting ES256 signature validates against
@@ -697,7 +697,7 @@ open func signDevice(payload: Data) -> Data {
     )
 })
 }
-
+    
 
 }
 
@@ -757,112 +757,93 @@ public func FfiConverterTypeDemoWallet_lower(_ value: DemoWallet) -> UnsafeMutab
 
 /**
  * The UniFFI-exposed handle the native shell (Swift now, Kotlin later) holds. It wraps [`Core`]
- * behind a mutex and speaks the FFI-friendly JSON API. The durable API deliberately requires one
- * fresh engine to be prepared with the current environment before any restore.
+ * behind a mutex and speaks the FFI-friendly JSON API. The whole native surface is intentionally
+ * tiny: construct, load a credential, and drive events.
  */
 public protocol WalletEngineProtocol : AnyObject {
-
+    
     /**
      * The attestation catalogue as JSON (TS11): known credential types + their claims/issuers.
      */
     func attestationCatalogueJson()  -> String
-
-    /**
-     * Export a bounded canonical checkpoint for the next authenticated store generation.
-     */
-    func exportDurableCheckpoint(generation: UInt64) throws  -> FfiDurableCheckpoint
-
+    
     /**
      * A portable, integrity-protected export of the holder's wallet data as JSON (TS10).
      */
     func exportJson()  -> String
-
+    
     /**
      * Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
      * event, returns a `{"error": "..."}` object instead of an array.
      */
     func handleEventJson(eventJson: String)  -> String
-
+    
     /**
      * The credentials the wallet holds as a JSON array (`[{vct, issuer, disclosuresByClaim}]`),
      * including any just obtained via issuance. The wallet home renders these as cards.
      */
     func heldCredentialsJson()  -> String
-
+    
     /**
      * Authenticate and store a credential against the current trusted list. Returns an empty
      * string on success or a stable debug code on refusal.
      */
     func ingestCredential(format: String, credential: Data, issuerCertChain: [Data], issuerId: String)  -> String
-
+    
     /**
      * Deprecated compatibility entry point. Unauthenticated credential injection is disabled;
      * callers must use [`Self::ingest_credential`] or the OID4VCI event flow.
      */
-    func loadCredential(issuerJwt: String, disclosuresByClaimJson: String, statusIndex: UInt64?)
-
+    func loadCredential(issuerJwt: String, disclosuresByClaimJson: String, statusIndex: UInt64?) 
+    
     /**
      * Register the device public key the WUA attests (raw uncompressed point).
      */
-    func loadDeviceKey(devicePublicKey: Data)
-
+    func loadDeviceKey(devicePublicKey: Data) 
+    
     /**
      * Verify + cache a URI-bound Token Status List from a trusted status-provider certificate.
      * Returns "" on success.
      */
     func loadStatusList(uri: String, token: Data, providerCertChain: [Data])  -> String
-
+    
     /**
      * Install/update the signed trusted list. Returns "" on success, else an error string.
      */
     func loadTrustList(signedList: Data, operatorPublicKey: Data)  -> String
-
+    
     /**
      * Verify + store the Wallet Unit Attestation. Returns "" on success, else an error string.
      */
     func loadWua(wuaJwt: Data, providerPublicKey: Data)  -> String
-
-    /**
-     * Prepare a fresh engine with the live, independently obtained environment required to
-     * authenticate a durable checkpoint. All inputs are bounded before cryptographic parsing.
-     * The staged environment replaces the engine only after clock, trust list, device key and WUA
-     * validation all succeed; no checkpoint bytes are accepted by this method.
-     */
-    func prepareDurableEnvironment(clockEpoch: Int64, signedTrustList: Data, operatorPublicKey: Data, devicePublicKey: Data, wuaJwt: Data, wuaProviderPublicKey: Data) throws
-
+    
     /**
      * Erase one transaction-log entry (right to erasure, TS07). Chain-preserving tombstone.
      */
     func redactTransaction(seq: UInt64)  -> Bool
-
-    /**
-     * Restore one authenticated platform-store record. This is legal only after the current
-     * environment has been prepared and before any event has been driven in this process.
-     */
-    func restoreDurableCheckpoint(checkpoint: FfiDurableCheckpoint) throws
-
+    
     /**
      * The transaction (audit) log as JSON — completed presentations, payments, issuances. Records
      * claim paths + a committing consent hash, never raw claim values (TS06). For the history UI.
      */
     func transactionLogJson()  -> String
-
+    
     /**
      * A privacy-preserving activity report as JSON (TS08).
      */
     func transactionReportJson()  -> String
-
+    
     /**
      * Erase the entire transaction log (TS07).
      */
-    func wipeTransactionLog()
-
+    func wipeTransactionLog() 
+    
 }
 
 /**
  * The UniFFI-exposed handle the native shell (Swift now, Kotlin later) holds. It wraps [`Core`]
- * behind a mutex and speaks the FFI-friendly JSON API. The durable API deliberately requires one
- * fresh engine to be prepared with the current environment before any restore.
+ * behind a mutex and speaks the FFI-friendly JSON API. The whole native surface is intentionally
+ * tiny: construct, load a credential, and drive events.
  */
 open class WalletEngine:
     WalletEngineProtocol {
@@ -923,9 +904,9 @@ public convenience init(walletClientId: String, deviceKeyRef: String) {
         try! rustCall { uniffi_wallet_core_fn_free_walletengine(pointer, $0) }
     }
 
+    
 
-
-
+    
     /**
      * The attestation catalogue as JSON (TS11): known credential types + their claims/issuers.
      */
@@ -935,18 +916,7 @@ open func attestationCatalogueJson() -> String {
     )
 })
 }
-
-    /**
-     * Export a bounded canonical checkpoint for the next authenticated store generation.
-     */
-open func exportDurableCheckpoint(generation: UInt64)throws  -> FfiDurableCheckpoint {
-    return try  FfiConverterTypeFfiDurableCheckpoint.lift(try rustCallWithError(FfiConverterTypeDurableFfiError.lift) {
-    uniffi_wallet_core_fn_method_walletengine_export_durable_checkpoint(self.uniffiClonePointer(),
-        FfiConverterUInt64.lower(generation),$0
-    )
-})
-}
-
+    
     /**
      * A portable, integrity-protected export of the holder's wallet data as JSON (TS10).
      */
@@ -956,7 +926,7 @@ open func exportJson() -> String {
     )
 })
 }
-
+    
     /**
      * Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
      * event, returns a `{"error": "..."}` object instead of an array.
@@ -968,7 +938,7 @@ open func handleEventJson(eventJson: String) -> String {
     )
 })
 }
-
+    
     /**
      * The credentials the wallet holds as a JSON array (`[{vct, issuer, disclosuresByClaim}]`),
      * including any just obtained via issuance. The wallet home renders these as cards.
@@ -979,7 +949,7 @@ open func heldCredentialsJson() -> String {
     )
 })
 }
-
+    
     /**
      * Authenticate and store a credential against the current trusted list. Returns an empty
      * string on success or a stable debug code on refusal.
@@ -994,7 +964,7 @@ open func ingestCredential(format: String, credential: Data, issuerCertChain: [D
     )
 })
 }
-
+    
     /**
      * Deprecated compatibility entry point. Unauthenticated credential injection is disabled;
      * callers must use [`Self::ingest_credential`] or the OID4VCI event flow.
@@ -1007,7 +977,7 @@ open func loadCredential(issuerJwt: String, disclosuresByClaimJson: String, stat
     )
 }
 }
-
+    
     /**
      * Register the device public key the WUA attests (raw uncompressed point).
      */
@@ -1017,7 +987,7 @@ open func loadDeviceKey(devicePublicKey: Data) {try! rustCall() {
     )
 }
 }
-
+    
     /**
      * Verify + cache a URI-bound Token Status List from a trusted status-provider certificate.
      * Returns "" on success.
@@ -1031,7 +1001,7 @@ open func loadStatusList(uri: String, token: Data, providerCertChain: [Data]) ->
     )
 })
 }
-
+    
     /**
      * Install/update the signed trusted list. Returns "" on success, else an error string.
      */
@@ -1043,7 +1013,7 @@ open func loadTrustList(signedList: Data, operatorPublicKey: Data) -> String {
     )
 })
 }
-
+    
     /**
      * Verify + store the Wallet Unit Attestation. Returns "" on success, else an error string.
      */
@@ -1055,25 +1025,7 @@ open func loadWua(wuaJwt: Data, providerPublicKey: Data) -> String {
     )
 })
 }
-
-    /**
-     * Prepare a fresh engine with the live, independently obtained environment required to
-     * authenticate a durable checkpoint. All inputs are bounded before cryptographic parsing.
-     * The staged environment replaces the engine only after clock, trust list, device key and WUA
-     * validation all succeed; no checkpoint bytes are accepted by this method.
-     */
-open func prepareDurableEnvironment(clockEpoch: Int64, signedTrustList: Data, operatorPublicKey: Data, devicePublicKey: Data, wuaJwt: Data, wuaProviderPublicKey: Data)throws  {try rustCallWithError(FfiConverterTypeDurableFfiError.lift) {
-    uniffi_wallet_core_fn_method_walletengine_prepare_durable_environment(self.uniffiClonePointer(),
-        FfiConverterInt64.lower(clockEpoch),
-        FfiConverterData.lower(signedTrustList),
-        FfiConverterData.lower(operatorPublicKey),
-        FfiConverterData.lower(devicePublicKey),
-        FfiConverterData.lower(wuaJwt),
-        FfiConverterData.lower(wuaProviderPublicKey),$0
-    )
-}
-}
-
+    
     /**
      * Erase one transaction-log entry (right to erasure, TS07). Chain-preserving tombstone.
      */
@@ -1084,18 +1036,7 @@ open func redactTransaction(seq: UInt64) -> Bool {
     )
 })
 }
-
-    /**
-     * Restore one authenticated platform-store record. This is legal only after the current
-     * environment has been prepared and before any event has been driven in this process.
-     */
-open func restoreDurableCheckpoint(checkpoint: FfiDurableCheckpoint)throws  {try rustCallWithError(FfiConverterTypeDurableFfiError.lift) {
-    uniffi_wallet_core_fn_method_walletengine_restore_durable_checkpoint(self.uniffiClonePointer(),
-        FfiConverterTypeFfiDurableCheckpoint.lower(checkpoint),$0
-    )
-}
-}
-
+    
     /**
      * The transaction (audit) log as JSON — completed presentations, payments, issuances. Records
      * claim paths + a committing consent hash, never raw claim values (TS06). For the history UI.
@@ -1106,7 +1047,7 @@ open func transactionLogJson() -> String {
     )
 })
 }
-
+    
     /**
      * A privacy-preserving activity report as JSON (TS08).
      */
@@ -1116,7 +1057,7 @@ open func transactionReportJson() -> String {
     )
 })
 }
-
+    
     /**
      * Erase the entire transaction log (TS07).
      */
@@ -1125,7 +1066,7 @@ open func wipeTransactionLog() {try! rustCall() {
     )
 }
 }
-
+    
 
 }
 
@@ -1232,32 +1173,32 @@ public struct DemoScenario {
     public init(
         /**
          * Wall-clock (Unix seconds) to give the core via `setClock`.
-         */epoch: Int64,
+         */epoch: Int64, 
         /**
          * Issuer-signed SD-JWT VC (a PID with `family_name` + `age_over_18`).
-         */issuerJwt: String,
+         */issuerJwt: String, 
         /**
          * JSON object mapping claim name → base64url disclosure, for `loadCredential`.
-         */disclosuresByClaimJson: String,
+         */disclosuresByClaimJson: String, 
         /**
          * Operator-signed trusted list anchoring the RP-access CA.
-         */trustList: Data,
+         */trustList: Data, 
         /**
          * Raw public key that signed `trust_list`.
-         */operatorPublicKey: Data,
+         */operatorPublicKey: Data, 
         /**
          * Raw device public key to load into the core (`loadDeviceKey`).
-         */devicePublicKey: Data,
+         */devicePublicKey: Data, 
         /**
          * RP certificate chain (DER, leaf-first) the shell supplies on `resolveRpTrust`.
-         */rpCertChain: [Data],
+         */rpCertChain: [Data], 
         /**
          * Authenticated delivery endpoints registered for the RP. The field keeps its legacy name for
          * compatibility with the native FFI contract.
-         */registeredRedirectUris: [String],
+         */registeredRedirectUris: [String], 
         /**
          * RP-signed authorization request (compact JWS) requesting only `age_over_18`.
-         */presentationRequest: Data,
+         */presentationRequest: Data, 
         /**
          * A payment authorization request the shell feeds via `paymentAuthorizationRequestReceived`.
          */paymentRequest: Data) {
@@ -1333,15 +1274,15 @@ public struct FfiConverterTypeDemoScenario: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DemoScenario {
         return
             try DemoScenario(
-                epoch: FfiConverterInt64.read(from: &buf),
-                issuerJwt: FfiConverterString.read(from: &buf),
-                disclosuresByClaimJson: FfiConverterString.read(from: &buf),
-                trustList: FfiConverterData.read(from: &buf),
-                operatorPublicKey: FfiConverterData.read(from: &buf),
-                devicePublicKey: FfiConverterData.read(from: &buf),
-                rpCertChain: FfiConverterSequenceData.read(from: &buf),
-                registeredRedirectUris: FfiConverterSequenceString.read(from: &buf),
-                presentationRequest: FfiConverterData.read(from: &buf),
+                epoch: FfiConverterInt64.read(from: &buf), 
+                issuerJwt: FfiConverterString.read(from: &buf), 
+                disclosuresByClaimJson: FfiConverterString.read(from: &buf), 
+                trustList: FfiConverterData.read(from: &buf), 
+                operatorPublicKey: FfiConverterData.read(from: &buf), 
+                devicePublicKey: FfiConverterData.read(from: &buf), 
+                rpCertChain: FfiConverterSequenceData.read(from: &buf), 
+                registeredRedirectUris: FfiConverterSequenceString.read(from: &buf), 
+                presentationRequest: FfiConverterData.read(from: &buf), 
                 paymentRequest: FfiConverterData.read(from: &buf)
         )
     }
@@ -1373,77 +1314,6 @@ public func FfiConverterTypeDemoScenario_lift(_ buf: RustBuffer) throws -> DemoS
 #endif
 public func FfiConverterTypeDemoScenario_lower(_ value: DemoScenario) -> RustBuffer {
     return FfiConverterTypeDemoScenario.lower(value)
-}
-
-
-/**
- * One canonical Core checkpoint plus the non-zero authenticated platform-envelope generation it
- * must be committed under. The byte vector intentionally has no `Debug` implementation: native
- * diagnostics must use [`DurableFfiError`] codes and never stringify credential-bearing state.
- */
-public struct FfiDurableCheckpoint {
-    public var generation: UInt64
-    public var bytes: Data
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(generation: UInt64, bytes: Data) {
-        self.generation = generation
-        self.bytes = bytes
-    }
-}
-
-
-
-extension FfiDurableCheckpoint: Equatable, Hashable {
-    public static func ==(lhs: FfiDurableCheckpoint, rhs: FfiDurableCheckpoint) -> Bool {
-        if lhs.generation != rhs.generation {
-            return false
-        }
-        if lhs.bytes != rhs.bytes {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(generation)
-        hasher.combine(bytes)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiDurableCheckpoint: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDurableCheckpoint {
-        return
-            try FfiDurableCheckpoint(
-                generation: FfiConverterUInt64.read(from: &buf),
-                bytes: FfiConverterData.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiDurableCheckpoint, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.generation, into: &buf)
-        FfiConverterData.write(value.bytes, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiDurableCheckpoint_lift(_ buf: RustBuffer) throws -> FfiDurableCheckpoint {
-    return try FfiConverterTypeFfiDurableCheckpoint.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiDurableCheckpoint_lower(_ value: FfiDurableCheckpoint) -> RustBuffer {
-    return FfiConverterTypeFfiDurableCheckpoint.lower(value)
 }
 
 
@@ -1526,49 +1396,49 @@ public struct IssuanceScenario {
     public init(
         /**
          * Wall-clock (Unix seconds) for `setClock`.
-         */epoch: Int64,
+         */epoch: Int64, 
         /**
          * Operator-signed trusted list anchoring the demo CA for issuance (pid + attestation) AND
          * RP access, so one engine can both add credentials and present them.
-         */trustList: Data,
+         */trustList: Data, 
         /**
          * Raw public key that signed `trust_list`.
-         */operatorPublicKey: Data,
+         */operatorPublicKey: Data, 
         /**
          * Raw device public key to load (`loadDeviceKey`) — the key the WUA attests.
-         */devicePublicKey: Data,
+         */devicePublicKey: Data, 
         /**
          * Wallet Unit Attestation JWT (`loadWua`): binds the device key at High assurance.
-         */wuaJwt: Data,
+         */wuaJwt: Data, 
         /**
          * Raw public key that signed the WUA (the wallet provider).
-         */walletProviderPublicKey: Data,
+         */walletProviderPublicKey: Data, 
         /**
          * The issuer's certificate chain (DER, leaf-first) for the `CredentialOfferReceived` event —
          * it chains to the trusted CA, so in-core issuer trust validates against a real chain.
-         */issuerCertChain: [Data],
+         */issuerCertChain: [Data], 
         /**
          * The issuer identity recorded in the audit log.
-         */issuerId: String,
+         */issuerId: String, 
         /**
          * A pre-authorized credential offer (no PAR / browser / tx-code), fed via
          * `credentialOfferReceived`.
-         */offer: Data,
+         */offer: Data, 
         /**
          * The issuer-signed PID compact the stub `/credential` endpoint returns.
-         */pidCredentialCompact: String,
+         */pidCredentialCompact: String, 
         /**
          * The issuer-signed mDL compact the stub `/credential` endpoint returns.
-         */mdlCredentialCompact: String,
+         */mdlCredentialCompact: String, 
         /**
          * The issuer-signed passport compact.
-         */passportCredentialCompact: String,
+         */passportCredentialCompact: String, 
         /**
          * The issuer-signed national ID card compact.
-         */nidCredentialCompact: String,
+         */nidCredentialCompact: String, 
         /**
          * The issuer-signed German ID card (Personalausweis) compact.
-         */germanIdCredentialCompact: String,
+         */germanIdCredentialCompact: String, 
         /**
          * An issuer-signed mDL in the ISO 18013-5 `mso_mdoc` format, base64url(IssuerSigned CBOR) —
          * what an mso_mdoc `/credential` endpoint returns. Presented over OpenID4VP as a DeviceResponse.
@@ -1670,20 +1540,20 @@ public struct FfiConverterTypeIssuanceScenario: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> IssuanceScenario {
         return
             try IssuanceScenario(
-                epoch: FfiConverterInt64.read(from: &buf),
-                trustList: FfiConverterData.read(from: &buf),
-                operatorPublicKey: FfiConverterData.read(from: &buf),
-                devicePublicKey: FfiConverterData.read(from: &buf),
-                wuaJwt: FfiConverterData.read(from: &buf),
-                walletProviderPublicKey: FfiConverterData.read(from: &buf),
-                issuerCertChain: FfiConverterSequenceData.read(from: &buf),
-                issuerId: FfiConverterString.read(from: &buf),
-                offer: FfiConverterData.read(from: &buf),
-                pidCredentialCompact: FfiConverterString.read(from: &buf),
-                mdlCredentialCompact: FfiConverterString.read(from: &buf),
-                passportCredentialCompact: FfiConverterString.read(from: &buf),
-                nidCredentialCompact: FfiConverterString.read(from: &buf),
-                germanIdCredentialCompact: FfiConverterString.read(from: &buf),
+                epoch: FfiConverterInt64.read(from: &buf), 
+                trustList: FfiConverterData.read(from: &buf), 
+                operatorPublicKey: FfiConverterData.read(from: &buf), 
+                devicePublicKey: FfiConverterData.read(from: &buf), 
+                wuaJwt: FfiConverterData.read(from: &buf), 
+                walletProviderPublicKey: FfiConverterData.read(from: &buf), 
+                issuerCertChain: FfiConverterSequenceData.read(from: &buf), 
+                issuerId: FfiConverterString.read(from: &buf), 
+                offer: FfiConverterData.read(from: &buf), 
+                pidCredentialCompact: FfiConverterString.read(from: &buf), 
+                mdlCredentialCompact: FfiConverterString.read(from: &buf), 
+                passportCredentialCompact: FfiConverterString.read(from: &buf), 
+                nidCredentialCompact: FfiConverterString.read(from: &buf), 
+                germanIdCredentialCompact: FfiConverterString.read(from: &buf), 
                 mdlMdocCredential: FfiConverterString.read(from: &buf)
         )
     }
@@ -1720,148 +1590,6 @@ public func FfiConverterTypeIssuanceScenario_lift(_ buf: RustBuffer) throws -> I
 #endif
 public func FfiConverterTypeIssuanceScenario_lower(_ value: IssuanceScenario) -> RustBuffer {
     return FfiConverterTypeIssuanceScenario.lower(value)
-}
-
-
-/**
- * Stable, low-cardinality failures for the durable UniFFI boundary.
- *
- * No variant carries source bytes, credential details, identifiers, parser messages, sizes or
- * generations. Generated Swift/Kotlin bindings can therefore surface the typed case without
- * accidentally copying authenticated wallet state into logs or crash reports.
- */
-public enum DurableFfiError {
-
-
-
-    case InvalidLifecycleState
-    case InvalidEnvironment
-    case TrustEnvironmentRejected
-    case WuaEnvironmentRejected
-    case InvalidGeneration
-    case ResourceLimit
-    case MalformedCheckpoint
-    case UnsupportedCheckpointVersion
-    case ContextRejected
-    case ClockRejected
-    case DeviceKeyRejected
-    case TrustRejected
-    case WuaRejected
-    case AuditLogRejected
-    case CredentialRejected
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeDurableFfiError: FfiConverterRustBuffer {
-    typealias SwiftType = DurableFfiError
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DurableFfiError {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-
-
-
-
-        case 1: return .InvalidLifecycleState
-        case 2: return .InvalidEnvironment
-        case 3: return .TrustEnvironmentRejected
-        case 4: return .WuaEnvironmentRejected
-        case 5: return .InvalidGeneration
-        case 6: return .ResourceLimit
-        case 7: return .MalformedCheckpoint
-        case 8: return .UnsupportedCheckpointVersion
-        case 9: return .ContextRejected
-        case 10: return .ClockRejected
-        case 11: return .DeviceKeyRejected
-        case 12: return .TrustRejected
-        case 13: return .WuaRejected
-        case 14: return .AuditLogRejected
-        case 15: return .CredentialRejected
-
-         default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: DurableFfiError, into buf: inout [UInt8]) {
-        switch value {
-
-
-
-
-
-        case .InvalidLifecycleState:
-            writeInt(&buf, Int32(1))
-
-
-        case .InvalidEnvironment:
-            writeInt(&buf, Int32(2))
-
-
-        case .TrustEnvironmentRejected:
-            writeInt(&buf, Int32(3))
-
-
-        case .WuaEnvironmentRejected:
-            writeInt(&buf, Int32(4))
-
-
-        case .InvalidGeneration:
-            writeInt(&buf, Int32(5))
-
-
-        case .ResourceLimit:
-            writeInt(&buf, Int32(6))
-
-
-        case .MalformedCheckpoint:
-            writeInt(&buf, Int32(7))
-
-
-        case .UnsupportedCheckpointVersion:
-            writeInt(&buf, Int32(8))
-
-
-        case .ContextRejected:
-            writeInt(&buf, Int32(9))
-
-
-        case .ClockRejected:
-            writeInt(&buf, Int32(10))
-
-
-        case .DeviceKeyRejected:
-            writeInt(&buf, Int32(11))
-
-
-        case .TrustRejected:
-            writeInt(&buf, Int32(12))
-
-
-        case .WuaRejected:
-            writeInt(&buf, Int32(13))
-
-
-        case .AuditLogRejected:
-            writeInt(&buf, Int32(14))
-
-
-        case .CredentialRejected:
-            writeInt(&buf, Int32(15))
-
-        }
-    }
-}
-
-
-extension DurableFfiError: Equatable, Hashable {}
-
-extension DurableFfiError: Foundation.LocalizedError {
-    public var errorDescription: String? {
-        String(reflecting: self)
-    }
 }
 
 #if swift(>=5.8)
@@ -1987,9 +1715,6 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallet_core_checksum_method_walletengine_attestation_catalogue_json() != 15813) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_wallet_core_checksum_method_walletengine_export_durable_checkpoint() != 40164) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_wallet_core_checksum_method_walletengine_export_json() != 59242) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2017,13 +1742,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallet_core_checksum_method_walletengine_load_wua() != 52241) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_wallet_core_checksum_method_walletengine_prepare_durable_environment() != 20679) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_wallet_core_checksum_method_walletengine_redact_transaction() != 36608) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_wallet_core_checksum_method_walletengine_restore_durable_checkpoint() != 5321) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_transaction_log_json() != 50296) {

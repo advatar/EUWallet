@@ -144,6 +144,11 @@ jobs:
           swift_version=$(swift --version)
           printf '%s\n' "$swift_version"
           printf '%s\n' "$swift_version" | grep -Eq 'Swift version ([6-9]|[1-9][0-9]+)\.'
+      - name: Regenerate Rust framework and UniFFI bindings
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+          ./build-rust-xcframework.sh
+          git diff --exit-code -- Generated/wallet_core.swift Generated/wallet_coreFFI.h
       - name: Build
         run: swift build
       - name: Test
