@@ -22,6 +22,7 @@ sealed interface WalletEffect {
     data class Http(
         val operationId: Long,
         val resultType: HttpResultType,
+        val profile: HttpDeliveryProfile,
         val url: String,
         val body: ByteArray,
     ) : WalletEffect
@@ -51,6 +52,24 @@ enum class HttpResultType(val wireValue: String) {
 
     companion object {
         fun fromWire(value: String): HttpResultType? = entries.firstOrNull { it.wireValue == value }
+    }
+}
+
+enum class HttpDeliveryProfile(
+    val wireValue: String,
+    val resultType: HttpResultType,
+) {
+    OPENID4VP_DIRECT_POST("openid4vpDirectPost", HttpResultType.PRESENTATION_DELIVERED),
+    PAYMENT_AUTHORIZATION(
+        "paymentAuthorization",
+        HttpResultType.PAYMENT_AUTHORIZATION_DELIVERED,
+    ),
+    QES_AUTHORIZATION("qesAuthorization", HttpResultType.QES_AUTHORIZATION_DELIVERED),
+    ;
+
+    companion object {
+        fun fromWire(value: String): HttpDeliveryProfile? =
+            entries.firstOrNull { it.wireValue == value }
     }
 }
 
@@ -112,13 +131,22 @@ object WalletEffectDecoder {
             keyRef = string(value, "keyRef"),
             payload = bytes(value, "payload"),
         )
-        "http" -> WalletEffect.Http(
-            operationId = operationId(value),
-            resultType = HttpResultType.fromWire(string(value, "resultType"))
-                ?: malformed("unknown HTTP resultType"),
-            url = string(value, "url"),
-            body = bytes(value, "body"),
-        )
+        "http" -> {
+            val resultType = HttpResultType.fromWire(string(value, "resultType"))
+                ?: malformed("unknown HTTP resultType")
+            val profile = HttpDeliveryProfile.fromWire(string(value, "profile"))
+                ?: malformed("unknown HTTP delivery profile")
+            if (profile.resultType != resultType) {
+                malformed("HTTP delivery profile does not match resultType")
+            }
+            WalletEffect.Http(
+                operationId = operationId(value),
+                resultType = resultType,
+                profile = profile,
+                url = string(value, "url"),
+                body = bytes(value, "body"),
+            )
+        }
         "pushPar" -> WalletEffect.PushPar(operationId(value))
         "openAuthBrowser" -> WalletEffect.OpenAuthBrowser(operationId(value))
         "promptTxCode" -> WalletEffect.PromptTxCode(operationId(value))

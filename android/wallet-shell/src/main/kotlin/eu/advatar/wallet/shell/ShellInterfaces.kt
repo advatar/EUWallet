@@ -1,5 +1,7 @@
 package eu.advatar.wallet.shell
 
+import java.net.URI
+
 fun interface WalletSigner {
     fun sign(keyRef: String, payload: ByteArray): ByteArray
 }
@@ -7,10 +9,16 @@ fun interface WalletSigner {
 data class HttpResponse(
     val statusCode: Int,
     val body: ByteArray,
+    val contentType: String? = null,
 )
 
 fun interface WalletHttpClient {
-    fun post(url: String, body: ByteArray): HttpResponse
+    fun post(url: String, body: ByteArray, profile: HttpDeliveryProfile): HttpResponse
+}
+
+/** Host-owned browser/app routing for one validated OpenID4VP response redirect. */
+fun interface OpenId4VpRedirectHandler {
+    fun handle(redirectUri: URI)
 }
 
 fun interface WalletStorage {

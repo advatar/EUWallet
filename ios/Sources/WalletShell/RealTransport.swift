@@ -362,19 +362,32 @@ public final class URLSessionHttpClient: HttpClient {
         self.allowsDebugLoopback = allowsDebugLoopback
     }
 
-    /// POST `body` to `url`. Content-Type is inferred from the body shape (JSON vs. the OAuth
-    /// default of form-encoding), which matches the OpenID4VCI/VP endpoints the core drives.
-    public func post(url: String, body: Data) async throws -> HttpResponse {
+    /// Deliver one core-owned protocol response. OpenID4VP has a complete shared contract here;
+    /// payment and QES require dedicated PSP/CSC adapters and are rejected before network access.
+    public func post(
+        url: String,
+        body: Data,
+        profile: HttpDeliveryProfile
+    ) async throws -> HttpResponse {
+        guard profile == .openid4vpDirectPost else {
+            throw HttpClientError.unsupportedDeliveryProfile(profile)
+        }
+        guard OpenID4VPDirectPostResponse.isUtf8(body) else {
+            throw HttpClientError.invalidProtocolBody(
+                "OpenID4VP direct_post parameters must be UTF-8")
+        }
         let u = try validatedURL(url)
         var req = URLRequest(url: u)
         req.httpMethod = "POST"
         req.httpBody = body
-        req.setValue(Self.contentType(for: body), forHTTPHeaderField: "Content-Type")
-        req.setValue("*/*", forHTTPHeaderField: "Accept")
-        // The generic effect is shared by token/credential JSON endpoints, OpenID4VP
-        // `direct_post`, payments and QES. Their response contracts differ, so MIME enforcement
-        // belongs in a typed protocol adapter rather than this common transport boundary.
-        return try await perform(req, limit: maximumResponseBytes, acceptedContentTypes: nil)
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        return try await perform(
+            req,
+            limit: min(
+                maximumResponseBytes,
+                OpenID4VPDirectPostResponse.maximumResponseBytes),
+            acceptedContentTypes: ["application/json"])
     }
 
     /// GET `url` (issuer/verifier metadata, request objects fetched by reference, JWKS, …).
@@ -528,12 +541,6 @@ public final class URLSessionHttpClient: HttpClient {
         }
     }
 
-    private static func contentType(for body: Data) -> String {
-        if let first = body.first, first == UInt8(ascii: "{") || first == UInt8(ascii: "[") {
-            return "application/json"
-        }
-        return "application/x-www-form-urlencoded"
-    }
 }
 
 /// Resolves an EUDI-authorised status signer's certificate path for a specific list URI. The

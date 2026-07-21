@@ -1,5 +1,6 @@
 package eu.advatar.wallet.shell
 
+import java.net.URI
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -25,6 +26,19 @@ private const val AUTHORIZATION_HASH_JSON =
 private const val ERROR_CLOSE =
     "[{\"type\":\"render\",\"screen\":{\"screen\":\"error\",\"code\":\"operation_failed\",\"message\":\"Operation failed\"}},{\"type\":\"close\"}]"
 
+private class RecordingRedirectHandler(
+    private val shouldFail: Boolean = false,
+    private val onHandle: () -> Unit = {},
+) : OpenId4VpRedirectHandler {
+    val redirects = mutableListOf<URI>()
+
+    override fun handle(redirectUri: URI) {
+        onHandle()
+        if (shouldFail) throw ExpectedFailure()
+        redirects += redirectUri
+    }
+}
+
 class EffectExecutorTest {
     @Test
     fun drainsSignAndHttpCascadeOnGenuineSuccess() {
@@ -33,22 +47,22 @@ class EffectExecutorTest {
                 event.contains("userConsented") ->
                     "[{\"type\":\"sign\",\"operationId\":2,\"keyRef\":\"device\",\"payload\":[1,2]}]"
                 event.contains("deviceSignatureProduced") ->
-                    "[{\"type\":\"http\",\"operationId\":3,\"resultType\":\"presentationDelivered\",\"url\":\"https://rp.example/cb\",\"body\":[3]}]"
+                    "[{\"type\":\"http\",\"operationId\":3,\"resultType\":\"presentationDelivered\",\"profile\":\"openid4vpDirectPost\",\"url\":\"https://rp.example/cb\",\"body\":[3]}]"
                 event.contains("presentationDelivered") -> "[{\"type\":\"close\"}]"
                 else -> "[]"
             }
         }
         val signed = mutableListOf<ByteArray>()
-        val posted = mutableListOf<Pair<String, ByteArray>>()
+        val posted = mutableListOf<Triple<String, ByteArray, HttpDeliveryProfile>>()
         val executor = makeExecutor(
             engine = engine,
             signer = WalletSigner { _, payload ->
                 signed += payload
                 byteArrayOf(9, 8)
             },
-            http = WalletHttpClient { url, body ->
-                posted += url to body
-                HttpResponse(204, ByteArray(0))
+            http = WalletHttpClient { url, body, profile ->
+                posted += Triple(url, body, profile)
+                HttpResponse(200, "{}".encodeToByteArray(), "application/json")
             },
         )
 
@@ -58,6 +72,7 @@ class EffectExecutorTest {
         assertArrayEquals(byteArrayOf(1, 2), signed.single())
         assertEquals("https://rp.example/cb", posted.single().first)
         assertArrayEquals(byteArrayOf(3), posted.single().second)
+        assertEquals(HttpDeliveryProfile.OPENID4VP_DIRECT_POST, posted.single().third)
         assertEquals(3, engine.events.size)
         assertEquals(EffectCascadeOutcome.Succeeded, outcome)
     }
@@ -68,7 +83,7 @@ class EffectExecutorTest {
             if (event.contains("paymentAuthorizationDelivered")) {
                 "[{\"type\":\"close\"}]"
             } else {
-                "[{\"type\":\"http\",\"operationId\":13,\"resultType\":\"paymentAuthorizationDelivered\",\"url\":\"https://psp.example\",\"body\":[]}]"
+                "[{\"type\":\"http\",\"operationId\":13,\"resultType\":\"paymentAuthorizationDelivered\",\"profile\":\"paymentAuthorization\",\"url\":\"https://psp.example\",\"body\":[]}]"
             }
         }
 
@@ -272,12 +287,14 @@ class EffectExecutorTest {
     @Test
     fun transportAndNon2xxFailuresNeverBecomePresentationDelivered() {
         listOf<WalletHttpClient>(
-            WalletHttpClient { _, _ -> throw ExpectedFailure() },
-            WalletHttpClient { _, _ -> HttpResponse(503, "unavailable".encodeToByteArray()) },
+            WalletHttpClient { _, _, _ -> throw ExpectedFailure() },
+            WalletHttpClient { _, _, _ ->
+                HttpResponse(503, "unavailable".encodeToByteArray(), "application/json")
+            },
         ).forEach { client ->
             val engine = RecordingEngine { event ->
                 if (event.contains("operationFailed")) ERROR_CLOSE else
-                    "[{\"type\":\"http\",\"operationId\":6,\"resultType\":\"presentationDelivered\",\"url\":\"https://rp.example\",\"body\":[]}]"
+                    "[{\"type\":\"http\",\"operationId\":6,\"resultType\":\"presentationDelivered\",\"profile\":\"openid4vpDirectPost\",\"url\":\"https://rp.example\",\"body\":[]}]"
             }
             val executor = makeExecutor(engine = engine, http = client)
 
@@ -296,16 +313,142 @@ class EffectExecutorTest {
     fun non2xxIsTypedBeforeItCrossesBackIntoCore() {
         val engine = RecordingEngine { event ->
             if (event.contains("operationFailed")) ERROR_CLOSE else
-                "[{\"type\":\"http\",\"operationId\":7,\"resultType\":\"presentationDelivered\",\"url\":\"https://rp.example\",\"body\":[]}]"
+                "[{\"type\":\"http\",\"operationId\":7,\"resultType\":\"presentationDelivered\",\"profile\":\"openid4vpDirectPost\",\"url\":\"https://rp.example\",\"body\":[]}]"
         }
         val body = "unavailable".encodeToByteArray()
         val executor = makeExecutor(
             engine = engine,
-            http = WalletHttpClient { _, _ -> HttpResponse(503, body) },
+            http = WalletHttpClient { _, _, _ ->
+                HttpResponse(503, body, "application/json")
+            },
         )
 
         executor.send("{\"type\":\"start\"}")
         assertTrue(engine.events.any { it.contains("\"failure\":\"httpStatus\"") })
+        assertNoFabricatedOutcome(engine)
+    }
+
+    @Test
+    fun openId4VpResponseRequiresExactStatusMimeObjectUtf8AndBounds() {
+        val invalidResponses = listOf(
+            "201" to HttpResponse(201, "{}".encodeToByteArray(), "application/json"),
+            "204" to HttpResponse(204, "{}".encodeToByteArray(), "application/json"),
+            "missing MIME" to HttpResponse(200, "{}".encodeToByteArray()),
+            "wrong MIME" to HttpResponse(200, "{}".encodeToByteArray(), "text/html"),
+            "ambiguous MIME" to HttpResponse(
+                200,
+                "{}".encodeToByteArray(),
+                "application/json, text/html",
+            ),
+            "array" to HttpResponse(200, "[]".encodeToByteArray(), "application/json"),
+            "scalar" to HttpResponse(200, "true".encodeToByteArray(), "application/json"),
+            "invalid JSON" to HttpResponse(200, "{".encodeToByteArray(), "application/json"),
+            "non-UTF8" to HttpResponse(200, byteArrayOf(0xff.toByte()), "application/json"),
+            "oversize" to HttpResponse(
+                200,
+                ByteArray(OpenId4VpDirectPostResponse.MAXIMUM_RESPONSE_BYTES + 1) { ' '.code.toByte() },
+                "application/json",
+            ),
+        )
+
+        invalidResponses.forEach { (name, response) ->
+            val engine = directPostEngine()
+            val outcome = makeExecutor(
+                engine = engine,
+                http = WalletHttpClient { _, _, _ -> response },
+            ).send("{}")
+
+            assertTrue(name, outcome is EffectCascadeOutcome.Aborted)
+            assertNoFabricatedOutcome(engine)
+        }
+    }
+
+    @Test
+    fun openId4VpRedirectRejectsMalformedAmbiguousAndOversizedValues() {
+        val oversized = "wallet:" + "a".repeat(
+            OpenId4VpDirectPostResponse.MAXIMUM_REDIRECT_URI_BYTES,
+        )
+        val invalidBodies = listOf(
+            "{\"redirect_uri\":7}",
+            "{\"redirect_uri\":\"relative/path\"}",
+            "{\"redirect_uri\":\"https://client.example/%zz\"}",
+            "{\"redirect_uri\":\"$oversized\"}",
+            "{\"redirect_uri\":\"https://one.example\",\"redirect_uri\":\"https://two.example\"}",
+            "{\"redirect_uri\":\"https://one.example\",\"\\u0072edirect_uri\":\"https://two.example\"}",
+        )
+
+        invalidBodies.forEach { body ->
+            val engine = directPostEngine()
+            makeExecutor(
+                engine = engine,
+                http = WalletHttpClient { _, _, _ ->
+                    HttpResponse(200, body.encodeToByteArray(), "application/json")
+                },
+                redirectHandler = RecordingRedirectHandler(),
+            ).send("{}")
+            assertNoFabricatedOutcome(engine)
+        }
+    }
+
+    @Test
+    fun openId4VpUnknownMembersAreIgnoredAndOpaqueRedirectOnlyReachesInjectedHandler() {
+        val engine = directPostEngine()
+        var acknowledgedBeforeHandler = false
+        val handler = RecordingRedirectHandler {
+            acknowledgedBeforeHandler = engine.events.any { it.contains("presentationDelivered") }
+        }
+        val outcome = makeExecutor(
+            engine = engine,
+            http = WalletHttpClient { _, _, _ ->
+                HttpResponse(
+                    200,
+                    """{"future":{"nested":[1,2,3]},"redirect_uri":"wallet:continue?response_code=abc"}"""
+                        .encodeToByteArray(),
+                    "Application/JSON; charset=UTF-8",
+                )
+            },
+            redirectHandler = handler,
+        ).send("{}")
+
+        assertEquals(EffectCascadeOutcome.Succeeded, outcome)
+        assertFalse(acknowledgedBeforeHandler)
+        assertEquals(listOf(URI("wallet:continue?response_code=abc")), handler.redirects)
+    }
+
+    @Test
+    fun openId4VpRedirectRequiresHandlerAndRefusalNeverAcknowledges() {
+        listOf<OpenId4VpRedirectHandler?>(null, RecordingRedirectHandler(shouldFail = true))
+            .forEach { handler ->
+                val engine = directPostEngine()
+                makeExecutor(
+                    engine = engine,
+                    http = WalletHttpClient { _, _, _ ->
+                        HttpResponse(
+                            200,
+                            """{"redirect_uri":"https://client.example/cb#code=abc"}"""
+                                .encodeToByteArray(),
+                            "application/json",
+                        )
+                    },
+                    redirectHandler = handler,
+                ).send("{}")
+                assertNoFabricatedOutcome(engine)
+            }
+    }
+
+    @Test
+    fun openId4VpRequestBodyMustBeUtf8BeforeTransport() {
+        var posts = 0
+        val engine = directPostEngine(body = "[255]")
+        makeExecutor(
+            engine = engine,
+            http = WalletHttpClient { _, _, _ ->
+                posts += 1
+                HttpResponse(200, "{}".encodeToByteArray(), "application/json")
+            },
+        ).send("{}")
+
+        assertEquals(0, posts)
         assertNoFabricatedOutcome(engine)
     }
 
@@ -442,12 +585,15 @@ class EffectExecutorTest {
     private fun makeExecutor(
         engine: RecordingEngine,
         signer: WalletSigner = WalletSigner { _, _ -> byteArrayOf(1) },
-        http: WalletHttpClient = WalletHttpClient { _, _ -> HttpResponse(204, ByteArray(0)) },
+        http: WalletHttpClient = WalletHttpClient { _, _, _ ->
+            HttpResponse(200, "{}".encodeToByteArray(), "application/json")
+        },
         storage: WalletStorage = WalletStorage { _, _ -> },
         trust: TrustResolver = TrustResolver { TrustResolution(emptyList(), emptyList()) },
         renderer: ScreenRenderer = ScreenRenderer { _, _, _ -> },
         statusLists: StatusListResolver? = null,
         transferOffers: TransferOfferPublisher? = null,
+        redirectHandler: OpenId4VpRedirectHandler? = null,
     ): EffectExecutor = EffectExecutor(
         engine = engine,
         signer = signer,
@@ -457,10 +603,21 @@ class EffectExecutorTest {
         renderer = renderer,
         statusListResolver = statusLists,
         transferOfferPublisher = transferOffers,
+        presentationRedirectHandler = redirectHandler,
     )
 
     private fun assertNoFabricatedOutcome(engine: RecordingEngine) {
         assertFalse(engine.events.any { it.contains("userDeclined") })
         assertFalse(engine.events.any { it.contains("presentationDelivered") })
+    }
+
+    private fun directPostEngine(body: String = "[]"): RecordingEngine = RecordingEngine { event ->
+        if (event.contains("operationFailed") || event.contains("operationCancelled")) {
+            ERROR_CLOSE
+        } else if (event.contains("presentationDelivered")) {
+            "[{\"type\":\"close\"}]"
+        } else {
+            "[{\"type\":\"http\",\"operationId\":71,\"resultType\":\"presentationDelivered\",\"profile\":\"openid4vpDirectPost\",\"url\":\"https://rp.example/response\",\"body\":$body}]"
+        }
     }
 }

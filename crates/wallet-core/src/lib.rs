@@ -1261,6 +1261,17 @@ pub enum Event {
 }
 
 /// Everything the core asks the shell to do (serialised to JSON at the FFI boundary).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HttpDeliveryProfile {
+    /// OpenID4VP 1.0 `direct_post` and `direct_post.jwt` response delivery.
+    Openid4vpDirectPost,
+    /// A payment authorization destined for a dedicated PSP adapter.
+    PaymentAuthorization,
+    /// A QES authorization destined for a dedicated CSC/QTSP adapter.
+    QesAuthorization,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 // See the note on `Event`: `rename_all_fields` makes struct-variant fields (`client_id` ->
 // `clientId`, `key_ref` -> `keyRef`) camelCase so the shell's `WalletEffect` decoder matches.
@@ -1278,8 +1289,13 @@ pub enum Effect {
     Render { screen: ScreenDescription },
     /// Sign `payload` with the device key (Secure Enclave), then send back `DeviceSignatureProduced`.
     Sign { key_ref: String, payload: Vec<u8> },
-    /// Perform an HTTP POST (TLS handled by the OS), then send back `PresentationDelivered`.
-    Http { url: String, body: Vec<u8> },
+    /// Deliver a protocol response through the profile-specific native adapter. The profile is
+    /// checked against the active flow before this effect crosses the JSON boundary.
+    Http {
+        profile: HttpDeliveryProfile,
+        url: String,
+        body: Vec<u8>,
+    },
     // --- Issuance (OID4VCI) actions ---
     /// Push a PAR request, then send back `ParPushed`.
     PushPar,
@@ -2674,12 +2690,32 @@ impl Core {
             Effect::ResolveRpTrust { .. } => OperationResultKind::RpCertChain,
             Effect::PersistNonce { .. } => OperationResultKind::Persisted,
             Effect::Sign { .. } => OperationResultKind::Signature,
-            Effect::Http { .. } => match self.active {
-                ActiveFlow::Presentation => OperationResultKind::PresentationDelivery,
-                ActiveFlow::Payment => OperationResultKind::PaymentDelivery,
-                ActiveFlow::Qes => OperationResultKind::QesDelivery,
-                flow => return Err(format!("HTTP effect emitted for unsupported flow {flow:?}")),
-            },
+            Effect::Http { profile, .. } => {
+                let (expected_profile, result) = match self.active {
+                    ActiveFlow::Presentation => (
+                        HttpDeliveryProfile::Openid4vpDirectPost,
+                        OperationResultKind::PresentationDelivery,
+                    ),
+                    ActiveFlow::Payment => (
+                        HttpDeliveryProfile::PaymentAuthorization,
+                        OperationResultKind::PaymentDelivery,
+                    ),
+                    ActiveFlow::Qes => (
+                        HttpDeliveryProfile::QesAuthorization,
+                        OperationResultKind::QesDelivery,
+                    ),
+                    flow => {
+                        return Err(format!("HTTP effect emitted for unsupported flow {flow:?}"))
+                    }
+                };
+                if *profile != expected_profile {
+                    return Err(format!(
+                        "HTTP delivery profile {profile:?} does not match active flow {:?}",
+                        self.active
+                    ));
+                }
+                result
+            }
             Effect::PushPar => OperationResultKind::Par,
             Effect::OpenAuthBrowser => OperationResultKind::AuthorizationCode,
             Effect::PromptTxCode => OperationResultKind::TransactionCode,
@@ -3449,7 +3485,11 @@ impl Core {
                     .as_ref()
                     .map(|(u, _)| u.clone())
                     .unwrap_or_default();
-                vec![Effect::Http { url, body: code }]
+                vec![Effect::Http {
+                    profile: HttpDeliveryProfile::PaymentAuthorization,
+                    url,
+                    body: code,
+                }]
             }
             // The pure payment machine closes after producing the authorization. The facade waits
             // for `PaymentAuthorizationDelivered`; a decline still closes immediately.
@@ -3525,6 +3565,7 @@ impl Core {
             }],
             // The QTSP endpoint (CSC API) is resolved by the shell; the body is the authorization.
             QO::SendToQtsp(body) => vec![Effect::Http {
+                profile: HttpDeliveryProfile::QesAuthorization,
                 url: String::new(),
                 body,
             }],
@@ -4302,7 +4343,11 @@ impl Core {
                 // verifier's key before it leaves the device. Encryption needs RNG (ephemeral key +
                 // IV), so it happens here in the facade, not in the sans-IO `oid4vp` core.
                 match sess.response_mode.as_str() {
-                    "direct_post" => vec![Effect::Http { url, body }],
+                    "direct_post" => vec![Effect::Http {
+                        profile: HttpDeliveryProfile::Openid4vpDirectPost,
+                        url,
+                        body,
+                    }],
                     "direct_post.jwt" => {
                         let Some(key) = sess.response_encryption_key.clone() else {
                             return self.abort_presentation(
@@ -4311,6 +4356,7 @@ impl Core {
                         };
                         match self.encrypt_direct_post_jwt(&body, &key) {
                             Some(encrypted) => vec![Effect::Http {
+                                profile: HttpDeliveryProfile::Openid4vpDirectPost,
                                 url,
                                 body: encrypted,
                             }],
@@ -4905,6 +4951,7 @@ mod structured_sdjwt_tests {
             (
                 ActiveFlow::Presentation,
                 Effect::Http {
+                    profile: HttpDeliveryProfile::Openid4vpDirectPost,
                     url: "https://rp.example/cb".into(),
                     body: vec![],
                 },
@@ -5056,17 +5103,30 @@ mod structured_sdjwt_tests {
         #[test]
         fn delivery_acknowledgements_are_rejected_before_the_protocol_is_ready() {
             let cases = [
-                (ActiveFlow::Presentation, "presentationDelivered"),
-                (ActiveFlow::Payment, "paymentAuthorizationDelivered"),
-                (ActiveFlow::Qes, "qesAuthorizationDelivered"),
+                (
+                    ActiveFlow::Presentation,
+                    HttpDeliveryProfile::Openid4vpDirectPost,
+                    "presentationDelivered",
+                ),
+                (
+                    ActiveFlow::Payment,
+                    HttpDeliveryProfile::PaymentAuthorization,
+                    "paymentAuthorizationDelivered",
+                ),
+                (
+                    ActiveFlow::Qes,
+                    HttpDeliveryProfile::QesAuthorization,
+                    "qesAuthorizationDelivered",
+                ),
             ];
 
-            for (flow, event_type) in cases {
+            for (flow, profile, event_type) in cases {
                 let mut core = Core::new("wallet.example", "device-key");
                 let operation_id = emit(
                     &mut core,
                     flow,
                     Effect::Http {
+                        profile,
                         url: "https://service.example/callback".into(),
                         body: vec![],
                     },
@@ -5080,6 +5140,75 @@ mod structured_sdjwt_tests {
 
                 assert!(error.contains("invalid in the current state"), "{error}");
                 assert!(core.pending_operations.contains_key(&operation_id));
+            }
+        }
+
+        #[test]
+        fn http_delivery_profile_must_match_the_active_flow_before_wire_emission() {
+            let cases = [
+                (
+                    ActiveFlow::Presentation,
+                    HttpDeliveryProfile::PaymentAuthorization,
+                ),
+                (ActiveFlow::Payment, HttpDeliveryProfile::QesAuthorization),
+                (ActiveFlow::Qes, HttpDeliveryProfile::Openid4vpDirectPost),
+            ];
+
+            for (flow, profile) in cases {
+                let mut core = Core::new("wallet.example", "device-key");
+                core.active = flow;
+                let next_operation_id = core.next_operation_id;
+                let error = core
+                    .serialize_wire_effects(vec![Effect::Http {
+                        profile,
+                        url: "https://service.example/callback".into(),
+                        body: vec![],
+                    }])
+                    .unwrap_err();
+
+                assert!(error.contains("does not match active flow"), "{error}");
+                assert_eq!(core.next_operation_id, next_operation_id);
+                assert!(core.pending_operations.is_empty());
+            }
+        }
+
+        #[test]
+        fn wire_http_effect_carries_an_exact_profile_and_result_pair() {
+            let cases = [
+                (
+                    ActiveFlow::Presentation,
+                    HttpDeliveryProfile::Openid4vpDirectPost,
+                    "openid4vpDirectPost",
+                    "presentationDelivered",
+                ),
+                (
+                    ActiveFlow::Payment,
+                    HttpDeliveryProfile::PaymentAuthorization,
+                    "paymentAuthorization",
+                    "paymentAuthorizationDelivered",
+                ),
+                (
+                    ActiveFlow::Qes,
+                    HttpDeliveryProfile::QesAuthorization,
+                    "qesAuthorization",
+                    "qesAuthorizationDelivered",
+                ),
+            ];
+
+            for (flow, profile, expected_profile, expected_result) in cases {
+                let mut core = Core::new("wallet.example", "device-key");
+                core.active = flow;
+                let output = core
+                    .serialize_wire_effects(vec![Effect::Http {
+                        profile,
+                        url: "https://service.example/callback".into(),
+                        body: vec![],
+                    }])
+                    .unwrap();
+                let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+                let effect = &value.as_array().unwrap()[0];
+                assert_eq!(effect["profile"], expected_profile);
+                assert_eq!(effect["resultType"], expected_result);
             }
         }
 
