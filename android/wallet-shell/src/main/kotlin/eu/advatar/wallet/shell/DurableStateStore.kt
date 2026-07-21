@@ -286,8 +286,6 @@ internal data class DecodedDurableEnvelope(
 internal object DurableStateLimits {
     const val MAXIMUM_ENVELOPE_BYTES = 32 * 1024 * 1024
     const val MAXIMUM_APPLICATION_IDENTITY_BYTES = 512
-    // Shared Core/iOS/Android plaintext ceiling. Android has the largest fixed slot-envelope
-    // overhead (120 bytes), so this derived value is the cross-platform lifecycle contract.
     const val MAXIMUM_PLAINTEXT_BYTES =
         MAXIMUM_ENVELOPE_BYTES - DurableSlotEnvelopeCodec.FIXED_OVERHEAD
     const val MAXIMUM_ANCHOR_BYTES = 1024

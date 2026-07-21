@@ -130,8 +130,6 @@ class DurableStateStoreTest {
 
     @Test
     fun exactMaximumEnvelopeIsAcceptedAndOneByteMoreIsRejected() {
-        assertEquals(120, DurableSlotEnvelopeCodec.FIXED_OVERHEAD)
-        assertEquals(33_554_312, DurableStateLimits.MAXIMUM_PLAINTEXT_BYTES)
         val fixture = Fixture()
         val exact = ByteArray(DurableStateLimits.MAXIMUM_PLAINTEXT_BYTES) { 0x5a }
         fixture.coordinator.commit(0, 1, exact, context)

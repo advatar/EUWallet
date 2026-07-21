@@ -84,16 +84,8 @@ cryptographically valid; the JVM suite includes that limitation as an explicit a
 Before national-wallet launch, the Wallet Provider must pin generations with monotonic receipts or
 another evaluated platform monotonic anchor and define recovery when that service is unavailable.
 Physical-device evidence must also confirm the accepted StrongBox/KeyMint implementations and
-filesystem durability behavior.
-
-`DurableLifecycleCoordinator` is the pure host seam for the next layer: it prepares a fresh Core
-with current clock/trust/device/WUA inputs before restore and compare-and-swap commits every Core
-event before returning its effects to `EffectExecutor`. A failed commit retains the exact event,
-checkpoint and effect batch for a retry that does not invoke Core again. Process death deliberately
-drops such an uncommitted batch and restores only the last anchored checkpoint; protocol sessions
-and pending effects are not a durable outbox. This gives at-most-once effect release after local
-persistence, not exactly-once external delivery. The AAR still has no generated Rust adapter or
-application lifecycle composition, so production integration remains open.
+filesystem durability behavior. The current primitive is not yet wired to Rust Core lifecycle
+restoration.
 
 ## Build and verify
 
@@ -114,10 +106,9 @@ its normal secure mechanism.
 
 This foundation does not make the Android wallet launch-ready. The host application still needs:
 
-- the generated Rust bridge, its `DurableWalletEngineDriving` adapter and application ownership of
-  the lifecycle coordinator (with no direct Core bypass);
-- restart/process-death orchestration, schema migration policy, crash-window product behavior and
-  Wallet Provider monotonic generation receipts;
+- the generated Rust bridge and lifecycle-safe engine adapter;
+- the bounded Rust checkpoint wired to this store, restart/process-death orchestration, schema
+  migration policy, and Wallet Provider monotonic generation receipts;
 - RP/issuer trust resolution, OpenID4VCI endpoint adapters, PAR/browser/transaction-code handling,
   dedicated payment PSP and QES CSC/QTSP delivery adapters, and wallet-to-wallet transport;
 - national-wallet key enrollment/attestation and device-integrity policy in addition to local

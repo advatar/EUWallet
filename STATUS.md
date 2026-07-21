@@ -140,9 +140,6 @@ operational solution needed to enter those processes.
 - [ ] [#15](https://github.com/advatar/EUWallet/issues/15): make Android a first-class,
       independently shippable wallet client with the same core contract and assurance gates as iOS.
   - [x] Require hosted Android unit tests, lint and release assembly on every pull request.
-  - [ ] Add an Android-specific formal shell model and exhaustive Kotlin model-conformance suite
-        equivalent to the iOS NavigationModel/NavigationTests boundary; shared Rust proofs do not
-        substitute for native Android parity.
   - [ ] Integrate generated UniFFI bindings plus production networking, trust, issuance and
         lifecycle adapters; demo/test doubles must not be reachable from release builds.
   - [ ] Add the production app, StrongBox/KeyMint capability policy, encrypted rollback-resistant
@@ -162,76 +159,10 @@ operational solution needed to enter those processes.
         StrongBox-first AndroidKeyStore AES key, authenticated generation/digest anchor,
         compare-and-swap commits, no-backup/path-hardening policy and exhaustive JVM crash/tamper
         tests; Core serialization and lifecycle wiring remain separate work.
-  - [x] Restore only bounded authenticated holdings, replay state and audit data through current
+  - [ ] Restore only bounded authenticated holdings, replay state and audit data through current
         trust/WUA/device-key revalidation; never revive pending operations or protocol sessions.
-    - [x] Add a migration-ready canonical CBOR checkpoint v1 with explicit magic, version and
-          authenticated-envelope generation; hard 32 MiB and structural allocation budgets; and
-          deterministic rejection of duplicate, non-canonical, unknown, trailing or future data.
-    - [x] Export only production credential source evidence, sorted replay memberships and the
-          externally anchored transaction log; document the legacy numeric issuance nonce in v1
-          and exclude every active protocol machine, pending operation, callback and fixture.
-    - [x] Restore into a staged core only after current clock, trust-list sequence, device key and
-          high-assurance WUA checks; reauthenticate every credential and atomically retain the
-          current environment while replacing only authenticated durable state.
-    - [x] Prove exact resource boundaries, deterministic encoding, context/tamper/corruption
-          rejection, credential and transaction revalidation, zero partial mutation, and that
-          process-death restoration cannot revive stale callbacks or operation identifiers.
-  - [ ] Complete atomic, rollback-detecting, device-bound platform storage and lifecycle wiring
-        with backup exclusion, corruption/migration/process-death tests and no release-build
-        fallback to demo storage.
-    - [x] Add the bounded, authenticated and encrypted iOS storage primitive.
-    - [x] Add the equivalent Android Keystore-backed storage primitive.
-    - [x] Expose a bounded, secret-safe Core checkpoint contract through UniFFI and add native
-          lifecycle coordinator seams that bootstrap the live clock, trust, device key and WUA
-          before restore; gate each resulting effect batch on an exact compare-and-swap commit;
-          retry a failed commit without re-handling the event; and discard in-flight protocol work
-          across process death.
-    - [ ] Wire both stores to the Core checkpoint boundary and prove crash-safe effect delivery.
-      - [x] Reject every new event while an exact checkpoint/effect batch awaits commit, predecode
-            and validate the full effect batch before committing it, preserve the exact pending
-            event across executor replacement and retain the original typed failure category.
-      - [ ] Make the lifecycle coordinator the only production event path; remove or isolate raw
-            `WalletEngine` event driving so application composition cannot bypass persistence.
-        - [x] Require both native effect executors to receive a concrete lifecycle coordinator and
-              exercise their public APIs only through coordinator-backed tests.
-        - [x] Route iOS application events, including transaction redaction and history wipe,
-              through the coordinator and keep generated Core access behind a controlled adapter.
-        - [ ] Add the missing Android generated bridge/application composition and enforce the same
-              sole-event-path rule there; the current AAR alone cannot close this parent item.
-      - [x] Align the Core/iOS/Android checkpoint plaintext ceiling at 33,554,312 bytes and reject
-            growth of every durable replay set before persistent mutation; reset the active flow
-            and preserve an exportable prior checkpoint at the exact boundary.
-      - [x] Enforce durable credential count, per-component and aggregate evidence limits before
-            direct or issuance ingestion. Exact projected upserts account for replacement and
-            fixture promotion; rejection preserves the prior checkpoint and audit trail.
-      - [ ] Add a bounded durable effect outbox with stable effect identifiers and acknowledgements
-            before claiming crash-safe external delivery; process death after checkpoint commit
-            must neither lose nor duplicate browser, signing, network or attestation work.
-        - [ ] Define checkpoint schema v2 with a strict, bounded Core-owned delivery ledger:
-              at most 32 live entries and 4 MiB reserved delivery data; stable 32-byte effect IDs;
-              queued, dispatching, result-ready and ambiguous states; acknowledgement tombstones;
-              v1 migration to an idle aggregate with an empty ledger; and atomic capacity failure.
-          - [x] Add the dormant Core ledger state machine with exact count/byte/sequence admission,
-                domain-separated stable IDs, strict head-of-line claiming, one dispatch slot,
-                result-before-consume handling, explicit ambiguity, bounded tombstone rotation and
-                redacted diagnostics. It is intentionally not production-checkpointed or
-                dispatch-enabled.
-          - [x] Add a dormant canonical v2 codec and hostile-state reconstruction with fixed tags,
-                v1/v2 golden vectors, exact 2 MiB request/result fields, a 4 MiB live reservation,
-                strict hash/ID/state/sequence validation and an exact 9,054-byte Idle continuation
-                ceiling. Idle rejects live work; public export/restore remains byte-for-byte v1 and
-                rejects non-pristine dormant ledgers, so no dispatch capability was activated.
-          - [ ] Prove the authenticated v1 idle/empty migration boundary, persist every resumable
-                aggregate variant, then activate public v2 import/export without a downgrade path.
-        - [ ] Persist and revalidate the complete resumable production aggregate, pending result
-              correlation and public key/nonce/attestation reservations. Never serialize private
-              keys, and never release a ledger entry whose result cannot be consumed after restore.
-        - [ ] Generalise both lifecycle coordinators to commit enqueue, claim, result recording,
-              result consumption and acknowledgement transitions before releasing the associated
-              action or outcome; exercise every crash/ambiguous-commit boundary after restart.
-        - [ ] Require stable-ID idempotency or reconciliation from each production adapter. Treat
-              an unknown browser, signing, HTTP, credential or attestation completion as ambiguous
-              and fail closed instead of blindly retrying or claiming generic exactly-once I/O.
+  - [ ] Add atomic, rollback-detecting, device-bound iOS and Android stores with backup exclusion,
+        corruption/migration/process-death tests and no release-build fallback to demo storage.
 - [ ] Build the Android client with equivalent StrongBox/KeyMint security behavior.
 - [ ] [#18](https://github.com/advatar/EUWallet/issues/18): implement German eID/eAT onboarding and
       HAIP-compliant live PID issuance through an accepted German PID Provider.
@@ -249,82 +180,11 @@ operational solution needed to enter those processes.
   - [ ] Implement authorization-code issuance with PAR, PKCE S256, RFC 9207 issuer binding, exact
         redirect/state correlation, DPoP and DPoP-Nonce, final token/nonce/proofs/credentials wire
         models and typed native effects.
-    - [x] Add and harden the isolated OpenID4VCI 1.0 Final/HAIP authorization transport machine.
-          The reviewed implementation has bounded injected PKCE/state generation; exact PAR,
-          browser callback and token contracts; request-bound Wallet Attestation/PoP inputs; RFC
-          9207 issuer/redirect binding; token-only ES256 DPoP signing effects and nonce retry;
-          duplicate-aware bounded JSON; and replay/downgrade/secret-redaction tests. Production
-          aggregate integration, external Wallet Provider/PID-provider trust and native-shell
-          wiring remain separate work.
-    - [ ] Integrate the reviewed sans-I/O authorization/credential transport only after its P1
-          conformance, device-binding, replay and privacy defects are closed; green isolated tests
-          are not sufficient to mark either transport complete.
-      - [x] Implement the pinned Wallet Attestation challenge protocol and construct/verify local,
-            WSCD-key-bound client-attestation PoP instead of accepting two opaque remote JWTs.
-      - [x] Accept RFC 9449 header-only and mixed DPoP nonce challenges, case-insensitive token
-            types and conforming cache headers; require atomic durable `c_nonce` reservation before
-            credential-proof signing and fail closed with a typed fresh-key requirement after any
-            Credential Endpoint nonce challenge instead of replaying a burned key/attestation.
-      - [x] Enforce distinct Client Instance, DPoP and credential keys, minimise Wallet/Key
-            Attestation backend requests, and remove the incorrect SD-JWT
-            `iss == credential_issuer` transport gate in favour of verified-ingestion
-            `x5c`/issuer-path authorization.
-      - [ ] Require native adapters to enforce streaming body/header/decompression limits before
-            allocation, exact final URL/method correlation, disabled redirects, deadlines,
-            cancellation and secret-safe logging; add the missing hostile/conformance vectors.
-      - [ ] Replace wallet-core's legacy issuance machine with a Rust-owned production aggregate
-            that performs bounded offer/issuer/AS discovery, resolves PID-provider trust, owns the
-            reviewed authorization and credential flows, and never exposes tokens, grants or an
-            `UnverifiedCredential` through UniFFI or UI DTOs.
-      - [ ] Introduce strict correlated native effects for lossless protocol HTTP responses,
-            browser authorization, WIA/KA acquisition, atomic reservations and ES256 key/signing
-            operations; preserve duplicate security headers and enforce three non-aliasable Client
-            Instance, DPoP and per-credential holder-key namespaces on both platforms.
-      - [ ] Add checkpoint schema v2 and a bounded crash-safe outbox/inbox: commit intent before
-            browser, signing or network effects; durably retain bounded results before transition;
-            persist c_nonce, WIA, KA and public-key reservations across abort/restart; fail closed
-            on unknown HTTP completion or full ledgers; never serialize private keys.
-      - [ ] Wire the new effects through iOS and Android production transports, durable stores,
-            hardware-key managers and Wallet Provider services, then route successful transport
-            output immediately through versioned PID mdoc/draft-13 SD-JWT VC verified ingestion.
-            Deliver any credential notification only from a post-ingestion durable outbox.
-    - [x] Add and harden the isolated final Nonce/Credential Endpoint transport machine that
-          consumes the sender-constrained authorization grant; obtains bounded `c_nonce`; requires
-          exact request-bound key-attestation acquisition and ES256 credential-proof signing;
-          sends an `ath`-bound DPoP request; and accepts only one immediate, unencrypted German PID
-          credential in the selected format while preserving its raw bytes for the
-          verified-ingestion boundary.
-          Trusted WIA/KA minting, native-shell wiring, verified ingestion and PID-provider trust
-          resolution remain separate work.
   - [ ] Replace the custom WUA gate with TS3 1.5.2 WIA + KA transport, Wallet Provider trust,
         one-use/privacy rules, WSCD key binding and client/key-storage status maintenance.
-    - [x] Accept the TS3 1.5.2 x5c-derived Wallet Provider identity without a non-standard `iss`
-          requirement; verify each compact WIA locally; require bounded wallet name/version,
-          solution-certification and client-status claims; enforce the sub-24-hour WIA lifetime,
-          effective client-status maintenance period and safe single-issuance policy.
-    - [x] Accept TS3 1.5.2 key attestations without leaking the issuance `c_nonce` to the attestation
-          provider; verify required certification and key-storage status, preferred status periods
-          and German PID WSCD assurance; atomically reserve each key-attestation and public key for
-          one use, and require a genuinely new credential key after `invalid_nonce` instead of
-          minting another attestation for the same key.
-    - [x] Preserve Client Instance, DPoP and credential-holder key identities across the transport
-          hand-off and reject reference or canonical-JWK aliasing between all three roles.
-    - [ ] Build external WIA/KA PKI path construction, trust-anchor exclusion, revocation and live
-          Token Status List resolution; authorize Wallet/PID Providers against ecosystem trusted
-          lists; wire the policy and attestation services through both native clients.
   - [ ] Add and test a secret-safe native `GermanEidClient` seam; then integrate the official
         AusweisApp SDK on iOS and Android against the accepted PID Provider's authenticated TcToken
         and secure-return contract, with identity attributes available only at the provider backend.
-    - [x] Define matching Swift/Kotlin native-only contracts and deterministic fakes for API-level
-          negotiation, one RUN_AUTH session, access-right minimisation, service-certificate consent,
-          exact provider-certificate/transaction/auxiliary binding, session/interaction correlation,
-          explicitly attested integrated-reader PIN/CAN/PUK handling with orthogonal SDK card facts,
-          and final result/refresh URL; keep TcToken and card secrets redacted, clearable and absent
-          from Rust JSON, persistence and diagnostics, and reject RUN_AUTH custom headers because
-          their RefreshAddress recipient cannot be validated before use.
-    - [ ] Implement the official SDK adapters and physical-device/simulator evidence after the PID
-          Provider supplies its authenticated TcToken and secure-return contract; any custom-header
-          requirement must be removed or separately proven safe before this boundary can permit it.
   - [ ] Authenticate and ingest both `eu.europa.ec.eudi.pid.1` mdoc and `urn:eudi:pid:1` SD-JWT VC;
         explicitly reject deferred/batch/encrypted/notification modes until separately implemented.
   - [ ] Pass hostile local vectors, fake-provider end-to-end tests, official AusweisApp simulator and
@@ -344,14 +204,7 @@ operational solution needed to enter those processes.
 - [ ] Replace keyword traceability with reviewed applicability and behavior-level evidence.
 - [ ] Bind formal oracle tests to production state machines.
 - [ ] Complete the TOE, threat model, DPIA, key lifecycle, algorithm profile and KAT evidence.
-  - [ ] Add hybrid-PQ only to ARF-preserving internal/explicitly negotiated paths;
-        complete KATs, downgrade tests, device coverage and CAB/profile approval
-        before enabling any production claim (`docs/certification-evidence/hybrid-pq-boundary.md`).
-  - [ ] Run and submit OpenID Foundation self-certification for every shipped
-        OpenID4VP/OpenID4VCI + HAIP profile; archive signed, release-matched
-        suite configuration/results and renewal triggers in
-        `docs/certification-evidence/openid-self-certification.md`.
-  - [ ] Pass OIDF, FCAF, German sandbox and cross-border interoperability suites.
+- [ ] Pass OIDF, FCAF, German sandbox and cross-border interoperability suites.
 - [ ] Complete independent review, penetration testing, red team and bug bounty.
 - [ ] Establish signed reproducible releases, SBOM/provenance, incident response, revocation,
       support, monitoring, rollback and disaster recovery.
