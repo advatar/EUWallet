@@ -3,7 +3,7 @@
 //! Signature verification goes through crypto-traits; a stub verifier stands in for aws-lc-rs
 //! (real signature crypto is wired at the platform-crypto integration step, like the other codecs).
 use base64ct::{Base64, Encoding};
-use crypto_traits::{Alg, CryptoError, Verifier};
+use crypto_traits::{Alg, CertificatePublicKeyAlg, CertificateSignatureAlg, CryptoError, Verifier};
 use x509::{
     check_credential_issuer, check_relying_party, parse_cert, validate_path, X509Error,
     EKU_MDOC_READER_AUTH,
@@ -24,6 +24,24 @@ const WAY_LATER: i64 = 2_100_000_000; // ~2036, past not_after
 struct AcceptingVerifier;
 impl Verifier for AcceptingVerifier {
     fn verify(&self, _a: Alg, _pk: &[u8], _msg: &[u8], _sig: &[u8]) -> Result<(), CryptoError> {
+        Ok(())
+    }
+
+    fn validate_certificate_public_key(
+        &self,
+        _alg: CertificatePublicKeyAlg,
+        _public_key: &[u8],
+    ) -> Result<(), CryptoError> {
+        Ok(())
+    }
+
+    fn verify_certificate(
+        &self,
+        _alg: CertificateSignatureAlg,
+        _public_key: &[u8],
+        _payload: &[u8],
+        _sig: &[u8],
+    ) -> Result<(), CryptoError> {
         Ok(())
     }
 }
@@ -152,6 +170,24 @@ fn signature_failure_is_detected() {
     struct RejectingVerifier;
     impl Verifier for RejectingVerifier {
         fn verify(&self, _a: Alg, _pk: &[u8], _m: &[u8], _s: &[u8]) -> Result<(), CryptoError> {
+            Err(CryptoError::Backend("nope".into()))
+        }
+
+        fn validate_certificate_public_key(
+            &self,
+            _alg: CertificatePublicKeyAlg,
+            _public_key: &[u8],
+        ) -> Result<(), CryptoError> {
+            Ok(())
+        }
+
+        fn verify_certificate(
+            &self,
+            _alg: CertificateSignatureAlg,
+            _public_key: &[u8],
+            _payload: &[u8],
+            _sig: &[u8],
+        ) -> Result<(), CryptoError> {
             Err(CryptoError::Backend("nope".into()))
         }
     }

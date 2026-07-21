@@ -9,18 +9,22 @@
 //! these attributes?" — a separate, additional question. Path validation and the profile check
 //! are two distinct steps returning distinct types, so a caller cannot mistake one for the other.
 //!
-//! Parsing and profile evaluation are pure logic (via the `x509-cert`/`der` crates). The one
-//! cryptographic step — verifying each certificate's signature — goes through
+//! Parsing and profile evaluation are pure logic (via RustCrypto `x509-cert`/`der`/`pkcs1`).
+//! Cryptographic public-key validation and certificate-signature verification go through
 //! [`crypto_traits::Verifier`]; this crate never implements a signature algorithm.
 
 use std::collections::BTreeSet;
 
-use crypto_traits::{Alg, Verifier};
-use der::{Decode, Encode};
+use crypto_traits::{CertificatePublicKeyAlg, CertificateSignatureAlg, Verifier};
+use der::{asn1::ObjectIdentifier, Decode, Encode, Tag, Tagged};
+use pkcs1::RsaPublicKey;
 use x509_cert::ext::pkix::{
-    name::GeneralName, AuthorityKeyIdentifier, BasicConstraints, CertificatePolicies,
-    ExtendedKeyUsage, KeyUsage, SubjectAltName, SubjectKeyIdentifier,
+    constraints::{name::GeneralSubtree, NameConstraints},
+    name::GeneralName,
+    AuthorityKeyIdentifier, BasicConstraints, CertificatePolicies, ExtendedKeyUsage, KeyUsage,
+    SubjectAltName, SubjectKeyIdentifier,
 };
+use x509_cert::spki::AlgorithmIdentifierOwned;
 use x509_cert::Certificate;
 
 /// ISO/IEC 18013-5 mdoc **reader authentication** EKU — the real OID a relying party's reader
@@ -37,6 +41,22 @@ const OID_SUBJECT_ALT_NAME: &str = "2.5.29.17";
 const OID_KEY_USAGE: &str = "2.5.29.15";
 const OID_SUBJECT_KEY_IDENTIFIER: &str = "2.5.29.14";
 const OID_AUTHORITY_KEY_IDENTIFIER: &str = "2.5.29.35";
+const OID_NAME_CONSTRAINTS: &str = "2.5.29.30";
+
+// Signature and SPKI algorithm OIDs accepted by this bounded certificate profile. The strength
+// floor is P-256/P-384, Ed25519, or RSA 2048..=8192 with exponent 65537; signatures require
+// SHA-256 or stronger. PKCS#1 v1.5 RSA is retained for the service-scoped GlobalSign R45 reader
+// hierarchy. Final EUDI service profiles may narrow this interoperability set further.
+const OID_ECDSA_SHA256: &str = "1.2.840.10045.4.3.2";
+const OID_ECDSA_SHA384: &str = "1.2.840.10045.4.3.3";
+const OID_ED25519: &str = "1.3.101.112";
+const OID_RSA_ENCRYPTION: &str = "1.2.840.113549.1.1.1";
+const OID_RSA_SHA256: &str = "1.2.840.113549.1.1.11";
+const OID_RSA_SHA384: &str = "1.2.840.113549.1.1.12";
+const OID_RSA_SHA512: &str = "1.2.840.113549.1.1.13";
+const OID_EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
+const OID_P256: &str = "1.2.840.10045.3.1.7";
+const OID_P384: &str = "1.3.132.0.34";
 
 // Explicit resource budgets for hostile certificate bundles. The first strict slice intentionally
 // supports short wallet trust paths rather than exposing an unbounded graph search.
@@ -44,6 +64,8 @@ const MAX_SUPPLIED_CERTIFICATES: usize = 8;
 const MAX_TRUST_ANCHORS: usize = 64;
 const MAX_CERTIFICATE_DER_BYTES: usize = 64 * 1024;
 const MAX_EXTENSIONS_PER_CERTIFICATE: usize = 32;
+const MAX_GENERAL_NAMES_PER_CERTIFICATE: usize = 64;
+const MAX_NAME_CONSTRAINTS_PER_CERTIFICATE: usize = 64;
 const MAX_ISSUER_CANDIDATES: usize = 16;
 const MAX_PATH_BUILD_STEPS: usize = 256;
 const MAX_COMPLETE_PATHS: usize = MAX_PATH_BUILD_STEPS;
@@ -58,6 +80,8 @@ pub enum X509Error {
     ProfileViolation(&'static str),
     /// A signature algorithm we do not map.
     UnsupportedSignatureAlg,
+    /// A subject public key type, parameter set or strength outside the explicit policy.
+    UnsupportedPublicKey,
 }
 
 /// A parsed certificate reduced to the fields the profile and path checks need.
@@ -65,11 +89,11 @@ pub enum X509Error {
 pub struct ParsedCert {
     pub tbs_der: Vec<u8>,
     pub signature: Vec<u8>,
-    pub sig_alg: Alg,
+    pub sig_alg: CertificateSignatureAlg,
     /// SubjectPublicKeyInfo (DER).
     pub spki_der: Vec<u8>,
-    /// The raw public key (uncompressed EC point `0x04||X||Y`) — the form the crypto backend
-    /// verifies a child certificate's signature against.
+    /// The algorithm-native public key: uncompressed SEC1 for EC, 32 raw bytes for Ed25519, or a
+    /// DER PKCS#1 `RSAPublicKey`. This is the form the crypto backend validates and verifies with.
     pub public_key_raw: Vec<u8>,
     pub subject: String,
     pub issuer: String,
@@ -97,15 +121,250 @@ struct CertificateConstraints {
     authority_key_identifier: Option<Vec<u8>>,
     unsupported_critical_extension: bool,
     signature_algorithms_match: bool,
+    public_key_algorithm: Option<CertificatePublicKey>,
+    names: CertificateNames,
+    name_constraints_present: bool,
+    name_constraints: Option<ParsedNameConstraints>,
+    name_constraints_error: Option<&'static str>,
 }
 
-fn map_sig_alg(oid: &str) -> Result<Alg, X509Error> {
-    match oid {
-        "1.2.840.10045.4.3.2" => Ok(Alg::Es256), // ecdsa-with-SHA256
-        "1.2.840.10045.4.3.3" => Ok(Alg::Es384), // ecdsa-with-SHA384
-        "1.3.101.112" => Ok(Alg::EdDsa),         // Ed25519
+type CertificatePublicKey = CertificatePublicKeyAlg;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CertificateNames {
+    dns: Vec<String>,
+    uris: Vec<String>,
+    ips: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SupportedNameConstraint {
+    Dns(String),
+    UriHost(String),
+    Ip { address: Vec<u8>, mask: Vec<u8> },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ParsedNameConstraints {
+    permitted: Vec<SupportedNameConstraint>,
+    excluded: Vec<SupportedNameConstraint>,
+}
+
+fn parameters_absent(algorithm: &AlgorithmIdentifierOwned) -> bool {
+    algorithm.parameters.is_none()
+}
+
+fn parameters_absent_or_null(algorithm: &AlgorithmIdentifierOwned) -> bool {
+    algorithm
+        .parameters
+        .as_ref()
+        .is_none_or(|parameters| parameters.tag() == Tag::Null && parameters.value().is_empty())
+}
+
+fn map_sig_alg(algorithm: &AlgorithmIdentifierOwned) -> Result<CertificateSignatureAlg, X509Error> {
+    let oid = algorithm.oid.to_string();
+    match oid.as_str() {
+        OID_ECDSA_SHA256 if parameters_absent(algorithm) => {
+            Ok(CertificateSignatureAlg::EcdsaSha256)
+        }
+        OID_ECDSA_SHA384 if parameters_absent(algorithm) => {
+            Ok(CertificateSignatureAlg::EcdsaSha384)
+        }
+        OID_ED25519 if parameters_absent(algorithm) => Ok(CertificateSignatureAlg::Ed25519),
+        OID_RSA_SHA256 if parameters_absent_or_null(algorithm) => {
+            Ok(CertificateSignatureAlg::RsaPkcs1Sha256)
+        }
+        OID_RSA_SHA384 if parameters_absent_or_null(algorithm) => {
+            Ok(CertificateSignatureAlg::RsaPkcs1Sha384)
+        }
+        OID_RSA_SHA512 if parameters_absent_or_null(algorithm) => {
+            Ok(CertificateSignatureAlg::RsaPkcs1Sha512)
+        }
         _ => Err(X509Error::UnsupportedSignatureAlg),
     }
+}
+
+fn parameters_are_null(algorithm: &AlgorithmIdentifierOwned) -> bool {
+    algorithm
+        .parameters
+        .as_ref()
+        .is_some_and(|parameters| parameters.tag() == Tag::Null && parameters.value().is_empty())
+}
+
+fn parse_public_key(
+    algorithm: &AlgorithmIdentifierOwned,
+    public_key_raw: &[u8],
+) -> Result<CertificatePublicKey, X509Error> {
+    let oid = algorithm.oid.to_string();
+    match oid.as_str() {
+        OID_EC_PUBLIC_KEY => {
+            let curve = algorithm
+                .parameters
+                .as_ref()
+                .ok_or(X509Error::UnsupportedPublicKey)?
+                .decode_as::<ObjectIdentifier>()
+                .map_err(|_| X509Error::UnsupportedPublicKey)?
+                .to_string();
+            match (curve.as_str(), public_key_raw.len(), public_key_raw.first()) {
+                (OID_P256, 65, Some(0x04)) => Ok(CertificatePublicKey::EcP256),
+                (OID_P384, 97, Some(0x04)) => Ok(CertificatePublicKey::EcP384),
+                _ => Err(X509Error::UnsupportedPublicKey),
+            }
+        }
+        OID_ED25519 if parameters_absent(algorithm) && public_key_raw.len() == 32 => {
+            Ok(CertificatePublicKey::Ed25519)
+        }
+        OID_RSA_ENCRYPTION if parameters_are_null(algorithm) => {
+            let key = RsaPublicKey::from_der(public_key_raw)
+                .map_err(|_| X509Error::UnsupportedPublicKey)?;
+            let modulus = key.modulus.as_bytes();
+            let modulus_bits = modulus
+                .first()
+                .map(|first| (modulus.len() - 1) * 8 + (8 - first.leading_zeros() as usize))
+                .unwrap_or(0);
+            if !(2048..=8192).contains(&modulus_bits)
+                || key.public_exponent.as_bytes() != [0x01, 0x00, 0x01]
+            {
+                return Err(X509Error::UnsupportedPublicKey);
+            }
+            Ok(CertificatePublicKey::Rsa)
+        }
+        _ => Err(X509Error::UnsupportedPublicKey),
+    }
+}
+
+fn canonical_dns_name(value: &str) -> Option<String> {
+    if value.is_empty()
+        || value.len() > 253
+        || value.starts_with('.')
+        || value.ends_with('.')
+        || value.bytes().any(|byte| !byte.is_ascii())
+    {
+        return None;
+    }
+    let canonical = value.to_ascii_lowercase();
+    canonical
+        .split('.')
+        .all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
+        .then_some(canonical)
+}
+
+fn canonical_uri_constraint(value: &str) -> Option<String> {
+    let (subdomains_only, host) = value
+        .strip_prefix('.')
+        .map_or((false, value), |host| (true, host));
+    let host = canonical_dns_name(host)?;
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return None;
+    }
+    Some(if subdomains_only {
+        format!(".{host}")
+    } else {
+        host
+    })
+}
+
+fn valid_ip_constraint(address: &[u8], mask: &[u8]) -> bool {
+    if address.len() != mask.len() || !matches!(address.len(), 4 | 16) {
+        return false;
+    }
+    let mut saw_zero = false;
+    for byte in mask {
+        for bit in (0..8).rev() {
+            let set = byte & (1 << bit) != 0;
+            if saw_zero && set {
+                return false;
+            }
+            saw_zero |= !set;
+        }
+    }
+    address
+        .iter()
+        .zip(mask)
+        .all(|(address, mask)| address & !mask == 0)
+}
+
+fn parse_name_constraints(parsed: NameConstraints) -> Result<ParsedNameConstraints, &'static str> {
+    if parsed
+        .permitted_subtrees
+        .as_ref()
+        .is_some_and(Vec::is_empty)
+        || parsed.excluded_subtrees.as_ref().is_some_and(Vec::is_empty)
+    {
+        return Err("NameConstraints contains an empty GeneralSubtrees");
+    }
+    let permitted_subtrees = parsed.permitted_subtrees.unwrap_or_default();
+    let excluded_subtrees = parsed.excluded_subtrees.unwrap_or_default();
+    let total = permitted_subtrees
+        .len()
+        .checked_add(excluded_subtrees.len())
+        .ok_or("name constraints resource budget exceeded")?;
+    if total == 0 {
+        return Err("NameConstraints is empty");
+    }
+    if total > MAX_NAME_CONSTRAINTS_PER_CERTIFICATE {
+        return Err("name constraints resource budget exceeded");
+    }
+
+    fn parse_subtrees(
+        subtrees: Vec<GeneralSubtree>,
+    ) -> Result<Vec<SupportedNameConstraint>, &'static str> {
+        subtrees
+            .into_iter()
+            .map(|subtree| {
+                if subtree.minimum != 0 || subtree.maximum.is_some() {
+                    return Err("unsupported name constraint distance");
+                }
+                match subtree.base {
+                    GeneralName::DnsName(name) => canonical_dns_name(name.as_str())
+                        .map(SupportedNameConstraint::Dns)
+                        .ok_or("malformed DNS name constraint"),
+                    GeneralName::UniformResourceIdentifier(host) => {
+                        canonical_uri_constraint(host.as_str())
+                            .map(SupportedNameConstraint::UriHost)
+                            .ok_or("malformed URI name constraint")
+                    }
+                    GeneralName::IpAddress(value) => {
+                        let bytes = value.as_bytes();
+                        let half = bytes.len() / 2;
+                        if !matches!(bytes.len(), 8 | 32)
+                            || !valid_ip_constraint(&bytes[..half], &bytes[half..])
+                        {
+                            return Err("malformed IP name constraint");
+                        }
+                        Ok(SupportedNameConstraint::Ip {
+                            address: bytes[..half].to_vec(),
+                            mask: bytes[half..].to_vec(),
+                        })
+                    }
+                    GeneralName::Rfc822Name(_)
+                    | GeneralName::DirectoryName(_)
+                    | GeneralName::OtherName(_)
+                    | GeneralName::EdiPartyName(_)
+                    | GeneralName::RegisteredId(_) => Err("unsupported name constraint form"),
+                }
+            })
+            .collect()
+    }
+
+    Ok(ParsedNameConstraints {
+        permitted: parse_subtrees(permitted_subtrees)?,
+        excluded: parse_subtrees(excluded_subtrees)?,
+    })
 }
 
 /// Parse a DER certificate into the reduced [`ParsedCert`].
@@ -118,7 +377,7 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
 
     let tbs_der = tbs.to_der().map_err(|_| X509Error::Der)?;
     let signature = cert.signature.as_bytes().ok_or(X509Error::Der)?.to_vec();
-    let sig_alg = map_sig_alg(&cert.signature_algorithm.oid.to_string())?;
+    let sig_alg = map_sig_alg(&cert.signature_algorithm)?;
     let spki_der = tbs
         .subject_public_key_info
         .to_der()
@@ -129,6 +388,8 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
         .as_bytes()
         .ok_or(X509Error::Der)?
         .to_vec();
+    let public_key_algorithm =
+        parse_public_key(&tbs.subject_public_key_info.algorithm, &public_key_raw)?;
 
     let not_before = tbs.validity.not_before.to_unix_duration().as_secs() as i64;
     let not_after = tbs.validity.not_after.to_unix_duration().as_secs() as i64;
@@ -141,6 +402,7 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
         subject_der: tbs.subject.to_der().map_err(|_| X509Error::Der)?,
         issuer_der: tbs.issuer.to_der().map_err(|_| X509Error::Der)?,
         signature_algorithms_match: tbs.signature == cert.signature_algorithm,
+        public_key_algorithm: Some(public_key_algorithm),
         ..CertificateConstraints::default()
     };
 
@@ -195,10 +457,43 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
                 OID_SUBJECT_ALT_NAME => {
                     let san = SubjectAltName::from_der(ext.extn_value.as_bytes())
                         .map_err(|_| X509Error::Der)?;
-                    uri_sans.extend(san.0.iter().filter_map(|name| match name {
-                        GeneralName::UniformResourceIdentifier(uri) => Some(uri.to_string()),
-                        _ => None,
-                    }));
+                    if san.0.is_empty() || san.0.len() > MAX_GENERAL_NAMES_PER_CERTIFICATE {
+                        return Err(X509Error::Der);
+                    }
+                    for name in san.0 {
+                        match name {
+                            GeneralName::DnsName(name) => {
+                                constraints.names.dns.push(name.to_string());
+                            }
+                            GeneralName::UniformResourceIdentifier(uri) => {
+                                let uri = uri.to_string();
+                                uri_sans.push(uri.clone());
+                                constraints.names.uris.push(uri);
+                            }
+                            GeneralName::IpAddress(address) => {
+                                constraints.names.ips.push(address.as_bytes().to_vec());
+                            }
+                            GeneralName::Rfc822Name(_)
+                            | GeneralName::DirectoryName(_)
+                            | GeneralName::OtherName(_)
+                            | GeneralName::EdiPartyName(_)
+                            | GeneralName::RegisteredId(_) => {}
+                        }
+                    }
+                }
+                OID_NAME_CONSTRAINTS => {
+                    let parsed = NameConstraints::from_der(ext.extn_value.as_bytes())
+                        .map_err(|_| X509Error::Der)?;
+                    constraints.name_constraints_present = true;
+                    if !ext.critical {
+                        constraints.name_constraints_error =
+                            Some("NameConstraints must be critical");
+                    } else {
+                        match parse_name_constraints(parsed) {
+                            Ok(parsed) => constraints.name_constraints = Some(parsed),
+                            Err(error) => constraints.name_constraints_error = Some(error),
+                        }
+                    }
                 }
                 OID_SUBJECT_KEY_IDENTIFIER => {
                     let identifier = SubjectKeyIdentifier::from_der(ext.extn_value.as_bytes())
@@ -222,6 +517,14 @@ pub fn parse_cert(der_bytes: &[u8]) -> Result<ParsedCert, X509Error> {
                 _ => {}
             }
         }
+    }
+
+    if constraints.name_constraints_present
+        && !is_ca
+        && constraints.name_constraints_error.is_none()
+    {
+        constraints.name_constraints_error =
+            Some("NameConstraints only permitted in CA certificates");
     }
 
     Ok(ParsedCert {
@@ -515,6 +818,447 @@ fn explore_paths(
     }
 }
 
+fn dns_constraint_matches(name: &str, constraint: &str) -> bool {
+    name == constraint
+        || name
+            .strip_suffix(constraint)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
+fn uri_constraint_matches(host: &str, constraint: &str) -> bool {
+    constraint
+        .strip_prefix('.')
+        .map_or(host == constraint, |domain| {
+            host != domain && host.ends_with(constraint)
+        })
+}
+
+fn constrained_uri_host(uri: &str) -> Option<String> {
+    if !uri.is_ascii()
+        || uri
+            .chars()
+            .any(|character| character.is_ascii_control() || character.is_whitespace())
+    {
+        return None;
+    }
+    let colon = uri.find(':')?;
+    let scheme = &uri[..colon];
+    if scheme.is_empty()
+        || !scheme
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+        || !scheme
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    {
+        return None;
+    }
+    let authority_and_rest = uri[colon + 1..].strip_prefix("//")?;
+    let authority_end = authority_and_rest
+        .find(['/', '?', '#'])
+        .unwrap_or(authority_and_rest.len());
+    let authority = &authority_and_rest[..authority_end];
+    if authority.is_empty() || authority.matches('@').count() > 1 {
+        return None;
+    }
+    let host_and_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    // A constrained URI must contain a DNS host. Bracketed IP literals, unbracketed IPv6 and
+    // percent-encoded host spellings deliberately fail closed.
+    if host_and_port.starts_with('[') || host_and_port.matches(':').count() > 1 {
+        return None;
+    }
+    let (host, port) = host_and_port
+        .rsplit_once(':')
+        .map_or((host_and_port, None), |(host, port)| (host, Some(port)));
+    if port.is_some_and(|port| port.is_empty() || port.parse::<u16>().is_err()) {
+        return None;
+    }
+    let host = canonical_dns_name(host)?;
+    (host.parse::<std::net::Ipv4Addr>().is_err()).then_some(host)
+}
+
+fn ip_constraint_matches(name: &[u8], address: &[u8], mask: &[u8]) -> bool {
+    name.len() == address.len()
+        && address.len() == mask.len()
+        && name
+            .iter()
+            .zip(address)
+            .zip(mask)
+            .all(|((name, address), mask)| name & mask == address & mask)
+}
+
+fn enforce_name_constraints(
+    names: &CertificateNames,
+    constraints: &ParsedNameConstraints,
+) -> Result<(), X509Error> {
+    let permitted_dns = constraints.permitted.iter().filter_map(|constraint| {
+        if let SupportedNameConstraint::Dns(value) = constraint {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    });
+    let excluded_dns = constraints.excluded.iter().filter_map(|constraint| {
+        if let SupportedNameConstraint::Dns(value) = constraint {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    });
+    let permitted_dns = permitted_dns.collect::<Vec<_>>();
+    let excluded_dns = excluded_dns.collect::<Vec<_>>();
+    for name in &names.dns {
+        let name = canonical_dns_name(name)
+            .ok_or(X509Error::PathInvalid("constrained DNS name is malformed"))?;
+        if excluded_dns
+            .iter()
+            .any(|constraint| dns_constraint_matches(&name, constraint))
+        {
+            return Err(X509Error::PathInvalid(
+                "name constraints exclude certificate name",
+            ));
+        }
+        if !permitted_dns.is_empty()
+            && !permitted_dns
+                .iter()
+                .any(|constraint| dns_constraint_matches(&name, constraint))
+        {
+            return Err(X509Error::PathInvalid(
+                "name constraints do not permit certificate name",
+            ));
+        }
+    }
+
+    let permitted_uri = constraints.permitted.iter().filter_map(|constraint| {
+        if let SupportedNameConstraint::UriHost(value) = constraint {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    });
+    let excluded_uri = constraints.excluded.iter().filter_map(|constraint| {
+        if let SupportedNameConstraint::UriHost(value) = constraint {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    });
+    let permitted_uri = permitted_uri.collect::<Vec<_>>();
+    let excluded_uri = excluded_uri.collect::<Vec<_>>();
+    if !permitted_uri.is_empty() || !excluded_uri.is_empty() {
+        for uri in &names.uris {
+            let host = constrained_uri_host(uri).ok_or(X509Error::PathInvalid(
+                "constrained URI has no canonical DNS host",
+            ))?;
+            if excluded_uri
+                .iter()
+                .any(|constraint| uri_constraint_matches(&host, constraint))
+            {
+                return Err(X509Error::PathInvalid(
+                    "name constraints exclude certificate name",
+                ));
+            }
+            if !permitted_uri.is_empty()
+                && !permitted_uri
+                    .iter()
+                    .any(|constraint| uri_constraint_matches(&host, constraint))
+            {
+                return Err(X509Error::PathInvalid(
+                    "name constraints do not permit certificate name",
+                ));
+            }
+        }
+    }
+
+    let permitted_ip = constraints.permitted.iter().filter_map(|constraint| {
+        if let SupportedNameConstraint::Ip { address, mask } = constraint {
+            Some((address.as_slice(), mask.as_slice()))
+        } else {
+            None
+        }
+    });
+    let excluded_ip = constraints.excluded.iter().filter_map(|constraint| {
+        if let SupportedNameConstraint::Ip { address, mask } = constraint {
+            Some((address.as_slice(), mask.as_slice()))
+        } else {
+            None
+        }
+    });
+    let permitted_ip = permitted_ip.collect::<Vec<_>>();
+    let excluded_ip = excluded_ip.collect::<Vec<_>>();
+    for name in &names.ips {
+        if !matches!(name.len(), 4 | 16) {
+            return Err(X509Error::PathInvalid(
+                "constrained IP address is malformed",
+            ));
+        }
+        if excluded_ip
+            .iter()
+            .any(|(address, mask)| ip_constraint_matches(name, address, mask))
+        {
+            return Err(X509Error::PathInvalid(
+                "name constraints exclude certificate name",
+            ));
+        }
+        if !permitted_ip.is_empty()
+            && !permitted_ip
+                .iter()
+                .any(|(address, mask)| ip_constraint_matches(name, address, mask))
+        {
+            return Err(X509Error::PathInvalid(
+                "name constraints do not permit certificate name",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_name_constraints(path: &[ParsedCert]) -> Result<(), X509Error> {
+    for (issuer_index, issuer) in path.iter().enumerate().skip(1) {
+        let Some(constraints) = issuer.constraints.name_constraints.as_ref() else {
+            continue;
+        };
+        for (subject_index, subject) in path[..issuer_index].iter().enumerate() {
+            let self_issued = subject.constraints.subject_der == subject.constraints.issuer_der;
+            if subject_index != 0 && self_issued {
+                continue;
+            }
+            enforce_name_constraints(&subject.constraints.names, constraints)?;
+        }
+    }
+    Ok(())
+}
+
+fn signature_compatible_with_issuer(
+    signature: CertificateSignatureAlg,
+    issuer_key: CertificatePublicKey,
+) -> bool {
+    matches!(
+        (signature, issuer_key),
+        (
+            CertificateSignatureAlg::EcdsaSha256 | CertificateSignatureAlg::EcdsaSha384,
+            CertificatePublicKey::EcP256 | CertificatePublicKey::EcP384
+        ) | (
+            CertificateSignatureAlg::Ed25519,
+            CertificatePublicKey::Ed25519
+        ) | (
+            CertificateSignatureAlg::RsaPkcs1Sha256
+                | CertificateSignatureAlg::RsaPkcs1Sha384
+                | CertificateSignatureAlg::RsaPkcs1Sha512,
+            CertificatePublicKey::Rsa
+        )
+    )
+}
+
+#[cfg(test)]
+mod strict_constraint_unit_tests {
+    use super::*;
+    use der::asn1::{Ia5String, OctetString};
+
+    fn subtree(base: GeneralName) -> GeneralSubtree {
+        GeneralSubtree {
+            base,
+            minimum: 0,
+            maximum: None,
+        }
+    }
+
+    fn permitted(subtrees: Vec<GeneralSubtree>) -> NameConstraints {
+        NameConstraints {
+            permitted_subtrees: Some(subtrees),
+            excluded_subtrees: None,
+        }
+    }
+
+    fn dns_subtree(value: &str) -> GeneralSubtree {
+        subtree(GeneralName::DnsName(Ia5String::new(value).unwrap()))
+    }
+
+    #[test]
+    fn unsupported_forms_and_distances_are_rejected_before_path_use() {
+        let email = subtree(GeneralName::Rfc822Name(
+            Ia5String::new("user@example.com").unwrap(),
+        ));
+        assert_eq!(
+            parse_name_constraints(permitted(vec![email])),
+            Err("unsupported name constraint form")
+        );
+
+        let directory = subtree(GeneralName::DirectoryName(Default::default()));
+        assert_eq!(
+            parse_name_constraints(permitted(vec![directory])),
+            Err("unsupported name constraint form")
+        );
+
+        let mut distance = dns_subtree("allowed.example");
+        distance.minimum = 1;
+        assert_eq!(
+            parse_name_constraints(permitted(vec![distance])),
+            Err("unsupported name constraint distance")
+        );
+        let mut maximum = dns_subtree("allowed.example");
+        maximum.maximum = Some(1);
+        assert_eq!(
+            parse_name_constraints(permitted(vec![maximum])),
+            Err("unsupported name constraint distance")
+        );
+    }
+
+    #[test]
+    fn malformed_and_unbounded_constraints_are_rejected() {
+        assert_eq!(
+            parse_name_constraints(NameConstraints {
+                permitted_subtrees: None,
+                excluded_subtrees: None,
+            }),
+            Err("NameConstraints is empty")
+        );
+        assert_eq!(
+            parse_name_constraints(NameConstraints {
+                permitted_subtrees: Some(Vec::new()),
+                excluded_subtrees: Some(vec![dns_subtree("blocked.example")]),
+            }),
+            Err("NameConstraints contains an empty GeneralSubtrees")
+        );
+        assert_eq!(
+            parse_name_constraints(NameConstraints {
+                permitted_subtrees: Some(vec![dns_subtree("allowed.example")]),
+                excluded_subtrees: Some(Vec::new()),
+            }),
+            Err("NameConstraints contains an empty GeneralSubtrees")
+        );
+        assert_eq!(
+            parse_name_constraints(permitted(vec![dns_subtree(".allowed.example")])),
+            Err("malformed DNS name constraint")
+        );
+        assert_eq!(
+            parse_name_constraints(permitted(vec![subtree(
+                GeneralName::UniformResourceIdentifier(
+                    Ia5String::new("https://allowed.example").unwrap(),
+                ),
+            )])),
+            Err("malformed URI name constraint")
+        );
+        assert_eq!(
+            parse_name_constraints(permitted(vec![subtree(GeneralName::IpAddress(
+                OctetString::new([10, 0, 0, 0, 255, 0, 255, 0]).unwrap(),
+            ))])),
+            Err("malformed IP name constraint")
+        );
+        assert_eq!(
+            parse_name_constraints(permitted(vec![dns_subtree("allowed.example"); 65])),
+            Err("name constraints resource budget exceeded")
+        );
+    }
+
+    #[test]
+    fn uri_host_and_ip_matching_are_canonical_and_family_aware() {
+        assert_eq!(
+            constrained_uri_host("https://user@Issuer.Service.Example:8443/path"),
+            Some("issuer.service.example".into())
+        );
+        assert_eq!(constrained_uri_host("urn:example:wallet"), None);
+        assert_eq!(constrained_uri_host("https://192.0.2.1/path"), None);
+        assert_eq!(constrained_uri_host("https://[2001:db8::1]/path"), None);
+        assert!(uri_constraint_matches(
+            "issuer.service.example",
+            ".service.example"
+        ));
+        assert!(!uri_constraint_matches(
+            "service.example",
+            ".service.example"
+        ));
+
+        let address = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mask = [
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let mut inside = address;
+        inside[15] = 1;
+        let outside = [0x20, 0x01, 0x0d, 0xb9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        assert!(ip_constraint_matches(&inside, &address, &mask));
+        assert!(!ip_constraint_matches(&outside, &address, &mask));
+    }
+
+    fn synthetic_cert(
+        subject: &[u8],
+        issuer: &[u8],
+        dns: &[&str],
+        name_constraints: Option<ParsedNameConstraints>,
+    ) -> ParsedCert {
+        ParsedCert {
+            tbs_der: subject.to_vec(),
+            signature: vec![1],
+            sig_alg: CertificateSignatureAlg::EcdsaSha256,
+            spki_der: vec![1],
+            public_key_raw: vec![0x04; 65],
+            subject: String::new(),
+            issuer: String::new(),
+            uri_sans: Vec::new(),
+            not_before: 0,
+            not_after: i64::MAX,
+            is_ca: name_constraints.is_some(),
+            eku: Vec::new(),
+            policies: Vec::new(),
+            constraints: CertificateConstraints {
+                subject_der: subject.to_vec(),
+                issuer_der: issuer.to_vec(),
+                names: CertificateNames {
+                    dns: dns.iter().map(|name| (*name).to_owned()).collect(),
+                    ..CertificateNames::default()
+                },
+                name_constraints,
+                ..CertificateConstraints::default()
+            },
+        }
+    }
+
+    #[test]
+    fn self_issued_non_target_certificates_are_exempt_but_target_is_not() {
+        let constraints = ParsedNameConstraints {
+            permitted: vec![SupportedNameConstraint::Dns("allowed.example".into())],
+            excluded: Vec::new(),
+        };
+        let leaf = synthetic_cert(b"leaf", b"rollover", &["wallet.allowed.example"], None);
+        let rollover = synthetic_cert(b"rollover", b"rollover", &["outside.example"], None);
+        let anchor = synthetic_cert(b"anchor", b"anchor", &[], Some(constraints.clone()));
+        validate_name_constraints(&[leaf, rollover, anchor])
+            .expect("the non-target self-issued rollover is exempt");
+
+        let self_issued_target = synthetic_cert(b"leaf", b"leaf", &["outside.example"], None);
+        let anchor = synthetic_cert(b"anchor", b"anchor", &[], Some(constraints));
+        assert_eq!(
+            validate_name_constraints(&[self_issued_target, anchor]),
+            Err(X509Error::PathInvalid(
+                "name constraints do not permit certificate name"
+            ))
+        );
+    }
+
+    #[test]
+    fn signature_family_must_match_the_issuer_spki_not_the_subject_spki() {
+        assert!(signature_compatible_with_issuer(
+            CertificateSignatureAlg::EcdsaSha384,
+            CertificatePublicKey::EcP256
+        ));
+        assert!(signature_compatible_with_issuer(
+            CertificateSignatureAlg::RsaPkcs1Sha384,
+            CertificatePublicKey::Rsa
+        ));
+        assert!(!signature_compatible_with_issuer(
+            CertificateSignatureAlg::RsaPkcs1Sha384,
+            CertificatePublicKey::EcP384
+        ));
+        assert!(!signature_compatible_with_issuer(
+            CertificateSignatureAlg::EcdsaSha256,
+            CertificatePublicKey::Rsa
+        ));
+    }
+}
+
 fn validate_built_path(
     path: &[ParsedCert],
     now: i64,
@@ -535,6 +1279,21 @@ fn validate_built_path(
                 "unsupported critical certificate extension",
             ));
         }
+        if let Some(error) = certificate.constraints.name_constraints_error {
+            return Err(X509Error::PathInvalid(error));
+        }
+        let public_key_algorithm =
+            certificate
+                .constraints
+                .public_key_algorithm
+                .ok_or(X509Error::PathInvalid(
+                    "certificate public key is unsupported",
+                ))?;
+        verifier
+            .validate_certificate_public_key(public_key_algorithm, &certificate.public_key_raw)
+            .map_err(|_| {
+                X509Error::PathInvalid("certificate subject public key validation failed")
+            })?;
         if now < certificate.not_before || now > certificate.not_after {
             return Err(X509Error::PathInvalid(
                 "certificate expired or not yet valid",
@@ -588,6 +1347,8 @@ fn validate_built_path(
         }
     }
 
+    validate_name_constraints(path)?;
+
     for pair in path.windows(2) {
         let child = &pair[0];
         let parent = &pair[1];
@@ -597,8 +1358,17 @@ fn validate_built_path(
         if !authority_key_matches(child, parent) {
             return Err(X509Error::PathInvalid("authority key identifier mismatch"));
         }
+        let issuer_key = parent
+            .constraints
+            .public_key_algorithm
+            .ok_or(X509Error::PathInvalid("issuer public key is unsupported"))?;
+        if !signature_compatible_with_issuer(child.sig_alg, issuer_key) {
+            return Err(X509Error::PathInvalid(
+                "certificate signature algorithm is incompatible with issuer public key",
+            ));
+        }
         verifier
-            .verify(
+            .verify_certificate(
                 child.sig_alg,
                 &parent.public_key_raw,
                 &child.tbs_der,
@@ -610,10 +1380,12 @@ fn validate_built_path(
 }
 
 /// Step 1 — build one deterministic, bounded leaf-to-anchor path from an unordered certificate
-/// bundle, then validate the first strict RFC 5280 slice: time, signatures, AKI/SKI issuer
-/// selection, unknown critical extensions, BasicConstraints/pathLen and role-specific KeyUsage.
-/// Duplicate bundles, cycles and multiple complete paths fail closed. Name constraints, policy
-/// processing, algorithm profiles and EUDI service profiles remain explicit follow-up work.
+/// bundle, then validate the current bounded RFC 5280 slice: time, profiled signature/SPKI
+/// algorithms and strength, AKI/SKI issuer selection, supported name constraints, unknown critical
+/// extensions, BasicConstraints/pathLen and role-specific KeyUsage. Duplicate bundles, cycles and
+/// multiple complete paths fail closed. Unsupported name-constraint forms/distances also fail
+/// closed. Certificate policy-tree processing, broader name forms/algorithms and final EUDI
+/// service profiles remain explicit follow-up work.
 /// The independently configured `trust_anchors` are the only trust authority: a peer bundle that
 /// redundantly supplies one of those roots is rejected instead of treating peer material as trust.
 ///
