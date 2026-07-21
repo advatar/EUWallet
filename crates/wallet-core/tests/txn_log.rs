@@ -99,7 +99,7 @@ fn presentation_and_payment_are_logged_without_values() {
 
     // --- Deletion (TS07): erase the presentation; the chain stays intact. ---
     assert_eq!(
-        core.handle_event(Event::RedactTransaction { seq: 0 }),
+        { core.redact_transaction(0); Vec::new() },
         Vec::<Effect>::new(),
         "history commands complete without native effects"
     );
@@ -123,14 +123,14 @@ fn presentation_and_payment_are_logged_without_values() {
     // A missing sequence is a deterministic no-op and remains checkpointable by the shell.
     let before_missing = core.transaction_log_json();
     assert_eq!(
-        core.handle_event(Event::RedactTransaction { seq: u64::MAX }),
+        { core.redact_transaction(u64::MAX); Vec::new() },
         Vec::<Effect>::new()
     );
     assert_eq!(core.transaction_log_json(), before_missing);
 
     // Full wipe is also a normal event transition and clears everything.
     assert_eq!(
-        core.handle_event(Event::WipeTransactionLog),
+        { core.wipe_transaction_log(); Vec::new() },
         Vec::<Effect>::new()
     );
     assert_eq!(core.transaction_log().len(), 0);

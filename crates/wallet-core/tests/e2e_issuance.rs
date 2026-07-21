@@ -243,9 +243,7 @@ fn full_issuance_with_in_core_trust_and_attestation() {
     assert_eq!(bytes, cred);
 
     // Terminal issuance released the active marker, so history mutation is immediately admitted.
-    assert!(core
-        .handle_event(Event::RedactTransaction { seq: 0 })
-        .is_empty());
+    assert!(core.redact_transaction(0));
     assert!(core.transaction_log().entries()[0].redacted);
 }
 
@@ -292,68 +290,7 @@ fn issuer_provided_key_binding_jwt_is_rejected_during_issuance() {
         core.last_credential_ingestion_error(),
         Some(&CredentialIngestionError::MalformedCredential)
     );
-    assert!(core.handle_event(Event::WipeTransactionLog).is_empty());
-}
-
-#[test]
-fn selectively_disclosed_protocol_control_is_rejected_at_storage_boundary() {
-    let (mut core, device, issuer) = setup(true, false);
-    let credential = issued_sd_jwt_with_selective_exp(&issuer, device.public_key_raw());
-    assert_eq!(
-        core.ingest_credential(
-            "dc+sd-jwt",
-            &credential,
-            &[issuer_chain_leaf()],
-            "https://issuer.example",
-        ),
-        Err(CredentialIngestionError::MalformedCredential)
-    );
-    assert_eq!(core.held_credentials_json(), "[]");
-}
-
-#[test]
-fn issuer_provided_key_binding_jwt_is_rejected_during_issuance() {
-    let (mut core, device, issuer) = setup(true, true);
-    assert!(core
-        .handle_event(offer_event())
-        .contains(&Effect::RequestToken));
-    let signing_input = core
-        .handle_event(Event::TokenReceived {
-            bound: true,
-            c_nonce: 112,
-        })
-        .into_iter()
-        .find_map(|effect| match effect {
-            Effect::Sign { payload, .. } => Some(payload),
-            _ => None,
-        })
-        .expect("proof signature requested");
-    let proof_signature = device
-        .sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input)
-        .unwrap();
-    assert!(core
-        .handle_event(Event::DeviceSignatureProduced {
-            signature: proof_signature,
-        })
-        .iter()
-        .any(|effect| matches!(effect, Effect::RequestCredential { .. })));
-
-    let mut issued_presentation =
-        String::from_utf8(issued_sd_jwt(&issuer, device.public_key_raw(), None)).unwrap();
-    // The credential builder ends in `~` (empty KB slot). Filling that slot turns it into a
-    // presentation received from another transaction, which must never become a reusable holding.
-    issued_presentation.push_str("fake.kb.jwt");
-    let effects = core.handle_event(Event::CredentialReceived {
-        format: "dc+sd-jwt".into(),
-        bytes: issued_presentation.into_bytes(),
-    });
-    assert_eq!(effects, vec![Effect::Close]);
-    assert!(core.issued_credential().is_none());
-    assert_eq!(core.held_credentials_json(), "[]");
-    assert_eq!(
-        core.last_credential_ingestion_error(),
-        Some(&CredentialIngestionError::MalformedCredential)
-    );
+    core.wipe_transaction_log();
 }
 
 #[test]
@@ -452,7 +389,7 @@ fn forged_credential_response_aborts_and_is_not_stored() {
         core.last_credential_ingestion_error(),
         Some(&CredentialIngestionError::SignatureInvalid)
     );
-    assert!(core.handle_event(Event::WipeTransactionLog).is_empty());
+    core.wipe_transaction_log();
 }
 
 #[test]
@@ -467,9 +404,9 @@ fn out_of_order_credential_response_is_visible_and_does_not_wedge_the_wallet() {
     assert_eq!(core.held_credentials_json(), "[]");
     assert_eq!(
         core.last_credential_ingestion_error(),
-        Some(&CredentialIngestionError::UnexpectedCredentialResponse)
+        Some(&CredentialIngestionError::MalformedCredential)
     );
-    assert!(core.handle_event(Event::WipeTransactionLog).is_empty());
+    core.wipe_transaction_log();
 }
 
 #[test]

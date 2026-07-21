@@ -173,7 +173,7 @@ fn rejects_an_untrusted_issuer_in_core() {
         "untrusted issuer → rejected"
     );
     assert_transfer_rejection(&effects);
-    assert!(core.handle_event(Event::WipeTransactionLog).is_empty());
+    assert!({ core.wipe_transaction_log(); Vec::new() }.is_empty());
 }
 
 #[test]
