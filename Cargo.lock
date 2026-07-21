@@ -682,6 +682,7 @@ dependencies = [
  "mdoc",
  "sdjwt",
  "serde_json",
+ "sha2",
  "x509",
 ]
 

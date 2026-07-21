@@ -49,6 +49,12 @@ supporting artifact (`cd LandingPage && bun install && bun run dev`). It reads f
 
 ## Quick verify (what already works)
 
+The `oid4vci::binding` module supports the VCIssuer ARF cross-attestation contract: it parses the
+bound/unbound profile policy, produces the exact PID-key signing input over the issuer nonce and
+new holder key, assembles the PID VP credential request, and fails closed if the issued credential's
+`cryptographically_bound_to` claim does not match the selected profile. Native shells keep PID and
+new-credential private keys behind their existing signing effects.
+
 ```bash
 # Rust core: 21 crates compile; 198 workspace tests pass with real aws-lc-rs crypto
 cd euwallet && cargo test --workspace
