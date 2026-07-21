@@ -138,6 +138,11 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
+- [x] [#26](https://github.com/advatar/EUWallet/issues/26): restore the typed durable-checkpoint
+      UniFFI boundary dropped during consolidation, enforce its required Swift/C/archive symbols,
+      and prove a clean regenerated XCFramework and Xcode build. The regenerated arm64 device and
+      Simulator slices pass explicit symbol verification; the app builds cleanly and both on-device
+      simulator tests pass under Xcode 26.5.
 - [ ] Separate production and demo iOS targets; add encrypted persistence and lifecycle flows.
 - [ ] Build the Android client with equivalent StrongBox/KeyMint security behavior.
 - [ ] Implement German eID/eAT onboarding, live PID issuance, RP registration, trust, WIA/WUA,
