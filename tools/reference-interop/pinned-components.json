@@ -1,0 +1,19 @@
+{
+  "reference_organization": "https://github.com/eu-digital-identity-wallet",
+  "documentation": "https://docs.eudi.dev/",
+  "conformance_framework": "https://conformance.eudi.dev/",
+  "repositories": {
+    "architecture_reference_framework": {
+      "repository": "eu-digital-identity-wallet/eudi-doc-architecture-and-reference-framework",
+      "commit": "PIN_REQUIRED_BEFORE_RELEASE"
+    },
+    "wallet_provider": {
+      "repository": "eu-digital-identity-wallet/eudi-srv-wallet-provider",
+      "commit": "PIN_REQUIRED_BEFORE_RELEASE"
+    },
+    "openid4vp_kotlin": {
+      "repository": "eu-digital-identity-wallet/eudi-lib-jvm-openid4vp-kt",
+      "commit": "PIN_REQUIRED_BEFORE_RELEASE"
+    }
+  }
+}

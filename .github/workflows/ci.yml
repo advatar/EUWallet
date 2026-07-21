@@ -8,6 +8,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -153,6 +154,25 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+
+  reference-interop:
+    name: EU reference-wallet interoperability probe
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe configured reference issuer and verifier
+        env:
+          REFERENCE_ISSUER: ${{ vars.REFERENCE_ISSUER }}
+          REFERENCE_VERIFIER: ${{ vars.REFERENCE_VERIFIER }}
+          REFERENCE_INTEROP_OUT: ${{ runner.temp }}/reference-interop
+        run: tools/reference-interop/run.sh
+      - name: Upload interoperability evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-wallet-interop-${{ github.run_id }}
+          path: ${{ runner.temp }}/reference-interop/report.json
+          if-no-files-found: error
 
   traceability:
     name: HLR traceability import
