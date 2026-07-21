@@ -21,3 +21,6 @@ fuzz/artifacts
 tools/**/.venv
 __pycache__/
 /mutants.out/
+
+# Playwright interop UI-test deps (not committed)
+tools/interop/pid-uitest/node_modules/
