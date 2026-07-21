@@ -36,6 +36,13 @@ Results must be signed or checksummed and retained with the release SBOM. Never
 commit live credentials or user data. A failed or partial run remains evidence
 of an open gate; it must not be converted into a pass by editing the report.
 
+The required profile scope is machine-readable in
+`tools/oidf/profile-matrix.json`. Run
+`python3 tools/oidf/validate_evidence.py --release <release>` from the repository
+root as the release gate. The validator fails closed until the suite version is
+pinned and an official, HTTPS-linked PASS bundle matches the shipped commit and
+profile-matrix checksum.
+
 ## Renewal and change control
 
 Re-run before launch and whenever a normative profile, conformance-suite

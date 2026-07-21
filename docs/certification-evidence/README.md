@@ -23,6 +23,7 @@ module reaches its definition-of-done (plan Section 12).
 | `openid-self-certification.md` | OpenID Foundation profile matrix, evidence retention, submission and renewal gate | OIDF self-certification |
 | `conformance-run-2026-07-21.md` | Reproducible local EU/EUDI test run and explicit external blockers | engineering evidence |
 | `hybrid-pq-boundary.md` | ARF-preserving hybrid post-quantum design boundary and approval gates | crypto/certification |
+| `../tools/oidf/profile-matrix.json` + `../tools/oidf/validate_evidence.py` | Machine-readable OIDF scope and fail-closed release evidence gate | OIDF self-certification |
 | `payment-sca.md` | PSD2 RTS Art. 4–5 dynamic-linking traceability | 2018/389 |
 
 ## External conformance suites (where to run real interop/certification tests)

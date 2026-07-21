@@ -1,0 +1,25 @@
+{
+  "suite": "OpenID Foundation Conformance Suite",
+  "suite_version": "PIN_REQUIRED_BEFORE_SUBMISSION",
+  "profiles": [
+    "OpenID4VP-1.0",
+    "OpenID4VP-1.0-HAIP-1.0-SD-JWT-VC",
+    "OpenID4VP-1.0-HAIP-1.0-ISO-mdoc",
+    "OpenID4VCI-1.0",
+    "OpenID4VCI-1.0-HAIP-1.0-SD-JWT-VC",
+    "OpenID4VCI-1.0-HAIP-1.0-ISO-mdoc"
+  ],
+  "required_evidence": [
+    "result.json",
+    "result.json.sha256",
+    "submission.txt",
+    "configuration.redacted.json"
+  ],
+  "renew_on": [
+    "normative profile change",
+    "conformance suite change",
+    "OpenID wire behavior change",
+    "credential format or algorithm change",
+    "platform shell boundary change"
+  ]
+}
