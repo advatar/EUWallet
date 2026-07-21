@@ -140,9 +140,7 @@ fn accepts_a_trusted_peer_bound_transfer_in_core() {
     // A privacy-preserving Transfer entry is logged.
     assert!(core.transaction_report_json().contains(r#""transfers":1"#));
     assert_eq!(effects, vec![Effect::Close]);
-    assert!(core
-        .handle_event(Event::RedactTransaction { seq: 0 })
-        .is_empty());
+    assert!(core.redact_transaction(0));
 }
 
 #[test]
@@ -173,7 +171,7 @@ fn rejects_an_untrusted_issuer_in_core() {
         "untrusted issuer → rejected"
     );
     assert_transfer_rejection(&effects);
-    assert!({ core.wipe_transaction_log(); Vec::new() }.is_empty());
+    core.wipe_transaction_log();
 }
 
 #[test]

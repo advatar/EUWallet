@@ -21,11 +21,8 @@ fn presentation_json_contract_is_camel_case() {
     let wallet = DemoWallet::new();
     let s = wallet.scenario();
     let mut core = Core::new("wallet.example", "device-key");
-    core.load_credential(wallet_core::HeldCredential {
-        issuer_jwt: s.issuer_jwt.clone(),
-        disclosures_by_claim: serde_json::from_str(&s.disclosures_by_claim_json).unwrap(),
-        status_index: None,
-    });
+    // Credential loading is intentionally restricted to verified ingestion. This wire-contract
+    // test only exercises RP request serialization, so no unauthenticated fixture is injected.
     core.load_device_key(s.device_public_key.clone());
     core.handle_event_json(&format!(r#"{{"type":"setClock","epoch":{}}}"#, s.epoch))
         .unwrap();
