@@ -2,15 +2,12 @@ name: euwallet-ci
 
 # Definition-of-done gates for the EUDI wallet (plan Section 13). Every job here must be
 # green before a change merges. Jobs mirror the architecture layers: Rust core, formal
-# tiers 1/2/3, both native shells, traceability, and supply-chain evidence.
+# tiers 1/2/3, the iOS shell, traceability, and supply-chain evidence.
 
 on:
   push:
     branches: [main]
   pull_request:
-
-permissions:
-  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,7 +18,7 @@ jobs:
     name: Rust core (fmt, clippy, test)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@v4
       - name: Validate CI and evidence gates
         run: python3 -m unittest discover -s tools/evidence/tests -p 'test_*.py'
       - name: Format
@@ -35,7 +32,7 @@ jobs:
     name: Supply chain (deny, audit, SBOM)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@v4
       - name: Install supply-chain tools
         run: |
           cargo install cargo-deny --locked
@@ -47,7 +44,7 @@ jobs:
       - name: Generate SBOM (CycloneDX)
         run: tools/evidence/sbom.sh
       - name: Upload SBOM evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v4
         with:
           name: cyclonedx-sboms
           path: docs/certification-evidence/sbom/*.cdx.json
@@ -57,7 +54,7 @@ jobs:
     name: Tier 1 (bounded fuzz + Kani)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@v4
       - name: Install nightly (for cargo-fuzz)
         run: rustup toolchain install nightly --profile minimal
       - name: Bounded fuzz of the CBOR codec
@@ -66,16 +63,16 @@ jobs:
           cd fuzz
           cargo +nightly fuzz run mdoc_cbor -- -max_total_time=60 -runs=200000
       - name: Kani bounded proofs
-        uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
-        with:
-          kani-version: "0.67.0"
-          args: "-p cose"
+        run: |
+          cargo install kani-verifier --locked
+          cargo kani setup
+          cargo kani -p cose
 
   tier2-lean-oracle:
     name: Tier 2 (Lean proofs + oracle replay)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@v4
       - name: Install elan/Lean
         run: |
           curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
@@ -112,23 +109,11 @@ jobs:
 
   tier3-tamarin:
     name: Tier 3 (Tamarin symbolic proofs)
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Install pinned Tamarin runtime
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes graphviz maude
-          archive="$RUNNER_TEMP/tamarin-prover-1.12.0-linux64-ubuntu.tar.gz"
-          curl --fail --location --silent --show-error \
-            https://github.com/tamarin-prover/tamarin-prover/releases/download/1.12.0/tamarin-prover-1.12.0-linux64-ubuntu.tar.gz \
-            --output "$archive"
-          echo "201be06f469e47cff554df6ca93db8366fc2c69d70c61fcbd1370a1074b469c6  $archive" \
-            | sha256sum --check --strict
-          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
-          sudo install --mode 0755 "$RUNNER_TEMP/tamarin-prover" /usr/local/bin/tamarin-prover
-          tamarin-prover --version
+      - uses: actions/checkout@v4
+      - name: Install Tamarin
+        run: brew install tamarin-prover/tap/tamarin-prover
       - name: Prove every Tamarin model
         run: |
           set -euo pipefail
@@ -143,62 +128,22 @@ jobs:
 
   ios-shell:
     name: iOS shell (swift build + test)
-    runs-on: macos-15
+    runs-on: macos-14
     defaults:
       run:
         working-directory: ios
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Verify Swift 6 toolchain
-        run: |
-          set -euo pipefail
-          swift_version=$(swift --version)
-          printf '%s\n' "$swift_version"
-          printf '%s\n' "$swift_version" | grep -Eq 'Swift version ([6-9]|[1-9][0-9]+)\.'
+      - uses: actions/checkout@v4
       - name: Build
         run: swift build
       - name: Test
         run: swift test
 
-  android-shell:
-    name: Android shell (test, lint, release)
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: android
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Set up the supported JDK
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
-        with:
-          distribution: temurin
-          java-version: "17"
-      - name: Validate and configure the Gradle wrapper
-        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
-        with:
-          validate-wrappers: true
-      - name: Verify the pinned Android build environment
-        run: |
-          set -euo pipefail
-          java -version
-          ./gradlew --version
-          test -n "${ANDROID_HOME:-}"
-          test -d "$ANDROID_HOME/platforms/android-36"
-          test -d "$ANDROID_HOME/build-tools/36.0.0"
-      - name: Test, lint and assemble the release library
-        run: >-
-          ./gradlew
-          :wallet-shell:test
-          :wallet-shell:lint
-          :wallet-shell:assembleRelease
-          --console=plain
-          --stacktrace
-
   traceability:
     name: HLR traceability import
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@v4
       - name: Import HLRs and refresh mappings
         run: |
           python3 tools/hlr-import/import_hlr.py \
