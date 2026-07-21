@@ -1,6 +1,6 @@
-//! Bounded second-slice vectors for issue #11: RFC 5280 DNS/URI/IP name constraints and an
-//! explicit certificate-only signature/SPKI policy. These do not claim policy-tree or final EUDI
-//! service-profile conformance.
+//! Bounded vectors for issues #11 and #21: RFC 5280 DNS/URI/IP/email/directory name constraints,
+//! canonical DN handling and an explicit certificate-only signature/SPKI policy. These do not
+//! claim policy-tree or final EUDI service-profile conformance.
 
 use base64ct::{Base64, Encoding};
 use crypto_backend::AwsLc;
@@ -28,6 +28,13 @@ vector!(INTERSECTION_INTERMEDIATE, "intersection-intermediate");
 vector!(LEAF_TEAM_ALLOWED, "leaf-team-allowed");
 vector!(LEAF_TEAM_OUTSIDE, "leaf-team-outside");
 vector!(EMAIL_CONSTRAINT_ROOT, "email-constraint-root");
+vector!(EMAIL_ALLOWED_LEAF, "email-allowed-leaf");
+vector!(EMAIL_OUTSIDE_LEAF, "email-outside-leaf");
+vector!(EMAIL_EXCLUDED_LEAF, "email-excluded-leaf");
+vector!(DIRECTORY_CONSTRAINT_ROOT, "directory-constraint-root");
+vector!(DIRECTORY_ALLOWED_LEAF, "directory-allowed-leaf");
+vector!(DIRECTORY_OUTSIDE_LEAF, "directory-outside-leaf");
+vector!(DIRECTORY_EXCLUDED_LEAF, "directory-excluded-leaf");
 vector!(NONCRITICAL_CONSTRAINT_ROOT, "noncritical-constraint-root");
 vector!(ILLEGAL_CONSTRAINT_LEAF, "illegal-constraint-leaf");
 vector!(PLAIN_LEAF, "plain-leaf");
@@ -148,12 +155,14 @@ fn permitted_subtrees_from_multiple_cas_intersect() {
 }
 
 #[test]
-fn unsupported_noncritical_and_end_entity_constraints_fail_closed() {
-    assert_path_error(
-        PLAIN_LEAF,
-        EMAIL_CONSTRAINT_ROOT,
-        "unsupported name constraint form",
-    );
+fn email_constraints_are_supported_while_noncritical_and_end_entity_constraints_fail_closed() {
+    validate_path(
+        &[der(PLAIN_LEAF)],
+        &[anchor(EMAIL_CONSTRAINT_ROOT)],
+        NOW,
+        &AwsLc,
+    )
+    .expect("a permitted email subtree does not constrain a certificate without email identities");
     assert_path_error(
         NONCRITICAL_LEAF,
         NONCRITICAL_CONSTRAINT_ROOT,
@@ -163,6 +172,48 @@ fn unsupported_noncritical_and_end_entity_constraints_fail_closed() {
         ILLEGAL_CONSTRAINT_LEAF,
         CONSTRAINED_ROOT,
         "NameConstraints only permitted in CA certificates",
+    );
+}
+
+#[test]
+fn rfc822_name_permitted_and_excluded_subtrees_are_enforced() {
+    validate_path(
+        &[der(EMAIL_ALLOWED_LEAF)],
+        &[anchor(EMAIL_CONSTRAINT_ROOT)],
+        NOW,
+        &AwsLc,
+    )
+    .expect("a mailbox below the permitted domain must pass");
+    assert_path_error(
+        EMAIL_OUTSIDE_LEAF,
+        EMAIL_CONSTRAINT_ROOT,
+        "name constraints do not permit certificate name",
+    );
+    assert_path_error(
+        EMAIL_EXCLUDED_LEAF,
+        EMAIL_CONSTRAINT_ROOT,
+        "name constraints exclude certificate name",
+    );
+}
+
+#[test]
+fn directory_name_permitted_and_excluded_subtrees_are_enforced() {
+    validate_path(
+        &[der(DIRECTORY_ALLOWED_LEAF)],
+        &[anchor(DIRECTORY_CONSTRAINT_ROOT)],
+        NOW,
+        &AwsLc,
+    )
+    .expect("a subject below the permitted DN subtree must pass");
+    assert_path_error(
+        DIRECTORY_OUTSIDE_LEAF,
+        DIRECTORY_CONSTRAINT_ROOT,
+        "name constraints do not permit certificate name",
+    );
+    assert_path_error(
+        DIRECTORY_EXCLUDED_LEAF,
+        DIRECTORY_CONSTRAINT_ROOT,
+        "name constraints exclude certificate name",
     );
 }
 

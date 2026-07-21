@@ -66,6 +66,9 @@ operational solution needed to enter those processes.
           support strong RSA PKCS#1 certificate verification without enabling RSA in JOSE/COSE.
   - [ ] Complete the residual RFC 5280 surface: canonical DN chaining, `directoryName` and
         `rfc822Name` constraints, policy tree/mappings/constraints/`anyPolicy`, and RSASSA-PSS.
+    - [x] [#21](https://github.com/advatar/EUWallet/issues/21): implement bounded canonical DN
+          chaining plus `directoryName` and `rfc822Name` constraint processing with positive and
+          adversarial vectors; policy-tree processing and RSASSA-PSS remain separate work.
   - [ ] Freeze and enforce the normative algorithm and certificate profiles for EUDI PID,
         (Q)EAA/mdoc, RP, status and WUA/WIA services.
   - [ ] Prove those final profiles against official EUDI/PKITS suites and production certificate
