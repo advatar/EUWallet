@@ -185,6 +185,10 @@ operational solution needed to enter those processes.
         validation with PID Rulebook 1.7, including explicit opt-out semantics, bounded JPEG
         validation, formal policy coverage and native adapter verification; all required gates
         passed in [CI run 29919838280](https://github.com/advatar/EUWallet/actions/runs/29919838280).
+  - [x] [#39](https://github.com/advatar/EUWallet/issues/39): restored Android debug and release
+        compilation, repaired the shared canonical ingress URL-validation contract, and added a
+        permanent unit-test, lint, debug and release CI gate; all required gates passed in
+        [CI run 29922532177](https://github.com/advatar/EUWallet/actions/runs/29922532177).
 - [ ] Obtain the applicable German authority, CAB/BSI certification and Commission listing.
 
 ## Completed
