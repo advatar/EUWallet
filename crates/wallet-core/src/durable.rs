@@ -1628,6 +1628,7 @@ mod tests {
                 valid_until,
                 anchors,
                 relying_parties: Vec::new(),
+                credential_issuers: Vec::new(),
             })
             .unwrap();
     }
@@ -2102,6 +2103,7 @@ mod tests {
                 valid_until: i64::MAX,
                 anchors: Vec::new(),
                 relying_parties: Vec::new(),
+                credential_issuers: Vec::new(),
             })
             .unwrap();
         assert!(matches!(

@@ -59,6 +59,7 @@ const MAX_RP_REGISTRATIONS: usize = 1_024;
 const MAX_RP_TEXT_BYTES: usize = 256;
 const MAX_RP_CLAIMS: usize = 64;
 const MAX_RP_REDIRECT_URIS: usize = 16;
+const MAX_ISSUER_REGISTRATIONS: usize = 1_024;
 
 /// A reviewed trust mark carried by the signed registration feed. Keeping this vocabulary closed
 /// prevents arbitrary operator text from becoming a security badge in the wallet UI.
@@ -86,6 +87,14 @@ pub struct RelyingPartyRegistration {
     pub redirect_uris: Vec<String>,
 }
 
+/// Consumer display metadata for a credential issuer, authenticated by the signed trust feed and
+/// keyed by the exact issuer identifier proven by certificate-path validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CredentialIssuerRegistration {
+    pub issuer_id: String,
+    pub display_name: String,
+}
+
 /// A verified trust list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustList {
@@ -95,6 +104,7 @@ pub struct TrustList {
     pub valid_until: i64,
     pub anchors: Vec<TrustAnchor>,
     pub relying_parties: Vec<RelyingPartyRegistration>,
+    pub credential_issuers: Vec<CredentialIssuerRegistration>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,12 +278,48 @@ pub fn parse_and_verify(
         });
     }
 
+    let issuer_registrations: &[Json] = match payload.get("credential_issuers") {
+        None => &[],
+        Some(value) => value.as_array().ok_or(TrustError::Malformed)?.as_slice(),
+    };
+    if issuer_registrations.len() > MAX_ISSUER_REGISTRATIONS {
+        return Err(TrustError::Malformed);
+    }
+    let mut credential_issuers = Vec::with_capacity(issuer_registrations.len());
+    for registration in issuer_registrations {
+        let bounded = |name: &str| -> Result<String, TrustError> {
+            let value = registration
+                .get(name)
+                .and_then(Json::as_str)
+                .ok_or(TrustError::Malformed)?;
+            if value.is_empty()
+                || value.len() > MAX_RP_TEXT_BYTES
+                || value.chars().any(char::is_control)
+            {
+                return Err(TrustError::Malformed);
+            }
+            Ok(value.to_owned())
+        };
+        let issuer_id = bounded("issuer_id")?;
+        if credential_issuers
+            .iter()
+            .any(|existing: &CredentialIssuerRegistration| existing.issuer_id == issuer_id)
+        {
+            return Err(TrustError::Malformed);
+        }
+        credential_issuers.push(CredentialIssuerRegistration {
+            issuer_id,
+            display_name: bounded("display_name")?,
+        });
+    }
+
     Ok(TrustList {
         sequence_number,
         valid_from,
         valid_until,
         anchors,
         relying_parties,
+        credential_issuers,
     })
 }
 
@@ -365,6 +411,23 @@ impl TrustStore {
                     .relying_parties
                     .iter()
                     .find(|registration| registration.client_id.as_bytes() == client_id.as_bytes())
+            })
+            .flatten()
+    }
+
+    /// Signed issuer display registration for an exact authenticated issuer identifier.
+    pub fn credential_issuer_at(
+        &self,
+        issuer_id: &str,
+        now: i64,
+    ) -> Option<&CredentialIssuerRegistration> {
+        self.is_valid_at(now)
+            .then(|| {
+                self.current
+                    .as_ref()?
+                    .credential_issuers
+                    .iter()
+                    .find(|registration| registration.issuer_id.as_bytes() == issuer_id.as_bytes())
             })
             .flatten()
     }

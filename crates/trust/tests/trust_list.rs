@@ -40,6 +40,10 @@ fn signed_list(operator: &SoftwareSigner, seq: u64, valid_from: i64, valid_until
                 "retention": { "days": 30 },
                 "allowed_claims": ["age_over_18"],
                 "redirect_uris": ["https://rp.example/response"]
+            }],
+            "credential_issuers": [{
+                "issuer_id": "https://issuer.example",
+                "display_name": "Federal identity authority"
             }]
         }),
     )
@@ -121,6 +125,13 @@ fn verifies_and_exposes_granted_anchors() {
     assert_eq!(registration.display_name, "Example Verifier");
     assert_eq!(registration.trust_mark, Some(trust::TrustMark::EudiWallet));
     assert_eq!(registration.retention, trust::RetentionPolicy::Days(30));
+    assert_eq!(
+        store
+            .credential_issuer_at("https://issuer.example", 1_790_000_000)
+            .expect("signed issuer registration")
+            .display_name,
+        "Federal identity authority"
+    );
     assert!(store
         .relying_party_at("rp.example", 4_000_000_001)
         .is_none());
