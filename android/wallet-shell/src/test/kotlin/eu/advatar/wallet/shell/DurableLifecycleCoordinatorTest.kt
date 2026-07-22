@@ -316,7 +316,7 @@ class DurableLifecycleCoordinatorTest {
         lifecycle.bootstrap(environment)
         var renders = 0
         val executor = EffectExecutor(
-            engine = lifecycle,
+            lifecycle = lifecycle,
             signer = WalletSigner { _, _ -> byteArrayOf(1) },
             httpClient = WalletHttpClient { _, _, _ -> HttpResponse(200, byteArrayOf()) },
             storage = WalletStorage { _, _ -> },
@@ -324,7 +324,7 @@ class DurableLifecycleCoordinatorTest {
             renderer = ScreenRenderer { _, _, _ -> renders += 1 },
         )
 
-        assertThrows(WalletShellException.CoreInvocationFailure::class.java) {
+        assertLifecycleError(DurableLifecycleErrorCode.STORAGE_COMMIT_FAILED) {
             executor.send("""{"type":"start"}""")
         }
         assertEquals(0, renders)
