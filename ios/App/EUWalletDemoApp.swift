@@ -164,17 +164,25 @@ struct PresentingContainer: View {
 struct HistoryView: View {
     @ObservedObject var model: WalletModel
     let onBack: () -> Void
+    @State private var entryToRemove: UInt64?
+    @State private var confirmClearAll = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let r = model.report {
-                Text("\(r.total) recorded · \(r.presentations) presentations · \(r.payments) payments · \(r.redacted) erased")
+                Text("\(r.total) activities · \(r.presentations) information shares · \(r.payments) payments")
                     .font(.caption).foregroundStyle(.secondary)
                     .accessibilityLabel("Activity report")
             }
             if model.history.isEmpty {
                 Spacer()
-                Text("No transactions yet. Run a presentation or payment first.")
+                VStack(spacing: 10) {
+                    Image(systemName: "clock").font(.largeTitle).foregroundStyle(.secondary)
+                    Text("No activity yet").font(.headline)
+                    Text("Actions such as adding or sharing a document will appear here.")
+                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
                     .font(.callout).foregroundStyle(.secondary)
                 Spacer()
             } else {
@@ -185,9 +193,9 @@ struct HistoryView: View {
                             .swipeActions(edge: .trailing) {
                                 if !item.redacted {
                                     Button(role: .destructive) {
-                                        model.redact(seq: item.seq)
+                                        entryToRemove = item.seq
                                     } label: {
-                                        Label("Erase", systemImage: "trash")
+                                        Label("Remove", systemImage: "trash")
                                     }
                                 }
                             }
@@ -196,17 +204,17 @@ struct HistoryView: View {
                 .listStyle(.plain)
             }
             HStack(spacing: 12) {
-                Button("Back", action: onBack).buttonStyle(.borderedProminent)
+                Button("Done", action: onBack).buttonStyle(.borderedProminent)
                 Spacer()
                 Button {
                     model.exportPreview = model.makeExport()
                 } label: {
-                    Label("Export", systemImage: "square.and.arrow.up")
+                    Label("Save copy", systemImage: "square.and.arrow.up")
                 }
                 Button(role: .destructive) {
-                    model.wipeLog()
+                    confirmClearAll = true
                 } label: {
-                    Label("Wipe", systemImage: "trash.slash")
+                    Label("Clear all", systemImage: "trash.slash")
                 }
             }
             .font(.subheadline)
@@ -214,6 +222,25 @@ struct HistoryView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .sheet(item: $model.exportPreview) { preview in
             ExportSheet(preview: preview)
+        }
+        .confirmationDialog(
+            "Remove this activity?",
+            isPresented: Binding(get: { entryToRemove != nil }, set: { if !$0 { entryToRemove = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Remove activity", role: .destructive) {
+                if let seq = entryToRemove { model.redact(seq: seq) }
+                entryToRemove = nil
+            }
+            Button("Cancel", role: .cancel) { entryToRemove = nil }
+        } message: {
+            Text("The details will be deleted from this phone.")
+        }
+        .confirmationDialog("Clear all activity?", isPresented: $confirmClearAll, titleVisibility: .visible) {
+            Button("Clear all activity", role: .destructive) { model.wipeLog() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes all activity details from this phone and cannot be undone.")
         }
     }
 }
@@ -237,8 +264,8 @@ struct HistoryRow: View {
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 3) {
                 if item.redacted {
-                    Text("Erased entry").font(.headline).foregroundStyle(.secondary)
-                    Text("Content removed · position #\(item.seq) retained, chain intact")
+                    Text("Removed activity").font(.headline).foregroundStyle(.secondary)
+                    Text("Details deleted")
                         .font(.caption).foregroundStyle(.tertiary)
                 } else {
                     Text(item.counterparty).font(.headline)
@@ -246,13 +273,15 @@ struct HistoryRow: View {
                         Text(String(format: "%.2f %@", Double(p.amountMinor) / 100.0, p.currency))
                             .font(.subheadline)
                     } else if !item.claimPaths.isEmpty {
-                        Text("Shared: \(item.claimPaths.joined(separator: ", "))")
+                        Text("Shared: \(item.claimPaths.map(ConsumerCopy.claimName).joined(separator: ", "))")
                             .font(.subheadline)
                     }
-                    Text("\(item.kind.capitalized) · \(item.outcome)")
+                    Text("\(ConsumerCopy.activityName(item.kind)) · \(ConsumerCopy.outcomeName(item.outcome))")
                         .font(.caption).foregroundStyle(.secondary)
+#if DEBUG
                     Text("consent \(item.consentHash.prefix(12))…")
                         .font(.caption2).foregroundStyle(.tertiary)
+#endif
                 }
             }
         }
@@ -275,9 +304,9 @@ struct ExportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Wallet export").font(.title2.bold())
+            Text("Activity copy").font(.title2.bold())
             Label(
-                preview.verifies ? "Integrity verified by the core" : "Integrity check FAILED",
+                preview.verifies ? "Copy verified" : "Copy could not be verified",
                 systemImage: preview.verifies ? "checkmark.seal.fill" : "xmark.octagon.fill")
                 .foregroundStyle(preview.verifies ? .green : .red)
             Label(
@@ -285,6 +314,7 @@ struct ExportSheet: View {
                     ? "Tampered copy detected and rejected" : "Tamper check inconclusive",
                 systemImage: preview.tamperDetected ? "shield.checkered" : "questionmark.diamond")
                 .foregroundStyle(preview.tamperDetected ? .green : .orange)
+#if DEBUG
             Text("SHA-256 \(integrityHash.prefix(24))…")
                 .font(.caption.monospaced()).foregroundStyle(.secondary)
             Divider()
@@ -293,6 +323,10 @@ struct ExportSheet: View {
                     .font(.caption2.monospaced())
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+#else
+            Text("This copy is protected so later changes can be detected.")
+                .font(.callout).foregroundStyle(.secondary)
+#endif
         }
         .padding()
     }
@@ -343,8 +377,9 @@ struct SettingsView: View {
     let onBack: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("This demo builds every screen from the core's `ScreenDescription`. Navigation "
-                 + "containment is an app-shell statechart, deliberately outside the certification core.")
+            Label("Protected on this device", systemImage: "lock.shield")
+                .font(.headline)
+            Text("You will always see what an organisation is requesting before anything is shared.")
                 .font(.callout).foregroundStyle(.secondary)
             Spacer()
             Button("Back", action: onBack).buttonStyle(.borderedProminent)
@@ -367,14 +402,16 @@ struct ResultView: View {
                 Image(systemName: symbol).font(.largeTitle).foregroundStyle(tint)
                 Text(message).font(.headline)
             }
+#if DEBUG
             if !log.isEmpty {
                 Divider()
                 ForEach(Array(log.enumerated()), id: \.offset) { _, line in
                     Text("• \(line)").font(.caption).foregroundStyle(.secondary)
                 }
             }
+#endif
             Spacer()
-            Button("Back to flows", action: onDone).buttonStyle(.borderedProminent)
+            Button("Back to wallet", action: onDone).buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

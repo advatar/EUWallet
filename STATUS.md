@@ -156,10 +156,14 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
-- [ ] [#48](https://github.com/advatar/EUWallet/issues/48): replace the iOS developer demo shell
+- [x] [#48](https://github.com/advatar/EUWallet/issues/48): replace the iOS developer demo shell
       with a consumer-grade, accessible wallet experience for non-technical and older users, hide
       protocol/diagnostic detail from release UI, preserve core-bound consent semantics, and add
-      the app presentation/configuration needed for a controlled TestFlight beta.
+      the app presentation/configuration needed for a controlled TestFlight beta. Release UI uses
+      plain language and native Dynamic Type/VoiceOver controls; debug detail is compile-time
+      gated; destructive history actions require confirmation; the app has icon/accent assets and
+      an accurate privacy manifest. Swift package tests (137), on-simulator core tests (3), the
+      regenerated UniFFI/XCFramework contract, and an unsigned Release device archive pass.
 - [x] [#26](https://github.com/advatar/EUWallet/issues/26): restore the typed durable-checkpoint
       UniFFI boundary dropped during consolidation, enforce its required Swift/C/archive symbols,
       and prove a clean regenerated XCFramework and Xcode build. The regenerated arm64 device and

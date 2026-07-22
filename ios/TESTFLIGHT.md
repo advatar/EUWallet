@@ -14,15 +14,14 @@ account setup, which can't be committed to the repo.
   stub issuer and a canned verifier), so a tester can exercise the wallet's own machinery but cannot
   obtain a real PID or present to a real relying party. That's the "live eudiw.dev round-trip" item,
   which is gated on external services.
-- **Naming:** the display name is **"Advatar Wallet (demo)"** (renamed off "EUDI Wallet" so it does
-  not imply official EU endorsement / invite App Review scrutiny). The in-app title is "Advatar
-  Wallet"; the bundle id stays `eu.advatar.wallet.demo`.
+- **Naming:** the display name is **"Advatar Wallet"** and the bundle identifier is
+  `eu.advatar.wallet`. The app does not claim official EU endorsement or certification.
 
 ## One-time setup
 
 1. **Apple Developer Program** membership. Note your 10-character **Team ID** (Apple Developer →
    Membership).
-2. **App record** in App Store Connect for bundle id `eu.advatar.wallet.demo` (My Apps → + → New App).
+2. **App record** in App Store Connect for bundle id `eu.advatar.wallet` (My Apps → + → New App).
 3. **App Store Connect API key** (Users and Access → Integrations → App Store Connect API → +):
    download the `AuthKey_<KEY_ID>.p8` once, and note the **Key ID** and **Issuer ID**.
 4. First archive enables the **Data Protection** capability (the app's entitlement) automatically

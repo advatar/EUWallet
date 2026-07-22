@@ -291,11 +291,11 @@ struct CredentialDetailView: View {
                 .background(.quaternary.opacity(0.4))
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-                Text("\(credential.id) · stored on-device; shared only with data minimisation.")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                Label("Saved securely on this phone", systemImage: "lock.fill")
+                    .font(.caption).foregroundStyle(.secondary)
 
                 Button(action: onPresent) {
-                    Label("Present this credential", systemImage: "qrcode")
+                    Label("Use this document", systemImage: "qrcode")
                         .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 12)
                 }
                 .buttonStyle(.borderedProminent)

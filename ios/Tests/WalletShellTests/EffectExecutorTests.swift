@@ -37,7 +37,7 @@ final class MockEngine: DurableWalletEngineDriving {
             return #"[{"type":"resolveRpTrust","operationId":1,"resultType":"rpCertChainResolved","clientId":"rp.example"}]"#
         }
         if eventJson.contains("\"rpCertChainResolved\"") {
-            return #"[{"type":"persistNonce","operationId":2,"resultType":"operationSucceeded","nonce":42},{"type":"render","operationId":3,"resultType":"presentationDecision","authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"Example RP","purpose":"Prove age","requestedClaims":["age_over_18"]}}]"#
+            return #"[{"type":"persistNonce","operationId":2,"resultType":"operationSucceeded","nonce":"opaque-nonce"},{"type":"render","operationId":3,"resultType":"presentationDecision","authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"Example RP","purpose":"Prove age","requestedClaims":["age_over_18"]}}]"#
         }
         if eventJson.contains("\"userConsented\"") {
             return #"[{"type":"sign","operationId":4,"resultType":"deviceSignatureProduced","keyRef":"device-key","payload":[1,2,3]}]"#
