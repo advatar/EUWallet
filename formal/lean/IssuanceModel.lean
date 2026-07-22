@@ -34,6 +34,24 @@ inductive St where
   | aborted
   deriving DecidableEq, Repr
 
+/-- Holder-visible issuance journey derived from the security state. Native shells render this
+    projection; they do not independently decide whether an offer is approved or a document is
+    ready. -/
+inductive Ui where
+  | hidden
+  | review
+  | preparing
+  | ready
+  | recovery
+  deriving DecidableEq, Repr
+
+def uiFor : St → Ui
+  | .idle => .hidden
+  | .reviewingOffer => .review
+  | .offerParsed | .provingPossession | .requestingCredential => .preparing
+  | .credentialIssued => .ready
+  | .aborted => .recovery
+
 structure Ctx where
   st              : St
   issuerTrusted   : Bool
@@ -161,6 +179,19 @@ theorem issued_requires_valid_portrait_profile (evs : List Ev) :
 theorem issued_requires_holder_approval (evs : List Ev) :
     (run evs).st = St.credentialIssued → (run evs).holderApproved = true :=
   fun h => ((inv_run evs).2.2.2.2 h).2.2.2.2
+
+/-- The consumer completion screen is reachable exactly from the accepting protocol state. -/
+theorem issued_renders_ready (evs : List Ev) :
+    (run evs).st = St.credentialIssued → uiFor (run evs).st = Ui.ready := by
+  intro h
+  simp [uiFor, h]
+
+/-- A preparing screen after offer parsing is always backed by explicit holder approval. -/
+theorem offer_parsed_preparing_requires_approval (evs : List Ev) :
+    (run evs).st = St.offerParsed →
+      uiFor (run evs).st = Ui.preparing ∧ (run evs).holderApproved = true := by
+  intro h
+  exact ⟨by simp [uiFor, h], ((inv_run evs).2.1 h).2⟩
 
 /-- **Theorem (issuer-trust gate).** An offer from an untrusted issuer is rejected. -/
 theorem untrusted_issuer_is_rejected (c : Ctx) (h : c.st = St.idle) :
