@@ -153,11 +153,6 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
-- [x] [#28](https://github.com/advatar/EUWallet/issues/28): support ARF PID-bound education
-      issuance, including PID VP subject evidence, cross-attestation binding evidence,
-      `cryptographically_bound_to` validation, and bounded VCIssuer request assembly. Focused tests
-      and clippy pass; three pre-existing credential-fixture tests remain red on the full package run.
-
 - [x] [#26](https://github.com/advatar/EUWallet/issues/26): restore the typed durable-checkpoint
       UniFFI boundary dropped during consolidation, enforce its required Swift/C/archive symbols,
       and prove a clean regenerated XCFramework and Xcode build. The regenerated arm64 device and

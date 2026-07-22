@@ -15,7 +15,6 @@ x509 = { path = "../x509" }
 # Credential offer / proof-of-possession JWT are JSON + base64url (from the budget).
 serde_json = { workspace = true }
 base64ct = { workspace = true }
-sha2 = "0.10"
 
 [dev-dependencies]
 crypto-backend = { path = "../crypto-backend" }
