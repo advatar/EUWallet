@@ -1,6 +1,6 @@
 # OIDC + EU ARF conformance review — 2026-07-22
 
-> **Remediation status (branch `fix/oidc-arf-conformance`).** Both blockers and both non-tracked
+> **Remediation status (`cd988a6`, corrected by issue #46).** Both blockers and both non-tracked
 > highs from this review are FIXED and covered by tests (`cargo fmt`/`clippy`/full workspace suite
 > green). See [Remediation applied](#remediation-applied--branch-fixoidc-arf-conformance) at the end.
 > Fixed: Blocker 1 (nonce → opaque `String` end-to-end), Blocker 2 (mso_mdoc revocation gate),
@@ -79,8 +79,10 @@ mdoc status through the same fail-closed `StatusProvider` path as SD-JWT (revoke
 ### HIGH 3 — mandatory non-standard top-level `purpose` rejects conformant requests *(not tracked)*
 `purpose_is_declared` requires a non-empty top-level `purpose` (`crates/oid4vp/src/lib.rs:311-316,846`)
 and aborts `PurposeUndeclared` before consent (`:491-493`). A conformant verifier never sends this.
-**Fix:** remove the gate; derive purpose from DCQL `credential_sets.purpose` (which `dcql.rs` does not
-yet parse) and/or RP registration metadata.
+**Fix:** remove the gate. OpenID4VP 1.0 DCQL §6.2 defines only `options` and `required` for a
+Credential Set Query; it does not define `credential_sets[].purpose`. Purpose may be obtained from
+separately authenticated registration/policy metadata or displayed before invoking the Wallet, but
+must not become a mandatory or falsely standardised request parameter.
 
 ### HIGH 4 — no Client Identifier Prefix / client_id↔RP-key binding *(not tracked)*
 `client_id` is taken opaque (`crates/oid4vp/src/lib.rs:822-826`) and `resolve_rp`/`check_relying_party`
@@ -136,7 +138,7 @@ currently over-claims credential status as complete), High 3 (`purpose`), High 4
 High 6 (LOTL rooting), PID mandatory attributes. Already tracked: issuance wiring (165), unlinkability
 (168), CRL/OCSP + issuer-EKU + proximity + WUA depth (11/21/22/163/166/169).
 
-## Remediation applied — branch `fix/oidc-arf-conformance`
+## Remediation applied — `cd988a6`, with issue #46 corrections
 
 Fixed on this branch, each with tests; `cargo fmt --all --check`, `cargo clippy --workspace
 --all-targets`, and the full `cargo test --workspace` suite are green.
@@ -145,9 +147,11 @@ Fixed on this branch, each with tests; `cargo fmt --all --check`, `cargo clippy 
   `guards::nonce_is_fresh`, `kb_jwt_signing_input`, `Output::PersistNonce`, `SessionInfo.nonce`,
   `Core.seen_nonces`, `Effect::PersistNonce`, the mdoc `OID4VPHandover` nonce, the JWE `apv`, and
   `sdjwt::KeyBindingCheck.expected_nonce` are now `String`. The parser accepts any non-empty wire
-  nonce (JSON string verbatim; a bare number tolerated as its decimal string). The Lean `Nat` /
-  Rust `model` abstraction is unchanged and still refines (nonce is only ever an equality token for
-  replay); Tamarin already used an opaque `Fr(~nonce)`. Durable checkpoint bumped to **schema v2**
+  nonce (JSON string verbatim). Issue #46 removed the temporary numeric compatibility and enforces
+  the normative non-empty, bounded ASCII URL-safe grammar at the production parser. The Lean `Nat`
+  / Rust `model` abstraction is unchanged and refines replay equality only; it does **not** prove
+  concrete string parsing or serialization. Those wire properties are covered by Rust conformance
+  tests. Tamarin already uses an opaque `Fr(~nonce)`. Durable checkpoint bumped to **schema v2**
   (presentation replay set persisted as text; payment/issuance/QES stay `u64`). Proof: an opaque
   non-numeric nonce round-trips through the real core + crypto in `crates/crypto-backend/tests/e2e_presentation.rs`,
   and `oid4vp` asserts the KB-JWT `nonce` is emitted as a JSON string.
@@ -157,14 +161,26 @@ Fixed on this branch, each with tests; `cargo fmt --all --check`, `cargo clippy 
   collects mdoc status references and routes them through the same fail-closed `StatusProvider` path
   as SD-JWT. Proof: `crates/wallet-core/tests/e2e_mdoc_status.rs` (revoked mso_mdoc → refused before
   any device signature; valid → proceeds). STATUS.md:43 corrected.
-- **High 3 — mandatory top-level `purpose` removed.** The `purpose_is_declared` gate is gone; purpose
-  is now derived from `credential_sets[].purpose` (newly parsed in `dcql.rs`) or a legacy top-level
-  field, else empty. A request that omits `purpose` is accepted (`oid4vp` transitions test).
+- **High 3 — mandatory top-level `purpose` removed.** The `purpose_is_declared` gate is gone. Issue
+  #46 also removed the non-standard `credential_sets[].purpose` follow-up. A legacy top-level value
+  may be displayed when present but never gates acceptance; an omitted value is accepted (`oid4vp`
+  transitions test). Authenticated registration/policy metadata remains the appropriate future
+  source for Wallet-side purpose display.
 - **High 4 — `x509_san_dns` client_id ↔ leaf-SAN binding (§5.10).** `check_relying_party` exposes the
   leaf DNS SANs; `ResolvedTrust` carries them; the new `client_id_binds_to_leaf` guard requires a
   `x509_san_dns:<host>` client_id's host to be a SAN of the RP leaf that signed the request object,
   else `AbortReason::ClientIdBindingInvalid`. Bare/pre-registered client_ids are unaffected. Tests
   cover match-accepted and mismatch-rejected.
+
+### Formal-assurance boundary
+
+Lean proves replay rejection over an equality-only abstract nonce and now also proves that revoked,
+suspended or indeterminate credential status and mismatched client-certificate binding cannot pass
+their abstract admission policies. Tamarin models the nonce as an opaque fresh term and proves
+injective agreement, authenticity and secrecy. Concrete OpenID4VP character/length validation,
+JSON string typing, exact KB-JWT/mdoc/JWE serialization, X.509 SAN extraction and status-list parsing
+remain implementation properties covered by Rust unit, conformance and end-to-end tests; they are
+not theorem-proven by the abstract models.
 
 ### Deferred (documented follow-ups, not done on this branch)
 - **PID mandatory attributes (`nationality`/`place_of_birth`).** Doing this correctly means modelling

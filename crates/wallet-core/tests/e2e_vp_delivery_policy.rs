@@ -54,7 +54,7 @@ fn core() -> Core {
 fn base_request() -> Value {
     json!({
         "client_id": "rp.example",
-        "nonce": 424_242,
+        "nonce": "424242",
         "aud": "wallet.example",
         "response_uri": RESPONSE_URI,
         "response_mode": "direct_post",

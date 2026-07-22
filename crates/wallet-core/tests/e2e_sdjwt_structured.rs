@@ -163,7 +163,7 @@ fn signed_request(rp: &SoftwareSigner, nonce: u64, credential_query: Value) -> V
     let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
     let payload = b64(json!({
         "client_id": "rp.example",
-        "nonce": nonce,
+        "nonce": nonce.to_string(),
         "aud": "wallet.example",
         "response_uri": RESPONSE_URI,
         "response_mode": "direct_post",
