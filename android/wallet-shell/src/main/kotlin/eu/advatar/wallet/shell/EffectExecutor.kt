@@ -26,11 +26,13 @@ sealed interface EffectCascadeOutcome {
 }
 
 /**
- * Drains the sans-I/O core's effect cascade. Infrastructure failures stop the cascade and are
- * never translated into semantic decline or success events.
+ * Drains the sans-I/O core's effect cascade through a durable lifecycle coordinator.
+ * Infrastructure failures stop the cascade and are never translated into semantic decline or
+ * success events. Requiring the concrete coordinator prevents callers from releasing native
+ * effects from a raw, uncommitted Core transition.
  */
 class EffectExecutor(
-    private val engine: WalletEngineDriving,
+    private val lifecycle: DurableLifecycleCoordinator,
     private val signer: WalletSigner,
     private val httpClient: WalletHttpClient,
     private val storage: WalletStorage,
@@ -41,9 +43,45 @@ class EffectExecutor(
     private val transferOfferPublisher: TransferOfferPublisher? = null,
     private val presentationRedirectHandler: OpenId4VpRedirectHandler? = null,
 ) {
+    private var pendingDurableEventJson: String? = null
+
     fun send(eventJson: String): EffectCascadeOutcome {
-        val queue = ArrayDeque(invokeCore(eventJson))
-        val initialEventType = eventType(eventJson)
+        val effects = invokeCore(eventJson)
+        return drain(effects, eventType(eventJson))
+    }
+
+    /**
+     * Commit and resume the exact transition blocked by durable persistence. The coordinator
+     * returns its retained effects without invoking Core again.
+     */
+    fun retryPendingDurableCommit(): EffectCascadeOutcome {
+        val (eventJson, output) = retryPendingCoreOutput()
+        return drain(WalletEffectDecoder.decodeCoreOutput(output), eventType(eventJson))
+    }
+
+    @Synchronized
+    private fun retryPendingCoreOutput(): Pair<String, String> {
+        val eventJson = pendingDurableEventJson
+            ?: throw WalletShellException.NoPendingDurableCommit()
+        val output = try {
+            lifecycle.retryPendingEvent(eventJson)
+        } catch (error: DurableLifecycleException) {
+            if (!lifecycle.hasPendingCommit) pendingDurableEventJson = null
+            // Preserve the stable lifecycle code rather than hiding it behind a generic Core
+            // invocation failure.
+            throw error
+        } catch (error: Exception) {
+            throw WalletShellException.CoreInvocationFailure(error)
+        }
+        pendingDurableEventJson = null
+        return eventJson to output
+    }
+
+    private fun drain(
+        initialEffects: List<WalletEffect>,
+        initialEventType: String?,
+    ): EffectCascadeOutcome {
+        val queue = ArrayDeque(initialEffects)
         var executedEffects = 0
         var acknowledged = false
         var renderedInput = false
@@ -71,7 +109,11 @@ class EffectExecutor(
                 else -> Unit
             }
             val followUp = execute(effect) ?: continue
-            if (eventType(followUp) in COMPLETION_EVENT_TYPES) {
+            val followUpEffects = invokeCore(followUp)
+            if (
+                eventType(followUp) in COMPLETION_EVENT_TYPES &&
+                followUpEffects.none(::isErrorScreen)
+            ) {
                 acknowledged = true
             }
             if (
@@ -80,7 +122,7 @@ class EffectExecutor(
             ) {
                 awaitingExternalInput = true
             }
-            queue.addAll(invokeCore(followUp))
+            queue.addAll(followUpEffects)
         }
 
         return when {
@@ -100,12 +142,31 @@ class EffectExecutor(
         null
     }
 
+    private fun isErrorScreen(effect: WalletEffect): Boolean =
+        effect is WalletEffect.Render && effect.screen is WalletScreen.Error
+
+    @Synchronized
     private fun invokeCore(eventJson: String): List<WalletEffect> {
+        // Do not overwrite the event associated with an exact retained checkpoint/effect batch.
+        if (pendingDurableEventJson != null) {
+            throw DurableLifecycleException(DurableLifecycleErrorCode.COMMIT_PENDING)
+        }
+        // A coordinator can outlive an executor. A replacement executor must reject a new event
+        // without mistaking it for the exact transition already retained by that coordinator.
+        if (lifecycle.hasPendingCommit) {
+            throw DurableLifecycleException(DurableLifecycleErrorCode.COMMIT_PENDING)
+        }
+        pendingDurableEventJson = eventJson
         val output = try {
-            engine.handleEventJson(eventJson)
+            lifecycle.handleEventJson(eventJson)
+        } catch (error: DurableLifecycleException) {
+            if (!lifecycle.hasPendingCommit) pendingDurableEventJson = null
+            throw error
         } catch (error: Exception) {
+            pendingDurableEventJson = null
             throw WalletShellException.CoreInvocationFailure(error)
         }
+        pendingDurableEventJson = null
         return WalletEffectDecoder.decodeCoreOutput(output)
     }
 
@@ -312,7 +373,11 @@ class EffectExecutor(
         const val MAX_EFFECTS_PER_CASCADE = 1_024
         const val MAX_STATUS_LIST_TOKEN_BYTES = 2 * 1_024 * 1_024
         val DECLINE_EVENT_TYPES = setOf("userDeclined", "paymentDeclined", "qesDeclined")
-        val IDLE_EVENT_TYPES = setOf("setClock")
+        val IDLE_EVENT_TYPES = setOf(
+            "setClock",
+            "redactTransaction",
+            "wipeTransactionLog",
+        )
         val COMPLETION_EVENT_TYPES = setOf(
             "presentationDelivered",
             "paymentAuthorizationDelivered",

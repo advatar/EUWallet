@@ -1167,6 +1167,10 @@ struct SessionInfo {
 pub enum Event {
     /// Set the shell's wall-clock (Unix seconds); the core has no clock of its own.
     SetClock { epoch: i64 },
+    /// Replace one audit-log entry with a chain-preserving tombstone.
+    RedactTransaction { seq: u64 },
+    /// Erase all audit-log entries while retaining the rest of the wallet state.
+    WipeTransactionLog,
     /// A remote authorization request (compact JWS) arrived via deep link / browser.
     AuthorizationRequestReceived { request: Vec<u8> },
     /// The shell fetched the RP's certificate chain (DER, leaf-first) for the pending request.
@@ -2173,6 +2177,15 @@ impl Core {
         )
     }
 
+    fn wallet_transfer_in_progress_effects() -> Vec<Effect> {
+        vec![Effect::Render {
+            screen: ScreenDescription::Error {
+                code: "wallet_transfer_in_progress".into(),
+                message: "A credential transfer cannot replace another wallet operation.".into(),
+            },
+        }]
+    }
+
     fn append_audit_entry(&mut self, entry: txnlog::NewEntry) -> Result<(), txnlog::Error> {
         // Each auditable flow reserved MAX_ENTRY_BYTES at admission and checked its exact variable
         // fields before its first consequential effect. A post-ack error is therefore an internal
@@ -2214,6 +2227,14 @@ impl Core {
                         .unwrap_or_default();
                 }
                 self.now_epoch = epoch;
+                Vec::new()
+            }
+            Event::RedactTransaction { seq } => {
+                self.redact_transaction(seq);
+                Vec::new()
+            }
+            Event::WipeTransactionLog => {
+                self.wipe_transaction_log();
                 Vec::new()
             }
             Event::AuthorizationRequestReceived { request } => {
@@ -2352,6 +2373,9 @@ impl Core {
             Event::QesAuthorized => self.drive_qes(qes::Input::UserAuthorized),
             Event::QesDeclined => self.drive_qes(qes::Input::UserDeclined),
             Event::WalletTransferOfferCreated => {
+                if !matches!(self.active, ActiveFlow::None | ActiveFlow::WalletTransfer) {
+                    return Self::wallet_transfer_in_progress_effects();
+                }
                 let audit_candidate = txnlog::NewEntry {
                     epoch: self.now_epoch,
                     kind: txnlog::Kind::Transfer,
@@ -2375,6 +2399,12 @@ impl Core {
                 sender_consent_hash,
                 nonce,
             } => {
+                if !matches!(self.active, ActiveFlow::None | ActiveFlow::WalletTransfer) {
+                    return Self::wallet_transfer_in_progress_effects();
+                }
+                if self.active == ActiveFlow::None {
+                    self.begin_flow(ActiveFlow::WalletTransfer);
+                }
                 // Decide acceptance IN-CORE (never shell booleans):
                 //  * issuer_valid — the issuer chain is trusted AND signs this credential;
                 //  * peer_bound   — the sender's authorization is bound to THIS wallet's key and
@@ -2443,39 +2473,44 @@ impl Core {
                 }
                 effects
             }
-            Event::CredentialReceived { format, bytes } => match parse_format(&format) {
-                Some(f) => match self.authenticate_received_credential(
-                    f,
-                    &bytes,
-                    &self.issuer_cert_chain_current,
-                    &self.issuer_id_assertion_current,
-                ) {
-                    Ok(verified) => {
-                        self.pending_verified_credential = Some(verified);
-                        self.last_credential_ingestion_error = None;
-                        self.drive_issuance(oid4vci::Input::CredentialResponse {
-                            format: f,
-                            bytes,
-                            issuer_authenticated: true,
-                        })
-                    }
-                    Err(error) => {
-                        self.pending_verified_credential = None;
-                        self.last_credential_ingestion_error = Some(error);
-                        self.drive_issuance(oid4vci::Input::CredentialResponse {
-                            format: f,
-                            bytes,
-                            issuer_authenticated: false,
-                        })
-                    }
-                },
-                None => {
-                    self.pending_verified_credential = None;
-                    self.last_credential_ingestion_error =
-                        Some(CredentialIngestionError::UnsupportedFormat);
-                    self.drive_issuance(oid4vci::Input::CredentialResponseRejected)
+            Event::CredentialReceived { format, bytes } => {
+                if !matches!(self.issuance, oid4vci::State::RequestingCredential { .. }) {
+                    return self.reject_unexpected_credential_response();
                 }
-            },
+                match parse_format(&format) {
+                    Some(f) => match self.authenticate_received_credential(
+                        f,
+                        &bytes,
+                        &self.issuer_cert_chain_current,
+                        &self.issuer_id_assertion_current,
+                    ) {
+                        Ok(verified) => {
+                            self.pending_verified_credential = Some(verified);
+                            self.last_credential_ingestion_error = None;
+                            self.drive_issuance(oid4vci::Input::CredentialResponse {
+                                format: f,
+                                bytes,
+                                issuer_authenticated: true,
+                            })
+                        }
+                        Err(error) => {
+                            self.pending_verified_credential = None;
+                            self.last_credential_ingestion_error = Some(error);
+                            self.drive_issuance(oid4vci::Input::CredentialResponse {
+                                format: f,
+                                bytes,
+                                issuer_authenticated: false,
+                            })
+                        }
+                    },
+                    None => {
+                        self.pending_verified_credential = None;
+                        self.last_credential_ingestion_error =
+                            Some(CredentialIngestionError::UnsupportedFormat);
+                        self.drive_issuance(oid4vci::Input::CredentialResponseRejected)
+                    }
+                }
+            }
             Event::StatusListReceived {
                 uri,
                 http_status,
@@ -2918,6 +2953,10 @@ impl Core {
 
     fn presentation_error_effects(reason: AbortReason) -> Option<Vec<Effect>> {
         let (code, message) = match reason {
+            AbortReason::MalformedRequest => (
+                "presentation_request_malformed",
+                "The relying party sent a malformed presentation request.",
+            ),
             AbortReason::ResponseModeUnsupported => (
                 "presentation_response_mode_unsupported",
                 "The relying party requested an unsupported response mode.",
@@ -3265,6 +3304,38 @@ impl Core {
         ))
     }
 
+    fn credential_issuance_rejection_effects() -> Vec<Effect> {
+        vec![
+            Effect::Render {
+                screen: ScreenDescription::Error {
+                    code: "credential_issuance_rejected".into(),
+                    message: "The credential response could not be authenticated and stored."
+                        .into(),
+                },
+            },
+            Effect::Close,
+        ]
+    }
+
+    fn reject_unexpected_credential_response(&mut self) -> Vec<Effect> {
+        self.pending_verified_credential = None;
+        self.last_credential_ingestion_error = Some(CredentialIngestionError::MalformedCredential);
+
+        let closes_current_flow = matches!(self.active, ActiveFlow::None | ActiveFlow::Issuance);
+        if self.active == ActiveFlow::Issuance
+            || matches!(self.issuance, oid4vci::State::RequestingCredential { .. })
+        {
+            self.issuance = oid4vci::State::Aborted(oid4vci::AbortReason::CredentialInvalid);
+            self.finish_flow(ActiveFlow::Issuance);
+        }
+
+        let mut effects = Self::credential_issuance_rejection_effects();
+        if !closes_current_flow {
+            effects.retain(|effect| !matches!(effect, Effect::Close));
+        }
+        effects
+    }
+
     fn drive_issuance(&mut self, input: oid4vci::Input) -> Vec<Effect> {
         // proof_key_attested is computed in-core: the loaded WUA must verify AND bind this device
         // key at High assurance — never a shell boolean.
@@ -3300,6 +3371,7 @@ impl Core {
             oid4vci::step(&self.issuance, &input, &env)
         };
         let was_issued = matches!(self.issuance, oid4vci::State::CredentialIssued { .. });
+        let was_aborted = matches!(self.issuance, oid4vci::State::Aborted(_));
         self.issuance = next;
 
         let audit_format = match &self.issuance {
@@ -3354,6 +3426,22 @@ impl Core {
                             Some(CredentialIngestionError::MalformedCredential);
                     }
                 }
+            }
+        }
+        if matches!(self.issuance, oid4vci::State::CredentialIssued { .. }) {
+            self.finish_flow(ActiveFlow::Issuance);
+        } else if let oid4vci::State::Aborted(reason) = &self.issuance {
+            let reason = *reason;
+            let terminal_effects = (!was_aborted).then(|| {
+                if reason == oid4vci::AbortReason::UserDeclined {
+                    vec![Effect::Close]
+                } else {
+                    Self::credential_issuance_rejection_effects()
+                }
+            });
+            self.finish_flow(ActiveFlow::Issuance);
+            if let Some(terminal_effects) = terminal_effects {
+                return terminal_effects;
             }
         }
         effects
@@ -4209,10 +4297,29 @@ impl Core {
     fn drive_w2w(&mut self, input: w2w::Input) -> Vec<Effect> {
         let (next, outputs) = w2w::step(&self.w2w, &input);
         self.w2w = next;
-        outputs
+        let effects: Vec<Effect> = outputs
             .into_iter()
             .flat_map(|o| self.translate_w2w(o))
-            .collect()
+            .collect();
+        match &self.w2w {
+            w2w::State::Accepted { .. } => {
+                self.finish_flow(ActiveFlow::WalletTransfer);
+                effects
+            }
+            w2w::State::Rejected(_) => {
+                self.finish_flow(ActiveFlow::WalletTransfer);
+                vec![
+                    Effect::Render {
+                        screen: ScreenDescription::Error {
+                            code: "wallet_transfer_rejected".into(),
+                            message: "The credential transfer could not be authenticated.".into(),
+                        },
+                    },
+                    Effect::Close,
+                ]
+            }
+            w2w::State::Idle | w2w::State::AwaitingTransfer => effects,
+        }
     }
 
     fn translate_w2w(&mut self, output: w2w::Output) -> Vec<Effect> {
@@ -5073,6 +5180,20 @@ mod audit_log_failure_tests {
             .any(|effect| matches!(effect, Effect::PublishTransferOffer { .. })));
         assert!(!has_error_code(&admitted, "audit_log_capacity_exhausted"));
         assert_eq!(core.active, ActiveFlow::WalletTransfer);
+    }
+
+    #[test]
+    fn history_maintenance_events_are_accepted_at_json_boundary() {
+        let mut core = Core::new("wallet.example", "device-key");
+
+        assert_eq!(
+            core.handle_event_json(r#"{"type":"redactTransaction","seq":0}"#),
+            Ok("[]".to_string())
+        );
+        assert_eq!(
+            core.handle_event_json(r#"{"type":"wipeTransactionLog"}"#),
+            Ok("[]".to_string())
+        );
     }
 }
 

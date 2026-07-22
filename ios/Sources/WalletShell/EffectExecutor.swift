@@ -285,9 +285,9 @@ extension HttpClientError: LocalizedError {
 /// A stopped effect cascade. Infrastructure failures are never translated into semantic wallet
 /// events such as `userDeclined` or `presentationDelivered`.
 public enum EffectExecutorError: Error, Equatable {
+    case ffi(FfiContractError)
     case coreInvocationFailed
     case noPendingDurableCommit
-    case ffi(FfiContractError)
     case signingFailed(String)
     case storageFailed(String)
     case transportFailed(HttpClientError)
@@ -302,9 +302,9 @@ public enum EffectExecutorError: Error, Equatable {
 extension EffectExecutorError: LocalizedError {
     public var errorDescription: String? {
         switch self {
-        case .coreInvocationFailed: return "Durable core invocation failed"
-        case .noPendingDurableCommit: return "No pending durable commit"
         case .ffi(let error): return error.localizedDescription
+        case .coreInvocationFailed: return "Wallet core invocation failed"
+        case .noPendingDurableCommit: return "No durable wallet transition is awaiting retry"
         case .signingFailed(let reason): return "Device signing failed: \(reason)"
         case .storageFailed(let reason): return "Secure storage failed: \(reason)"
         case .transportFailed(let error): return error.localizedDescription
@@ -355,7 +355,7 @@ public enum EffectCascadeOutcome: Equatable {
 /// This is the whole "shell" contract (plan Section 2/8). Device signing (`.sign`) goes to the
 /// Secure Enclave; the private key never crosses the FFI.
 public final class EffectExecutor {
-    private let engine: WalletEngineDriving
+    private let lifecycle: DurableLifecycleCoordinator
     private let signer: Signer
     private let http: HttpClient
     private let storage: SecureStorage
@@ -365,10 +365,11 @@ public final class EffectExecutor {
     private let transferOffers: TransferOfferPublisher?
     private let presentationRedirectHandler: OpenID4VPRedirectHandler?
     private let render: (UInt64?, Data?, ScreenDescription) throws -> Void
-    private var pendingDurableEvent: String?
+    private let durableStateLock = NSLock()
+    private var pendingDurableEventJson: String?
 
     public init(
-        engine: WalletEngineDriving,
+        lifecycle: DurableLifecycleCoordinator,
         signer: Signer,
         http: HttpClient,
         storage: SecureStorage,
@@ -379,7 +380,7 @@ public final class EffectExecutor {
         presentationRedirectHandler: OpenID4VPRedirectHandler? = nil,
         render: @escaping (UInt64?, Data?, ScreenDescription) throws -> Void
     ) {
-        self.engine = engine
+        self.lifecycle = lifecycle
         self.signer = signer
         self.http = http
         self.storage = storage
@@ -394,15 +395,28 @@ public final class EffectExecutor {
     /// Send one JSON event and fully drain the resulting effect cascade.
     @discardableResult
     public func send(eventJson: String) async throws -> EffectCascadeOutcome {
-        if engine is DurableLifecycleRetrying { pendingDurableEvent = eventJson }
-        let coreOutput: String
-        do {
-            coreOutput = try engine.handleEventJson(eventJson: eventJson)
-        } catch {
-            throw EffectExecutorError.coreInvocationFailed
-        }
-        var queue = try decode(coreOutput)
-        let initialEventType = Self.eventType(eventJson)
+        let output = try invokeCore(eventJson)
+        return try await drain(
+            initialCoreOutput: output,
+            initialEventType: Self.eventType(eventJson))
+    }
+
+    /// Retry the exact Core transition whose durable commit blocked this executor. The lifecycle
+    /// coordinator commits its retained checkpoint and returns its retained effect batch without
+    /// invoking Core again; draining then continues from that batch.
+    @discardableResult
+    public func retryPendingDurableCommit() async throws -> EffectCascadeOutcome {
+        let (eventJson, output) = try retryPendingCoreOutput()
+        return try await drain(
+            initialCoreOutput: output,
+            initialEventType: Self.eventType(eventJson))
+    }
+
+    private func drain(
+        initialCoreOutput: String,
+        initialEventType: String?
+    ) async throws -> EffectCascadeOutcome {
+        var queue = try decode(initialCoreOutput)
         var acknowledged = false
         var renderedInput = false
         var awaitingExternalInput = false
@@ -432,18 +446,21 @@ public final class EffectExecutor {
             }
             if let followUp = try await execute(effect) {
                 let followUpType = Self.eventType(followUp)
-                switch followUpType {
-                case "presentationDelivered", "paymentAuthorizationDelivered",
-                     "qesAuthorizationDelivered", "credentialReceived":
+                // A native completion callback is only an acknowledgement after Core has
+                // durably accepted it and its returned batch has decoded without an error render.
+                // Marking success before this boundary can turn a rejected credential callback
+                // into a false-positive issuance result.
+                let followUpEffects = try decode(invokeCore(followUp))
+                if Self.completionEventTypes.contains(followUpType ?? ""),
+                   !followUpEffects.contains(where: Self.isErrorRender)
+                {
                     acknowledged = true
-                default:
-                    break
                 }
                 if case .publishTransferOffer = effect,
                    followUpType == "operationSucceeded" {
                     awaitingExternalInput = true
                 }
-                queue.append(contentsOf: try decode(engine.handleEventJson(eventJson: followUp)))
+                queue.append(contentsOf: followUpEffects)
             }
         }
 
@@ -465,28 +482,56 @@ public final class EffectExecutor {
         return .aborted(.missingTerminalOutcome)
     }
 
-    /// Release effects retained by the durable coordinator after a persistence failure without
-    /// invoking the Rust core a second time.
-    @discardableResult
-    public func retryPendingDurableCommit() async throws -> EffectCascadeOutcome {
-        guard let eventJson = pendingDurableEvent,
-              let durable = engine as? DurableLifecycleRetrying else {
+    private func invokeCore(_ eventJson: String) throws -> String {
+        durableStateLock.lock()
+        defer { durableStateLock.unlock() }
+        // Never replace the exact event associated with a retained checkpoint/effect batch. A
+        // second event cannot be handled until the first event's commit has succeeded or failed
+        // terminally.
+        guard pendingDurableEventJson == nil else {
+            throw DurableLifecycleError.commitPending
+        }
+        // A newly-created executor must also respect a transition retained by the coordinator;
+        // never adopt the new event as if it were the original pending event.
+        guard !lifecycle.hasPendingCommit else {
+            throw DurableLifecycleError.commitPending
+        }
+        pendingDurableEventJson = eventJson
+        do {
+            let output = try lifecycle.handleEventJson(eventJson: eventJson)
+            pendingDurableEventJson = nil
+            return output
+        } catch let error as DurableLifecycleError {
+            if !lifecycle.hasPendingCommit {
+                pendingDurableEventJson = nil
+            }
+            // Preserve the stable lifecycle category so callers can distinguish an exact retry
+            // from a poisoned lifecycle or persistence divergence.
+            throw error
+        } catch {
+            pendingDurableEventJson = nil
+            throw EffectExecutorError.coreInvocationFailed
+        }
+    }
+
+    private func retryPendingCoreOutput() throws -> (eventJson: String, output: String) {
+        durableStateLock.lock()
+        defer { durableStateLock.unlock() }
+        guard let eventJson = pendingDurableEventJson else {
             throw EffectExecutorError.noPendingDurableCommit
         }
-        let output: String
         do {
-            output = try durable.retryPendingEvent(eventJson: eventJson)
-        } catch let error as DurableLifecycleError where error == .noPendingCommit {
-            throw EffectExecutorError.noPendingDurableCommit
+            let output = try lifecycle.retryPendingEvent(eventJson: eventJson)
+            pendingDurableEventJson = nil
+            return (eventJson, output)
+        } catch let error as DurableLifecycleError {
+            if !lifecycle.hasPendingCommit {
+                pendingDurableEventJson = nil
+            }
+            throw error
         } catch {
             throw EffectExecutorError.coreInvocationFailed
         }
-        let effects = try decode(output)
-        for effect in effects {
-            _ = try await execute(effect)
-        }
-        pendingDurableEvent = nil
-        return .awaitingInput
     }
 
     private static func eventType(_ json: String) -> String? {
@@ -689,10 +734,21 @@ public final class EffectExecutor {
     }
 
     private static let maximumEffectsPerCascade = 1_024
+    private static let completionEventTypes: Set<String> = [
+        "credentialReceived", "paymentAuthorizationDelivered", "presentationDelivered",
+        "qesAuthorizationDelivered",
+    ]
     private static let declineEventTypes: Set<String> = [
         "userDeclined", "paymentDeclined", "qesDeclined",
     ]
-    private static let idleEventTypes: Set<String> = ["setClock"]
+    private static let idleEventTypes: Set<String> = [
+        "redactTransaction", "setClock", "wipeTransactionLog",
+    ]
+
+    private static func isErrorRender(_ effect: WalletEffect) -> Bool {
+        if case .render(_, _, .error) = effect { return true }
+        return false
+    }
 }
 
 public protocol HttpClient {

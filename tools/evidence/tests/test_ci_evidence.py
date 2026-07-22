@@ -84,6 +84,7 @@ class CiEvidenceConfigurationTests(unittest.TestCase):
             [
                 "brew trust --formula tamarin-prover/tap/tamarin-prover",
                 "brew trust --formula tamarin-prover/tap/maude",
+                "brew trust --formula tamarin-prover/tap/libbuddy",
             ],
             trust_commands,
         )

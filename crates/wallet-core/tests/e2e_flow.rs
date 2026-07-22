@@ -212,7 +212,7 @@ fn json_ffi_surface_round_trips() {
         .unwrap();
     // "no" is not a valid JWS → the machine visibly aborts and releases its active marker.
     let effects: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(effects[0]["type"], "render");
+    assert_eq!(effects[0]["type"], "render", "wire effects: {effects}");
     assert_eq!(
         effects[0]["screen"]["code"],
         "presentation_request_malformed"

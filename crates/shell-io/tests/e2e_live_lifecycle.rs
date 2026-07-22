@@ -131,14 +131,8 @@ fn live_issuance_then_plaintext_presentation_is_rejected() {
     let wallet = DemoWallet::new();
     // What the live issuer will hand out: the SD-JWT issuance compact serialization
     // (issuer JWT + both disclosures), exactly as a real issuer responds.
-    let s0 = wallet.scenario();
-    let disclosures: std::collections::BTreeMap<String, String> =
-        serde_json::from_str(&s0.disclosures_by_claim_json).unwrap();
-    let issuance_compact = format!(
-        "{}~{}~",
-        s0.issuer_jwt,
-        disclosures.values().cloned().collect::<Vec<_>>().join("~")
-    );
+    let issuance = wallet.issuance_scenario();
+    let issuance_compact = issuance.pid_credential_compact.clone();
 
     let (port, proof_rx) = spawn_issuer(issuance_compact.clone());
     let s = wallet.scenario_with_response_uri(&format!("http://127.0.0.1:{port}/response"));
@@ -147,12 +141,9 @@ fn live_issuance_then_plaintext_presentation_is_rejected() {
     let mut core = Core::new("wallet.example", "device-key");
     core.handle_event(Event::SetClock { epoch: s.epoch });
     core.load_device_key(s.device_public_key.clone());
-    core.load_trust_list(
-        &wallet.signed_trust_list_with_pid_anchor(),
-        &s.operator_public_key,
-    )
-    .expect("trust list loads");
-    core.load_wua(&wallet.wua_jwt(), &wallet.wallet_provider_public_key())
+    core.load_trust_list(&issuance.trust_list, &issuance.operator_public_key)
+        .expect("trust list loads");
+    core.load_wua(&issuance.wua_jwt, &issuance.wallet_provider_public_key)
         .expect("WUA verifies and binds the device key");
 
     let mut shell = ShellRunner::new(
@@ -172,11 +163,16 @@ fn live_issuance_then_plaintext_presentation_is_rejected() {
     let outcome = shell.handle(Event::CredentialOfferReceived {
         offer: br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#
             .to_vec(),
-        issuer_cert_chain: s.rp_cert_chain.clone(), // demo leaf chains to the trusted CA
-        issuer_id: "https://issuer.example".into(),
+        issuer_cert_chain: issuance.issuer_cert_chain,
+        issuer_id: issuance.issuer_id,
     });
     assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
-    assert_eq!(outcome.http_posts.len(), 2, "live /token + /credential");
+    assert_eq!(
+        outcome.http_posts.len(),
+        2,
+        "live /token + /credential; last screen: {:?}",
+        shell.last_screen()
+    );
 
     // The issuer received a real proof JWT over the socket.
     let proof = proof_rx.recv().expect("issuer received the proof");
@@ -191,8 +187,8 @@ fn live_issuance_then_plaintext_presentation_is_rejected() {
     let held = held_credential_from_wire(core_str(&wire_bytes));
     assert_eq!(
         held.disclosures_by_claim.len(),
-        2,
-        "both disclosures travelled"
+        4,
+        "all PID disclosures travelled"
     );
     // The old unauthenticated Core::load_credential API was removed. Keep the parsed holding
     // assertion above; presentation tests must be migrated to authenticated ingestion fixtures.
