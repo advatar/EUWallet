@@ -181,9 +181,10 @@ operational solution needed to enter those processes.
         graph, and verified that the live harness still classifies the issuer's `/dynamic/form`
         HTTP 500 without confusing it with a browser failure; all required gates passed in
         [CI run 29917911998](https://github.com/advatar/EUWallet/actions/runs/29917911998).
-  - [ ] [#36](https://github.com/advatar/EUWallet/issues/36): align SD-JWT and mdoc PID portrait
+  - [x] [#36](https://github.com/advatar/EUWallet/issues/36): aligned SD-JWT and mdoc PID portrait
         validation with PID Rulebook 1.7, including explicit opt-out semantics, bounded JPEG
-        validation, formal policy coverage and native adapter verification.
+        validation, formal policy coverage and native adapter verification; all required gates
+        passed in [CI run 29919838280](https://github.com/advatar/EUWallet/actions/runs/29919838280).
 - [ ] Obtain the applicable German authority, CAB/BSI certification and Commission listing.
 
 ## Completed

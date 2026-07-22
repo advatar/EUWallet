@@ -147,6 +147,74 @@ fn signed_mdoc(scenario: &IssuanceScenario, namespace: &str) -> Vec<u8> {
     ))
 }
 
+fn issued_pid_mdoc(scenario: &IssuanceScenario, portrait: Option<Vec<u8>>) -> mdoc::IssuerSigned {
+    let issuer = SoftwareSigner::from_pkcs8_der(ISSUER_PKCS8).expect("issuer key");
+    let mut items = vec![
+        IssuerSignedItem {
+            digest_id: 0,
+            random: vec![0x11; 16],
+            element_id: "family_name".into(),
+            element_value: Value::Text("Andersson".into()),
+        },
+        IssuerSignedItem {
+            digest_id: 1,
+            random: vec![0x22; 16],
+            element_id: "given_name".into(),
+            element_value: Value::Text("Astrid".into()),
+        },
+        IssuerSignedItem {
+            digest_id: 2,
+            random: vec![0x33; 16],
+            element_id: "birth_date".into(),
+            element_value: Value::Tag(1004, Box::new(Value::Text("1988-04-12".into()))),
+        },
+    ];
+    if let Some(portrait) = portrait {
+        items.push(IssuerSignedItem {
+            digest_id: 3,
+            random: vec![0x44; 16],
+            element_id: "portrait".into(),
+            element_value: Value::Bytes(portrait),
+        });
+    }
+    let mut name_spaces = BTreeMap::new();
+    name_spaces.insert("eu.europa.ec.eudi.pid.1".into(), items);
+    let mut issued = mdoc::build_and_sign(
+        name_spaces,
+        "eu.europa.ec.eudi.pid.1",
+        cose_key(&scenario.device_public_key),
+        ValidityInfo {
+            signed: "2026-07-19T00:00:00Z".into(),
+            valid_from: "2026-07-19T00:00:00Z".into(),
+            valid_until: "2035-01-01T00:00:00Z".into(),
+        },
+        &AwsLc,
+        &issuer,
+        &KeyRef("issuer".into()),
+        Alg::Es256,
+    )
+    .expect("sign PID mdoc");
+    issued.issuer_auth.unprotected.x5chain = Some(Box::new(cose::X5Chain::Single(
+        scenario.issuer_cert_chain[0].clone(),
+    )));
+    issued
+}
+
+fn remove_sd_jwt_disclosure(compact: &str, claim: &str) -> String {
+    let mut components = compact.split('~');
+    let issuer_jwt = components.next().expect("issuer JWT");
+    let disclosures = components
+        .filter(|component| !component.is_empty())
+        .filter(|component| {
+            let decoded = Base64UrlUnpadded::decode_vec(component).expect("disclosure base64");
+            let disclosure: serde_json::Value =
+                serde_json::from_slice(&decoded).expect("disclosure JSON");
+            disclosure.get(1).and_then(serde_json::Value::as_str) != Some(claim)
+        })
+        .collect::<Vec<_>>();
+    format!("{issuer_jwt}~{}~", disclosures.join("~"))
+}
+
 #[test]
 fn authenticated_sdjwt_and_mdoc_cross_the_storage_boundary() {
     let wallet = DemoWallet::new();
@@ -171,6 +239,53 @@ fn authenticated_sdjwt_and_mdoc_cross_the_storage_boundary() {
     let held = core.held_credentials_json();
     assert!(held.contains("urn:eudi:pid:1"));
     assert!(held.contains("org.iso.18013.5.1.mDL"));
+}
+
+#[test]
+fn pid_portrait_profile_is_enforced_at_authenticated_storage_boundary() {
+    let wallet = DemoWallet::new();
+    let scenario = wallet.issuance_scenario();
+
+    let missing_picture = remove_sd_jwt_disclosure(&scenario.pid_credential_compact, "picture");
+    let mut sd_core = ready_core(&scenario);
+    assert_eq!(
+        sd_core.ingest_credential(
+            "dc+sd-jwt",
+            missing_picture.as_bytes(),
+            &scenario.issuer_cert_chain,
+            &scenario.issuer_id,
+        ),
+        Err(CredentialIngestionError::PidPortraitInvalid)
+    );
+    assert_eq!(sd_core.held_credentials_json(), "[]");
+
+    for portrait in [vec![0xff, 0xd8, 0xff, 0xd9], vec![]] {
+        let mut mdoc_core = ready_core(&scenario);
+        let credential = encoded_mdoc(&issued_pid_mdoc(&scenario, Some(portrait)));
+        mdoc_core
+            .ingest_credential(
+                "mso_mdoc",
+                &credential,
+                &scenario.issuer_cert_chain,
+                &scenario.issuer_id,
+            )
+            .expect("JPEG and explicit empty opt-out PID portraits are accepted");
+        assert!(mdoc_core
+            .held_credentials_json()
+            .contains("eu.europa.ec.eudi.pid.1"));
+    }
+
+    let mut missing_mdoc_core = ready_core(&scenario);
+    let missing = encoded_mdoc(&issued_pid_mdoc(&scenario, None));
+    assert_eq!(
+        missing_mdoc_core.ingest_credential(
+            "mso_mdoc",
+            &missing,
+            &scenario.issuer_cert_chain,
+            &scenario.issuer_id,
+        ),
+        Err(CredentialIngestionError::PidPortraitInvalid)
+    );
 }
 
 #[test]

@@ -16,6 +16,9 @@ use std::sync::{Arc, Mutex};
 use catalogue::IssuerTrustDomain;
 use crypto_backend::AwsLc;
 use crypto_traits::{Alg, Digest, Random};
+use oid4vci::pid_profile::{
+    validate_mdoc_pid_portrait, validate_sd_jwt_pid_portrait, PID_MDOC_DOCTYPE, PID_SD_JWT_VCT,
+};
 use oid4vp::{AbortReason, Env, Input, ResolvedTrust, SelectedCredential, State};
 use presenter::{minimum_claim_set, ConsentScreen, PaymentScreen, ScreenDescription, SignScreen};
 use serde::{Deserialize, Serialize};
@@ -1032,6 +1035,7 @@ pub enum CredentialIngestionError {
     CredentialTypeFormatMismatch,
     IssuerNotAllowedForType,
     MandatoryClaimsMissing,
+    PidPortraitInvalid,
     CredentialNotYetValid,
     CredentialExpired,
     DeviceBindingMissing,
@@ -3203,6 +3207,10 @@ impl Core {
         if credential_type.format != "dc+sd-jwt" {
             return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
         }
+        if vct == PID_SD_JWT_VCT {
+            validate_sd_jwt_pid_portrait(claims)
+                .map_err(|_| CredentialIngestionError::PidPortraitInvalid)?;
+        }
         let authenticated_issuer = self.issuer_for_type(issuers, vct)?;
         if issuer.is_empty()
             || issuer != authenticated_issuer.identity
@@ -3262,6 +3270,10 @@ impl Core {
             .ok_or(CredentialIngestionError::UnknownCredentialType)?;
         if credential_type.format != "mso_mdoc" {
             return Err(CredentialIngestionError::CredentialTypeFormatMismatch);
+        }
+        if mso.doc_type == PID_MDOC_DOCTYPE {
+            validate_mdoc_pid_portrait(&issuer_signed)
+                .map_err(|_| CredentialIngestionError::PidPortraitInvalid)?;
         }
         let authenticated_issuer = self.issuer_for_type(issuers, &mso.doc_type)?;
         if issuer_id_assertion != authenticated_issuer.identity {

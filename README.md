@@ -45,6 +45,7 @@ supporting artifact (`cd LandingPage && bun install && bun run dev`). It reads f
 | Mutation testing (oid4vp: 73/73 viable caught) | [`mutation-testing.md`](docs/certification-evidence/mutation-testing.md) |
 | Reference-environment interop probe | [`interop.md`](docs/certification-evidence/interop.md) · [`tools/interop/probe.sh`](tools/interop/probe.sh) |
 | PSD2 SCA dynamic-linking traceability | [`payment-sca.md`](docs/certification-evidence/payment-sca.md) |
+| PID Rulebook 1.7 portrait profile | [`pid-portrait-profile.md`](docs/certification-evidence/pid-portrait-profile.md) |
 
 ## Quick verify (what already works)
 

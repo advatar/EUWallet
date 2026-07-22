@@ -15,7 +15,12 @@ fn parse_event(v: &Value) -> Ev {
             attested: v["attested"].as_bool().expect("attested"),
         },
         "proof" => Ev::Proof,
-        "credential" => Ev::Credential(v["valid"].as_bool().expect("valid")),
+        "credential" => Ev::Credential {
+            valid: v["valid"].as_bool().expect("valid"),
+            portrait_profile_valid: v["portraitProfileValid"]
+                .as_bool()
+                .expect("portraitProfileValid"),
+        },
         other => panic!("unknown event kind: {other}"),
     }
 }
@@ -56,6 +61,11 @@ fn rust_model_matches_lean_oracle() {
             ctx.proof_key_attested,
             expect["proofKeyAttested"].as_bool().unwrap(),
             "trace #{i}: proofKeyAttested"
+        );
+        assert_eq!(
+            ctx.portrait_profile_valid,
+            expect["portraitProfileValid"].as_bool().unwrap(),
+            "trace #{i}: portraitProfileValid"
         );
     }
 }
