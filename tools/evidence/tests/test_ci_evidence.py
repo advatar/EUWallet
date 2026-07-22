@@ -73,6 +73,7 @@ class CiEvidenceConfigurationTests(unittest.TestCase):
         self.assertIn("grep -Eq 'Swift version", ios_job)
 
         tamarin_job = WORKFLOW.split("  tier3-tamarin:", 1)[1].split("  ios-shell:", 1)[0]
+        self.assertIn("runs-on: macos-26", tamarin_job)
         self.assertIn("brew tap tamarin-prover/tap", tamarin_job)
         self.assertIn("brew install tamarin-prover/tap/tamarin-prover", tamarin_job)
         trust_commands = [
