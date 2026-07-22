@@ -20,7 +20,7 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             container
-                .navigationTitle("Advatar Wallet")
+                .navigationTitle("My Wallet")
                 .padding()
         }
         // Derive coarse navigation milestones from what the core rendered — a thin mapping, NOT
@@ -121,12 +121,14 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 16) {
             Spacer()
             Image(systemName: "wallet.pass").font(.system(size: 48)).foregroundStyle(.tint)
-            Text("Your EU Digital Identity").font(.title.bold())
-            Text("Present credentials and authorise payments — every trust, minimisation and "
-                 + "signing decision is made in the verified Rust core.")
+            Text("Your ID, safely on your phone").font(.title.bold())
+            Text("Add trusted documents, use them when asked, and always see what you are sharing before you approve.")
                 .font(.body).foregroundStyle(.secondary)
+            Label("You choose what to share", systemImage: "checkmark.shield")
+            Label("Protected on this device", systemImage: "lock")
+            Label("Simple activity history", systemImage: "clock.arrow.circlepath")
             Spacer()
-            Button("Get started", action: onContinue)
+            Button("Set up my wallet", action: onContinue)
                 .buttonStyle(.borderedProminent)
                 .frame(maxWidth: .infinity)
         }
@@ -143,7 +145,7 @@ struct PresentingContainer: View {
     var body: some View {
         switch model.phase {
         case .running, .home:
-            ProgressView("Working with the core…")
+            ProgressView("Please wait…")
         case .screen(let screen):
             ScreenRenderer(screen: screen, onConsent: model.approve, onDecline: model.decline)
         case .done(let message):

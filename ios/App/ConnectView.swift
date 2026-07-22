@@ -13,28 +13,28 @@ struct ConnectView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Scan or paste a link") {
+                Section("Scan") {
                     if #available(iOS 16.0, *), QRScannerView.isAvailable {
                         Button { scanning = true } label: {
                             Label("Scan a QR code", systemImage: "qrcode.viewfinder")
                         }
                     } else {
-                        Label("Camera unavailable here — paste a link to classify it.",
+                        Label("The camera isn't available. You can enter the link below.",
                               systemImage: "camera.metering.unknown")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    TextField("openid-credential-offer://…  or  openid4vp://…",
+                    TextField("Paste a link",
                               text: $pasted, axis: .vertical)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .font(.caption.monospaced())
-                    Button("Classify link") { model.handleScanned(pasted) }
+                    Button("Continue with link") { model.handleScanned(pasted) }
                         .disabled(pasted.trimmingCharacters(in: .whitespaces).isEmpty)
                     if let scan = model.lastScan {
                         Text(scan).font(.callout).foregroundStyle(.primary)
                     }
                 }
 
+#if DEBUG
                 Section {
                     Button { model.probeReferenceIssuer() } label: {
                         Label("Probe issuer.eudiw.dev", systemImage: "antenna.radiowaves.left.and.right")
@@ -55,8 +55,9 @@ struct ConnectView: View {
                     Text("Secure Enclave on device; a keychain key stands in on the Simulator.")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
+#endif
             }
-            .navigationTitle("Connect")
+            .navigationTitle("Scan a QR code")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }

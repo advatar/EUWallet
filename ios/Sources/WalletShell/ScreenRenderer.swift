@@ -22,8 +22,12 @@ public struct ScreenRenderer: View {
         case .error(let code, let message):
             VStack(spacing: 12) {
                 Image(systemName: "exclamationmark.triangle").font(.largeTitle)
-                Text(message).font(.body)
+                Text("Something went wrong").font(.headline)
+                Text("Please try again. Nothing was shared.").font(.body)
+#if DEBUG
+                Text(message).font(.caption).foregroundStyle(.secondary)
                 Text(code).font(.caption).foregroundStyle(.secondary)
+#endif
             }.accessibilityElement(children: .combine)
         case .consent(let rp, let purpose, let claims):
             ConsentView(rp: rp, purpose: purpose, claims: claims, onConsent: onConsent, onDecline: onDecline)
@@ -53,12 +57,14 @@ struct SignConfirmationView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Authorize qualified signature").font(.headline)
+            Text("Sign this document?").font(.headline)
             Text(documentName).font(.title2.bold())
-            Text("Trust service: \(qtspId)").font(.subheadline)
+            Text("Signing service: \(qtspId)").font(.subheadline)
+#if DEBUG
             Text("Document hash: \(documentHashHex)")
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
+#endif
             Spacer()
             HStack {
                 Button("Cancel", role: .cancel, action: onDecline)
@@ -121,17 +127,20 @@ struct ConsentView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("\(rp) is requesting your data").font(.headline)
-            Text("Purpose: \(purpose)").font(.subheadline)
-            Text("They will receive only:").font(.subheadline).padding(.top, 4)
+            Text("Share information?").font(.title2.bold())
+            Text("Requested by \(rp)").font(.subheadline).foregroundStyle(.secondary)
+            if !purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(purpose).font(.body)
+            }
+            Text("Only this information will be shared:").font(.headline).padding(.top, 4)
             ForEach(claims, id: \.self) { claim in
                 Label(claim, systemImage: "checkmark.seal")
             }
             Spacer()
             HStack {
-                Button("Decline", role: .cancel, action: onDecline)
+                Button("Not now", role: .cancel, action: onDecline)
                 Spacer()
-                Button("Share", action: onConsent).buttonStyle(.borderedProminent)
+                Button("Share information", action: onConsent).buttonStyle(.borderedProminent)
             }
         }
         .padding()
