@@ -56,7 +56,7 @@ class WalletEffectDecoderTest {
                 {"type":"render","operationId":21,"authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"signConfirmation","documentName":"Contract","qtspId":"qtsp","documentHashHex":"ab"}},
                 {"type":"render","screen":{"screen":"credentialList","documents":[{"documentId":"pid-1","documentName":"National ID","issuerName":"Federal identity authority","format":"dcSdJwt","status":"ready","portraitRequired":true}]}},
                 {"type":"render","screen":{"screen":"credentialDetail","document":{"documentId":"pid-1","documentName":"National ID","issuerName":"Federal identity authority","format":"dcSdJwt","status":"ready","portraitRequired":true},"attributes":[{"label":"Name","value":"Astrid Andersson"}]}},
-                {"type":"render","screen":{"screen":"issuanceOffer","issuerName":"Federal identity authority","documentName":"National ID","format":"dcSdJwt","attributes":["family_name"],"portraitRequired":true}},
+                {"type":"render","operationId":22,"authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"issuanceOffer","issuerName":"Federal identity authority","documentName":"National ID","format":"dcSdJwt","attributes":["family_name"],"portraitRequired":true}},
                 {"type":"render","screen":{"screen":"pinPreparation","documentName":"National ID"}},
                 {"type":"render","screen":{"screen":"pinHelp"}},
                 {"type":"render","screen":{"screen":"nfcReady","documentName":"National ID"}},

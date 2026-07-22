@@ -110,6 +110,14 @@ object WalletEventJson {
         .put("issuerId", issuerId)
         .toString()
 
+    fun credentialOfferAccepted(operationId: Long, authorizationHash: ByteArray): String =
+        operationEvent("credentialOfferAccepted", operationId)
+            .put("authorizationHash", byteArray(authorizationHash))
+            .toString()
+
+    fun credentialOfferDeclined(operationId: Long): String =
+        operationEvent("credentialOfferDeclined", operationId).toString()
+
     fun parPushed(operationId: Long, pkceS256: Boolean): String = operationEvent(
         "parPushed",
         operationId,

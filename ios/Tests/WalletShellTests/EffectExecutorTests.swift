@@ -443,7 +443,7 @@ final class EffectExecutorTests: XCTestCase {
     func testCompleteIssuanceScreenVocabularyDecodesWithoutFallback() throws {
         let document = #"{"documentId":"pid-1","documentName":"National ID","issuerName":"Federal identity authority","format":"dcSdJwt","status":"ready","portraitRequired":true}"#
         let outputs = [
-            #"[{"type":"render","screen":{"screen":"issuanceOffer","issuerName":"Federal identity authority","documentName":"National ID","format":"dcSdJwt","attributes":["family_name"],"portraitRequired":true}}]"#,
+            #"[{"type":"render","operationId":40,"authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"issuanceOffer","issuerName":"Federal identity authority","documentName":"National ID","format":"dcSdJwt","attributes":["family_name"],"portraitRequired":true}}]"#,
             #"[{"type":"render","screen":{"screen":"pinPreparation","documentName":"National ID"}}]"#,
             #"[{"type":"render","screen":{"screen":"pinHelp"}}]"#,
             #"[{"type":"render","screen":{"screen":"nfcReady","documentName":"National ID"}}]"#,

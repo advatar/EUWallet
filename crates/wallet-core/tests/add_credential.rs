@@ -18,11 +18,18 @@ fn add_credential(
     credential_compact: &str,
 ) {
     // Offer → the core decides issuer trust in-core → RequestToken.
-    let fx = core.handle_event(Event::CredentialOfferReceived {
+    let review = core.handle_event(Event::CredentialOfferReceived {
         offer: scn.offer.clone(),
         issuer_cert_chain: scn.issuer_cert_chain.clone(),
         issuer_id: scn.issuer_id.clone(),
     });
+    assert!(matches!(
+        review.as_slice(),
+        [Effect::Render {
+            screen: presenter::ScreenDescription::IssuanceOffer(_)
+        }]
+    ));
+    let fx = core.handle_event(Event::CredentialOfferAccepted);
     assert!(
         fx.contains(&Effect::RequestToken),
         "trusted issuer should proceed to token, got {fx:?}"
@@ -64,11 +71,18 @@ fn add_mdoc_credential(
     credential_b64: &str,
 ) {
     let offer = br#"{"format":"mso_mdoc","grant":"pre-authorized","tx_code_required":false}"#;
-    let fx = core.handle_event(Event::CredentialOfferReceived {
+    let review = core.handle_event(Event::CredentialOfferReceived {
         offer: offer.to_vec(),
         issuer_cert_chain: scn.issuer_cert_chain.clone(),
         issuer_id: scn.issuer_id.clone(),
     });
+    assert!(matches!(
+        review.as_slice(),
+        [Effect::Render {
+            screen: presenter::ScreenDescription::IssuanceOffer(_)
+        }]
+    ));
+    let fx = core.handle_event(Event::CredentialOfferAccepted);
     assert!(
         fx.contains(&Effect::RequestToken),
         "mso_mdoc offer proceeds: {fx:?}"

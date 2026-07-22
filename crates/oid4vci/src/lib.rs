@@ -41,6 +41,10 @@ pub enum CredentialFormat {
 pub enum State {
     /// HLR-VCI-S-001
     Idle,
+    ReviewingOffer {
+        grant: HaipGrant,
+        format: CredentialFormat,
+    },
     /// HLR-VCI-S-002 — offer parsed; grant + format chosen and validated.
     OfferParsed {
         grant: HaipGrant,
@@ -95,6 +99,7 @@ pub enum AbortReason {
 #[derive(Clone, Debug)]
 pub enum Input {
     CredentialOffer(Vec<u8>),
+    AcceptOffer,
     ParPushed {
         pkce_s256: bool,
     },
@@ -119,6 +124,9 @@ pub enum Input {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Output {
+    ReviewOffer {
+        format: CredentialFormat,
+    },
     /// Push a PAR request (network I/O in the shell).
     PushPar,
     /// Open the browser for the authorization-code flow.
@@ -133,7 +141,9 @@ pub enum Output {
         signing_input: Vec<u8>,
     },
     /// Request the credential, presenting the assembled key-bound proof JWT.
-    RequestCredential { proof_jwt: Vec<u8> },
+    RequestCredential {
+        proof_jwt: Vec<u8>,
+    },
     /// Tear down.
     Close,
 }
@@ -215,22 +225,34 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                 if !guards::credential_format_is_supported(format) {
                     return (State::Aborted(AbortReason::UnsupportedFormat), vec![]);
                 }
-                match grant {
-                    HaipGrant::AuthorizationCode => {
-                        (State::OfferParsed { grant, format }, vec![Output::PushPar])
-                    }
-                    HaipGrant::PreAuthorized {
-                        tx_code_required: true,
-                    } => (State::AwaitingTxCode { format }, vec![Output::PromptTxCode]),
-                    HaipGrant::PreAuthorized {
-                        tx_code_required: false,
-                    } => (
-                        State::RequestingToken { format },
-                        vec![Output::RequestToken],
-                    ),
-                }
+                (
+                    State::ReviewingOffer { grant, format },
+                    vec![Output::ReviewOffer { format }],
+                )
             }
             Err(()) => (State::Aborted(AbortReason::UnsupportedGrant), vec![]),
+        },
+
+        (State::ReviewingOffer { grant, format }, Input::AcceptOffer) => match grant {
+            HaipGrant::AuthorizationCode => (
+                State::OfferParsed {
+                    grant: *grant,
+                    format: *format,
+                },
+                vec![Output::PushPar],
+            ),
+            HaipGrant::PreAuthorized {
+                tx_code_required: true,
+            } => (
+                State::AwaitingTxCode { format: *format },
+                vec![Output::PromptTxCode],
+            ),
+            HaipGrant::PreAuthorized {
+                tx_code_required: false,
+            } => (
+                State::RequestingToken { format: *format },
+                vec![Output::RequestToken],
+            ),
         },
 
         // HLR-VCI-T-002 — auth-code: PAR must carry PKCE S256, or abort.

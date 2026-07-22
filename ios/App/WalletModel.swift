@@ -254,12 +254,7 @@ final class WalletModel: ObservableObject {
         isIssuing = true
         log = ["Adding \(type.displayName)…"]
         Task {
-            guard await issue(type) else { isIssuing = false; return }
-            note("Core ran the issuance machine: issuer-trust decision, WUA key-attestation gate, "
-                 + "device-signed proof-of-possession — then stored the issuer-signed credential.")
-            reloadCredentials()
-            reloadHistory()
-            isIssuing = false
+            guard await issue(type, requiresReview: true) else { isIssuing = false; return }
         }
     }
 
@@ -310,7 +305,7 @@ final class WalletModel: ObservableObject {
 
     /// The awaitable core of issuance (also used to seed demo state silently). Routes the credential
     /// compact, offer, and format by type — `.mdlMdoc` issues the ISO 18013-5 mDL in `mso_mdoc`.
-    private func issue(_ type: CredentialType) async -> Bool {
+    private func issue(_ type: CredentialType, requiresReview: Bool = false) async -> Bool {
         let compact: String
         switch type {
         case .pid: compact = issuance.pidCredentialCompact
@@ -325,13 +320,33 @@ final class WalletModel: ObservableObject {
             credentialCompact: Data(compact.utf8),
             cNonce: nextNonce(),
             format: type.issuanceFormat)
-        guard let ex = makeExecutor(issuer: issuer, render: { _, _, _ in }) else {
+        var reviewOperationId: UInt64?
+        var reviewAuthorizationHash: Data?
+        guard let ex = makeExecutor(issuer: issuer, render: {
+            [weak self] operationId, authorizationHash, screen in
+            reviewOperationId = operationId
+            reviewAuthorizationHash = authorizationHash
+            guard requiresReview, let self else { return }
+            self.decisionOperationId = operationId
+            self.decisionAuthorizationHash = authorizationHash
+            self.decisionKind = WalletDecisionKind(screen: screen)
+            self.phase = .screen(screen)
+        }) else {
             return false
         }
-        return await run(ex, eventJson: WalletEventJSON.credentialOfferReceived(
+        self.executor = requiresReview ? ex : self.executor
+        guard await run(ex, eventJson: WalletEventJSON.credentialOfferReceived(
             offer: offer,
             issuerCertChain: issuance.issuerCertChain,
-            issuerId: issuance.issuerId), requiring: .succeeded)
+            issuerId: issuance.issuerId), requiring: .awaitingInput) else { return false }
+        if requiresReview { return true }
+        guard let reviewOperationId, let reviewAuthorizationHash else { return false }
+        return await run(
+            ex,
+            eventJson: WalletEventJSON.credentialOfferAccepted(
+                operationId: reviewOperationId,
+                authorizationHash: reviewAuthorizationHash),
+            requiring: .succeeded)
     }
 
     // MARK: - Flows (presentation / payment) on the persistent engine
@@ -424,6 +439,12 @@ final class WalletModel: ObservableObject {
                 note("Device authorized the exact document hash; the response was acknowledged by the QTSP.")
                 reloadHistory()
                 phase = .done("Document signed successfully.")
+            case .issuance:
+                note("The approved issuer offer completed with a device-bound proof and verified credential.")
+                reloadCredentials()
+                reloadHistory()
+                isIssuing = false
+                phase = .done("Your document is ready.")
             }
         }
     }
@@ -447,7 +468,8 @@ final class WalletModel: ObservableObject {
                 eventJson: kind.declineEvent(operationId: operationId),
                 requiring: .declined
             ) else { return }
-            phase = .done("Nothing was shared.")
+            if kind == .issuance { isIssuing = false }
+            phase = .done(kind == .issuance ? "Nothing was added." : "Nothing was shared.")
         }
     }
 

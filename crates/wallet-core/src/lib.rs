@@ -21,8 +21,9 @@ use oid4vci::pid_profile::{
 };
 use oid4vp::{AbortReason, Env, Input, ResolvedTrust, SelectedCredential, State};
 use presenter::{
-    minimum_claim_set, ConsentScreen, OverAskResult, PaymentScreen, RetentionDisclosure,
-    ScreenDescription, SignScreen, VerifierRegistration, VerifierTrustMark,
+    minimum_claim_set, ConsentScreen, CredentialFormat as DisplayCredentialFormat,
+    IssuanceOfferScreen, OverAskResult, PaymentScreen, RetentionDisclosure, ScreenDescription,
+    SignScreen, VerifierRegistration, VerifierTrustMark,
 };
 use serde::{Deserialize, Serialize};
 use trust::{ServiceType, TrustStore};
@@ -75,6 +76,7 @@ enum OperationResultKind {
     PresentationDecision,
     PaymentDecision,
     QesDecision,
+    IssuanceDecision,
 }
 
 impl OperationResultKind {
@@ -95,6 +97,7 @@ impl OperationResultKind {
             Self::PresentationDecision => "presentationDecision",
             Self::PaymentDecision => "paymentDecision",
             Self::QesDecision => "qesDecision",
+            Self::IssuanceDecision => "issuanceDecision",
         }
     }
 
@@ -105,6 +108,12 @@ impl OperationResultKind {
                 matches!(event_type, "paymentApproved" | "paymentDeclined")
             }
             Self::QesDecision => matches!(event_type, "qesAuthorized" | "qesDeclined"),
+            Self::IssuanceDecision => {
+                matches!(
+                    event_type,
+                    "credentialOfferAccepted" | "credentialOfferDeclined"
+                )
+            }
             _ => self.result_type() == event_type,
         }
     }
@@ -1175,13 +1184,19 @@ struct SessionInfo {
 )]
 pub enum Event {
     /// Set the shell's wall-clock (Unix seconds); the core has no clock of its own.
-    SetClock { epoch: i64 },
+    SetClock {
+        epoch: i64,
+    },
     /// Replace one audit-log entry with a chain-preserving tombstone.
-    RedactTransaction { seq: u64 },
+    RedactTransaction {
+        seq: u64,
+    },
     /// Erase all audit-log entries while retaining the rest of the wallet state.
     WipeTransactionLog,
     /// A remote authorization request (compact JWS) arrived via deep link / browser.
-    AuthorizationRequestReceived { request: Vec<u8> },
+    AuthorizationRequestReceived {
+        request: Vec<u8>,
+    },
     /// The shell fetched the RP's certificate chain (DER, leaf-first) for the pending request.
     /// Whether the RP is *registered* is decided IN-CORE against the trusted list — not here.
     RpCertChainResolved {
@@ -1196,7 +1211,9 @@ pub enum Event {
     UserDeclined,
     /// The device produced the signature the core requested (routed to the active flow —
     /// presentation's key-binding JWT or payment's SCA authentication code).
-    DeviceSignatureProduced { signature: Vec<u8> },
+    DeviceSignatureProduced {
+        signature: Vec<u8>,
+    },
     /// The shell confirmed the vp_token reached the response_uri.
     PresentationDelivered,
     /// The payment service acknowledged the dynamically linked authorization code.
@@ -1205,7 +1222,9 @@ pub enum Event {
     QesAuthorizationDelivered,
     /// A correlated operation without a protocol-specific payload completed (currently durable
     /// nonce persistence and peer-offer publication).
-    OperationSucceeded { operation_id: u64 },
+    OperationSucceeded {
+        operation_id: u64,
+    },
     /// A correlated native operation failed. The JSON boundary validates `operation_id` before
     /// this transition can reset the owning flow.
     OperationFailed {
@@ -1213,15 +1232,21 @@ pub enum Event {
         failure: OperationFailure,
     },
     /// The OS or holder cancelled a correlated native operation.
-    OperationCancelled { operation_id: u64 },
+    OperationCancelled {
+        operation_id: u64,
+    },
     /// A payment authorization request (PSD2/TS12) arrived.
-    PaymentAuthorizationRequestReceived { request: Vec<u8> },
+    PaymentAuthorizationRequestReceived {
+        request: Vec<u8>,
+    },
     /// The user approved the payment confirmation screen.
     PaymentApproved,
     /// The user declined the payment.
     PaymentDeclined,
     /// A document-signing (QES) request arrived (JSON, see `qes::parse_request`).
-    QesSignRequestReceived { request: Vec<u8> },
+    QesSignRequestReceived {
+        request: Vec<u8>,
+    },
     /// The user authorized the QES sign-confirmation screen.
     QesAuthorized,
     /// The user declined to sign.
@@ -1233,16 +1258,31 @@ pub enum Event {
         issuer_cert_chain: Vec<Vec<u8>>,
         issuer_id: String,
     },
+    /// Holder approved the exact authenticated offer screen.
+    CredentialOfferAccepted,
+    CredentialOfferDeclined,
     /// The shell pushed a PAR request (auth-code flow); reports whether PKCE S256 was used.
-    ParPushed { pkce_s256: bool },
+    ParPushed {
+        pkce_s256: bool,
+    },
     /// The browser returned an authorization code.
-    AuthorizationCodeReturned { code: Vec<u8> },
+    AuthorizationCodeReturned {
+        code: Vec<u8>,
+    },
     /// The user entered the pre-authorized transaction code / PIN.
-    TransactionCodeEntered { code: Vec<u8> },
+    TransactionCodeEntered {
+        code: Vec<u8>,
+    },
     /// The token endpoint responded (sender-bound + a fresh c_nonce).
-    TokenReceived { bound: bool, c_nonce: u64 },
+    TokenReceived {
+        bound: bool,
+        c_nonce: u64,
+    },
     /// The credential endpoint returned a credential.
-    CredentialReceived { format: String, bytes: Vec<u8> },
+    CredentialReceived {
+        format: String,
+        bytes: Vec<u8>,
+    },
     /// The shell completed an HTTPS Token Status List fetch. The token is trusted only after the
     /// core validates the exact URI, 2xx response, status-provider certificate path and JWS.
     StatusListReceived {
@@ -1396,6 +1436,7 @@ pub struct Core {
     /// Parsed credential that crossed the authentication/policy boundary for this response.
     pending_verified_credential: Option<AuthenticatedCredential>,
     last_credential_ingestion_error: Option<CredentialIngestionError>,
+    issuance_consent_hash: [u8; 32],
     // Revocation: URI-keyed verified lists plus the exact selected references awaiting refresh.
     // Both collections are explicitly bounded to keep hostile issuer data from growing memory.
     status_lists: BTreeMap<String, CachedStatusList>,
@@ -1453,6 +1494,7 @@ impl Core {
             issuer_candidates_current: Vec::new(),
             pending_verified_credential: None,
             last_credential_ingestion_error: None,
+            issuance_consent_hash: [0u8; 32],
             status_lists: BTreeMap::new(),
             pending_status_references: Vec::new(),
             log: txnlog::TransactionLog::new(),
@@ -2032,6 +2074,7 @@ impl Core {
                 self.issuer_cert_chain_current.clear();
                 self.issuer_candidates_current.clear();
                 self.pending_verified_credential = None;
+                self.issuance_consent_hash = [0u8; 32];
             }
             ActiveFlow::Qes => {
                 self.qes = qes::QesState::Idle;
@@ -2078,6 +2121,7 @@ impl Core {
                 self.issuer_cert_chain_current.clear();
                 self.issuer_candidates_current.clear();
                 self.pending_verified_credential = None;
+                self.issuance_consent_hash = [0u8; 32];
             }
             ActiveFlow::Qes => {
                 self.qes_consent_hash = [0u8; 32];
@@ -2492,6 +2536,8 @@ impl Core {
                 self.last_credential_ingestion_error = None;
                 self.drive_issuance(oid4vci::Input::CredentialOffer(offer))
             }
+            Event::CredentialOfferAccepted => self.drive_issuance(oid4vci::Input::AcceptOffer),
+            Event::CredentialOfferDeclined => self.drive_issuance(oid4vci::Input::Decline),
             Event::ParPushed { pkce_s256 } => {
                 self.drive_issuance(oid4vci::Input::ParPushed { pkce_s256 })
             }
@@ -2636,7 +2682,7 @@ impl Core {
             }
             if matches!(
                 event_type,
-                "userConsented" | "paymentApproved" | "qesAuthorized"
+                "userConsented" | "paymentApproved" | "qesAuthorized" | "credentialOfferAccepted"
             ) {
                 let expected_hash = pending.authorization_hash.ok_or_else(|| {
                     format!("operationId {operation_id} has no authorization hash")
@@ -2715,6 +2761,8 @@ impl Core {
                 | "paymentDeclined"
                 | "qesAuthorized"
                 | "qesDeclined"
+                | "credentialOfferAccepted"
+                | "credentialOfferDeclined"
                 | "operationSucceeded"
                 | "operationFailed"
                 | "operationCancelled"
@@ -2811,6 +2859,10 @@ impl Core {
                     ScreenDescription::SignConfirmation(_) => (
                         OperationResultKind::QesDecision,
                         Some(self.qes_consent_hash),
+                    ),
+                    ScreenDescription::IssuanceOffer(_) => (
+                        OperationResultKind::IssuanceDecision,
+                        Some(self.issuance_consent_hash),
                     ),
                     _ => return Ok(None),
                 };
@@ -3426,7 +3478,8 @@ impl Core {
         self.issuance = next;
 
         let audit_format = match &self.issuance {
-            oid4vci::State::OfferParsed { format, .. }
+            oid4vci::State::ReviewingOffer { format, .. }
+            | oid4vci::State::OfferParsed { format, .. }
             | oid4vci::State::Authorizing { format }
             | oid4vci::State::AwaitingTxCode { format }
             | oid4vci::State::RequestingToken { format }
@@ -3498,9 +3551,43 @@ impl Core {
         effects
     }
 
-    fn translate_issuance(&self, output: oid4vci::Output) -> Effect {
+    fn translate_issuance(&mut self, output: oid4vci::Output) -> Effect {
         use oid4vci::Output as O;
         match output {
+            O::ReviewOffer { format } => {
+                let issuer_name = self
+                    .trust_store
+                    .credential_issuer_at(&self.issuer_id_current, self.now_epoch)
+                    .map(|registration| registration.display_name.clone())
+                    .unwrap_or_else(|| "Verified credential issuer".into());
+                let (document_name, display_format) = match format {
+                    oid4vci::CredentialFormat::DcSdJwt => (
+                        "Digital identity document".to_string(),
+                        DisplayCredentialFormat::DcSdJwt,
+                    ),
+                    oid4vci::CredentialFormat::MsoMdoc => (
+                        "Mobile document".to_string(),
+                        DisplayCredentialFormat::MsoMdoc,
+                    ),
+                };
+                let portrait_required = self
+                    .issuer_candidates_current
+                    .first()
+                    .is_some_and(|issuer| issuer.service == IssuerTrustDomain::Pid);
+                let screen = ScreenDescription::IssuanceOffer(IssuanceOfferScreen {
+                    issuer_name,
+                    document_name,
+                    format: display_format,
+                    attributes: if portrait_required {
+                        vec!["family_name".into(), "given_name".into(), "portrait".into()]
+                    } else {
+                        Vec::new()
+                    },
+                    portrait_required,
+                });
+                self.issuance_consent_hash = presenter::consent_hash(&AwsLc, &screen);
+                Effect::Render { screen }
+            }
             O::PushPar => Effect::PushPar,
             O::OpenAuthBrowser => Effect::OpenAuthBrowser,
             O::PromptTxCode => Effect::PromptTxCode,

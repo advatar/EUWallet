@@ -342,6 +342,10 @@ impl DemoWallet {
                 { "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" },
                 { "cert": b64(CA_DER), "service": "pid", "status": "granted" },
             ],
+            "credential_issuers": [{
+                "issuer_id": "https://issuer.example",
+                "display_name": "Federal identity authority"
+            }]
         })
         .to_string()
         .as_bytes());
@@ -369,6 +373,10 @@ impl DemoWallet {
                 { "cert": b64(CA_DER), "service": "pid", "status": "granted" },
                 { "cert": b64(CA_DER), "service": "attestation", "status": "granted" },
             ],
+            "credential_issuers": [{
+                "issuer_id": "https://issuer.example",
+                "display_name": "Federal identity authority"
+            }]
         })
         .to_string()
         .as_bytes());

@@ -713,6 +713,7 @@ impl Core {
         self.issuer_candidates_current.clear();
         self.pending_verified_credential = None;
         self.last_credential_ingestion_error = None;
+        self.issuance_consent_hash = [0u8; 32];
         self.status_lists.clear();
         self.pending_status_references.clear();
         self.pay_summary = None;

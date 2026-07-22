@@ -20,15 +20,23 @@ fn drive(state: &State, input: Input, seen: &[u64]) -> (State, Vec<Output>) {
     step(state, &input, &env(seen))
 }
 
+fn review_offer(grant: &str, format: &str, tx: bool, seen: &[u64]) -> State {
+    let (state, output) = drive(
+        &State::Idle,
+        Input::CredentialOffer(offer(grant, format, tx)),
+        seen,
+    );
+    assert!(matches!(state, State::ReviewingOffer { .. }));
+    assert!(matches!(output.as_slice(), [Output::ReviewOffer { .. }]));
+    state
+}
+
 #[test]
 fn happy_pre_authorized_no_pin_to_issued() {
     let seen: Vec<u64> = vec![];
     // Offer (pre-auth, no PIN) → RequestToken
-    let (s, out) = drive(
-        &State::Idle,
-        Input::CredentialOffer(offer("pre-authorized", "dc+sd-jwt", false)),
-        &seen,
-    );
+    let review = review_offer("pre-authorized", "dc+sd-jwt", false, &seen);
+    let (s, out) = drive(&review, Input::AcceptOffer, &seen);
     assert!(matches!(s, State::RequestingToken { .. }));
     assert_eq!(out, vec![Output::RequestToken]);
 
@@ -73,11 +81,8 @@ fn happy_pre_authorized_no_pin_to_issued() {
 #[test]
 fn happy_pre_authorized_with_pin() {
     let seen: Vec<u64> = vec![];
-    let (s, out) = drive(
-        &State::Idle,
-        Input::CredentialOffer(offer("pre-authorized", "mso_mdoc", true)),
-        &seen,
-    );
+    let review = review_offer("pre-authorized", "mso_mdoc", true, &seen);
+    let (s, out) = drive(&review, Input::AcceptOffer, &seen);
     assert!(matches!(s, State::AwaitingTxCode { .. }));
     assert_eq!(out, vec![Output::PromptTxCode]);
 
@@ -89,11 +94,8 @@ fn happy_pre_authorized_with_pin() {
 #[test]
 fn happy_authorization_code_par_pkce() {
     let seen: Vec<u64> = vec![];
-    let (s, out) = drive(
-        &State::Idle,
-        Input::CredentialOffer(offer("authorization_code", "dc+sd-jwt", false)),
-        &seen,
-    );
+    let review = review_offer("authorization_code", "dc+sd-jwt", false, &seen);
+    let (s, out) = drive(&review, Input::AcceptOffer, &seen);
     assert!(matches!(s, State::OfferParsed { .. }));
     assert_eq!(out, vec![Output::PushPar]);
 
@@ -146,11 +148,8 @@ fn abort_unsupported_grant() {
 #[test]
 fn abort_pkce_missing() {
     let seen: Vec<u64> = vec![];
-    let (s, _) = drive(
-        &State::Idle,
-        Input::CredentialOffer(offer("authorization_code", "dc+sd-jwt", false)),
-        &seen,
-    );
+    let review = review_offer("authorization_code", "dc+sd-jwt", false, &seen);
+    let (s, _) = drive(&review, Input::AcceptOffer, &seen);
     let (s, _) = drive(&s, Input::ParPushed { pkce_s256: false }, &seen);
     assert_eq!(s, State::Aborted(AbortReason::PkceMissing));
 }
@@ -158,22 +157,32 @@ fn abort_pkce_missing() {
 #[test]
 fn abort_tx_code_invalid() {
     let seen: Vec<u64> = vec![];
-    let (s, _) = drive(
-        &State::Idle,
-        Input::CredentialOffer(offer("pre-authorized", "dc+sd-jwt", true)),
-        &seen,
-    );
+    let review = review_offer("pre-authorized", "dc+sd-jwt", true, &seen);
+    let (s, _) = drive(&review, Input::AcceptOffer, &seen);
     let (s, _) = drive(&s, Input::TxCodeEntered(vec![]), &seen);
     assert_eq!(s, State::Aborted(AbortReason::TxCodeInvalid));
 }
 
 fn to_requesting_token(seen: &[u64]) -> State {
-    drive(
-        &State::Idle,
-        Input::CredentialOffer(offer("pre-authorized", "dc+sd-jwt", false)),
-        seen,
-    )
-    .0
+    let review = review_offer("pre-authorized", "dc+sd-jwt", false, seen);
+    drive(&review, Input::AcceptOffer, seen).0
+}
+
+#[test]
+fn offer_cannot_start_network_or_signing_before_holder_approval() {
+    let seen = Vec::new();
+    let review = review_offer("pre-authorized", "dc+sd-jwt", false, &seen);
+    for input in [
+        Input::TokenResponse {
+            bound: true,
+            c_nonce: 1,
+        },
+        Input::ProofSignatureProduced(vec![1]),
+    ] {
+        let (state, output) = drive(&review, input, &seen);
+        assert_eq!(state, review);
+        assert!(output.is_empty());
+    }
 }
 
 #[test]

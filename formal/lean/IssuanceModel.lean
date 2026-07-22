@@ -17,6 +17,7 @@ namespace IssuanceModel
 
 inductive Ev where
   | offer (issuerTrusted : Bool)
+  | approveOffer
   | token (bound attested : Bool)   -- sender-bound token + proof-key attested (WUA High)
   | proof                           -- device proof-of-possession assembled
   | credential (valid portraitProfileValid : Bool)
@@ -25,6 +26,7 @@ inductive Ev where
 /-- Machine states (mirror of the security-relevant subset of `oid4vci::State`). -/
 inductive St where
   | idle
+  | reviewingOffer
   | offerParsed
   | provingPossession
   | requestingCredential
@@ -38,18 +40,23 @@ structure Ctx where
   tokenBound      : Bool
   proofKeyAttested : Bool
   portraitProfileValid : Bool
+  holderApproved : Bool
   deriving Repr
 
 def init : Ctx :=
   { st := .idle, issuerTrusted := false, tokenBound := false, proofKeyAttested := false,
-    portraitProfileValid := false }
+    portraitProfileValid := false, holderApproved := false }
 
 def step (c : Ctx) : Ev → Ctx
   | .offer trusted =>
       match c.st with
       | .idle =>
-          if trusted then { c with st := .offerParsed, issuerTrusted := true }
+          if trusted then { c with st := .reviewingOffer, issuerTrusted := true }
           else { c with st := .aborted }                              -- guard: IssuerNotTrusted
+      | _ => c
+  | .approveOffer =>
+      match c.st with
+      | .reviewingOffer => { c with st := .offerParsed, holderApproved := true }
       | _ => c
   | .token bound attested =>
       match c.st with
@@ -75,44 +82,51 @@ def run (evs : List Ev) : Ctx := evs.foldl step init
 /-! ## Inductive invariant carrying the three security facts to the accepting state. -/
 
 def Inv (c : Ctx) : Prop :=
-  (c.st = St.offerParsed → c.issuerTrusted = true) ∧
+  (c.st = St.reviewingOffer → c.issuerTrusted = true) ∧
+  (c.st = St.offerParsed → c.issuerTrusted = true ∧ c.holderApproved = true) ∧
   (c.st = St.provingPossession →
-      c.issuerTrusted = true ∧ c.tokenBound = true ∧ c.proofKeyAttested = true) ∧
+      c.issuerTrusted = true ∧ c.tokenBound = true ∧ c.proofKeyAttested = true ∧
+        c.holderApproved = true) ∧
   (c.st = St.requestingCredential →
-      c.issuerTrusted = true ∧ c.tokenBound = true ∧ c.proofKeyAttested = true) ∧
+      c.issuerTrusted = true ∧ c.tokenBound = true ∧ c.proofKeyAttested = true ∧
+        c.holderApproved = true) ∧
   (c.st = St.credentialIssued →
       c.issuerTrusted = true ∧ c.tokenBound = true ∧ c.proofKeyAttested = true ∧
-        c.portraitProfileValid = true)
+        c.portraitProfileValid = true ∧ c.holderApproved = true)
 
 theorem step_preserves_inv (c : Ctx) (e : Ev) (h : Inv c) : Inv (step c e) := by
-  obtain ⟨h1, h2, h3, h4⟩ := h
+  obtain ⟨h1, h2, h3, h4, h5⟩ := h
   cases e with
   | offer trusted =>
       simp only [step]; split
       · split
-        · refine ⟨?_, ?_, ?_, ?_⟩ <;> intro hst <;> simp_all
-        · refine ⟨?_, ?_, ?_, ?_⟩ <;> intro hst <;> simp_all
-      · exact ⟨h1, h2, h3, h4⟩
+        · refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro hst <;> simp_all
+        · refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro hst <;> simp_all
+      · exact ⟨h1, h2, h3, h4, h5⟩
+  | approveOffer =>
+      simp only [step]; split
+      · rename_i hst; refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all [h1 hst]
+      · exact ⟨h1, h2, h3, h4, h5⟩
   | token bound attested =>
       simp only [step]; split
       · rename_i hst
         split
-        · refine ⟨?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all
+        · refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all
         · split
-          · refine ⟨?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all
-          · refine ⟨?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all [h1 hst]
-      · exact ⟨h1, h2, h3, h4⟩
+          · refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all
+          · refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all [h2 hst]
+      · exact ⟨h1, h2, h3, h4, h5⟩
   | proof =>
       simp only [step]; split
-      · rename_i hst; refine ⟨?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all [h2 hst]
-      · exact ⟨h1, h2, h3, h4⟩
+      · rename_i hst; refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all [h3 hst]
+      · exact ⟨h1, h2, h3, h4, h5⟩
   | credential valid portraitValid =>
       simp only [step]; split
       · rename_i hst
         split
-        · refine ⟨?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all [h3 hst]
-        · refine ⟨?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all
-      · exact ⟨h1, h2, h3, h4⟩
+        · refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all [h4 hst]
+        · refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all
+      · exact ⟨h1, h2, h3, h4, h5⟩
 
 theorem inv_foldl (evs : List Ev) (c : Ctx) (h : Inv c) : Inv (evs.foldl step c) := by
   induction evs generalizing c with
@@ -120,28 +134,33 @@ theorem inv_foldl (evs : List Ev) (c : Ctx) (h : Inv c) : Inv (evs.foldl step c)
   | cons e rest ih => simpa [List.foldl_cons] using ih (step c e) (step_preserves_inv c e h)
 
 theorem inv_run (evs : List Ev) : Inv (run evs) :=
-  inv_foldl evs init (by refine ⟨?_, ?_, ?_, ?_⟩ <;> intro h <;> simp [init] at h)
+  inv_foldl evs init (by refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro h <;> simp [init] at h)
 
 /-- **Theorem (issuer trust).** A credential is accepted only if the issuer was trusted in-core. -/
 theorem issued_requires_issuer_trust (evs : List Ev) :
     (run evs).st = St.credentialIssued → (run evs).issuerTrusted = true :=
-  fun h => ((inv_run evs).2.2.2 h).1
+  fun h => ((inv_run evs).2.2.2.2 h).1
 
 /-- **Theorem (token binding).** A credential is accepted only over a sender-bound token. -/
 theorem issued_requires_bound_token (evs : List Ev) :
     (run evs).st = St.credentialIssued → (run evs).tokenBound = true :=
-  fun h => ((inv_run evs).2.2.2 h).2.1
+  fun h => ((inv_run evs).2.2.2.2 h).2.1
 
 /-- **Theorem (key attestation).** A credential is accepted only if the proof key was attested
     (the WUA verified and bound the device key at High assurance). -/
 theorem issued_requires_attested_key (evs : List Ev) :
     (run evs).st = St.credentialIssued → (run evs).proofKeyAttested = true :=
-  fun h => ((inv_run evs).2.2.2 h).2.2.1
+  fun h => ((inv_run evs).2.2.2.2 h).2.2.1
 
 /-- **Theorem (PID portrait profile).** An issued PID passed the mandatory portrait gate. -/
 theorem issued_requires_valid_portrait_profile (evs : List Ev) :
     (run evs).st = St.credentialIssued → (run evs).portraitProfileValid = true :=
-  fun h => ((inv_run evs).2.2.2 h).2.2.2
+  fun h => ((inv_run evs).2.2.2.2 h).2.2.2.1
+
+/-- An issued credential always follows explicit holder approval of the reviewed offer. -/
+theorem issued_requires_holder_approval (evs : List Ev) :
+    (run evs).st = St.credentialIssued → (run evs).holderApproved = true :=
+  fun h => ((inv_run evs).2.2.2.2 h).2.2.2.2
 
 /-- **Theorem (issuer-trust gate).** An offer from an untrusted issuer is rejected. -/
 theorem untrusted_issuer_is_rejected (c : Ctx) (h : c.st = St.idle) :

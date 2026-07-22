@@ -186,6 +186,17 @@ fn offer_event() -> Event {
     }
 }
 
+fn approve_offer(core: &mut Core) -> Vec<Effect> {
+    let review = core.handle_event(offer_event());
+    assert!(matches!(
+        review.as_slice(),
+        [Effect::Render {
+            screen: presenter::ScreenDescription::IssuanceOffer(_)
+        }]
+    ));
+    core.handle_event(Event::CredentialOfferAccepted)
+}
+
 fn assert_credential_rejection(effects: &[Effect]) {
     assert!(matches!(
         effects,
@@ -199,11 +210,56 @@ fn assert_credential_rejection(effects: &[Effect]) {
 }
 
 #[test]
+fn production_boundary_binds_offer_approval_to_exact_rendered_hash() {
+    let (mut core, _device, _issuer) = setup(true, true);
+    let review_json = core
+        .handle_event_json(
+            &json!({
+                "type": "credentialOfferReceived",
+                "offer": OFFER,
+                "issuerCertChain": [issuer_chain_leaf()],
+                "issuerId": "https://issuer.example"
+            })
+            .to_string(),
+        )
+        .expect("offer review");
+    let review: serde_json::Value = serde_json::from_str(&review_json).unwrap();
+    let effect = &review.as_array().unwrap()[0];
+    assert_eq!(effect["resultType"], "issuanceDecision");
+    assert_eq!(effect["screen"]["screen"], "issuanceOffer");
+    let operation_id = effect["operationId"].as_u64().unwrap();
+    let authorization_hash = effect["authorizationHash"].clone();
+
+    assert!(core
+        .handle_event_json(
+            &json!({
+                "type": "credentialOfferAccepted",
+                "operationId": operation_id,
+                "authorizationHash": vec![0u8; 32]
+            })
+            .to_string()
+        )
+        .is_err());
+
+    let accepted = core
+        .handle_event_json(
+            &json!({
+                "type": "credentialOfferAccepted",
+                "operationId": operation_id,
+                "authorizationHash": authorization_hash
+            })
+            .to_string(),
+        )
+        .expect("exact offer approval");
+    assert!(accepted.contains("requestToken"));
+}
+
+#[test]
 fn full_issuance_with_in_core_trust_and_attestation() {
     let (mut core, device, issuer) = setup(true, true);
 
     // Offer accepted (issuer trusted in-core) → RequestToken.
-    let fx = core.handle_event(offer_event());
+    let fx = approve_offer(&mut core);
     assert!(
         fx.contains(&Effect::RequestToken),
         "issuer should be trusted, got {fx:?}"
@@ -252,9 +308,7 @@ fn full_issuance_with_in_core_trust_and_attestation() {
 #[test]
 fn issuer_provided_key_binding_jwt_is_rejected_during_issuance() {
     let (mut core, device, issuer) = setup(true, true);
-    assert!(core
-        .handle_event(offer_event())
-        .contains(&Effect::RequestToken));
+    assert!(approve_offer(&mut core).contains(&Effect::RequestToken));
     let signing_input = core
         .handle_event(Event::TokenReceived {
             bound: true,
@@ -340,7 +394,7 @@ fn shell_issuer_id_is_only_a_checked_compatibility_assertion() {
 fn unattested_proof_key_is_rejected_in_core() {
     // Trust loaded but NO WUA → proof_key_attested is false → no Sign effect at token time.
     let (mut core, _device, _issuer) = setup(true, false);
-    let _ = core.handle_event(offer_event());
+    let _ = approve_offer(&mut core);
     let fx = core.handle_event(Event::TokenReceived {
         bound: true,
         c_nonce: 222,
@@ -355,9 +409,7 @@ fn unattested_proof_key_is_rejected_in_core() {
 fn forged_credential_response_aborts_and_is_not_stored() {
     let (mut core, device, _issuer) = setup(true, true);
     let attacker = SoftwareSigner::generate_p256().unwrap();
-    assert!(core
-        .handle_event(offer_event())
-        .contains(&Effect::RequestToken));
+    assert!(approve_offer(&mut core).contains(&Effect::RequestToken));
     let fx = core.handle_event(Event::TokenReceived {
         bound: true,
         c_nonce: 333,

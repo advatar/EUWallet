@@ -243,12 +243,14 @@ public enum WalletDecisionKind: Equatable {
     case presentation
     case payment
     case qes
+    case issuance
 
     public init?(screen: ScreenDescription) {
         switch screen {
         case .consent: self = .presentation
         case .paymentConfirmation: self = .payment
         case .signConfirmation: self = .qes
+        case .issuanceOffer: self = .issuance
         default: return nil
         }
     }
@@ -267,6 +269,10 @@ public enum WalletDecisionKind: Equatable {
             return WalletEventJSON.qesAuthorized(
                 operationId: operationId,
                 authorizationHash: authorizationHash)
+        case .issuance:
+            return WalletEventJSON.credentialOfferAccepted(
+                operationId: operationId,
+                authorizationHash: authorizationHash)
         }
     }
 
@@ -275,6 +281,7 @@ public enum WalletDecisionKind: Equatable {
         case .presentation: return WalletEventJSON.userDeclined(operationId: operationId)
         case .payment: return WalletEventJSON.paymentDeclined(operationId: operationId)
         case .qes: return WalletEventJSON.qesDeclined(operationId: operationId)
+        case .issuance: return WalletEventJSON.credentialOfferDeclined(operationId: operationId)
         }
     }
 }
@@ -345,7 +352,7 @@ public enum WalletEffect: Decodable {
                 [UInt8].self,
                 forKey: .authorizationHash)
             switch screen {
-            case .consent, .paymentConfirmation, .signConfirmation:
+            case .consent, .paymentConfirmation, .signConfirmation, .issuanceOffer:
                 guard operationId != nil, authorizationHash?.count == 32 else {
                     throw DecodingError.keyNotFound(
                         operationId == nil ? CodingKeys.operationId : CodingKeys.authorizationHash,
@@ -514,6 +521,14 @@ public enum WalletEventJSON {
     ) -> String {
         let chain = issuerCertChain.map { byteArray($0) }.joined(separator: ",")
         return #"{"type":"credentialOfferReceived","offer":\#(byteArray(offer)),"issuerCertChain":[\#(chain)],"issuerId":\#(jsonString(issuerId))}"#
+    }
+    public static func credentialOfferAccepted(
+        operationId: UInt64, authorizationHash: Data
+    ) -> String {
+        #"{"type":"credentialOfferAccepted","operationId":\#(operationId),"authorizationHash":\#(byteArray(authorizationHash))}"#
+    }
+    public static func credentialOfferDeclined(operationId: UInt64) -> String {
+        #"{"type":"credentialOfferDeclined","operationId":\#(operationId)}"#
     }
     public static func parPushed(operationId: UInt64, pkceS256: Bool) -> String {
         #"{"type":"parPushed","operationId":\#(operationId),"pkceS256":\#(pkceS256)}"#

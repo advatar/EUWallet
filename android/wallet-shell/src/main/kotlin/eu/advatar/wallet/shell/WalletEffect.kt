@@ -121,7 +121,8 @@ object WalletEffectDecoder {
                 (operationId == null || authorizationHash?.size != 32) &&
                 (screen is WalletScreen.Consent ||
                     screen is WalletScreen.PaymentConfirmation ||
-                    screen is WalletScreen.SignConfirmation)
+                    screen is WalletScreen.SignConfirmation ||
+                    screen is WalletScreen.IssuanceOffer)
             ) {
                 malformed("interactive render requires operationId and 32-byte authorizationHash")
             }
