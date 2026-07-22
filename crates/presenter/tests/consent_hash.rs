@@ -3,8 +3,9 @@
 use cose::cbor::from_canonical_slice;
 use crypto_traits::Digest;
 use presenter::{
-    canonical_bytes, consent_hash, minimum_claim_set, present, ConsentScreen, ScreenDescription,
-    ScreenKind, Snapshot,
+    canonical_bytes, consent_hash, minimum_claim_set, present, ConsentScreen, CredentialFormat,
+    DocumentStatus, DocumentSummary, IssuanceRecovery, IssuanceRecoveryScreen, NfcReadState,
+    ScreenDescription, ScreenKind, Snapshot,
 };
 
 struct RealDigest;
@@ -14,6 +15,17 @@ impl Digest for RealDigest {
         let mut h = Sha256::new();
         h.update(data);
         h.finalize().into()
+    }
+}
+
+fn pid_summary(status: DocumentStatus) -> DocumentSummary {
+    DocumentSummary {
+        document_id: "pid-1".into(),
+        document_name: "National ID".into(),
+        issuer_name: "Federal identity authority".into(),
+        format: CredentialFormat::DcSdJwt,
+        status,
+        portrait_required: true,
     }
 }
 
@@ -111,4 +123,59 @@ fn minimum_claim_set_is_intersection_deterministic() {
         min,
         vec!["age_over_18".to_string(), "family_name".to_string()]
     );
+}
+
+#[test]
+fn complete_issuance_journey_has_canonical_closed_screens() {
+    let screens = [
+        ScreenDescription::PinPreparation {
+            document_name: "National ID".into(),
+        },
+        ScreenDescription::PinHelp,
+        ScreenDescription::NfcReady {
+            document_name: "National ID".into(),
+        },
+        ScreenDescription::NfcReading {
+            state: NfcReadState::Reading,
+        },
+        ScreenDescription::IssuancePreparing(pid_summary(DocumentStatus::Preparing)),
+        ScreenDescription::IssuanceReady(pid_summary(DocumentStatus::Ready)),
+        ScreenDescription::IssuanceNeedsAttention {
+            document: pid_summary(DocumentStatus::NeedsAttention),
+            recovery: IssuanceRecovery::SessionInterrupted,
+        },
+        ScreenDescription::IssuanceRecovery(IssuanceRecoveryScreen {
+            reason: IssuanceRecovery::WrongPin,
+            document_name: "National ID".into(),
+            attempts_remaining: Some(2),
+            can_resume: true,
+        }),
+    ];
+
+    for screen in screens {
+        let bytes = canonical_bytes(&screen);
+        let decoded = from_canonical_slice(&bytes).expect("valid canonical issuance screen");
+        assert_eq!(decoded.to_canonical(), bytes);
+    }
+}
+
+#[test]
+fn issuance_recovery_and_status_change_the_canonical_contract() {
+    let preparing = ScreenDescription::IssuancePreparing(pid_summary(DocumentStatus::Preparing));
+    let ready = ScreenDescription::IssuanceReady(pid_summary(DocumentStatus::Ready));
+    assert_ne!(canonical_bytes(&preparing), canonical_bytes(&ready));
+
+    let wrong_pin = ScreenDescription::IssuanceRecovery(IssuanceRecoveryScreen {
+        reason: IssuanceRecovery::WrongPin,
+        document_name: "National ID".into(),
+        attempts_remaining: Some(2),
+        can_resume: true,
+    });
+    let blocked = ScreenDescription::IssuanceRecovery(IssuanceRecoveryScreen {
+        reason: IssuanceRecovery::PinBlocked,
+        document_name: "National ID".into(),
+        attempts_remaining: None,
+        can_resume: false,
+    });
+    assert_ne!(canonical_bytes(&wrong_pin), canonical_bytes(&blocked));
 }

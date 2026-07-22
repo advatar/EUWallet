@@ -84,6 +84,65 @@ public struct OverAskResult: Decodable, Equatable {
     }
 }
 
+public enum CredentialDisplayFormat: String, Decodable, Equatable { case dcSdJwt, msoMdoc }
+public enum DocumentStatus: String, Decodable, Equatable { case preparing, ready, needsAttention }
+
+public struct DocumentSummary: Decodable, Equatable, Identifiable {
+    public let documentId: String
+    public let documentName: String
+    public let issuerName: String
+    public let format: CredentialDisplayFormat
+    public let status: DocumentStatus
+    public let portraitRequired: Bool
+    public var id: String { documentId }
+}
+
+public struct DisplayAttribute: Decodable, Equatable {
+    public let label: String
+    public let value: String
+}
+
+public struct CredentialListScreen: Decodable, Equatable { public let documents: [DocumentSummary] }
+public struct CredentialDetailScreen: Decodable, Equatable {
+    public let document: DocumentSummary
+    public let attributes: [DisplayAttribute]
+}
+public struct IssuanceOfferScreen: Decodable, Equatable {
+    public let issuerName: String
+    public let documentName: String
+    public let format: CredentialDisplayFormat
+    public let attributes: [String]
+    public let portraitRequired: Bool
+}
+public enum NfcReadState: String, Decodable, Equatable { case waitingForCard, reading, connectionLost }
+public enum IssuanceRecovery: String, Decodable, Equatable {
+    case wrongPin, pinBlocked, nfcInterrupted, nfcUnavailable, issuerRejected
+    case networkInterrupted, delayed, sessionInterrupted
+}
+public struct IssuanceRecoveryScreen: Decodable, Equatable {
+    public let reason: IssuanceRecovery
+    public let documentName: String
+    public let attemptsRemaining: UInt8?
+    public let canResume: Bool
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        reason = try c.decode(IssuanceRecovery.self, forKey: .reason)
+        documentName = try c.decode(String.self, forKey: .documentName)
+        attemptsRemaining = try c.decodeIfPresent(UInt8.self, forKey: .attemptsRemaining)
+        canResume = try c.decode(Bool.self, forKey: .canResume)
+        if (reason == .wrongPin) != (attemptsRemaining != nil) || attemptsRemaining == 0 {
+            throw DecodingError.dataCorruptedError(
+                forKey: .attemptsRemaining, in: c,
+                debugDescription: "retry count must be present only for wrong PIN")
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case reason, documentName, attemptsRemaining, canResume
+    }
+}
+
 public enum ScreenDescription: Decodable, Equatable {
     case loading
     case error(code: String, message: String)
@@ -98,6 +157,17 @@ public enum ScreenDescription: Decodable, Equatable {
         overAsk: OverAskResult)
     case paymentConfirmation(creditorName: String, creditorAccount: String, amountMinor: UInt64, currency: String)
     case signConfirmation(documentName: String, qtspId: String, documentHashHex: String)
+    case credentialList(CredentialListScreen)
+    case credentialDetail(CredentialDetailScreen)
+    case issuanceOffer(IssuanceOfferScreen)
+    case pinPreparation(documentName: String)
+    case pinHelp
+    case nfcReady(documentName: String)
+    case nfcReading(NfcReadState)
+    case issuancePreparing(DocumentSummary)
+    case issuanceReady(DocumentSummary)
+    case issuanceNeedsAttention(document: DocumentSummary, recovery: IssuanceRecovery)
+    case issuanceRecovery(IssuanceRecoveryScreen)
     case other(String)
 
     private enum CodingKeys: String, CodingKey {
@@ -105,6 +175,8 @@ public enum ScreenDescription: Decodable, Equatable {
         case verifierRegistration, trustMark, retention, overAsk
         case creditorName, creditorAccount, amountMinor, currency
         case documentName, qtspId, documentHashHex
+        case documents, document, attributes, issuerName, format, portraitRequired
+        case state, recovery, reason, attemptsRemaining, canResume
     }
 
     public init(from decoder: Decoder) throws {
@@ -137,6 +209,28 @@ public enum ScreenDescription: Decodable, Equatable {
                 documentName: try c.decode(String.self, forKey: .documentName),
                 qtspId: try c.decode(String.self, forKey: .qtspId),
                 documentHashHex: try c.decode(String.self, forKey: .documentHashHex))
+        case "credentialList":
+            self = .credentialList(try CredentialListScreen(from: decoder))
+        case "credentialDetail":
+            self = .credentialDetail(try CredentialDetailScreen(from: decoder))
+        case "issuanceOffer":
+            self = .issuanceOffer(try IssuanceOfferScreen(from: decoder))
+        case "pinPreparation":
+            self = .pinPreparation(documentName: try c.decode(String.self, forKey: .documentName))
+        case "pinHelp": self = .pinHelp
+        case "nfcReady":
+            self = .nfcReady(documentName: try c.decode(String.self, forKey: .documentName))
+        case "nfcReading": self = .nfcReading(try c.decode(NfcReadState.self, forKey: .state))
+        case "issuancePreparing":
+            self = .issuancePreparing(try c.decode(DocumentSummary.self, forKey: .document))
+        case "issuanceReady":
+            self = .issuanceReady(try c.decode(DocumentSummary.self, forKey: .document))
+        case "issuanceNeedsAttention":
+            self = .issuanceNeedsAttention(
+                document: try c.decode(DocumentSummary.self, forKey: .document),
+                recovery: try c.decode(IssuanceRecovery.self, forKey: .recovery))
+        case "issuanceRecovery":
+            self = .issuanceRecovery(try IssuanceRecoveryScreen(from: decoder))
         case let other: self = .other(other)
         }
     }

@@ -31,9 +31,26 @@ pub enum ScreenDescription {
     PaymentConfirmation(PaymentScreen),
     /// QES qualified-signature confirmation (what-you-see-is-what-you-sign).
     SignConfirmation(SignScreen),
-    CredentialList,
-    CredentialDetail,
-    IssuanceOffer,
+    CredentialList(CredentialListScreen),
+    CredentialDetail(CredentialDetailScreen),
+    IssuanceOffer(IssuanceOfferScreen),
+    PinPreparation {
+        document_name: String,
+    },
+    PinHelp,
+    NfcReady {
+        document_name: String,
+    },
+    NfcReading {
+        state: NfcReadState,
+    },
+    IssuancePreparing(DocumentSummary),
+    IssuanceReady(DocumentSummary),
+    IssuanceNeedsAttention {
+        document: DocumentSummary,
+        recovery: IssuanceRecovery,
+    },
+    IssuanceRecovery(IssuanceRecoveryScreen),
     PresentQr,
     ScanQr,
     AuthPrompt,
@@ -61,6 +78,95 @@ pub struct SignScreen {
     pub qtsp_id: String,
     /// Hex of the document hash (DTBS) being signed.
     pub document_hash_hex: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CredentialFormat {
+    DcSdJwt,
+    MsoMdoc,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DocumentStatus {
+    Preparing,
+    Ready,
+    NeedsAttention,
+}
+
+/// Consumer-safe document metadata. `issuer_name` is trusted display metadata associated with the
+/// authenticated issuer identity; raw certificate subject text must never populate it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentSummary {
+    pub document_id: String,
+    pub document_name: String,
+    pub issuer_name: String,
+    pub format: CredentialFormat,
+    pub status: DocumentStatus,
+    pub portrait_required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayAttribute {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialListScreen {
+    pub documents: Vec<DocumentSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialDetailScreen {
+    pub document: DocumentSummary,
+    pub attributes: Vec<DisplayAttribute>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssuanceOfferScreen {
+    pub issuer_name: String,
+    pub document_name: String,
+    pub format: CredentialFormat,
+    pub attributes: Vec<String>,
+    pub portrait_required: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NfcReadState {
+    WaitingForCard,
+    Reading,
+    ConnectionLost,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IssuanceRecovery {
+    WrongPin,
+    PinBlocked,
+    NfcInterrupted,
+    NfcUnavailable,
+    IssuerRejected,
+    NetworkInterrupted,
+    Delayed,
+    SessionInterrupted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssuanceRecoveryScreen {
+    pub reason: IssuanceRecovery,
+    pub document_name: String,
+    /// Present only for `wrongPin`; the core supplies the authenticated eID retry counter.
+    pub attempts_remaining: Option<u8>,
+    pub can_resume: bool,
 }
 
 /// A fully-resolved consent screen. RP-supplied strings enter ONLY as validated data here.
@@ -135,7 +241,11 @@ pub enum ScreenKind {
 pub fn present(snapshot: &Snapshot) -> ScreenDescription {
     match snapshot.screen {
         Some(ScreenKind::Consent) => ScreenDescription::Consent(snapshot.consent.clone()),
-        Some(ScreenKind::CredentialList) => ScreenDescription::CredentialList,
+        Some(ScreenKind::CredentialList) => {
+            ScreenDescription::CredentialList(CredentialListScreen {
+                documents: Vec::new(),
+            })
+        }
         Some(ScreenKind::Error) => {
             let (c, m) = snapshot.error.clone().unwrap_or_default();
             ScreenDescription::Error {
@@ -239,14 +349,131 @@ fn to_value(screen: &ScreenDescription) -> Value {
             Value::Text(s.qtsp_id.clone()),
             Value::Text(s.document_hash_hex.clone()),
         ]),
-        ScreenDescription::CredentialList => Value::Array(vec![tag("credentialList")]),
-        ScreenDescription::CredentialDetail => Value::Array(vec![tag("credentialDetail")]),
-        ScreenDescription::IssuanceOffer => Value::Array(vec![tag("issuanceOffer")]),
+        ScreenDescription::CredentialList(screen) => Value::Array(vec![
+            tag("credentialList"),
+            document_summaries_value(&screen.documents),
+        ]),
+        ScreenDescription::CredentialDetail(screen) => Value::Array(vec![
+            tag("credentialDetail"),
+            document_summary_value(&screen.document),
+            Value::Array(
+                screen
+                    .attributes
+                    .iter()
+                    .map(|attribute| {
+                        Value::Array(vec![
+                            Value::Text(attribute.label.clone()),
+                            Value::Text(attribute.value.clone()),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ]),
+        ScreenDescription::IssuanceOffer(screen) => Value::Array(vec![
+            tag("issuanceOffer"),
+            Value::Text(screen.issuer_name.clone()),
+            Value::Text(screen.document_name.clone()),
+            credential_format_value(screen.format),
+            Value::Array(screen.attributes.iter().cloned().map(Value::Text).collect()),
+            Value::Bool(screen.portrait_required),
+        ]),
+        ScreenDescription::PinPreparation { document_name } => Value::Array(vec![
+            tag("pinPreparation"),
+            Value::Text(document_name.clone()),
+        ]),
+        ScreenDescription::PinHelp => Value::Array(vec![tag("pinHelp")]),
+        ScreenDescription::NfcReady { document_name } => {
+            Value::Array(vec![tag("nfcReady"), Value::Text(document_name.clone())])
+        }
+        ScreenDescription::NfcReading { state } => Value::Array(vec![
+            tag("nfcReading"),
+            Value::Text(
+                match state {
+                    NfcReadState::WaitingForCard => "waitingForCard",
+                    NfcReadState::Reading => "reading",
+                    NfcReadState::ConnectionLost => "connectionLost",
+                }
+                .into(),
+            ),
+        ]),
+        ScreenDescription::IssuancePreparing(document) => Value::Array(vec![
+            tag("issuancePreparing"),
+            document_summary_value(document),
+        ]),
+        ScreenDescription::IssuanceReady(document) => {
+            Value::Array(vec![tag("issuanceReady"), document_summary_value(document)])
+        }
+        ScreenDescription::IssuanceNeedsAttention { document, recovery } => Value::Array(vec![
+            tag("issuanceNeedsAttention"),
+            document_summary_value(document),
+            issuance_recovery_value(*recovery),
+        ]),
+        ScreenDescription::IssuanceRecovery(screen) => Value::Array(vec![
+            tag("issuanceRecovery"),
+            issuance_recovery_value(screen.reason),
+            Value::Text(screen.document_name.clone()),
+            screen
+                .attempts_remaining
+                .map_or(Value::Null, |attempts| Value::Uint(u64::from(attempts))),
+            Value::Bool(screen.can_resume),
+        ]),
         ScreenDescription::PresentQr => Value::Array(vec![tag("presentQr")]),
         ScreenDescription::ScanQr => Value::Array(vec![tag("scanQr")]),
         ScreenDescription::AuthPrompt => Value::Array(vec![tag("authPrompt")]),
         ScreenDescription::TransactionHistory => Value::Array(vec![tag("transactionHistory")]),
     }
+}
+
+fn credential_format_value(format: CredentialFormat) -> Value {
+    Value::Text(
+        match format {
+            CredentialFormat::DcSdJwt => "dcSdJwt",
+            CredentialFormat::MsoMdoc => "msoMdoc",
+        }
+        .into(),
+    )
+}
+
+fn document_status_value(status: DocumentStatus) -> Value {
+    Value::Text(
+        match status {
+            DocumentStatus::Preparing => "preparing",
+            DocumentStatus::Ready => "ready",
+            DocumentStatus::NeedsAttention => "needsAttention",
+        }
+        .into(),
+    )
+}
+
+fn document_summary_value(document: &DocumentSummary) -> Value {
+    Value::Array(vec![
+        Value::Text(document.document_id.clone()),
+        Value::Text(document.document_name.clone()),
+        Value::Text(document.issuer_name.clone()),
+        credential_format_value(document.format),
+        document_status_value(document.status),
+        Value::Bool(document.portrait_required),
+    ])
+}
+
+fn document_summaries_value(documents: &[DocumentSummary]) -> Value {
+    Value::Array(documents.iter().map(document_summary_value).collect())
+}
+
+fn issuance_recovery_value(recovery: IssuanceRecovery) -> Value {
+    Value::Text(
+        match recovery {
+            IssuanceRecovery::WrongPin => "wrongPin",
+            IssuanceRecovery::PinBlocked => "pinBlocked",
+            IssuanceRecovery::NfcInterrupted => "nfcInterrupted",
+            IssuanceRecovery::NfcUnavailable => "nfcUnavailable",
+            IssuanceRecovery::IssuerRejected => "issuerRejected",
+            IssuanceRecovery::NetworkInterrupted => "networkInterrupted",
+            IssuanceRecovery::Delayed => "delayed",
+            IssuanceRecovery::SessionInterrupted => "sessionInterrupted",
+        }
+        .into(),
+    )
 }
 
 /// Canonical (deterministic) serialization of a screen for hashing and the transaction log.

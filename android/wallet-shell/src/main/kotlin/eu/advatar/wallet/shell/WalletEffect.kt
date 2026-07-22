@@ -200,9 +200,50 @@ object WalletEffectDecoder {
             qtspId = string(value, "qtspId"),
             documentHashHex = string(value, "documentHashHex"),
         )
-        "credentialList" -> WalletScreen.CredentialList
-        "credentialDetail" -> WalletScreen.CredentialDetail
-        "issuanceOffer" -> WalletScreen.IssuanceOffer
+        "credentialList" -> WalletScreen.CredentialList(documentSummaries(value, "documents"))
+        "credentialDetail" -> WalletScreen.CredentialDetail(
+            documentSummary(objectValue(value, "document")),
+            displayAttributes(value, "attributes"),
+        )
+        "issuanceOffer" -> WalletScreen.IssuanceOffer(
+            issuerName = string(value, "issuerName"),
+            documentName = string(value, "documentName"),
+            format = credentialFormat(string(value, "format")),
+            attributes = strings(value, "attributes"),
+            portraitRequired = boolean(value, "portraitRequired"),
+        )
+        "pinPreparation" -> WalletScreen.PinPreparation(string(value, "documentName"))
+        "pinHelp" -> WalletScreen.PinHelp
+        "nfcReady" -> WalletScreen.NfcReady(string(value, "documentName"))
+        "nfcReading" -> WalletScreen.NfcReading(when (string(value, "state")) {
+            "waitingForCard" -> WalletScreen.NfcReadState.WAITING_FOR_CARD
+            "reading" -> WalletScreen.NfcReadState.READING
+            "connectionLost" -> WalletScreen.NfcReadState.CONNECTION_LOST
+            else -> malformed("unknown NFC read state")
+        })
+        "issuancePreparing" -> WalletScreen.IssuancePreparing(
+            documentSummary(objectValue(value, "document")),
+        )
+        "issuanceReady" -> WalletScreen.IssuanceReady(
+            documentSummary(objectValue(value, "document")),
+        )
+        "issuanceNeedsAttention" -> WalletScreen.IssuanceNeedsAttention(
+            documentSummary(objectValue(value, "document")),
+            issuanceRecovery(string(value, "recovery")),
+        )
+        "issuanceRecovery" -> {
+            val reason = issuanceRecovery(string(value, "reason"))
+            val attempts = if ("attemptsRemaining" in value) {
+                unsigned(value, "attemptsRemaining").takeIf { it in 1uL..UByte.MAX_VALUE.toULong() }
+                    ?.toUByte() ?: malformed("attempts remaining outside range")
+            } else null
+            if ((reason == WalletScreen.IssuanceRecovery.WRONG_PIN) != (attempts != null)) {
+                malformed("retry count must be present only for wrong PIN")
+            }
+            WalletScreen.IssuanceRecoveryScreen(
+                reason, string(value, "documentName"), attempts, boolean(value, "canResume"),
+            )
+        }
         "presentQr" -> WalletScreen.PresentQr
         "scanQr" -> WalletScreen.ScanQr
         "authPrompt" -> WalletScreen.AuthPrompt
@@ -269,6 +310,60 @@ object WalletEffectDecoder {
             if (!primitive.isString) malformed("$key[$index] must be a string")
             primitive.content
         }
+    }
+
+    private fun credentialFormat(value: String): WalletScreen.CredentialFormat = when (value) {
+        "dcSdJwt" -> WalletScreen.CredentialFormat.DC_SD_JWT
+        "msoMdoc" -> WalletScreen.CredentialFormat.MSO_MDOC
+        else -> malformed("unknown credential display format")
+    }
+
+    private fun documentSummary(value: JsonObject): WalletScreen.DocumentSummary =
+        WalletScreen.DocumentSummary(
+            documentId = string(value, "documentId"),
+            documentName = string(value, "documentName"),
+            issuerName = string(value, "issuerName"),
+            format = credentialFormat(string(value, "format")),
+            status = when (string(value, "status")) {
+                "preparing" -> WalletScreen.DocumentStatus.PREPARING
+                "ready" -> WalletScreen.DocumentStatus.READY
+                "needsAttention" -> WalletScreen.DocumentStatus.NEEDS_ATTENTION
+                else -> malformed("unknown document status")
+            },
+            portraitRequired = boolean(value, "portraitRequired"),
+        )
+
+    private fun documentSummaries(value: JsonObject, key: String): List<WalletScreen.DocumentSummary> {
+        val items = value[key] as? JsonArray ?: malformed("$key must be an object array")
+        return items.mapIndexed { index, item ->
+            documentSummary(item as? JsonObject ?: malformed("$key[$index] must be an object"))
+        }
+    }
+
+    private fun displayAttributes(value: JsonObject, key: String): List<WalletScreen.DisplayAttribute> {
+        val items = value[key] as? JsonArray ?: malformed("$key must be an object array")
+        return items.mapIndexed { index, item ->
+            val objectItem = item as? JsonObject ?: malformed("$key[$index] must be an object")
+            WalletScreen.DisplayAttribute(string(objectItem, "label"), string(objectItem, "value"))
+        }
+    }
+
+    private fun issuanceRecovery(value: String): WalletScreen.IssuanceRecovery = when (value) {
+        "wrongPin" -> WalletScreen.IssuanceRecovery.WRONG_PIN
+        "pinBlocked" -> WalletScreen.IssuanceRecovery.PIN_BLOCKED
+        "nfcInterrupted" -> WalletScreen.IssuanceRecovery.NFC_INTERRUPTED
+        "nfcUnavailable" -> WalletScreen.IssuanceRecovery.NFC_UNAVAILABLE
+        "issuerRejected" -> WalletScreen.IssuanceRecovery.ISSUER_REJECTED
+        "networkInterrupted" -> WalletScreen.IssuanceRecovery.NETWORK_INTERRUPTED
+        "delayed" -> WalletScreen.IssuanceRecovery.DELAYED
+        "sessionInterrupted" -> WalletScreen.IssuanceRecovery.SESSION_INTERRUPTED
+        else -> malformed("unknown issuance recovery state")
+    }
+
+    private fun boolean(value: JsonObject, key: String): Boolean {
+        val primitive = value[key] as? JsonPrimitive ?: malformed("$key must be a boolean")
+        return primitive.content.toBooleanStrictOrNull()
+            ?.takeIf { !primitive.isString } ?: malformed("$key must be a boolean")
     }
 
     private fun unsigned(value: JsonObject, key: String): ULong {

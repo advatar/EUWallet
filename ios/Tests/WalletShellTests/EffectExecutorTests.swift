@@ -440,6 +440,29 @@ final class EffectExecutorTests: XCTestCase {
         XCTAssertEqual(documentHashHex, "abcdef")
     }
 
+    func testCompleteIssuanceScreenVocabularyDecodesWithoutFallback() throws {
+        let document = #"{"documentId":"pid-1","documentName":"National ID","issuerName":"Federal identity authority","format":"dcSdJwt","status":"ready","portraitRequired":true}"#
+        let outputs = [
+            #"[{"type":"render","screen":{"screen":"issuanceOffer","issuerName":"Federal identity authority","documentName":"National ID","format":"dcSdJwt","attributes":["family_name"],"portraitRequired":true}}]"#,
+            #"[{"type":"render","screen":{"screen":"pinPreparation","documentName":"National ID"}}]"#,
+            #"[{"type":"render","screen":{"screen":"pinHelp"}}]"#,
+            #"[{"type":"render","screen":{"screen":"nfcReady","documentName":"National ID"}}]"#,
+            #"[{"type":"render","screen":{"screen":"nfcReading","state":"connectionLost"}}]"#,
+            "[{\"type\":\"render\",\"screen\":{\"screen\":\"issuanceReady\",\"document\":\(document)}}]",
+            #"[{"type":"render","screen":{"screen":"issuanceRecovery","reason":"wrongPin","documentName":"National ID","attemptsRemaining":2,"canResume":true}}]"#,
+        ]
+
+        for output in outputs {
+            let effects = try WalletEffect.decodeCoreOutput(output)
+            guard case .render(_, _, let screen) = effects.first else {
+                return XCTFail("expected render")
+            }
+            if case .other(let name) = screen {
+                XCTFail("issuance screen fell back to other: \(name)")
+            }
+        }
+    }
+
     func testInteractiveDecisionRoutingUsesTheProtocolSpecificEvents() throws {
         let screens: [(ScreenDescription, WalletDecisionKind, String, String)] = [
             (
