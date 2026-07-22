@@ -255,6 +255,61 @@ fn production_boundary_binds_offer_approval_to_exact_rendered_hash() {
 }
 
 #[test]
+fn issuance_transport_failure_renders_structured_consumer_recovery() {
+    let (mut core, _device, _issuer) = setup(true, true);
+    let review: serde_json::Value = serde_json::from_str(
+        &core
+            .handle_event_json(
+                &json!({
+                    "type": "credentialOfferReceived",
+                    "offer": OFFER,
+                    "issuerCertChain": [issuer_chain_leaf()],
+                    "issuerId": "https://issuer.example"
+                })
+                .to_string(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let decision = &review.as_array().unwrap()[0];
+    let accepted: serde_json::Value = serde_json::from_str(
+        &core
+            .handle_event_json(
+                &json!({
+                    "type": "credentialOfferAccepted",
+                    "operationId": decision["operationId"],
+                    "authorizationHash": decision["authorizationHash"]
+                })
+                .to_string(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let request = accepted
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["type"] == "requestToken")
+        .expect("token operation");
+    let recovery: serde_json::Value = serde_json::from_str(
+        &core
+            .handle_event_json(
+                &json!({
+                    "type": "operationFailed",
+                    "operationId": request["operationId"],
+                    "failure": "transport"
+                })
+                .to_string(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovery[0]["screen"]["screen"], "issuanceRecovery");
+    assert_eq!(recovery[0]["screen"]["reason"], "networkInterrupted");
+    assert_eq!(recovery[0]["screen"]["canResume"], false);
+}
+
+#[test]
 fn full_issuance_with_in_core_trust_and_attestation() {
     let (mut core, device, issuer) = setup(true, true);
 

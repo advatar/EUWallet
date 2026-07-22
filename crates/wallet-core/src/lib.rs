@@ -2138,7 +2138,45 @@ impl Core {
         pending: PendingOperation,
         failure: Option<OperationFailure>,
     ) -> Vec<Effect> {
+        let issuance_document = (pending.flow == ActiveFlow::Issuance)
+            .then(|| self.issuance_document_summary(DocumentStatus::NeedsAttention))
+            .flatten();
         self.reset_flow(pending.flow);
+        if let Some(document) = issuance_document {
+            let reason = match failure {
+                Some(OperationFailure::Issuer | OperationFailure::Trust) => {
+                    presenter::IssuanceRecovery::IssuerRejected
+                }
+                Some(OperationFailure::MissingDependency | OperationFailure::Unsupported) => {
+                    presenter::IssuanceRecovery::NfcUnavailable
+                }
+                Some(OperationFailure::Transport | OperationFailure::HttpStatus) => {
+                    presenter::IssuanceRecovery::NetworkInterrupted
+                }
+                None => presenter::IssuanceRecovery::SessionInterrupted,
+                Some(
+                    OperationFailure::Storage
+                    | OperationFailure::Signing
+                    | OperationFailure::Status
+                    | OperationFailure::Rendering,
+                ) => presenter::IssuanceRecovery::SessionInterrupted,
+            };
+            return vec![
+                Effect::Render {
+                    screen: ScreenDescription::IssuanceRecovery(
+                        presenter::IssuanceRecoveryScreen {
+                            reason,
+                            document_name: document.document_name,
+                            attempts_remaining: None,
+                            // The protocol machine was fail-closed above. A later fresh offer can
+                            // restart safely, but this exact callback cannot be resumed.
+                            can_resume: false,
+                        },
+                    ),
+                },
+                Effect::Close,
+            ];
+        }
         let (code, message) = match failure {
             None => (
                 "operation_cancelled",
