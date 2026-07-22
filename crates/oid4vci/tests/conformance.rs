@@ -10,6 +10,7 @@ use serde_json::Value;
 fn parse_event(v: &Value) -> Ev {
     match v["kind"].as_str().expect("event kind") {
         "offer" => Ev::Offer(v["issuerTrusted"].as_bool().expect("issuerTrusted")),
+        "approveOffer" => Ev::ApproveOffer,
         "token" => Ev::Token {
             bound: v["bound"].as_bool().expect("bound"),
             attested: v["attested"].as_bool().expect("attested"),
@@ -66,6 +67,11 @@ fn rust_model_matches_lean_oracle() {
             ctx.portrait_profile_valid,
             expect["portraitProfileValid"].as_bool().unwrap(),
             "trace #{i}: portraitProfileValid"
+        );
+        assert_eq!(
+            ctx.holder_approved,
+            expect["holderApproved"].as_bool().unwrap(),
+            "trace #{i}: holderApproved"
         );
     }
 }

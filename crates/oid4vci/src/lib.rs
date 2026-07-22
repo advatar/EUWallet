@@ -444,6 +444,7 @@ pub mod model {
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub enum St {
         Idle,
+        ReviewingOffer,
         OfferParsed,
         ProvingPossession,
         RequestingCredential,
@@ -454,6 +455,7 @@ pub mod model {
     #[derive(Clone, Debug)]
     pub enum Ev {
         Offer(bool), // issuer trusted in-core
+        ApproveOffer,
         Token {
             bound: bool,
             attested: bool,
@@ -472,6 +474,7 @@ pub mod model {
         pub token_bound: bool,
         pub proof_key_attested: bool,
         pub portrait_profile_valid: bool,
+        pub holder_approved: bool,
     }
 
     impl Ctx {
@@ -482,6 +485,7 @@ pub mod model {
                 token_bound: false,
                 proof_key_attested: false,
                 portrait_profile_valid: false,
+                holder_approved: false,
             }
         }
     }
@@ -492,11 +496,17 @@ pub mod model {
             Ev::Offer(trusted) => {
                 if c.st == St::Idle {
                     if *trusted {
-                        c.st = St::OfferParsed;
+                        c.st = St::ReviewingOffer;
                         c.issuer_trusted = true;
                     } else {
                         c.st = St::Aborted; // guard: IssuerNotTrusted
                     }
+                }
+            }
+            Ev::ApproveOffer => {
+                if c.st == St::ReviewingOffer {
+                    c.st = St::OfferParsed;
+                    c.holder_approved = true;
                 }
             }
             Ev::Token { bound, attested } => {
@@ -542,6 +552,7 @@ pub mod model {
     pub fn state_name(st: &St) -> &'static str {
         match st {
             St::Idle => "idle",
+            St::ReviewingOffer => "reviewingOffer",
             St::OfferParsed => "offerParsed",
             St::ProvingPossession => "provingPossession",
             St::RequestingCredential => "requestingCredential",
