@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -97,6 +98,18 @@ class CiEvidenceConfigurationTests(unittest.TestCase):
             "uniffi-bindgen -- generate \\\n  --no-format",
             script,
         )
+
+    def test_pid_ui_test_uses_patched_locked_playwright_and_ci_audit(self):
+        package_directory = ROOT / "tools/interop/pid-uitest"
+        package = json.loads((package_directory / "package.json").read_text())
+        lock = json.loads((package_directory / "package-lock.json").read_text())
+        declared = package["dependencies"]["playwright"]
+        resolved = lock["packages"]["node_modules/playwright"]["version"]
+        self.assertEqual(declared, resolved)
+        self.assertGreaterEqual(tuple(map(int, resolved.split("."))), (1, 55, 1))
+        self.assertIn("npm ci --ignore-scripts", WORKFLOW)
+        self.assertIn("npm audit --audit-level=high", WORKFLOW)
+        self.assertIn("npm run check", WORKFLOW)
 
     def test_evidence_script_is_syntax_valid_and_fail_closed(self):
         subprocess.run(["bash", "-n", EVIDENCE_SCRIPT], check=True)
