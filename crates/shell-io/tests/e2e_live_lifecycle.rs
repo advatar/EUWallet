@@ -130,7 +130,7 @@ fn held_credential_from_wire(compact: &str) -> HeldCredential {
 fn live_issuance_then_plaintext_presentation_is_rejected() {
     let wallet = DemoWallet::new();
     // What the live issuer will hand out: the SD-JWT issuance compact serialization
-    // (issuer JWT + both disclosures), exactly as a real issuer responds.
+    // (issuer JWT + its disclosures), exactly as a real issuer responds.
     let issuance = wallet.issuance_scenario();
     let issuance_compact = issuance.pid_credential_compact.clone();
 
@@ -187,7 +187,7 @@ fn live_issuance_then_plaintext_presentation_is_rejected() {
     let held = held_credential_from_wire(core_str(&wire_bytes));
     assert_eq!(
         held.disclosures_by_claim.len(),
-        4,
+        5,
         "all PID disclosures travelled"
     );
     // The old unauthenticated Core::load_credential API was removed. Keep the parsed holding

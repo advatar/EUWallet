@@ -14,7 +14,7 @@ def evJson : Ev → String
   | .offer t        => "{" ++ q "kind" ++ ":" ++ q "offer" ++ "," ++ q "issuerTrusted" ++ ":" ++ boolJson t ++ "}"
   | .token b a      => "{" ++ q "kind" ++ ":" ++ q "token" ++ "," ++ q "bound" ++ ":" ++ boolJson b ++ "," ++ q "attested" ++ ":" ++ boolJson a ++ "}"
   | .proof          => "{" ++ q "kind" ++ ":" ++ q "proof" ++ "}"
-  | .credential v   => "{" ++ q "kind" ++ ":" ++ q "credential" ++ "," ++ q "valid" ++ ":" ++ boolJson v ++ "}"
+  | .credential v p => "{" ++ q "kind" ++ ":" ++ q "credential" ++ "," ++ q "valid" ++ ":" ++ boolJson v ++ "," ++ q "portraitProfileValid" ++ ":" ++ boolJson p ++ "}"
 
 def stJson : St → String
   | .idle => "idle"
@@ -31,13 +31,14 @@ def traceJson (evs : List Ev) : String :=
     "{" ++ q "state" ++ ":" ++ q (stJson c.st) ++ "," ++
           q "issuerTrusted" ++ ":" ++ boolJson c.issuerTrusted ++ "," ++
           q "tokenBound" ++ ":" ++ boolJson c.tokenBound ++ "," ++
-          q "proofKeyAttested" ++ ":" ++ boolJson c.proofKeyAttested ++ "}"
+          q "proofKeyAttested" ++ ":" ++ boolJson c.proofKeyAttested ++ "," ++
+          q "portraitProfileValid" ++ ":" ++ boolJson c.portraitProfileValid ++ "}"
   "{" ++ q "events" ++ ":[" ++ events ++ "]," ++ q "expect" ++ ":" ++ expect ++ "}"
 
 /-- Curated suite covering the happy path and each security guard. -/
 def suite : List (List Ev) :=
   [ -- happy path: trusted offer → bound+attested token → proof → valid credential ⇒ issued
-    [.offer true, .token true true, .proof, .credential true],
+    [.offer true, .token true true, .proof, .credential true true],
     -- untrusted issuer ⇒ aborted immediately
     [.offer false],
     -- token not sender-bound ⇒ aborted (guard: TokenNotBound)
@@ -45,7 +46,9 @@ def suite : List (List Ev) :=
     -- proof key not attested (WUA) ⇒ aborted (guard: ProofKeyNotAttested)
     [.offer true, .token true false],
     -- invalid credential ⇒ aborted
-    [.offer true, .token true true, .proof, .credential false],
+    [.offer true, .token true true, .proof, .credential false true],
+    -- missing or malformed mandatory portrait ⇒ aborted
+    [.offer true, .token true true, .proof, .credential true false],
     -- proof-of-possession stage reached, not yet issued
     [.offer true, .token true true, .proof]
   ]

@@ -118,6 +118,7 @@ fn nested_credential(issuer: &SoftwareSigner, device_public_key: &[u8]) -> Neste
         "family_name": "Andersson",
         "given_name": "Astrid",
         "birthdate": "1988-04-12",
+        "picture": "data:image/jpeg;base64,/9j/2Q==",
         "contacts": [
             {"...": contact_0_digest},
             {"...": contact_1_digest},

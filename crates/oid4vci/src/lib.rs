@@ -17,6 +17,7 @@ pub mod authorization;
 pub mod bounded_json;
 pub mod credential;
 pub mod foundation;
+pub mod pid_profile;
 
 /// The only two grant types HAIP permits. There is deliberately no "other" variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -430,10 +431,16 @@ pub mod model {
 
     #[derive(Clone, Debug)]
     pub enum Ev {
-        Offer(bool),                           // issuer trusted in-core
-        Token { bound: bool, attested: bool }, // sender-bound token + proof-key attested (WUA High)
+        Offer(bool), // issuer trusted in-core
+        Token {
+            bound: bool,
+            attested: bool,
+        }, // sender-bound token + proof-key attested (WUA High)
         Proof,
-        Credential(bool),
+        Credential {
+            valid: bool,
+            portrait_profile_valid: bool,
+        },
     }
 
     #[derive(Clone, Debug)]
@@ -442,6 +449,7 @@ pub mod model {
         pub issuer_trusted: bool,
         pub token_bound: bool,
         pub proof_key_attested: bool,
+        pub portrait_profile_valid: bool,
     }
 
     impl Ctx {
@@ -451,6 +459,7 @@ pub mod model {
                 issuer_trusted: false,
                 token_bound: false,
                 proof_key_attested: false,
+                portrait_profile_valid: false,
             }
         }
     }
@@ -486,10 +495,14 @@ pub mod model {
                     c.st = St::RequestingCredential;
                 }
             }
-            Ev::Credential(valid) => {
+            Ev::Credential {
+                valid,
+                portrait_profile_valid,
+            } => {
                 if c.st == St::RequestingCredential {
-                    if *valid {
+                    if *valid && *portrait_profile_valid {
                         c.st = St::CredentialIssued;
+                        c.portrait_profile_valid = true;
                     } else {
                         c.st = St::Aborted; // guard: CredentialInvalid
                     }

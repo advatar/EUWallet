@@ -61,6 +61,7 @@ fn issued_sd_jwt(
         ("family_name", json!("Andersson")),
         ("given_name", json!("Astrid")),
         ("birthdate", json!("1988-04-12")),
+        ("picture", json!("data:image/jpeg;base64,/9j/2Q==")),
     ]
     .into_iter()
     .enumerate()
@@ -105,6 +106,7 @@ fn issued_sd_jwt_with_selective_exp(issuer: &SoftwareSigner, device_pub: &[u8]) 
         ("family_name", json!("Andersson")),
         ("given_name", json!("Astrid")),
         ("birthdate", json!("1988-04-12")),
+        ("picture", json!("data:image/jpeg;base64,/9j/2Q==")),
         ("exp", json!(4_000_000_000i64)),
     ]
     .into_iter()

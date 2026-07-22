@@ -19,7 +19,7 @@ inductive Ev where
   | offer (issuerTrusted : Bool)
   | token (bound attested : Bool)   -- sender-bound token + proof-key attested (WUA High)
   | proof                           -- device proof-of-possession assembled
-  | credential (valid : Bool)
+  | credential (valid portraitProfileValid : Bool)
   deriving Repr
 
 /-- Machine states (mirror of the security-relevant subset of `oid4vci::State`). -/
@@ -37,10 +37,12 @@ structure Ctx where
   issuerTrusted   : Bool
   tokenBound      : Bool
   proofKeyAttested : Bool
+  portraitProfileValid : Bool
   deriving Repr
 
 def init : Ctx :=
-  { st := .idle, issuerTrusted := false, tokenBound := false, proofKeyAttested := false }
+  { st := .idle, issuerTrusted := false, tokenBound := false, proofKeyAttested := false,
+    portraitProfileValid := false }
 
 def step (c : Ctx) : Ev → Ctx
   | .offer trusted =>
@@ -60,10 +62,11 @@ def step (c : Ctx) : Ev → Ctx
       match c.st with
       | .provingPossession => { c with st := .requestingCredential }
       | _ => c
-  | .credential valid =>
+  | .credential valid portraitValid =>
       match c.st with
       | .requestingCredential =>
-          if valid then { c with st := .credentialIssued }
+          if valid && portraitValid then
+            { c with st := .credentialIssued, portraitProfileValid := true }
           else { c with st := .aborted }                              -- guard: CredentialInvalid
       | _ => c
 
@@ -78,7 +81,8 @@ def Inv (c : Ctx) : Prop :=
   (c.st = St.requestingCredential →
       c.issuerTrusted = true ∧ c.tokenBound = true ∧ c.proofKeyAttested = true) ∧
   (c.st = St.credentialIssued →
-      c.issuerTrusted = true ∧ c.tokenBound = true ∧ c.proofKeyAttested = true)
+      c.issuerTrusted = true ∧ c.tokenBound = true ∧ c.proofKeyAttested = true ∧
+        c.portraitProfileValid = true)
 
 theorem step_preserves_inv (c : Ctx) (e : Ev) (h : Inv c) : Inv (step c e) := by
   obtain ⟨h1, h2, h3, h4⟩ := h
@@ -102,7 +106,7 @@ theorem step_preserves_inv (c : Ctx) (e : Ev) (h : Inv c) : Inv (step c e) := by
       simp only [step]; split
       · rename_i hst; refine ⟨?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all [h2 hst]
       · exact ⟨h1, h2, h3, h4⟩
-  | credential valid =>
+  | credential valid portraitValid =>
       simp only [step]; split
       · rename_i hst
         split
@@ -132,7 +136,12 @@ theorem issued_requires_bound_token (evs : List Ev) :
     (the WUA verified and bound the device key at High assurance). -/
 theorem issued_requires_attested_key (evs : List Ev) :
     (run evs).st = St.credentialIssued → (run evs).proofKeyAttested = true :=
-  fun h => ((inv_run evs).2.2.2 h).2.2
+  fun h => ((inv_run evs).2.2.2 h).2.2.1
+
+/-- **Theorem (PID portrait profile).** An issued PID passed the mandatory portrait gate. -/
+theorem issued_requires_valid_portrait_profile (evs : List Ev) :
+    (run evs).st = St.credentialIssued → (run evs).portraitProfileValid = true :=
+  fun h => ((inv_run evs).2.2.2 h).2.2.2
 
 /-- **Theorem (issuer-trust gate).** An offer from an untrusted issuer is rejected. -/
 theorem untrusted_issuer_is_rejected (c : Ctx) (h : c.st = St.idle) :

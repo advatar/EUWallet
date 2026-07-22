@@ -1707,6 +1707,7 @@ mod tests {
             ("family_name", json!("Andersson")),
             ("given_name", json!("Astrid")),
             ("birthdate", json!("1988-04-12")),
+            ("picture", json!("data:image/jpeg;base64,/9j/2Q==")),
         ];
         let mut disclosures = Vec::new();
         let mut digests = Vec::new();

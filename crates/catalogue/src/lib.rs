@@ -229,9 +229,43 @@ pub fn default_catalogue() -> Catalogue {
                 mandatory: true,
             },
             ClaimSpec {
+                path: "picture".into(),
+                display_name: "Portrait".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
                 path: "age_over_18".into(),
                 display_name: "Over 18".into(),
                 mandatory: false,
+            },
+        ],
+        trusted_issuers: vec!["https://issuer.example".into()],
+    });
+    c.register(AttestationType {
+        id: "eu.europa.ec.eudi.pid.1".into(),
+        display_name: "Person Identification Data (mdoc)".into(),
+        format: "mso_mdoc".into(),
+        issuer_trust_domain: IssuerTrustDomain::Pid,
+        claims: vec![
+            ClaimSpec {
+                path: ClaimPath::mdoc("eu.europa.ec.eudi.pid.1", "family_name"),
+                display_name: "Family name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: ClaimPath::mdoc("eu.europa.ec.eudi.pid.1", "given_name"),
+                display_name: "Given name".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: ClaimPath::mdoc("eu.europa.ec.eudi.pid.1", "birth_date"),
+                display_name: "Date of birth".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: ClaimPath::mdoc("eu.europa.ec.eudi.pid.1", "portrait"),
+                display_name: "Portrait".into(),
+                mandatory: true,
             },
         ],
         trusted_issuers: vec!["https://issuer.example".into()],
@@ -548,13 +582,14 @@ mod tests {
     #[test]
     fn mandatory_claims_gate() {
         let c = default_catalogue();
-        // All three mandatory claims present → satisfied (age_over_18 is optional).
+        // Every mandatory claim present → satisfied (age_over_18 is optional).
         assert!(c.satisfies_mandatory(
             "urn:eudi:pid:1",
             &[
                 "family_name".into(),
                 "given_name".into(),
-                "birthdate".into()
+                "birthdate".into(),
+                "picture".into()
             ]
         ));
         // Missing a mandatory claim → not satisfied.
