@@ -40,7 +40,10 @@ operational solution needed to enter those processes.
         require the exact operation ID and hash on approval before signing or disclosure.
   - [x] Mirror the closed contract in Swift and Android with stale, mismatched and cross-screen
         negative tests while preserving the same hash in audit/signing bindings.
-- [x] Make credential status per-credential, issuer/list-bound, fresh, and resource-bounded.
+- [x] Make credential status per-credential, issuer/list-bound, fresh, and resource-bounded,
+      for **both** SD-JWT VC (`status` claim) and mso_mdoc (signed MSO `status` element). The mdoc
+      presentation status gate is wired (`crates/wallet-core/tests/e2e_mdoc_status.rs`); a revoked or
+      suspended mso_mdoc PID is refused before any device signature.
 - [x] [#5](https://github.com/advatar/EUWallet/issues/5): freeze and revalidate selected credential
       provenance/validity plus RP, issuer and status trust before consent, signing and delivery;
       reject clock rollback, and recheck WUA time when it authorizes issuance proofs.

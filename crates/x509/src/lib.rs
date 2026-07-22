@@ -1991,6 +1991,10 @@ pub fn validate_path(
 pub struct RelyingPartyProfile {
     pub subject: String,
     pub registered: bool,
+    /// The DNS names carried in the leaf certificate's SAN. A caller binds the OpenID4VP
+    /// `client_id` (`x509_san_dns:<host>`, OpenID4VP 1.0 §5.10) to the authenticated leaf by
+    /// requiring the claimed host to appear here.
+    pub dns_sans: Vec<String>,
 }
 
 /// Step 2 — the EUDI relying-party profile. Runs ONLY after [`validate_path`] succeeds, and
@@ -2019,5 +2023,6 @@ pub fn check_relying_party(
     Ok(RelyingPartyProfile {
         subject: leaf.subject.clone(),
         registered: true,
+        dns_sans: leaf.constraints.names.dns.clone(),
     })
 }

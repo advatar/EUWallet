@@ -130,9 +130,13 @@ pub enum AbortReason {
     RequestNotSignedOrBound,
     /// HLR-VP-G-002 — rp_is_registered failed.
     RelyingPartyNotRegistered,
+    /// HLR-VP-G-007 — the `x509_san_dns` client_id did not match the authenticated RP leaf's SAN
+    /// (RP impersonation attempt within the shared RP-access trust domain).
+    ClientIdBindingInvalid,
     /// HLR-VP-G-003 — nonce_is_fresh failed (replay).
     NonceReplayed,
-    /// HLR-VP-G-004 — purpose_is_declared failed.
+    /// HLR-VP-G-004 (retired) — was "purpose not declared". OpenID4VP 1.0 has no mandatory
+    /// top-level `purpose`, so the wallet no longer produces this; kept for wire/enum compatibility.
     PurposeUndeclared,
     /// HLR-VP-G-005 — audience_matches failed (mix-up / wrong wallet).
     AudienceMismatch,
@@ -171,11 +175,15 @@ pub enum AbortReason {
 }
 
 /// Parsed, still-untrusted Authorization Request. Parsing does NOT imply validity; the guards
-/// decide that. `nonce` is modelled as a `u64` to line up with the Lean model.
+/// decide that. The OpenID4VP `nonce` is an OPAQUE STRING on the wire (OpenID4VP 1.0 §5.1); we
+/// keep it verbatim so it can be echoed byte-for-byte in the KB-JWT, the mdoc OID4VPHandover, and
+/// the JWE `apv`. This is a faithful concretization of the abstract `Nat` replay-token in the Lean
+/// [`model`] (the model only ever tests nonce EQUALITY for replay, so any type with decidable
+/// equality — here `String` — refines it identically).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthRequest {
     pub client_id: String,
-    pub nonce: u64,
+    pub nonce: String,
     pub audience: String,
     pub response_uri: String,
     pub redirect_uri: Option<String>,
@@ -214,6 +222,9 @@ pub struct ResolvedTrust {
     /// Authenticated RP delivery endpoints. The legacy field name is retained for FFI/wire
     /// compatibility; both `response_uri` and an optional `redirect_uri` must exact-match it.
     pub registered_redirect_uris: Vec<String>,
+    /// DNS names carried in the authenticated RP leaf certificate's SAN. Used to bind a
+    /// `x509_san_dns:<host>` `client_id` to the key that signed the request object (§5.10).
+    pub leaf_dns_sans: Vec<String>,
 }
 
 /// Inputs (events) into the machine.
@@ -234,7 +245,7 @@ pub enum Output {
     /// Fetch RP metadata / trust status / JWKS for this client_id (network I/O in the shell).
     ResolveRpTrust { client_id: String },
     /// Durably remember this nonce so replay is caught across restarts (idempotent in the shell).
-    PersistNonce(u64),
+    PersistNonce(String),
     /// Render the consent UI with exactly what will be disclosed.
     RenderConsent {
         rp_client_id: String,
@@ -259,7 +270,7 @@ pub struct Env<'a> {
     /// The value RPs MUST put in `aud`; anything else is a mix-up attempt.
     pub wallet_client_id: &'a str,
     /// Nonces already seen (durable replay set snapshot).
-    pub seen_nonces: &'a [u64],
+    pub seen_nonces: &'a [String],
     /// Signature verifier over the crypto boundary (pure CPU, no I/O).
     pub verifier: &'a dyn Verifier,
     /// Digest for the KB-JWT `sd_hash` (pure CPU).
@@ -302,17 +313,28 @@ pub mod guards {
         trust.registered
     }
 
-    /// HLR-VP-G-003 — the nonce has not been seen before (replay protection).
-    pub fn nonce_is_fresh(nonce: u64, seen: &[u64]) -> bool {
-        !seen.contains(&nonce)
+    /// HLR-VP-G-007 — bind the OpenID4VP `client_id` to the authenticated RP leaf (OpenID4VP 1.0
+    /// §5.10 Client Identifier Prefix). For the HAIP `x509_san_dns:<host>` scheme, the leaf that
+    /// signed the request object MUST carry `<host>` as a DNS SAN — otherwise any RP holding a
+    /// valid certificate under the same RP-access CA could impersonate another verifier's id. A
+    /// bare (pre-registered) client_id, or any other prefix, carries no per-request key binding and
+    /// is governed solely by trusted-list registration, so it passes this guard unchanged.
+    pub fn client_id_binds_to_leaf(req: &AuthRequest, trust: &ResolvedTrust) -> bool {
+        match req.client_id.split_once(':') {
+            Some(("x509_san_dns", host)) => {
+                !host.is_empty()
+                    && trust
+                        .leaf_dns_sans
+                        .iter()
+                        .any(|san| san.eq_ignore_ascii_case(host))
+            }
+            _ => true,
+        }
     }
 
-    /// HLR-VP-G-004 — the RP declared a non-empty purpose (no silent over-asking).
-    pub fn purpose_is_declared(req: &AuthRequest) -> bool {
-        req.purpose
-            .as_deref()
-            .map(|p| !p.trim().is_empty())
-            .unwrap_or(false)
+    /// HLR-VP-G-003 — the nonce has not been seen before (replay protection).
+    pub fn nonce_is_fresh(nonce: &str, seen: &[String]) -> bool {
+        !seen.iter().any(|s| s == nonce)
     }
 
     /// HLR-VP-G-005 — the request is addressed to THIS wallet (defeats OAuth mix-up).
@@ -488,21 +510,33 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
             if !guards::audience_matches(req, env.wallet_client_id) {
                 return (State::Aborted(AbortReason::AudienceMismatch), vec![]);
             }
-            if !guards::purpose_is_declared(req) {
-                return (State::Aborted(AbortReason::PurposeUndeclared), vec![]);
-            }
-            if !guards::nonce_is_fresh(req.nonce, env.seen_nonces) {
+            if !guards::nonce_is_fresh(&req.nonce, env.seen_nonces) {
                 return (State::Aborted(AbortReason::NonceReplayed), vec![]);
             }
             if !guards::request_object_is_signed_and_bound(req, trust, env.verifier) {
                 return (State::Aborted(AbortReason::RequestNotSignedOrBound), vec![]);
             }
-            let purpose = req.purpose.clone().unwrap_or_default();
+            if !guards::client_id_binds_to_leaf(req, trust) {
+                return (State::Aborted(AbortReason::ClientIdBindingInvalid), vec![]);
+            }
+            // OpenID4VP 1.0 has NO mandatory top-level `purpose` request parameter, so we do not
+            // reject requests that omit one (that rejected conformant DCQL requests). For the consent
+            // screen we show a purpose when the verifier supplies one — either a legacy top-level
+            // field or, the spec way, a DCQL `credential_sets[].purpose` (§6.2).
+            let purpose = req
+                .purpose
+                .clone()
+                .or_else(|| {
+                    req.dcql
+                        .as_ref()
+                        .and_then(|dcql| dcql.purpose().map(String::from))
+                })
+                .unwrap_or_default();
             let rp = req.client_id.clone();
             (
                 State::RequestValidated(req.clone()),
                 vec![
-                    Output::PersistNonce(req.nonce),
+                    Output::PersistNonce(req.nonce.clone()),
                     Output::RenderConsent {
                         rp_client_id: rp,
                         purpose,
@@ -531,7 +565,7 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                         let presentation = build_presentation(issuer_jwt, disclosures);
                         let sd_hash = base64url(&env.digest.sha256(presentation.as_bytes()));
                         let kb_signing_input = kb_jwt_signing_input(
-                            req.nonce,
+                            &req.nonce,
                             &req.client_id,
                             env.now_epoch,
                             &sd_hash,
@@ -749,7 +783,7 @@ fn build_presentation(issuer_jwt: &str, disclosures: &[String]) -> String {
 
 /// Construct the key-binding JWT signing input: ASCII(`<header-b64>.<payload-b64>`) over a
 /// `kb+jwt` binding the presentation (`sd_hash`) to this RP (`aud`) and this request (`nonce`).
-fn kb_jwt_signing_input(nonce: u64, aud: &str, iat: i64, sd_hash: &str) -> String {
+fn kb_jwt_signing_input(nonce: &str, aud: &str, iat: i64, sd_hash: &str) -> String {
     let header = base64url(br#"{"alg":"ES256","typ":"kb+jwt"}"#);
     let payload = serde_json::json!({
         "nonce": nonce,
@@ -824,15 +858,15 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         .and_then(|v| v.as_str())
         .ok_or(())?
         .to_string();
-    // The OpenID4VP nonce is a string on the wire; we model it as u64 to line up with the Lean
-    // model, so accept either a JSON number or a numeric string.
-    let nonce = p
-        .get("nonce")
-        .and_then(|v| {
-            v.as_u64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-        })
-        .ok_or(())?;
+    // The OpenID4VP nonce is an OPAQUE STRING on the wire (OpenID4VP 1.0 §5.1) — conformant
+    // verifiers (incl. the EUDI reference) send high-entropy strings. Keep it verbatim so it can
+    // be echoed byte-for-byte downstream. A bare JSON number is tolerated as its decimal string so
+    // numeric fixtures keep working; the value is otherwise never interpreted numerically.
+    let nonce = match p.get("nonce") {
+        Some(Json::String(s)) if !s.is_empty() => s.clone(),
+        Some(Json::Number(n)) => n.to_string(),
+        _ => return Err(()),
+    };
     let audience = p.get("aud").and_then(|v| v.as_str()).ok_or(())?.to_string();
     let response_uri = p
         .get("response_uri")
@@ -953,6 +987,12 @@ fn parse_enc_jwk(md: &serde_json::Value) -> Option<Vec<u8>> {
 /// is the Rust side those traces are replayed against (plan Section 10). The production
 /// `step` above must refine this model. Keeping them byte-for-byte behaviourally identical
 /// is exactly what the conformance test (`tests/conformance.rs`) checks.
+///
+/// The nonce here is a `u64` (mirroring the Lean model's `Nat`) used ONLY as an abstract
+/// replay token — the model never interprets it numerically, only tests equality/membership.
+/// Production [`AuthRequest::nonce`] is the concrete OpenID4VP opaque `String`; because both are
+/// just tokens with decidable equality, the `String` layer refines this abstract `u64` faithfully.
+/// This is intentional and must NOT be "fixed" to `String` here — the abstraction is the point.
 pub mod model {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum St {
@@ -1296,7 +1336,7 @@ mod internal_tests {
 
     #[test]
     fn kb_jwt_signing_input_binds_nonce_and_aud() {
-        let s = kb_jwt_signing_input(42, "rp.example", 100, "sd-hash");
+        let s = kb_jwt_signing_input("42", "rp.example", 100, "sd-hash");
         assert_eq!(
             s.matches('.').count(),
             1,
@@ -1305,7 +1345,9 @@ mod internal_tests {
         let payload_b64 = s.split('.').nth(1).unwrap();
         let bytes = Base64UrlUnpadded::decode_vec(payload_b64).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["nonce"], serde_json::json!(42));
+        // OpenID4VP 1.0: the KB-JWT `nonce` echoes the verifier's opaque string verbatim — a JSON
+        // string, never a number.
+        assert_eq!(v["nonce"], serde_json::json!("42"));
         assert_eq!(v["aud"], serde_json::json!("rp.example"));
         assert_eq!(v["sd_hash"], serde_json::json!("sd-hash"));
     }
@@ -1313,7 +1355,7 @@ mod internal_tests {
     fn auth_request(redirect: Option<&str>) -> AuthRequest {
         AuthRequest {
             client_id: "rp.example".into(),
-            nonce: 1,
+            nonce: "1".into(),
             audience: "wallet.example".into(),
             response_uri: "https://rp.example/resp".into(),
             redirect_uri: redirect.map(String::from),
@@ -1338,6 +1380,7 @@ mod internal_tests {
             registered: true,
             rp_public_key: vec![],
             registered_redirect_uris: vec!["https://rp.example/cb".into()],
+            leaf_dns_sans: vec![],
         };
         assert!(guards::redirect_uri_is_registered(
             &auth_request(Some("https://rp.example/cb")),

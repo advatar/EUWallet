@@ -52,7 +52,7 @@ fn issue_sd_jwt(
 }
 
 /// RP builds and signs an OpenID4VP authorization request object (compact JWS).
-fn sign_request(rp: &SoftwareSigner, client_id: &str, nonce: u64, aud: &str) -> Vec<u8> {
+fn sign_request(rp: &SoftwareSigner, client_id: &str, nonce: &str, aud: &str) -> Vec<u8> {
     let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
     let payload = b64(serde_json::to_string(&json!({
         "client_id": client_id,
@@ -88,11 +88,13 @@ fn full_remote_presentation_with_real_crypto() {
     );
 
     // RP sends a signed request.
-    const NONCE: u64 = 987654321;
+    // A high-entropy OPAQUE string nonce, exactly as a conformant verifier (incl. the EUDI
+    // reference) sends — NOT a number. Before the u64→String fix this was rejected before consent.
+    const NONCE: &str = "n-Yx9K3pQ7wZ2aB_gL5tR8u";
     let request = sign_request(&rp, "rp.example", NONCE, "wallet.example");
 
     // The wallet drives the sans-IO machine.
-    let seen: Vec<u64> = vec![];
+    let seen: Vec<String> = vec![];
     let creds = [SelectedCredential::SdJwt {
         issuer_jwt: issuer_jwt.clone(),
         disclosures: disclosures.clone(),
@@ -118,6 +120,7 @@ fn full_remote_presentation_with_real_crypto() {
         registered: true,
         rp_public_key: rp.public_key_raw().to_vec(),
         registered_redirect_uris: vec!["https://rp.example/response".into()],
+        leaf_dns_sans: vec![],
     };
     let (s, out) = step(&s, &Input::RpTrustResolved(trust), &env);
     assert!(
@@ -175,7 +178,7 @@ fn full_remote_presentation_with_real_crypto() {
     let wrong = sdjwt::KeyBindingCheck {
         device_public_key: device.public_key_raw(),
         expected_aud: "rp.example",
-        expected_nonce: NONCE + 1,
+        expected_nonce: "different-nonce",
         device_alg: Alg::Es256,
     };
     assert!(sd

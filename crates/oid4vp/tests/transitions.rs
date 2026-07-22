@@ -27,7 +27,7 @@ impl Digest for StubDigest {
 fn req() -> AuthRequest {
     AuthRequest {
         client_id: "rp.example".into(),
-        nonce: 42,
+        nonce: "42".into(),
         audience: "wallet.example".into(),
         response_uri: "https://rp.example/resp".into(),
         redirect_uri: None,
@@ -51,10 +51,11 @@ fn trust() -> ResolvedTrust {
         registered: true,
         rp_public_key: b"rp-pub".to_vec(),
         registered_redirect_uris: vec!["https://rp.example/resp".into()],
+        leaf_dns_sans: vec![],
     }
 }
 
-fn env<'a>(seen: &'a [u64], v: &'a dyn Verifier, d: &'a dyn Digest) -> Env<'a> {
+fn env<'a>(seen: &'a [String], v: &'a dyn Verifier, d: &'a dyn Digest) -> Env<'a> {
     Env {
         wallet_client_id: "wallet.example",
         seen_nonces: seen,
@@ -68,7 +69,7 @@ fn env<'a>(seen: &'a [u64], v: &'a dyn Verifier, d: &'a dyn Digest) -> Env<'a> {
 
 #[test]
 fn happy_path_idle_free_to_done() {
-    let seen: Vec<u64> = vec![];
+    let seen: Vec<String> = vec![];
     let creds = [SelectedCredential::SdJwt {
         issuer_jwt: "hdr.pay.sig".into(),
         disclosures: vec!["disc1".into()],
@@ -94,7 +95,7 @@ fn happy_path_idle_free_to_done() {
     assert_eq!(
         out,
         vec![
-            Output::PersistNonce(42),
+            Output::PersistNonce("42".into()),
             Output::RenderConsent {
                 rp_client_id: "rp.example".into(),
                 purpose: "age verification".into()
@@ -133,7 +134,7 @@ fn happy_path_idle_free_to_done() {
 
 fn resolve_with(
     mutate: impl FnOnce(&mut AuthRequest, &mut ResolvedTrust),
-    seen: &[u64],
+    seen: &[String],
     v: &dyn Verifier,
     wallet_id: &str,
 ) -> State {
@@ -285,14 +286,47 @@ fn abort_audience_mismatch() {
 }
 
 #[test]
-fn abort_purpose_undeclared() {
+fn request_without_top_level_purpose_is_accepted() {
+    // OpenID4VP 1.0 has NO mandatory top-level `purpose` request parameter; a conformant request
+    // that omits it must be accepted (previously it aborted with PurposeUndeclared).
     let s = resolve_with(|r, _| r.purpose = None, &[], &Accept, "wallet.example");
-    assert_eq!(s, State::Aborted(AbortReason::PurposeUndeclared));
+    assert!(matches!(s, State::RequestValidated(_)), "got {s:?}");
+}
+
+#[test]
+fn x509_san_dns_client_id_binds_to_the_authenticated_leaf() {
+    // §5.10: an `x509_san_dns:<host>` client_id whose host is a SAN of the RP leaf is accepted.
+    let s = resolve_with(
+        |r, t| {
+            r.client_id = "x509_san_dns:verifier.example".into();
+            t.leaf_dns_sans = vec!["verifier.example".into()];
+        },
+        &[],
+        &Accept,
+        "wallet.example",
+    );
+    assert!(matches!(s, State::RequestValidated(_)), "got {s:?}");
+}
+
+#[test]
+fn x509_san_dns_client_id_not_matching_the_leaf_is_rejected() {
+    // The signature verifies (same RP-CA domain), but the claimed host is not a SAN of the leaf →
+    // impersonation → abort before consent.
+    let s = resolve_with(
+        |r, t| {
+            r.client_id = "x509_san_dns:evil.example".into();
+            t.leaf_dns_sans = vec!["verifier.example".into()];
+        },
+        &[],
+        &Accept,
+        "wallet.example",
+    );
+    assert_eq!(s, State::Aborted(AbortReason::ClientIdBindingInvalid));
 }
 
 #[test]
 fn abort_nonce_replayed() {
-    let s = resolve_with(|_, _| {}, &[42], &Accept, "wallet.example");
+    let s = resolve_with(|_, _| {}, &["42".to_string()], &Accept, "wallet.example");
     assert_eq!(s, State::Aborted(AbortReason::NonceReplayed));
 }
 
@@ -311,7 +345,7 @@ fn abort_empty_signature() {
 
 #[test]
 fn consent_declined_aborts_without_disclosure() {
-    let seen: Vec<u64> = vec![];
+    let seen: Vec<String> = vec![];
     let e = env(&seen, &Accept, &StubDigest);
     let (s, out) = step(
         &State::RequestValidated(Box::new(req())),
@@ -324,7 +358,7 @@ fn consent_declined_aborts_without_disclosure() {
 
 #[test]
 fn malformed_request_aborts() {
-    let seen: Vec<u64> = vec![];
+    let seen: Vec<String> = vec![];
     let e = env(&seen, &Accept, &StubDigest);
     let (s, _) = step(
         &State::Idle,

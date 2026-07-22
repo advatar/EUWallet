@@ -20,7 +20,7 @@ const DOCTYPE: &str = "org.iso.18013.5.1.mDL";
 const NS: &str = "org.iso.18013.5.1";
 const CLIENT_ID: &str = "x509_san_dns:verifier.example";
 const RESPONSE_URI: &str = "https://verifier.example/response";
-const NONCE: u64 = 424_242;
+const NONCE: &str = "424242";
 const MGN: &str = "mdoc-generated-nonce-1";
 
 fn cose_key(pubkey: &[u8]) -> Value {
@@ -79,7 +79,7 @@ fn mdoc_presentation_assembles_a_verifiable_device_response() {
     let ns_bytes = empty_device_namespaces_bytes();
     let req = AuthRequest {
         client_id: CLIENT_ID.into(),
-        nonce: NONCE,
+        nonce: NONCE.into(),
         audience: "wallet.example".into(),
         response_uri: RESPONSE_URI.into(),
         redirect_uri: None,

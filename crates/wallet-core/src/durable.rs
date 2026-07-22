@@ -12,9 +12,11 @@
 //! authenticated envelope pins the complete checkpoint; the internal head alone is not rollback
 //! protection.
 //!
-//! Schema v1 preserves the current replay representation for OID4VCI `c_nonce`: a numeric `u64`.
-//! The final OpenID4VCI string nonce model therefore requires an explicit future schema migration,
-//! never an in-place reinterpretation of v1 bytes.
+//! Schema v2 represents the OpenID4VP presentation replay set as opaque TEXT nonces (matching the
+//! OpenID4VP 1.0 wire model). The OID4VCI `c_nonce`, payment and QES replay sets remain numeric
+//! `u64`; the final OpenID4VCI string nonce model is a separate future migration, never an in-place
+//! reinterpretation of prior bytes. The version is bumped so a v1 checkpoint is rejected outright
+//! rather than silently reinterpreted.
 
 use core::cmp::Ordering;
 
@@ -40,7 +42,10 @@ pub const MAX_CREDENTIAL_EVIDENCE_BYTES: usize = 24 * 1024 * 1024;
 pub const MAX_REPLAY_VALUES: usize = 65_536;
 
 const MAGIC: &[u8] = b"EUWALLET-CHECKPOINT";
-const VERSION: u64 = 1;
+const VERSION: u64 = 2;
+/// Maximum bytes of a single persisted OpenID4VP presentation nonce (opaque string). Conformant
+/// verifier nonces are short; this bounds durable growth without constraining real values.
+const MAX_NONCE_BYTES: usize = 256;
 const MAX_CONTEXT_VALUE_BYTES: usize = 16 * 1024;
 const MAX_SCHEMA_DEPTH: usize = 8;
 const MAX_CONTAINER_ITEMS: usize = MAX_REPLAY_VALUES;
@@ -178,7 +183,8 @@ impl CredentialRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReplaySets {
-    presentation: Vec<u64>,
+    /// OpenID4VP presentation nonces — opaque strings (OpenID4VP 1.0).
+    presentation: Vec<String>,
     payment: Vec<u64>,
     issuance: Vec<u64>,
     qes: Vec<u64>,
@@ -287,6 +293,31 @@ fn sorted_replay(values: &[u64]) -> Result<Vec<u64>, DurableCheckpointError> {
             MAX_REPLAY_VALUES,
             values.len(),
         ));
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    Ok(sorted)
+}
+
+/// Canonicalise the OpenID4VP presentation replay set (opaque string nonces): bound the count and
+/// each entry's length, then sort + dedup so the encoding is deterministic and strictly increasing.
+fn sorted_replay_str(values: &[String]) -> Result<Vec<String>, DurableCheckpointError> {
+    if values.len() > MAX_REPLAY_VALUES {
+        return Err(resource_limit(
+            Resource::ReplayValues,
+            MAX_REPLAY_VALUES,
+            values.len(),
+        ));
+    }
+    for value in values {
+        if value.len() > MAX_NONCE_BYTES {
+            return Err(resource_limit(
+                Resource::ReplayValues,
+                MAX_NONCE_BYTES,
+                value.len(),
+            ));
+        }
     }
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
@@ -505,7 +536,7 @@ impl Core {
         }
         let credentials = authenticated_records(self)?;
         let replay = ReplaySets {
-            presentation: sorted_replay(&self.seen_nonces)?,
+            presentation: sorted_replay_str(&self.seen_nonces)?,
             payment: sorted_replay(&self.pay_seen_nonces)?,
             issuance: sorted_replay(&self.iss_seen_c_nonces)?,
             qes: sorted_replay(&self.qes_seen_nonces)?,
@@ -820,8 +851,14 @@ fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Vec<u8>, DurableCheckpoi
     }
     out.uint(7)?;
     out.map(4)?;
+    // Key 1: OpenID4VP presentation replay — opaque STRING nonces (schema v2).
+    out.uint(1)?;
+    out.array(checkpoint.replay.presentation.len())?;
+    for value in &checkpoint.replay.presentation {
+        out.text(value)?;
+    }
+    // Keys 2-4: payment / issuance c_nonce / QES replay — numeric u64.
     for (key, values) in [
-        (1, &checkpoint.replay.presentation),
         (2, &checkpoint.replay.payment),
         (3, &checkpoint.replay.issuance),
         (4, &checkpoint.replay.qes),
@@ -1320,7 +1357,7 @@ fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, DurableCheckpointError>
     input.key(7)?;
     input.exact_map(4)?;
     input.key(1)?;
-    let presentation = decode_replay(&mut input)?;
+    let presentation = decode_replay_str(&mut input)?;
     input.key(2)?;
     let payment = decode_replay(&mut input)?;
     input.key(3)?;
@@ -1374,6 +1411,24 @@ fn decode_replay(input: &mut Cursor<'_>) -> Result<Vec<u64>, DurableCheckpointEr
             return Err(DurableCheckpointError::NonCanonical);
         }
         values.push(value);
+    }
+    Ok(values)
+}
+
+/// Decode the OpenID4VP presentation replay set (opaque string nonces, schema v2). Entries must be
+/// strictly increasing by byte order — the same canonical form [`sorted_replay_str`] produces.
+fn decode_replay_str(input: &mut Cursor<'_>) -> Result<Vec<String>, DurableCheckpointError> {
+    let len = input.container(4, MAX_REPLAY_VALUES)?;
+    let mut values: Vec<String> = Vec::with_capacity(len);
+    for _ in 0..len {
+        let value = input.borrowed_text(MAX_NONCE_BYTES)?;
+        if values
+            .last()
+            .is_some_and(|previous| previous.as_str() >= value)
+        {
+            return Err(DurableCheckpointError::NonCanonical);
+        }
+        values.push(value.to_owned());
     }
     Ok(values)
 }
@@ -1539,7 +1594,7 @@ mod tests {
             &scenario.issuer_id,
         )
         .unwrap();
-        core.seen_nonces = vec![91, 7];
+        core.seen_nonces = vec!["91".into(), "7".into()];
         core.pay_seen_nonces = vec![21];
         core.iss_seen_c_nonces = vec![31, 30];
         core.qes_seen_nonces = vec![41];
@@ -1622,7 +1677,7 @@ mod tests {
         next_operation_id: u64,
         pending_operations: BTreeMap<u64, PendingOperation>,
         issuance: oid4vci::State,
-        seen_nonces: Vec<u64>,
+        seen_nonces: Vec<String>,
         pay_seen_nonces: Vec<u64>,
         iss_seen_c_nonces: Vec<u64>,
         qes_seen_nonces: Vec<u64>,
@@ -1819,7 +1874,7 @@ mod tests {
 
         assert_eq!(target.credentials, source.credentials);
         assert_eq!(target.mdoc_holdings, source.mdoc_holdings);
-        assert_eq!(target.seen_nonces, vec![7, 91]);
+        assert_eq!(target.seen_nonces, vec!["7".to_string(), "91".to_string()]);
         assert_eq!(target.pay_seen_nonces, vec![21]);
         assert_eq!(target.iss_seen_c_nonces, vec![30, 31]);
         assert_eq!(target.qes_seen_nonces, vec![41]);
@@ -2127,20 +2182,24 @@ mod tests {
     fn replay_sets_are_sorted_unique_bounded_and_rejected_atomically_when_hostile() {
         let scenario = DemoWallet::new().issuance_scenario();
         let mut source = configured_core(&scenario, "wallet.example", "device-key");
-        source.seen_nonces = vec![9, 1, 9, 4];
+        source.seen_nonces = vec!["9".into(), "1".into(), "9".into(), "4".into()];
         let bytes = source.export_durable_checkpoint(12).unwrap();
         assert_eq!(
             decode_checkpoint(&bytes).unwrap().replay.presentation,
-            vec![1, 4, 9]
+            vec!["1".to_string(), "4".to_string(), "9".to_string()]
         );
 
-        source.seen_nonces = (0..MAX_REPLAY_VALUES as u64).rev().collect();
+        source.seen_nonces = (0..MAX_REPLAY_VALUES as u64)
+            .map(|n| n.to_string())
+            .collect();
         let exact = source.export_durable_checkpoint(12).unwrap();
         assert_eq!(
             decode_checkpoint(&exact).unwrap().replay.presentation.len(),
             MAX_REPLAY_VALUES
         );
-        source.seen_nonces.push(MAX_REPLAY_VALUES as u64);
+        source
+            .seen_nonces
+            .push((MAX_REPLAY_VALUES as u64).to_string());
         assert!(matches!(
             source.export_durable_checkpoint(12),
             Err(DurableCheckpointError::ResourceLimit {
@@ -2151,19 +2210,21 @@ mod tests {
 
         let mut target = configured_core(&scenario, "wallet.example", "device-key");
         let mut duplicate = decode_checkpoint(&bytes).unwrap();
-        duplicate.replay.presentation = vec![1, 1];
+        duplicate.replay.presentation = vec!["1".into(), "1".into()];
         assert_eq!(
             atomic_error(&mut target, &encode_checkpoint(&duplicate).unwrap(), 12),
             DurableCheckpointError::NonCanonical
         );
         let mut unordered = decode_checkpoint(&bytes).unwrap();
-        unordered.replay.presentation = vec![2, 1];
+        unordered.replay.presentation = vec!["2".into(), "1".into()];
         assert_eq!(
             atomic_error(&mut target, &encode_checkpoint(&unordered).unwrap(), 12),
             DurableCheckpointError::NonCanonical
         );
         let mut over = decode_checkpoint(&bytes).unwrap();
-        over.replay.presentation = (0..=MAX_REPLAY_VALUES as u64).collect();
+        over.replay.presentation = (0..=MAX_REPLAY_VALUES as u64)
+            .map(|n| n.to_string())
+            .collect();
         assert!(matches!(
             atomic_error(&mut target, &encode_checkpoint(&over).unwrap(), 12),
             DurableCheckpointError::ResourceLimit {
@@ -2271,12 +2332,12 @@ mod tests {
 
         cursor.key(2).unwrap();
         let version_position = cursor.position;
-        assert_eq!(valid[version_position], 1);
+        assert_eq!(valid[version_position], 2);
         let mut future = valid.clone();
-        future[version_position] = 2;
+        future[version_position] = 3;
         assert_eq!(
             atomic_error(&mut target, &future, 14),
-            DurableCheckpointError::UnsupportedVersion(2)
+            DurableCheckpointError::UnsupportedVersion(3)
         );
         let mut zero_version = valid.clone();
         zero_version[version_position] = 0;

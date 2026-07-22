@@ -322,7 +322,7 @@ fn recursive_paths_wildcard_filter_dependencies_and_consent_round_trip() {
             &sdjwt::KeyBindingCheck {
                 device_public_key: device.public_key_raw(),
                 expected_aud: "rp.example",
-                expected_nonce: NONCE,
+                expected_nonce: &NONCE.to_string(),
                 device_alg: Alg::Es256,
             },
         )

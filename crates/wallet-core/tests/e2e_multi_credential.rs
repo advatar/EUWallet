@@ -270,7 +270,7 @@ fn one_request_presents_a_pid_and_an_mdl_together() {
     let kb = sdjwt::KeyBindingCheck {
         device_public_key: device.public_key_raw(),
         expected_aud: "rp.example",
-        expected_nonce: NONCE,
+        expected_nonce: &NONCE.to_string(),
         device_alg: Alg::Es256,
     };
     let claims = sd

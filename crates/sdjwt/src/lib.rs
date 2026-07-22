@@ -68,8 +68,9 @@ pub struct KeyBindingCheck<'a> {
     pub device_public_key: &'a [u8],
     /// The RP's client_id — must equal the KB-JWT `aud`.
     pub expected_aud: &'a str,
-    /// The nonce from the RP's request — must equal the KB-JWT `nonce`.
-    pub expected_nonce: u64,
+    /// The nonce from the RP's request — must equal the KB-JWT `nonce`. OpenID4VP 1.0 defines the
+    /// nonce as an opaque string, so this compares byte-for-byte, never numerically.
+    pub expected_nonce: &'a str,
     /// The algorithm the device signs with.
     pub device_alg: Alg,
 }
@@ -588,11 +589,9 @@ impl SdJwtVc {
         if obj.get("aud").and_then(|v| v.as_str()) != Some(kb.expected_aud) {
             return Err(SdJwtError::KeyBindingMismatch);
         }
-        let nonce = obj.get("nonce").and_then(|v| {
-            v.as_u64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-        });
-        if nonce != Some(kb.expected_nonce) {
+        // The KB-JWT `nonce` MUST echo the verifier's opaque request nonce verbatim as a JSON
+        // string (OpenID4VP 1.0); a numeric or mismatched nonce is a binding failure.
+        if obj.get("nonce").and_then(|v| v.as_str()) != Some(kb.expected_nonce) {
             return Err(SdJwtError::KeyBindingMismatch);
         }
 

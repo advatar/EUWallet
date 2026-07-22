@@ -398,13 +398,13 @@ fn key_binding_requires_profile_type_and_issued_at() {
     let check = KeyBindingCheck {
         device_public_key: b"device",
         expected_aud: "rp.example",
-        expected_nonce: 42,
+        expected_nonce: "42",
         device_alg: Alg::Es256,
     };
 
     let payload = json!({
         "aud":"rp.example",
-        "nonce":42,
+        "nonce":"42",
         "iat":1_790_000_000,
         "sd_hash":sd_hash
     });
@@ -428,7 +428,7 @@ fn key_binding_requires_profile_type_and_issued_at() {
         json!({"alg":"ES256", "typ":"kb+jwt"}),
         json!({
             "aud":"rp.example",
-            "nonce":42,
+            "nonce":"42",
             "iat":1_790_000_000,
             "sd_hash":sd_hash
         }),

@@ -358,6 +358,15 @@ pub struct ValidityInfo {
     pub valid_until: String,
 }
 
+/// The MSO `status` element (IETF Token Status List, as profiled for ISO 18013-5): the credential's
+/// entry in an issuer-published status list, so a verifier can check revocation/suspension. Shape:
+/// `status: { status_list: { idx: uint, uri: tstr } }` — mirroring the SD-JWT VC `status` claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MsoStatus {
+    pub uri: String,
+    pub index: u64,
+}
+
 /// Mobile Security Object — the signed digest catalogue of a credential (18013-5 §9.1.2.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MobileSecurityObject {
@@ -369,6 +378,9 @@ pub struct MobileSecurityObject {
     /// The holder's COSE_Key for device authentication (opaque here).
     pub device_key: Value,
     pub validity_info: ValidityInfo,
+    /// Optional revocation/suspension status reference (IETF Token Status List). `None` when the
+    /// issuer published no status list for this credential.
+    pub status: Option<MsoStatus>,
 }
 
 impl MobileSecurityObject {
@@ -401,7 +413,7 @@ impl MobileSecurityObject {
                 tdate_value(&self.validity_info.valid_until, "validUntil tdate")?,
             ),
         ]);
-        Ok(Value::Map(vec![
+        let mut entries = vec![
             (
                 Value::Text("version".into()),
                 Value::Text(self.version.clone()),
@@ -423,7 +435,22 @@ impl MobileSecurityObject {
                 Value::Text(self.doc_type.clone()),
             ),
             (Value::Text("validityInfo".into()), validity),
-        ]))
+        ];
+        // `status` is optional; canonical encoding (`to_canonical`) fixes map-key order regardless
+        // of where it is appended.
+        if let Some(status) = &self.status {
+            entries.push((
+                Value::Text("status".into()),
+                Value::Map(vec![(
+                    Value::Text("status_list".into()),
+                    Value::Map(vec![
+                        (Value::Text("idx".into()), Value::Uint(status.index)),
+                        (Value::Text("uri".into()), Value::Text(status.uri.clone())),
+                    ]),
+                )]),
+            ));
+        }
+        Ok(Value::Map(entries))
     }
 
     fn from_value(v: &Value) -> Result<Self, MdocError> {
@@ -476,6 +503,29 @@ impl MobileSecurityObject {
             )?,
         };
 
+        // Optional IETF Token Status List reference. Absent ⇒ no status list. Present-but-malformed
+        // ⇒ fail closed, since a credential whose status we cannot locate must not be trusted.
+        let status = match map_get(pairs, "status") {
+            None => None,
+            Some(status_val) => {
+                let Value::Map(status_pairs) = status_val else {
+                    return Err(MdocError::Malformed("status not a map"));
+                };
+                let Some(Value::Map(list_pairs)) = map_get(status_pairs, "status_list") else {
+                    return Err(MdocError::Malformed("status.status_list"));
+                };
+                let uri = as_text(
+                    map_get(list_pairs, "uri").ok_or(MdocError::Malformed("status_list.uri"))?,
+                    "status_list.uri",
+                )?;
+                let index = as_uint(
+                    map_get(list_pairs, "idx").ok_or(MdocError::Malformed("status_list.idx"))?,
+                    "status_list.idx",
+                )?;
+                Some(MsoStatus { uri, index })
+            }
+        };
+
         Ok(MobileSecurityObject {
             version: as_text(
                 map_get(pairs, "version").ok_or(MdocError::Malformed("version"))?,
@@ -492,6 +542,7 @@ impl MobileSecurityObject {
             value_digests,
             device_key,
             validity_info,
+            status,
         })
     }
 
@@ -525,6 +576,33 @@ pub fn build_and_sign(
     key: &KeyRef,
     alg: Alg,
 ) -> Result<IssuerSigned, MdocError> {
+    build_and_sign_with_status(
+        name_spaces,
+        doc_type,
+        device_key,
+        validity_info,
+        None,
+        digest,
+        signer,
+        key,
+        alg,
+    )
+}
+
+/// Like [`build_and_sign`], but seals an IETF Token Status List `status` reference into the MSO so
+/// the credential can be checked for revocation/suspension at presentation time.
+#[allow(clippy::too_many_arguments)]
+pub fn build_and_sign_with_status(
+    name_spaces: BTreeMap<String, Vec<IssuerSignedItem>>,
+    doc_type: &str,
+    device_key: Value,
+    validity_info: ValidityInfo,
+    status: Option<MsoStatus>,
+    digest: &dyn Digest,
+    signer: &dyn Signer,
+    key: &KeyRef,
+    alg: Alg,
+) -> Result<IssuerSigned, MdocError> {
     let mut value_digests: BTreeMap<String, BTreeMap<u64, Digest32>> = BTreeMap::new();
     for (ns, items) in &name_spaces {
         let mut m = BTreeMap::new();
@@ -541,6 +619,7 @@ pub fn build_and_sign(
         value_digests,
         device_key,
         validity_info,
+        status,
     };
     let mso_bytes = mso.to_mso_bytes()?;
     let issuer_auth = CoseSign1::sign(
@@ -633,6 +712,20 @@ impl IssuerSigned {
     /// can store and later re-present an mdoc it received over the wire.
     pub fn parse(bytes: &[u8]) -> Result<Self, MdocError> {
         Self::from_value(&cbor::from_canonical_slice(bytes)?)
+    }
+
+    /// Decode the MSO from the (already issuer-signed) `issuerAuth` payload WITHOUT re-verifying the
+    /// signature. Only call this on a holding whose signature was validated at ingestion — it exists
+    /// so a stored credential's authenticated fields (e.g. the `status` reference) can be re-read at
+    /// presentation time. Use [`verify_issuer_signed`] for the authenticating path.
+    pub fn decode_mso(&self) -> Result<MobileSecurityObject, MdocError> {
+        let payload = self
+            .issuer_auth
+            .payload
+            .as_ref()
+            .ok_or(MdocError::Malformed("issuerAuth has no payload"))?;
+        let mso_canonical = untag24(payload)?;
+        MobileSecurityObject::from_value(&cbor::from_canonical_slice(&mso_canonical)?)
     }
 
     /// Parse from a decoded CBOR value.

@@ -111,8 +111,8 @@ pub struct Outcome {
     pub http_posts: Vec<(String, u16, Vec<u8>)>,
     /// (URI, HTTP status, body length) for status-list fetches.
     pub status_fetches: Vec<(String, u16, usize)>,
-    /// Nonces the core asked to persist.
-    pub persisted_nonces: Vec<u64>,
+    /// Nonces the core asked to persist (OpenID4VP presentation nonces are opaque strings).
+    pub persisted_nonces: Vec<String>,
     /// Whether the core closed the flow.
     pub closed: bool,
     /// The wallet-to-wallet offer key the core asked to publish, if any (TS09).

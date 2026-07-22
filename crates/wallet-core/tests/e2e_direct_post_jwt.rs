@@ -191,7 +191,7 @@ fn encrypted_response_leaves_the_device_as_a_jwe_only_the_verifier_can_open() {
     let kb = sdjwt::KeyBindingCheck {
         device_public_key: device.public_key_raw(),
         expected_aud: "rp.example",
-        expected_nonce: NONCE,
+        expected_nonce: &NONCE.to_string(),
         device_alg: Alg::Es256,
     };
     let claims = sd

@@ -866,7 +866,7 @@ fn minimise_mdoc(
 /// RNG; a production shell should instead supply a fresh random value (bound into the JWE `apu`
 /// for encrypted responses). Deriving it per-request keeps the unencrypted direct_post transcript
 /// well-formed and unique per presentation.
-fn mdoc_generated_nonce(nonce: u64) -> String {
+fn mdoc_generated_nonce(nonce: &str) -> String {
     let h = AwsLc.sha256(format!("eudi-mdoc-generated-nonce:{nonce}").as_bytes());
     format!("mgn-{}", hex_bytes(&h[..12]))
 }
@@ -1133,8 +1133,9 @@ struct SessionInfo {
     /// Every declared DCQL path, or the legacy flat claims when DCQL is absent. DCQL consent uses
     /// `selected_revealed_claims`; only the legacy selector reads this field directly.
     requested_claims: Vec<String>,
-    /// The request nonce, needed to bind the mdoc OpenID4VP SessionTranscript.
-    nonce: u64,
+    /// The request nonce (OpenID4VP opaque string), needed to bind the mdoc OpenID4VP
+    /// SessionTranscript and to echo verbatim in the KB-JWT / JWE `apv`.
+    nonce: String,
     response_uri: String,
     /// The response mode: `direct_post` (form body) or `direct_post.jwt` (JWE-encrypted response).
     response_mode: String,
@@ -1293,7 +1294,7 @@ pub enum Effect {
     /// Fetch RP metadata / trust status / JWKS, then send back `RpTrustResolved`.
     ResolveRpTrust { client_id: String },
     /// Durably remember this nonce (replay protection across restarts).
-    PersistNonce { nonce: u64 },
+    PersistNonce { nonce: String },
     /// Render this exact, fully-resolved screen.
     Render { screen: ScreenDescription },
     /// Sign `payload` with the device key (Secure Enclave), then send back `DeviceSignatureProduced`.
@@ -1353,7 +1354,7 @@ struct CachedStatusList {
 pub struct Core {
     config: WalletConfig,
     vp: State,
-    seen_nonces: Vec<u64>,
+    seen_nonces: Vec<String>,
     /// The credentials the wallet holds. A real wallet holds several (a PID, an mDL, …); issuance
     /// appends, and presentation selects the one that data-minimally satisfies the request.
     credentials: Vec<StoredSdJwtCredential>,
@@ -1649,12 +1650,32 @@ impl Core {
             return StatusGate::Indeterminate;
         };
         for source in &session.selected_sources {
-            let PresentationCredentialReference::SdJwt { holding, .. } = source else {
-                continue;
+            // Both credential formats carry an optional IETF Token Status List reference: SD-JWT in
+            // the `status` claim (parsed at ingestion), mdoc in the signed MSO `status` element
+            // (re-read here from the already-authenticated issuerAuth). A credential with no status
+            // list contributes no reference; a present-but-unreadable status fails closed.
+            let reference = match source {
+                PresentationCredentialReference::SdJwt { holding, .. } => holding.status.clone(),
+                PresentationCredentialReference::Mdoc(holding) => {
+                    match holding.issuer_signed.decode_mso() {
+                        Ok(mso) => match mso.status {
+                            Some(status) if valid_status_uri(&status.uri) => {
+                                Some(StatusReference {
+                                    uri: status.uri,
+                                    index: status.index,
+                                })
+                            }
+                            // A status reference we cannot use (bad URI) must not be waved through.
+                            Some(_) => return StatusGate::Indeterminate,
+                            None => None,
+                        },
+                        Err(_) => return StatusGate::Indeterminate,
+                    }
+                }
             };
-            if let Some(reference) = &holding.status {
-                if !references.contains(reference) {
-                    references.push(reference.clone());
+            if let Some(reference) = reference {
+                if !references.contains(&reference) {
+                    references.push(reference);
                 }
             }
         }
@@ -1752,20 +1773,20 @@ impl Core {
 
     /// Decide whether an RP cert chain is a registered relying party, in-core, via the trusted
     /// list + X.509 profile. Returns `(registered, rp_public_key_raw)`.
-    fn resolve_rp(&self, chain: &[Vec<u8>]) -> (bool, Vec<u8>) {
+    fn resolve_rp(&self, chain: &[Vec<u8>]) -> (bool, Vec<u8>, Vec<String>) {
         let anchors = self
             .trust_store
             .parsed_anchors_at(ServiceType::RelyingPartyAccessCa, self.now_epoch);
         match x509::check_relying_party(chain, &anchors, self.now_epoch, &AwsLc) {
-            Ok(_) => {
+            Ok(profile) => {
                 let key = chain
                     .first()
                     .and_then(|der| x509::parse_cert(der).ok())
                     .map(|c| c.public_key_raw)
                     .unwrap_or_default();
-                (true, key)
+                (true, key, profile.dns_sans)
             }
-            Err(_) => (false, Vec::new()),
+            Err(_) => (false, Vec::new(), Vec::new()),
         }
     }
 
@@ -2250,7 +2271,7 @@ impl Core {
                 registered_redirect_uris,
             } => {
                 // The registration decision is computed here, in-core, from the trusted list.
-                let (registered, rp_public_key) = self.resolve_rp(&rp_cert_chain);
+                let (registered, rp_public_key, leaf_dns_sans) = self.resolve_rp(&rp_cert_chain);
                 self.pending_rp_provenance = registered.then(|| RelyingPartyProvenance {
                     certificate_chain: rp_cert_chain,
                     public_key: rp_public_key.clone(),
@@ -2259,6 +2280,7 @@ impl Core {
                     registered,
                     rp_public_key,
                     registered_redirect_uris,
+                    leaf_dns_sans,
                 }))
             }
             Event::UserConsented => {
@@ -2896,7 +2918,7 @@ impl Core {
                 rp_client_id: req.client_id.clone(),
                 purpose: req.purpose.clone().unwrap_or_default(),
                 requested_claims: req.requested_claims.clone(),
-                nonce: req.nonce,
+                nonce: req.nonce.clone(),
                 response_uri: req.response_uri.clone(),
                 response_mode: req.response_mode.clone(),
                 response_encryption_key: req.response_encryption_key.clone(),
@@ -3771,7 +3793,8 @@ impl Core {
             .rp_provenance
             .as_ref()
             .ok_or(PresentationEligibilityError::TrustEvidenceInvalid)?;
-        let (registered, public_key) = self.resolve_rp(&provenance.certificate_chain);
+        let (registered, public_key, _leaf_dns_sans) =
+            self.resolve_rp(&provenance.certificate_chain);
         if !registered || public_key != provenance.public_key {
             return Err(PresentationEligibilityError::TrustEvidenceInvalid);
         }
@@ -4004,12 +4027,12 @@ impl Core {
                 }
                 let holding = &stored.holding;
                 let issuer_signed = minimise_mdoc(&holding.issuer_signed, &requested_mdoc_paths);
-                let mgn = mdoc_generated_nonce(sess.nonce);
+                let mgn = mdoc_generated_nonce(&sess.nonce);
                 let session_transcript = mdoc::oid4vp_session_transcript(
                     &AwsLc,
                     &sess.rp_client_id,
                     &sess.response_uri,
-                    &sess.nonce.to_string(),
+                    &sess.nonce,
                     &mgn,
                 );
                 selected.push(PreparedPresentationCredential {
@@ -4452,7 +4475,7 @@ impl Core {
         match output {
             O::ResolveRpTrust { client_id } => vec![Effect::ResolveRpTrust { client_id }],
             O::PersistNonce(nonce) => {
-                self.seen_nonces.push(nonce);
+                self.seen_nonces.push(nonce.clone());
                 vec![Effect::PersistNonce { nonce }]
             }
             O::RenderConsent { .. } => {
@@ -4545,7 +4568,7 @@ impl Core {
         let apv = self
             .session
             .as_ref()
-            .map(|s| s.nonce.to_string())
+            .map(|s| s.nonce.clone())
             .unwrap_or_default();
         let jwe = jwe::encrypt_ecdh_es_a256gcm(
             plaintext.as_bytes(),
@@ -5779,7 +5802,7 @@ mod structured_sdjwt_tests {
                     Effect::ResolveRpTrust {
                         client_id: "rp.example".into(),
                     },
-                    Effect::PersistNonce { nonce: 1 },
+                    Effect::PersistNonce { nonce: "1".into() },
                 ])
                 .unwrap_err();
             assert!(error.contains("operationId space exhausted"));
@@ -5855,12 +5878,12 @@ mod structured_sdjwt_tests {
             let first = emit(
                 &mut core,
                 ActiveFlow::Presentation,
-                Effect::PersistNonce { nonce: 1 },
+                Effect::PersistNonce { nonce: "1".into() },
             );
             let second = emit(
                 &mut core,
                 ActiveFlow::Presentation,
-                Effect::PersistNonce { nonce: 2 },
+                Effect::PersistNonce { nonce: "2".into() },
             );
             assert!((1..=i64::MAX as u64).contains(&first));
             assert_eq!(second, first + 1);
