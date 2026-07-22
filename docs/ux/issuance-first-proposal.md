@@ -17,15 +17,20 @@ listed at the end.
 > *"With the Digital Credentials API, most presentations will be via platform wallets anyway, so issuance
 > becomes the more important process."*
 
-**Verdict: agree — issuance is the right flagship bet — but reframe it as "the OS owns *selection*; the
-wallet owns *everything after the handoff*," not "presentation belongs to the platform wallet."** Three
-findings force this correction into the design:
+**Verdict: agree that issuance is a flagship bet — but the framing must be precise: the OS may own
+*selection* (which wallet/document answers a request); the wallet still owns everything trust-defining —
+verifier authentication, consent, data-minimisation, the user's approval, response construction, and
+recovery. So consent is a co-flagship journey, not an afterthought, and "the OS owns presentation" is
+wrong.** Three findings force this into the design:
 
-1. **The DC API picker is cross-wallet, not platform-only.** On Android, third-party wallets register as
-   credential providers (`RegistryManager` / `OpenId4VpRegistry`, `MdocEntry` + `SdJwtEntry` + display
-   metadata) and appear in the OS chooser; WebKit states Safari requests IDs "from Apple Wallet **and third
-   party Wallets**". So the wallet is not cut out of presentation — it is *de-chromed*: the bespoke
-   presentation UI stops being a differentiator. **[verified]**
+1. **The chooser is cross-wallet, and the selected wallet runs its own consent UI.** On Android, third-party
+   wallets register as credential providers (`RegistryManager` / `OpenId4VpRegistry`, `MdocEntry` +
+   `SdJwtEntry` + display metadata) and handle the handed-off request; **Apple's `IdentityDocumentServices`
+   gives the selected provider its own authorization UI**. The OS picks *which* wallet; the wallet then
+   authenticates the verifier, shows consent, minimises, and gets approval. The EUDI ARF (Topic F) is
+   explicit that **consent and relying-party authentication stay with the Wallet Unit, not the browser/OS**.
+   The bespoke *chooser* chrome stops being a differentiator; the **consent experience does not** — it is
+   one of our strongest. **[verified]**
 2. **Issuance does not fully escape the platform either.** Chrome 143 ships an OpenID4VCI `create()`
    *origin trial* that also shows an OS holder-picker bottom sheet, and a success result "only means the
    holder has successfully received the request" (issuance completes asynchronously). The durable
@@ -36,10 +41,13 @@ findings force this correction into the design:
    the regime is provisional — the DC API is a W3C **Working Draft** (2026-07-16), and the EUDI ARF
    (Topic F / OIA_08) adopts it **only conditionally** on Recommendation status + platform-neutrality. **[verified]**
 
-**Net:** issuance is the single strongest bet because, across every real deployment examined, it is the
-**hardest, most failure-prone, and most fully wallet-owned** surface. But design for a world where
-*selection* is platform-owned, and compete on what begins after the picker hands control back. The window is
-**time-bound**: if the issuance origin trial graduates, some issuance selection moves to the platform too. **[analysis]**
+**Net:** treat **Add (issuance)** and **Prove (consent)** as two co-flagship, wallet-owned journeys.
+Issuance is the strongest single bet because it is the **hardest, most failure-prone, and most fully
+wallet-owned** surface; consent is equally trust-defining and, per the EUDI framework, explicitly the
+wallet's — not the browser's or OS's. Design for a world where only *selection* is platform-owned, and
+compete on everything that begins after the chooser hands control back. The window is **time-bound**: if the
+issuance origin trial graduates, some *selection* of the issuance path moves to the platform too — but
+consent, minimisation, and approval remain ours. **[analysis]**
 
 ---
 
@@ -95,11 +103,15 @@ the exact decline reason; never restart the whole flow). **[verified]**
 
 ---
 
-## 4. Presentation — thin, standards-conformant, but not deleted
+## 4. Prove (presentation & consent) — a co-flagship journey the wallet owns
 
-- **Registered display metadata IS the UX now.** The Android Credential Manager bottom sheet renders *your*
-  app name, icon, human-readable field labels, and card art. Invest there; keep the registry fresh (stable
-  ids, re-register on issuance/refresh) — a stale registry silently loses presentations. **[verified]**
+The OS chooser may pick which wallet answers, but the wallet authenticates the verifier, renders consent,
+minimises, gets approval, and builds the response. This is trust-defining and ours to get right — not thin,
+not delegated.
+
+- **Registered display metadata is the chooser UX.** The Android Credential Manager bottom sheet renders
+  *your* app name, icon, human-readable field labels, and card art. Invest there; keep the registry fresh
+  (stable ids, re-register on issuance/refresh) — a stale registry silently loses presentations. **[verified]**
 - **The post-handoff consent screen is the real presentation surface:** three plain lines — **WHO** (verifier +
   Trust Mark), **WHAT**, **WHY** (registered purpose) — plus an explicit **"what is NOT shared"** line
   (*"only that you're over 18, not your date of birth"*). Default to the minimal set; avoid attribute/field
