@@ -20,14 +20,20 @@ fn byte_array(b: &[u8]) -> String {
 fn presentation_json_contract_is_camel_case() {
     let wallet = DemoWallet::new();
     let s = wallet.scenario();
+    let issuance = wallet.issuance_scenario();
     let mut core = Core::new("wallet.example", "device-key");
-    // Credential loading is intentionally restricted to verified ingestion. This wire-contract
-    // test only exercises RP request serialization, so no unauthenticated fixture is injected.
     core.load_device_key(s.device_public_key.clone());
     core.handle_event_json(&format!(r#"{{"type":"setClock","epoch":{}}}"#, s.epoch))
         .unwrap();
-    core.load_trust_list(&s.trust_list, &s.operator_public_key)
+    core.load_trust_list(&issuance.trust_list, &issuance.operator_public_key)
         .unwrap();
+    core.ingest_credential(
+        "dc+sd-jwt",
+        issuance.pid_credential_compact.as_bytes(),
+        &issuance.issuer_cert_chain,
+        &issuance.issuer_id,
+    )
+    .unwrap();
 
     // request → ResolveRpTrust, with a camelCase `clientId` field.
     let out = core
@@ -41,6 +47,9 @@ fn presentation_json_contract_is_camel_case() {
         "expected camelCase clientId, got: {out}"
     );
     assert!(!out.contains("client_id"), "leaked snake_case field: {out}");
+    let operation_id = serde_json::from_str::<serde_json::Value>(&out).unwrap()[0]["operationId"]
+        .as_u64()
+        .expect("resolve operation id");
 
     // The shell echoes the RP cert chain via a camelCase `rpCertChain` event field; the core must
     // accept it and emit a consent render minimised to the one requested-and-held claim.
@@ -52,7 +61,7 @@ fn presentation_json_contract_is_camel_case() {
         .join(",");
     let out = core
         .handle_event_json(&format!(
-            r#"{{"type":"rpCertChainResolved","rpCertChain":[{certs}],"registeredRedirectUris":["https://rp.example/response"]}}"#
+            r#"{{"type":"rpCertChainResolved","operationId":{operation_id},"rpCertChain":[{certs}],"registeredRedirectUris":["https://rp.example/response"]}}"#
         ))
         .unwrap();
     assert!(

@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use base64ct::{Base64UrlUnpadded, Encoding};
+use base64ct::{Base64, Base64UrlUnpadded, Encoding};
 use cose::cbor::Value;
 use crypto_backend::{AwsLc, SoftwareSigner};
 use crypto_traits::{Alg, Digest, KeyRef, Signer};
@@ -14,7 +14,8 @@ use serde_json::json;
 use wallet_core::{Core, Effect, Event};
 
 const CA_DER: &[u8] = include_bytes!("../../x509/tests/vectors/ca.der");
-const ISSUER_DER: &[u8] = include_bytes!("../../x509/tests/vectors/rp.der");
+const RP_DER: &[u8] = include_bytes!("../../x509/tests/vectors/rp.der");
+const ISSUER_DER_B64: &str = include_str!("../../x509/tests/vectors/issuer.der.b64");
 const ISSUER_PKCS8: &[u8] = include_bytes!("../../x509/tests/vectors/rp.pkcs8.der");
 const NOW: i64 = 1_790_000_000; // 2026-09-21T14:13:20Z
 const EXPIRY: i64 = NOW + 10;
@@ -27,6 +28,10 @@ fn b64(bytes: &[u8]) -> String {
     Base64UrlUnpadded::encode_string(bytes)
 }
 
+fn issuer_der() -> Vec<u8> {
+    Base64::decode_vec(ISSUER_DER_B64.trim()).expect("issuer certificate vector")
+}
+
 fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
     let header = b64(br#"{"alg":"ES256"}"#);
     let payload = b64(json!({
@@ -35,6 +40,7 @@ fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
         "valid_until": 4_000_000_000i64,
         "anchors": [
             { "cert": b64(CA_DER), "service": "pid", "status": "granted" },
+            { "cert": b64(CA_DER), "service": "attestation", "status": "granted" },
             { "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" }
         ]
     })
@@ -142,7 +148,7 @@ fn issued_mdoc(issuer: &SoftwareSigner, device_public_key: &[u8]) -> Vec<u8> {
             },
         ],
     );
-    let credential = build_and_sign(
+    let mut credential = build_and_sign(
         name_spaces,
         MDOC_TYPE,
         cose_key(device_public_key),
@@ -157,6 +163,8 @@ fn issued_mdoc(issuer: &SoftwareSigner, device_public_key: &[u8]) -> Vec<u8> {
         Alg::Es256,
     )
     .unwrap();
+    credential.issuer_auth.unprotected.x5chain =
+        Some(Box::new(cose::X5Chain::Single(issuer_der())));
     b64(&credential.to_value().to_canonical()).into_bytes()
 }
 
@@ -213,7 +221,7 @@ fn authenticated_core(mdoc: bool) -> (Core, SoftwareSigner, SoftwareSigner) {
     core.ingest_credential(
         if mdoc { "mso_mdoc" } else { "dc+sd-jwt" },
         &credential,
-        &[ISSUER_DER.to_vec()],
+        &[issuer_der()],
         ISSUER_ID,
     )
     .unwrap();
@@ -229,7 +237,7 @@ fn drive_to_consent(core: &mut Core, rp: &SoftwareSigner, mdoc: bool) {
         [Effect::ResolveRpTrust { .. }]
     ));
     let effects = core.handle_event(Event::RpCertChainResolved {
-        rp_cert_chain: vec![ISSUER_DER.to_vec()],
+        rp_cert_chain: vec![RP_DER.to_vec()],
         registered_redirect_uris: vec![RESPONSE_URI.into()],
     });
     assert!(effects.iter().any(|effect| matches!(

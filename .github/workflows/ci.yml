@@ -110,7 +110,9 @@ jobs:
 
   tier3-tamarin:
     name: Tier 3 (Tamarin symbolic proofs)
-    runs-on: macos-14
+    # Tamarin 1.12 publishes a Maude bottle for Tahoe. Older macOS runners compile Maude 3.5.1
+    # from source, which is incompatible with their current Apple Clang standard-library headers.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Install Tamarin
@@ -118,6 +120,7 @@ jobs:
           brew tap tamarin-prover/tap
           brew trust --formula tamarin-prover/tap/tamarin-prover
           brew trust --formula tamarin-prover/tap/maude
+          brew trust --formula tamarin-prover/tap/libbuddy
           brew install tamarin-prover/tap/tamarin-prover
       - name: Prove every Tamarin model
         run: |

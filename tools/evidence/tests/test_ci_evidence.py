@@ -73,6 +73,7 @@ class CiEvidenceConfigurationTests(unittest.TestCase):
         self.assertIn("grep -Eq 'Swift version", ios_job)
 
         tamarin_job = WORKFLOW.split("  tier3-tamarin:", 1)[1].split("  ios-shell:", 1)[0]
+        self.assertIn("runs-on: macos-26", tamarin_job)
         self.assertIn("brew tap tamarin-prover/tap", tamarin_job)
         self.assertIn("brew install tamarin-prover/tap/tamarin-prover", tamarin_job)
         trust_commands = [
@@ -84,10 +85,18 @@ class CiEvidenceConfigurationTests(unittest.TestCase):
             [
                 "brew trust --formula tamarin-prover/tap/tamarin-prover",
                 "brew trust --formula tamarin-prover/tap/maude",
+                "brew trust --formula tamarin-prover/tap/libbuddy",
             ],
             trust_commands,
         )
         self.assertNotIn("HOMEBREW_NO_REQUIRE_TAP_TRUST", WORKFLOW)
+
+    def test_uniffi_generation_disables_environment_dependent_formatting(self):
+        script = (ROOT / "ios/build-rust-xcframework.sh").read_text()
+        self.assertIn(
+            "uniffi-bindgen -- generate \\\n  --no-format",
+            script,
+        )
 
     def test_evidence_script_is_syntax_valid_and_fail_closed(self):
         subprocess.run(["bash", "-n", EVIDENCE_SCRIPT], check=True)

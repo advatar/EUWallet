@@ -8,6 +8,9 @@ sealed class WalletShellException(
     class CoreInvocationFailure(cause: Throwable) :
         WalletShellException("Wallet core invocation failed", cause)
 
+    class NoPendingDurableCommit :
+        WalletShellException("No durable wallet transition is awaiting retry")
+
     class CoreRejected(val detail: String) :
         WalletShellException("Wallet core rejected the event: $detail")
 

@@ -10,8 +10,15 @@ import org.junit.Test
 
 private class RecordingEngine(
     private val response: (String) -> String,
-) : WalletEngineDriving {
+) : DurableWalletEngineDriving {
     val events = mutableListOf<String>()
+
+    override fun prepareForDurableRestore(environment: CoreDurableEnvironment) = Unit
+
+    override fun makeDurableCheckpoint(generation: Long): CoreDurableCheckpoint =
+        CoreDurableCheckpoint(generation, byteArrayOf(1))
+
+    override fun restoreDurableCheckpointRecord(checkpoint: CoreDurableCheckpoint) = Unit
 
     override fun handleEventJson(eventJson: String): String {
         events += eventJson
@@ -40,6 +47,103 @@ private class RecordingRedirectHandler(
 }
 
 class EffectExecutorTest {
+    @Test
+    fun publicConstructorsRequireConcreteDurableLifecycleCoordinator() {
+        val constructors = EffectExecutor::class.java.constructors
+
+        assertTrue(constructors.isNotEmpty())
+        assertTrue(constructors.all {
+            it.parameterTypes.firstOrNull() == DurableLifecycleCoordinator::class.java
+        })
+        assertFalse(constructors.any {
+            WalletEngineDriving::class.java in it.parameterTypes
+        })
+    }
+
+    @Test
+    fun transactionHistoryMutationsCommitAsSuccessfulLocalEvents() {
+        val engine = RecordingEngine { "[]" }
+        val durableStore = InMemoryDurableStateStore()
+        val executor = makeExecutor(engine = engine, durableStore = durableStore)
+
+        assertEquals(
+            EffectCascadeOutcome.Idle,
+            executor.send(WalletEventJson.redactTransaction(17u)),
+        )
+        assertEquals(
+            EffectCascadeOutcome.Idle,
+            executor.send(WalletEventJson.wipeTransactionLog()),
+        )
+        assertEquals(2, engine.events.size)
+        assertEquals(2L, durableStore.currentRecord?.generation)
+    }
+
+    @Test
+    fun blockedTransactionHistoryMutationCannotBeReportedAsIdleSuccess() {
+        val executor = makeExecutor(
+            engine = RecordingEngine {
+                """[{"type":"render","screen":{"screen":"error","code":"history_mutation_in_progress","message":"History cannot be changed while a wallet operation is active"}},{"type":"close"}]"""
+            },
+        )
+
+        assertEquals(
+            EffectCascadeOutcome.Aborted(
+                EffectAbortReason.CoreError(
+                    "history_mutation_in_progress",
+                    "History cannot be changed while a wallet operation is active",
+                ),
+            ),
+            executor.send(WalletEventJson.wipeTransactionLog()),
+        )
+    }
+
+    @Test
+    fun credentialCallbackIsAcknowledgedOnlyAfterCoreAcceptsIt() {
+        val issuer = object : IssuerResponder {
+            override fun token(): TokenResult = TokenResult(bound = true, cNonce = 1u)
+
+            override fun credential(proofJwt: ByteArray): CredentialResult =
+                CredentialResult(format = "dc+sd-jwt", bytes = byteArrayOf(9, 8, 7))
+        }
+        val rejection = RecordingEngine { event ->
+            if (event.contains("\"type\":\"credentialReceived\"")) {
+                """[{"type":"render","screen":{"screen":"error","code":"credential_issuance_rejected","message":"Credential issuance was rejected"}},{"type":"close"}]"""
+            } else {
+                """[{"type":"requestCredential","operationId":73,"proofJwt":[1,2]}]"""
+            }
+        }
+
+        val rejectedOutcome = makeExecutor(
+            engine = rejection,
+            issuer = issuer,
+        ).send("{\"type\":\"start\"}")
+
+        assertEquals(
+            EffectCascadeOutcome.Aborted(
+                EffectAbortReason.CoreError(
+                    "credential_issuance_rejected",
+                    "Credential issuance was rejected",
+                ),
+            ),
+            rejectedOutcome,
+        )
+        assertFalse(rejectedOutcome is EffectCascadeOutcome.Succeeded)
+        assertTrue(rejection.events.any { it.contains("\"type\":\"credentialReceived\"") })
+
+        val acceptance = RecordingEngine { event ->
+            if (event.contains("\"type\":\"credentialReceived\"")) {
+                """[{"type":"close"}]"""
+            } else {
+                """[{"type":"requestCredential","operationId":74,"proofJwt":[3,4]}]"""
+            }
+        }
+
+        assertEquals(
+            EffectCascadeOutcome.Succeeded,
+            makeExecutor(engine = acceptance, issuer = issuer).send("{\"type\":\"start\"}"),
+        )
+    }
+
     @Test
     fun drainsSignAndHttpCascadeOnGenuineSuccess() {
         val engine = RecordingEngine { event ->
@@ -455,9 +559,10 @@ class EffectExecutorTest {
     @Test
     fun malformedAndRejectedCoreOutputsRemainDistinct() {
         val malformed = makeExecutor(engine = RecordingEngine { "not-json" })
-        assertThrows(WalletShellException.MalformedCoreOutput::class.java) {
+        val malformedError = assertThrows(DurableLifecycleException::class.java) {
             malformed.send("{}")
         }
+        assertEquals(DurableLifecycleErrorCode.MALFORMED_CORE_OUTPUT, malformedError.code)
 
         val rejected = makeExecutor(engine = RecordingEngine { "{\"error\":\"invalid\"}" })
         val error = assertThrows(WalletShellException.CoreRejected::class.java) {
@@ -470,9 +575,10 @@ class EffectExecutorTest {
     fun coreInvocationFailureIsTyped() {
         val executor = makeExecutor(engine = RecordingEngine { throw ExpectedFailure() })
 
-        assertThrows(WalletShellException.CoreInvocationFailure::class.java) {
+        val error = assertThrows(DurableLifecycleException::class.java) {
             executor.send("{}")
         }
+        assertEquals(DurableLifecycleErrorCode.CORE_INVOCATION_FAILED, error.code)
     }
 
     @Test
@@ -584,6 +690,7 @@ class EffectExecutorTest {
 
     private fun makeExecutor(
         engine: RecordingEngine,
+        durableStore: DurableStateStore = InMemoryDurableStateStore(),
         signer: WalletSigner = WalletSigner { _, _ -> byteArrayOf(1) },
         http: WalletHttpClient = WalletHttpClient { _, _, _ ->
             HttpResponse(200, "{}".encodeToByteArray(), "application/json")
@@ -591,16 +698,18 @@ class EffectExecutorTest {
         storage: WalletStorage = WalletStorage { _, _ -> },
         trust: TrustResolver = TrustResolver { TrustResolution(emptyList(), emptyList()) },
         renderer: ScreenRenderer = ScreenRenderer { _, _, _ -> },
+        issuer: IssuerResponder? = null,
         statusLists: StatusListResolver? = null,
         transferOffers: TransferOfferPublisher? = null,
         redirectHandler: OpenId4VpRedirectHandler? = null,
     ): EffectExecutor = EffectExecutor(
-        engine = engine,
+        lifecycle = bootstrappedTestLifecycle(engine, durableStore),
         signer = signer,
         httpClient = http,
         storage = storage,
         trustResolver = trust,
         renderer = renderer,
+        issuerResponder = issuer,
         statusListResolver = statusLists,
         transferOfferPublisher = transferOffers,
         presentationRedirectHandler = redirectHandler,

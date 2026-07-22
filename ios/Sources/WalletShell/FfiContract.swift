@@ -329,6 +329,19 @@ public enum WalletEventJSON {
         #"{"type":"qesDeclined","operationId":\#(operationId)}"#
     }
 
+    /// Replace one audit-log entry with a chain-preserving tombstone. This mutation must travel
+    /// through the durable lifecycle just like protocol events so it cannot be resurrected after
+    /// a restart from an older checkpoint.
+    public static func historyRedaction(seq: UInt64) -> String {
+        #"{"type":"redactTransaction","seq":\#(seq)}"#
+    }
+
+    /// Erase the audit log through the durable lifecycle. Core admits this only while no protocol
+    /// operation is active, then returns an empty effect batch after applying the mutation.
+    public static func historyWipe() -> String {
+        #"{"type":"wipeTransactionLog"}"#
+    }
+
     // --- Issuance (OpenID4VCI) ---
     public static func credentialOfferReceived(
         offer: Data, issuerCertChain: [Data], issuerId: String

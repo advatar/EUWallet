@@ -308,7 +308,7 @@ final class DurableLifecycleCoordinatorTests: XCTestCase {
         try lifecycle.bootstrap(environment: environment)
         var renders = 0
         let executor = EffectExecutor(
-            engine: lifecycle,
+            lifecycle: lifecycle,
             signer: StubSigner(),
             http: StubHttpClient(),
             storage: InMemoryStorage(),
@@ -319,7 +319,7 @@ final class DurableLifecycleCoordinatorTests: XCTestCase {
             _ = try await executor.send(eventJson: #"{"type":"start"}"#)
             XCTFail("commit failure must withhold effects")
         } catch {
-            XCTAssertEqual(error as? EffectExecutorError, .coreInvocationFailed)
+            XCTAssertEqual(error as? DurableLifecycleError, .storageCommitFailed)
         }
         XCTAssertEqual(renders, 0)
 
