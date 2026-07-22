@@ -156,6 +156,9 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
+- [ ] [#50](https://github.com/advatar/EUWallet/issues/50): compute the canonical held-but-not-shared
+      claim complement in the Rust core, bind it into the consent authorization hash, and enforce
+      correspondence through Rust, Swift, Android, and formal-model tests before rendering it.
 - [x] [#48](https://github.com/advatar/EUWallet/issues/48): replace the iOS developer demo shell
       with a consumer-grade, accessible wallet experience for non-technical and older users, hide
       protocol/diagnostic detail from release UI, preserve core-bound consent semantics, and add
