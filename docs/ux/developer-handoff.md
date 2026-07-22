@@ -1,164 +1,154 @@
-# Developer hand-off — Add & Prove wallet UX
+# Developer hand-off — Add & Prove wallet UX (contract-precise)
 
-**Date:** 2026-07-22 · **For:** the shell/app developer starting build.
+**Date:** 2026-07-22 · **For:** core + shell engineering.
 
-## 0. Status — read first
+## 0. How to read this
 
-**Can you start now? Yes.** The direction, boundary, journeys, screen inventory, states, and
-acceptance criteria are **locked and buildable**. Build the structure now.
+**Keep the complete product design.** Nothing in the prototype is trimmed to fit today's APIs — **existing
+APIs are a starting point, not a ceiling.** Every design element that is not backed by an existing *typed,
+decoded, tested* contract is marked **REQUIRED CORE WORK** below.
 
-**Is it signed off as "final"? Not yet.** One gate remains: **moderated usability testing with people
-aged ~65–85** (protocol in `accessibility-validation.md`). That round can only move **on-screen copy and
-fine spacing** — it will **not** change the architecture, the flows, the states, or the accessibility
-requirements. Therefore:
+**Order of work is fixed: core first, then UI.** For each proposed element: add the typed core contract →
+populate it from an authenticated source → include it in the consent/authorization binding where it is part
+of what the user approves → make it durable where it must survive restart → prove the obligation in the
+formal model → add presenter serialization tests and Swift **and** Android decoder conformance → **only
+then** bind the UI. Engineering can start the UI *today* against the **existing consent payload** while the
+richer typed fields land core-first.
 
-- **Frozen (build against these):** the wallet-owned boundary, the two journeys and their screen
-  inventory, the state/transition model, the error/recovery set, the accessibility acceptance criteria,
-  and the "UI ↔ verified data" binding contract (§3).
-- **Provisional (don't hard-code painfully):** exact wording and micro-copy, exact spacing/type sizes,
-  and any "portrait capture" screen. **Externalise all strings** (see §8) so copy changes after testing
-  are a data edit, not a refactor.
+**Frozen vs provisional.**
+- **Frozen:** the wallet/OS trust boundary (§2); the *set of required states* (every happy + recovery
+  state must exist); the accessibility acceptance criteria (§7); and the "UI ↔ verified data" binding rules
+  (§3).
+- **Provisional (usability testing with ~65–85 may change these):** **flow composition — navigation,
+  ordering, screen count, and recovery composition — as well as copy and spacing.** Do not hard-freeze the
+  number or order of screens.
+
+**Authority.** The **typed core contract and its tests are authoritative.** The prototype
+(`/building/issuance-flow.html`) is **design intent, not protocol truth** — where they disagree, the core
+contract wins.
 
 ## 1. Sources of truth
-
-| Artifact | Path / URL |
+| Artifact | Path |
 |---|---|
-| Interactive prototype (clickable) | `LandingPage/public/building/issuance-flow.html` → served at `/building/issuance-flow.html` |
-| Proposal & rationale | `docs/ux/issuance-first-proposal.md` |
-| Competitive teardown + **German eID/NFC/PIN spec** | `docs/ux/issuance-competitive-teardown-and-eid-flow.md` |
-| Accessibility validation + **65–85 test protocol** | `docs/ux/accessibility-validation.md` |
-| Shareable PDF (15 pp) | `docs/ux/issuance-flow-mockup.pdf` |
-| Commits | EUWallet `8b7d27b` · LandingPage `1ac60f2` |
+| Interactive prototype (design intent) | `LandingPage/public/building/issuance-flow.html` |
+| Proposal, teardown + eID/NFC/PIN spec, a11y validation + 65–85 protocol, PDF | `docs/ux/issuance-first-proposal.md`, `…competitive-teardown-and-eid-flow.md`, `…accessibility-validation.md`, `…issuance-flow-mockup.pdf` |
+| Core contract | `crates/presenter` (`ScreenDescription`, `ConsentScreen`), `crates/wallet-core` (`Event`/`Effect`, hashing, durable), `formal/lean/{NavigationModel,IssuanceModel}.lean`, Swift/Android decoders |
 
-## 2. The boundary the UI must honor (non-negotiable)
+## 2. Boundary (frozen, non-negotiable)
+OS may mediate **selection**. The **wallet** owns verifier authentication, request validation,
+minimisation, understandable consent, explicit approval, secure response construction, delivery, recovery.
+The shell stays thin: it renders `Effect::Render { screen: ScreenDescription }` and returns `Event`s. **No
+trust / minimisation / consent-binding / signing logic in the shell.**
 
-The OS may mediate **selection** (which wallet/document answers a request). The **wallet** owns verifier
-authentication, request validation, data-minimisation, understandable consent, explicit approval, secure
-response construction, delivery, and recovery.
+## 3. UI ↔ verified data binding rules (frozen)
+1. **Issuer/verifier display identity is NOT taken from raw certificate leaf text.** Bind it through trusted
+   **issuer/registration metadata** that is cryptographically associated with the validated certificate or
+   issuer identifier. Certificate subject text is not automatically safe UI copy.
+2. **Approval ≠ signing.** "Approve with Face ID" is an **authenticated approval result**, a *separate*
+   operation from `Effect::Sign`. The core must require a verified approval result **before** it requests the
+   signature. (New event/gate — §5, matrix row A.)
+3. **No raw issuer/verifier error text in the UI.** The core emits **stable error codes + bounded, structured
+   context**; the shell maps those to **reviewed, localised** recovery copy. Raw diagnostics are debug-only.
+4. Every consumer string is bound to authenticated core output; the shell never synthesises identity,
+   purpose, retention, "not shared", or over-ask conclusions itself.
 
-**In our architecture that means the SwiftUI/Android shell stays THIN:** it renders what the sans-IO core
-tells it (`Effect::Render { screen: ScreenDescription }`) and sends user actions back as `Event`s. **No
-trust decision, no minimisation, no consent binding, and no signing logic lives in the UI layer.** Keys
-live in the Secure Enclave / StrongBox; the core emits `Effect::Sign` and the shell returns
-`Event::DeviceSignatureProduced`.
+## 4. Contract tiers
 
-## 3. Binding contract — every UI string is bound to verified core data (must not be weakened)
+**Tier E — Exists today (typed payload, decoded, tested — build the UI on these now):**
+- `ScreenDescription::Consent(ConsentScreen{ rp_display_name, purpose, requested_claims })` — decoded in Swift.
+- `ScreenDescription::Error { code, message }` — decoded in Swift.
+- `Loading`, `PaymentConfirmation(PaymentScreen)`, `SignConfirmation(SignScreen)` — typed + decoded.
+- WYSIWYS binding exists: `consent_hash`/`authorization_hash` over the rendered approval.
 
-Visual simplification must never weaken verifier identity, consent integrity, or minimisation. The shell
-renders these strings **from** authenticated core output; it must never synthesise them from
-caller-supplied text.
+**Tier P — REQUIRED CORE WORK (proposed; not renderable until built core-first):**
+- **Payload-free variants** `IssuanceOffer`, `CredentialList`, `CredentialDetail` exist as *empty* Rust
+  variants **and the Swift decoder maps them to `.other`** — they carry no issuer/document/status content
+  today. Adding that content is new typed payload + new decoders (matrix rows 8–11).
+- **Consent enrichment**: registered-verifier status, Trust Mark, retention, "not shared", over-ask result
+  are **new authenticated core fields** on the consent contract — not existing UI work (rows 4–7).
+- **New issuance screens/states**: PIN-question, NFC tap/reading, Preparing, Ready, home-card
+  Needs-attention (rows 11–12).
+- **Authenticated approval gate** before signing (row A).
+- **Structured, bounded error context** + code→copy mapping (row 15).
 
-| What the person sees | Bound to (from the core, never the shell) |
-|---|---|
-| "✓ Verified issuer — Bundesdruckerei" | Authenticated certificate path; identity from the leaf cert |
-| "weindeals.example · registered verifier" | Verifier authenticated, `client_id` bound to its cert; purpose from its registration |
-| "Over 18: Yes" — nothing else | The single selectively-disclosed claim the core placed in the response |
-| "Not shared: name, date of birth, address" | The minimised response contents (non-requested attrs never assembled) |
-| "…asking for more than it registered for" | The core's RP-registration over-ask check |
-| "Approve with Face ID" | `Effect::Sign` → device-key signature over the request nonce |
+**Tier A — Product assumptions (validate in testing; do not encode as protocol truth):**
+- Flow ordering, screen count, and recovery composition (may change with 65–85 testing).
+- **Portrait:** presence is **already enforced** (PID Rulebook 1.7 profile — `validate_sd_jwt_pid_portrait`
+  / `validate_mdoc_pid_portrait`, gated by `CredentialIngestionError::PidPortraitInvalid` at ingestion). The
+  *only* open UX question is whether a **portrait-capture screen** is needed; normally the trusted issuer/eID
+  process supplies the portrait.
 
-## 4. Architecture mapping (screens ↔ existing core API)
+## 5. Contract matrix (every proposed field)
 
-Screens render from `presenter::ScreenDescription`; buttons dispatch `wallet_core::Event`; the core
-returns `Effect`s. **Existing** variants you build on:
+Columns: **Exists** · **Authenticated source** · **Core type/variant** · **In consent/authz hash?** ·
+**Durable across restart?** · **Swift/Android decoder** · **Formal obligation** · **Localised display rule**
 
-- `ScreenDescription::IssuanceOffer` — the Add offer screen (after `Event::CredentialOfferReceived`).
-- `ScreenDescription::Consent(ConsentScreen)` — the **Prove** screen (requested claims already minimised).
-- `ScreenDescription::Error { code, message }` — recovery screens (codes in §7).
-- `ScreenDescription::CredentialList` / `CredentialDetail` — the **wallet home** and the home card.
-- `ScreenDescription::AuthPrompt`, `ScanQr`, `PresentQr`, `TransactionHistory` — supporting surfaces.
+| # | Screen · field | Exists | Authenticated source | Core type/variant | In hash? | Durable? | Swift / Android | Formal obligation | Display rule |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | Consent · rp_display_name | ✅ | trusted RP **registration** metadata bound to validated client_id/cert (see §3.1) | `ConsentScreen.rp_display_name` | ✅ consent_hash | no (session) | Swift ✅ / Android ⚠confirm | NavigationModel + Tamarin consent-binding | verbatim from registration, not cert text |
+| 2 | Consent · purpose | ✅ | RP registration | `ConsentScreen.purpose` | ✅ | no | Swift ✅ / Android ⚠ | NavigationModel | from registration |
+| 3 | Consent · requested_claims (minimised) | ✅ | core minimisation | `ConsentScreen.requested_claims` | ✅ | no | Swift ✅ / Android ⚠ | minimisation correspondence | catalogue-localised claim labels |
+| 4 | Consent · registered-verifier + Trust Mark | ❌ REQUIRED | trusted list / RP-access registration cert | **new** `ConsentScreen` field | ✅ (must bind) | no | **new** both | serialization test + consent-binding obligation | symbol **and** text, never colour-only |
+| 5 | Consent · retention | ❌ REQUIRED | RP registration / request policy | **new** field | ✅ | no | **new** both | serialization + obligation | plain phrase ("Not stored" / "Kept N days") from authenticated policy |
+| 6 | Consent · "not shared" | ❌ REQUIRED | core: complement of held vs disclosed | **new** field (`Vec<String>`) | ✅ | no | **new** both | minimisation-correspondence test (shared ∪ not-shared = held; shared = requested) | catalogue-localised labels |
+| 7 | Consent · over-ask result | ❌ REQUIRED | core RP-registration check | **new** field (enum) | ✅ | no | **new** both | over-ask obligation (Rust + Tamarin) | reviewed warning copy from code |
+| 8 | Issuance · issuer display identity | ❌ REQUIRED (variant empty; Swift→.other) | trusted issuer metadata assoc. with validated issuer cert/identifier | **new** payload on `IssuanceOffer`/`CredentialDetail` | ✅ issuance-approval binding | ✅ stored with holding | **new** both | IssuanceModel + serialization + decoder conformance | from issuer metadata, not cert text |
+| 9 | Issuance · document type/name | ❌ REQUIRED | catalogue (authenticated type) | **new** payload field | ✅ | ✅ | **new** both | IssuanceModel | catalogue-localised type name |
+| 10 | Issuance · "what will be added" attrs | ❌ REQUIRED | catalogue / offer | **new** payload | ✅ | ✅ (granted set) | **new** both | IssuanceModel | catalogue-localised labels |
+| 11 | Home card · status Preparing/Ready/Needs-attention | ❌ REQUIRED | issuance machine state + durable checkpoint + status list | **new** variant/field | n/a (status) but integrity-bound | ✅ **checkpoint** | **new** both | IssuanceModel + **durable-transition proofs** + trace correspondence | localised status + recovery action |
+| 12 | Screens · PIN-question / tap / preparing / ready | ❌ REQUIRED | issuance machine | **new** `ScreenDescription` variants | mid-flow transitions bound | ✅ where mid-flow | **new** both | NavigationModel **and** IssuanceModel + trace correspondence + decoder conformance | verbs; no protocol terms; no time claims |
+| A | Approval · authenticated approval result | ❌ REQUIRED | platform user-auth (LAContext / BiometricPrompt) result verified by core | **new** `Event` + core gate before `Effect::Sign` | part of authz binding | no | shell **produces**; both | oid4vp + IssuanceModel gate: *no signature without a verified approval* | system sheet (no custom copy) |
+| 14 | Recovery · error code | ✅ | core | `Error.code` (stable string) | n/a | n/a | Swift ✅ / Android ⚠ | NavigationModel; codes are a stable enumerated set | shell maps **code → reviewed localised copy** |
+| 15 | Recovery · structured context | ❌ REQUIRED | core | **new** bounded typed field on `Error` | n/a | n/a | **new** both | codes stable + context bounded | localised copy from code+context; **raw diagnostics debug-only** |
 
-**New core work these designs require (engineering task, keep it in the core, not the shell):** the rich
-issuance sub-flow — *PIN question*, *NFC tap / reading*, *Preparing (async)*, *Ready*, and the home-card
-*Needs-attention* state — are **not yet distinct `ScreenDescription` variants**. Add them to
-`crates/presenter`, extend `formal/lean/NavigationModel.lean` (the verified navigation model) and its
-Swift conformance, and surface issuance progress from the **durable checkpoint** (so Preparing/Ready/
-Needs-attention survive app close + reboot). The eID card read is orchestrated via the Ausweis SDK in the
-shell feeding the core's OpenID4VCI issuance machine; the PIN is entered in the system/SDK sheet and never
-crosses into the core.
+Existing error codes to design copy for (already emitted): `credential_revoked`, `credential_status_unavailable`,
+`credential_expired`, `credential_not_yet_valid`, `credential_issuance_rejected`, `credential_rejected`,
+`credential_provenance_invalid`, `presentation_trust_invalid`, `presentation_response_uri_invalid`,
+`presentation_response_encryption_metadata_invalid`, `audit_log_unavailable`.
 
-## 5. Journey 1 — Add (issuance)
+## 6. Core-first implementation plan (ordered slices)
 
-Issuer-first; ordinary verbs; "National ID"/"Digital ID" (never "PID"); no time promises. As few screens
-as needed — a confident user goes straight through; an unsure one is helped, never stuck.
+Each slice lands **core-first and verified** before any UI binds it. Per-slice Definition of Done:
+Rust type + in-core population from an authenticated source + hash/durable wiring + **presenter
+serialization tests** + **formal obligation** (NavigationModel for shell containment; **IssuanceModel + trace
+correspondence** for issuance gates and durable transitions) + **Swift and Android decoder conformance** +
+`cargo fmt`/`clippy`/`test` green.
 
-| # | Screen | Purpose | Core touchpoint | Key controls |
-|---|---|---|---|---|
-| 1 | Offer | Named + verified issuer; one-line purpose; optional "What will be added?" | `IssuanceOffer` after `CredentialOfferReceived` | Add · What will be added? · Not now |
-| 2 | PIN question | "Do you know your ID card PIN?" — never assumes | new screen | Yes, I know it · I'm not sure |
-| — | PIN help | Transport-PIN/CAN/blocked detail lives **here**, not on primary screens | new screen | Continue · How to reset · Back |
-| 3 | Tap / reading | Guided NFC, live "Reading… keep still", cancellable + resumable | new screen; Ausweis SDK → issuance machine | Continue(read ok) · It's not reading · Cancel |
-| 4 | Confirm | Confirm by **purpose + issuer**, not an attribute checklist | new screen | Confirm · What will be added? |
-| 5 | Preparing | Async issuer processing as a **state** + notification; user may leave | new screen; durable checkpoint | Done |
-| 6 | Ready | Success → a useful next action | new screen / `CredentialDetail` | Prove your age · Go to Wallet |
+1. **Consent enrichment** (rows 4–7). Start with **"not shared"** (row 6) — fully core-derivable today (held
+   − disclosed), no external dependency — then registered-verifier/Trust Mark/retention/over-ask, which also
+   require the **RP-registration trust model** to carry that authenticated data (build that data path first).
+   All new fields join the `consent_hash`.
+2. **Payload-bearing `IssuanceOffer` / `CredentialDetail`** (rows 8–10) + new Swift/Android decoders
+   (replace the `.other` fallback).
+3. **Issuance screens + machine states + durable transitions** (rows 11–12): extend the Rust issuance
+   machine and `IssuanceModel.lean`, prove the new gates + durable transitions with trace correspondence,
+   surface status from the durable checkpoint.
+4. **Authenticated approval gate** (row A): a verified approval `Event` the core requires before `Effect::Sign`.
+5. **Structured error context + code→copy** (row 15).
 
-## 6. Journey 2 — Prove (consent)
+Then, and only then, connect the UI screen-by-screen (Prove first — it maps to the existing `Consent`
+payload extended by slice 1).
 
-The wallet authenticates the verifier, validates the request, shows a plain request, shares the minimum,
-takes an explicit approval, builds and delivers the response.
+## 7. Accessibility acceptance criteria (frozen — part of DoD)
+Dynamic Type end-to-end (large-text parity with the prototype); VoiceOver — labelled groups, heading→context
+→actions order, labelled controls, live regions for NFC + Preparing; ≥44 pt targets; WCAG AA (AAA where
+feasible), never colour-alone; reduced motion; no card-within-card; primary action reachable without
+scrolling; native iOS patterns (SF Symbols, system PIN sheet, Face ID prompt, grouped lists).
 
-- Renders as `ScreenDescription::Consent(ConsentScreen)` after `AuthorizationRequestReceived` →
-  `RpCertChainResolved` → core validation.
-- Shows **who** (verifier + registered purpose), **what** (only the disclosed claim), **why**, **retention**,
-  and an explicit **"Not shared"** line. Approve → `Event::UserConsented` → `Effect::Sign` →
-  `Event::DeviceSignatureProduced` → delivery.
-- **Over-ask** variant: when the request exceeds the verifier's registration, warn and default to "Don't
-  share". (Surface the core's over-ask signal — do not compute it in the shell.)
+## 8. Formal-verification obligations (correction to prior draft)
+Extending `NavigationModel.lean` **alone is insufficient** — it proves *shell containment*, not issuance
+security. New issuance gates and durable transitions additionally require: the **Rust issuance machine**,
+**`IssuanceModel.lean`**, **trace correspondence** between them, **presenter serialization tests**, and
+**Swift/Android decoder conformance**. Consent-binding and over-ask obligations extend the presentation
+model + Tamarin.
 
-## 7. States — happy **and** recovery (all required)
+## 9. Localisation & consent-text integrity (correction)
+Externalising strings avoids a refactor, but **changing bundled localisation still ships in a new app
+build.** Do **not** serve **remotely mutable** copy for security-critical **consent** text unless it is
+**authenticated, versioned, and included in the authorization binding**. Non-security chrome may use bundled
+localisation freely (de + en minimum). No protocol terms, no "PID", no time promises in any UI copy.
 
-Each names the cause in plain words and offers one recovery; progress is always saved. Recovery screens
-render from `Error { code }`:
-
-| State | Core `code` (where applicable) | Recovery |
-|---|---|---|
-| Wrong PIN | (SDK/attempts) | Try again + attempts left; PIN help before last try |
-| Blocked PIN | (SDK) | How to reset → resume |
-| NFC lost / interrupted | (transport) | Auto-resume the read; Cancel present |
-| Unsupported device (no NFC) | (pre-check) | Offer other ways to add |
-| Issuer rejection | `credential_issuance_rejected` / `credential_rejected` | Exact reason + retry + contact |
-| Revoked / suspended at present | `credential_revoked` / `credential_status_unavailable` | Refused before signing |
-| Timeout / connection dropped | (transport) | Progress saved + Resume |
-| Pending too long | (async) | Notify + check status on the home card |
-| Returning / interrupted session | (durable) | Greet + Continue / Start over |
-
-## 8. Accessibility — build requirements (part of Definition of Done)
-
-- **Dynamic Type** end-to-end (no fixed point sizes); the prototype's large-text mode is the parity target.
-- **VoiceOver:** each screen a labelled group; reading order = heading → context → actions; label every
-  control; **live regions** narrate the NFC read and the Preparing state.
-- **≥44 pt** targets; **WCAG AA** contrast (AAA where feasible); **never colour alone** (symbol + text);
-  respect **reduced motion**.
-- **No card-within-card**; primary action reachable without scrolling; critical instructions on-screen.
-- Native iOS patterns: SF Symbols, system PIN sheet, Face ID prompt, grouped lists.
-
-## 9. Copy & i18n
-
-- **Externalise all strings** (de + en at minimum) — copy is provisional until testing.
-- No protocol terms in UI ("PID", "credential offer", "OpenID4VCI", "SD-JWT", "mso_mdoc" are banned from
-  consumer copy). Issuer/verifier names come from the authenticated certificate. No "in seconds / under N
-  minutes" claims.
-
-## 10. Suggested build order
-
-1. Extend `presenter::ScreenDescription` + `NavigationModel.lean` + Swift conformance for the new issuance
-   screens/states (keeps the sans-IO boundary and the verified navigation intact).
-2. Build the **Prove** consent screen first (it maps to the existing `Consent` variant and is the highest
-   trust-risk surface).
-3. Build the **Add** happy path, then the **eID/NFC/PIN** journey to the spec, then every recovery state.
-4. Wire the **durable home card** to issuance status. Add the a11y layer as you go (not at the end).
-
-## 11. Definition of done (per screen)
-Renders from the correct `Effect::Render` payload · dispatches the correct `Event` · all its error/recovery
-states implemented · strings externalised · a11y criteria (§8) met · matches the prototype's intent (not
-pixel-copy).
-
-## 12. Open decisions (product/design sign-off, not blockers to starting)
-- Final copy after the 65–85 sessions · dark-theme contrast recheck · whether a portrait-capture screen is
-  needed for the applicable National ID profile · whether/when to adopt the Digital Credentials API
-  `create()/get()` opportunistically (keep app/OID4VCI + custom-scheme OID4VP + proximity as defaults).
-
-## 13. Do not
-Put trust / consent / minimisation / signing logic in the shell · show protocol terms · promise times ·
-nest cards · let a visual simplification drop a security check · synthesise issuer/verifier names from
-caller-supplied text.
+## 10. Do not
+Trust/consent/minimisation/signing logic in the shell · protocol terms in UI · raw cert/issuer/verifier text
+as display copy · raw issuer error strings · time promises · card-within-card · treating the prototype as
+the contract · remotely-mutable unauthenticated consent copy · binding "approve" directly to signing.
