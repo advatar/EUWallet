@@ -195,9 +195,11 @@ operational solution needed to enter those processes.
         compilation, repaired the shared canonical ingress URL-validation contract, and added a
         permanent unit-test, lint, debug and release CI gate; all required gates passed in
         [CI run 29922532177](https://github.com/advatar/EUWallet/actions/runs/29922532177).
-  - [ ] [#41](https://github.com/advatar/EUWallet/issues/41): reconcile branches still ahead of
-        main, integrate distinct RFC 5280 and PID-bound issuance work through green assurance
-        gates, then delete merged or superseded remote branches.
+  - [x] [#41](https://github.com/advatar/EUWallet/issues/41): reconciled branches ahead of main,
+        integrated the valid RFC 5280 residual work, rejected and reopened the unsourced PID-bound
+        issuance implementation, and deleted all four merged or superseded remote branches; all
+        required gates passed in
+        [CI run 29924091658](https://github.com/advatar/EUWallet/actions/runs/29924091658).
 - [ ] Obtain the applicable German authority, CAB/BSI certification and Commission listing.
 
 ## Completed
