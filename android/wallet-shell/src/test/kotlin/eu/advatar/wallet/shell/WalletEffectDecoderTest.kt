@@ -13,7 +13,7 @@ class WalletEffectDecoderTest {
             """[
                 {"type":"resolveRpTrust","operationId":1,"clientId":"https://rp.example"},
                 {"type":"persistNonce","operationId":2,"nonce":18446744073709551615},
-                {"type":"render","operationId":3,"authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":["age_over_18"],"notSharedClaims":["family_name"]}},
+                {"type":"render","operationId":3,"authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":["age_over_18"],"notSharedClaims":["family_name"],"verifierRegistration":"registered","trustMark":"eudiWallet","retention":{"policy":"days","days":30},"overAsk":{"result":"withinRegisteredScope"}}},
                 {"type":"sign","operationId":4,"keyRef":"device","payload":[0,127,255]},
                 {"type":"http","operationId":5,"resultType":"presentationDelivered","profile":"openid4vpDirectPost","url":"https://rp.example/cb","body":[1]},
                 {"type":"pushPar","operationId":6},
@@ -33,6 +33,9 @@ class WalletEffectDecoderTest {
         assertEquals("RP", screen.relyingPartyName)
         assertEquals(listOf("age_over_18"), screen.requestedClaims)
         assertEquals(listOf("family_name"), screen.notSharedClaims)
+        assertEquals(WalletScreen.VerifierRegistration.REGISTERED, screen.verifierRegistration)
+        assertEquals(WalletScreen.VerifierTrustMark.EUDI_WALLET, screen.trustMark)
+        assertEquals(30.toUShort(), screen.retention.days)
         assertEquals(3L, (effects[2] as WalletEffect.Render).operationId)
         assertEquals(32, (effects[2] as WalletEffect.Render).authorizationHash?.size)
         assertArrayEquals(byteArrayOf(0, 127, -1), (effects[3] as WalletEffect.Sign).payload)
@@ -103,7 +106,7 @@ class WalletEffectDecoderTest {
             "[{\"type\":\"http\",\"operationId\":1,\"resultType\":\"wrong\",\"url\":\"https://rp\",\"body\":[]}]",
             "[{\"type\":\"http\",\"operationId\":1,\"resultType\":\"presentationDelivered\",\"profile\":\"paymentAuthorization\",\"url\":\"https://rp\",\"body\":[]}]",
             "[{\"type\":\"http\",\"operationId\":1,\"resultType\":\"presentationDelivered\",\"profile\":\"futureProfile\",\"url\":\"https://rp\",\"body\":[]}]",
-            "[{\"type\":\"render\",\"operationId\":1,\"screen\":{\"screen\":\"consent\",\"rpDisplayName\":\"RP\",\"purpose\":\"Age\",\"requestedClaims\":[],\"notSharedClaims\":[]}}]",
+            "[{\"type\":\"render\",\"operationId\":1,\"screen\":{\"screen\":\"consent\",\"rpDisplayName\":\"RP\",\"purpose\":\"Age\",\"requestedClaims\":[],\"notSharedClaims\":[],\"verifierRegistration\":\"certificateValidated\",\"trustMark\":null,\"retention\":{\"policy\":\"unspecified\"},\"overAsk\":{\"result\":\"registrationScopeUnavailable\"}}}]",
         ).forEach { output ->
             assertThrows(WalletShellException.MalformedCoreOutput::class.java) {
                 WalletEffectDecoder.decodeCoreOutput(output)

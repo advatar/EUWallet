@@ -20,7 +20,10 @@ use oid4vci::pid_profile::{
     validate_mdoc_pid_portrait, validate_sd_jwt_pid_portrait, PID_MDOC_DOCTYPE, PID_SD_JWT_VCT,
 };
 use oid4vp::{AbortReason, Env, Input, ResolvedTrust, SelectedCredential, State};
-use presenter::{minimum_claim_set, ConsentScreen, PaymentScreen, ScreenDescription, SignScreen};
+use presenter::{
+    minimum_claim_set, ConsentScreen, OverAskResult, PaymentScreen, RetentionDisclosure,
+    ScreenDescription, SignScreen, VerifierRegistration, VerifierTrustMark,
+};
 use serde::{Deserialize, Serialize};
 use trust::{ServiceType, TrustStore};
 
@@ -1129,6 +1132,7 @@ pub struct WalletConfig {
 #[derive(Clone, Debug, Default)]
 struct SessionInfo {
     rp_client_id: String,
+    rp_registration: Option<trust::RelyingPartyRegistration>,
     purpose: String,
     /// Every declared DCQL path, or the legacy flat claims when DCQL is absent. DCQL consent uses
     /// `selected_revealed_claims`; only the legacy selector reads this field directly.
@@ -2272,6 +2276,14 @@ impl Core {
             } => {
                 // The registration decision is computed here, in-core, from the trusted list.
                 let (registered, rp_public_key, leaf_dns_sans) = self.resolve_rp(&rp_cert_chain);
+                let authenticated_redirect_uris = match &self.vp {
+                    State::ResolvingTrust(request) => self
+                        .trust_store
+                        .relying_party_at(&request.client_id, self.now_epoch)
+                        .map(|registration| registration.redirect_uris.clone())
+                        .unwrap_or(registered_redirect_uris),
+                    _ => registered_redirect_uris,
+                };
                 self.pending_rp_provenance = registered.then(|| RelyingPartyProvenance {
                     certificate_chain: rp_cert_chain,
                     public_key: rp_public_key.clone(),
@@ -2279,7 +2291,7 @@ impl Core {
                 self.drive(Input::RpTrustResolved(ResolvedTrust {
                     registered,
                     rp_public_key,
-                    registered_redirect_uris,
+                    registered_redirect_uris: authenticated_redirect_uris,
                     leaf_dns_sans,
                 }))
             }
@@ -2914,8 +2926,13 @@ impl Core {
         // Capture session details the moment the request is validated (needed later for the
         // consent screen and the response_uri).
         if let State::RequestValidated(req) = &self.vp {
+            let rp_registration = self
+                .trust_store
+                .relying_party_at(&req.client_id, self.now_epoch)
+                .cloned();
             self.session = Some(SessionInfo {
                 rp_client_id: req.client_id.clone(),
+                rp_registration,
                 purpose: req.purpose.clone().unwrap_or_default(),
                 requested_claims: req.requested_claims.clone(),
                 nonce: req.nonce.clone(),
@@ -4462,6 +4479,10 @@ impl Core {
                 purpose: String::new(),
                 requested_claims: Vec::new(),
                 not_shared_claims: Vec::new(),
+                verifier_registration: VerifierRegistration::CertificateValidated,
+                trust_mark: None,
+                retention: RetentionDisclosure::Unspecified,
+                over_ask: OverAskResult::RegistrationScopeUnavailable,
             });
         };
         let mut held_claims = Vec::new();
@@ -4510,11 +4531,61 @@ impl Core {
             .into_iter()
             .filter(|claim| !shared_paths.contains(claim.as_str()))
             .collect();
+        let (rp_display_name, verifier_registration, trust_mark, retention, over_ask) = session
+            .rp_registration
+            .as_ref()
+            .map(|registration| {
+                let unregistered_claims = session
+                    .selected_revealed_claims
+                    .iter()
+                    .filter(|claim| {
+                        let path = claim.strip_suffix(" [retained]").unwrap_or(claim);
+                        !registration
+                            .allowed_claims
+                            .iter()
+                            .any(|allowed| allowed == path)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let over_ask = if unregistered_claims.is_empty() {
+                    OverAskResult::WithinRegisteredScope
+                } else {
+                    OverAskResult::ExceedsRegisteredScope {
+                        claims: unregistered_claims,
+                    }
+                };
+                (
+                    registration.display_name.clone(),
+                    VerifierRegistration::Registered,
+                    registration.trust_mark.map(|mark| match mark {
+                        trust::TrustMark::EudiWallet => VerifierTrustMark::EudiWallet,
+                    }),
+                    match registration.retention {
+                        trust::RetentionPolicy::NotStored => RetentionDisclosure::NotStored,
+                        trust::RetentionPolicy::Days(days) => RetentionDisclosure::Days { days },
+                        trust::RetentionPolicy::Unspecified => RetentionDisclosure::Unspecified,
+                    },
+                    over_ask,
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    session.rp_client_id.clone(),
+                    VerifierRegistration::CertificateValidated,
+                    None,
+                    RetentionDisclosure::Unspecified,
+                    OverAskResult::RegistrationScopeUnavailable,
+                )
+            });
         ScreenDescription::Consent(ConsentScreen {
-            rp_display_name: session.rp_client_id.clone(),
+            rp_display_name,
             purpose: session.purpose.clone(),
             requested_claims: session.selected_revealed_claims.clone(),
             not_shared_claims,
+            verifier_registration,
+            trust_mark,
+            retention,
+            over_ask,
         })
     }
 
@@ -5697,6 +5768,7 @@ mod structured_sdjwt_tests {
                     purpose: "age".into(),
                     requested_claims: vec!["age_over_18".into()],
                     not_shared_claims: vec!["family_name".into()],
+                    ..ConsentScreen::default()
                 }),
             };
             let mut core = Core::new("wallet.example", "device-key");
@@ -5747,6 +5819,7 @@ mod structured_sdjwt_tests {
                 purpose: "age".into(),
                 requested_claims: vec!["age_over_18".into()],
                 not_shared_claims: vec!["family_name".into()],
+                ..ConsentScreen::default()
             });
             let expected_hash = presenter::consent_hash(&AwsLc, &screen);
             let mut core = Core::new("wallet.example", "device-key");
@@ -5784,6 +5857,7 @@ mod structured_sdjwt_tests {
                 purpose: "different".into(),
                 requested_claims: vec!["family_name".into()],
                 not_shared_claims: vec!["age_over_18".into()],
+                ..ConsentScreen::default()
             });
             let cross_screen_hash =
                 serde_json::to_string(&presenter::consent_hash(&AwsLc, &different_screen)).unwrap();

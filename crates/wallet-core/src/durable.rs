@@ -1627,6 +1627,7 @@ mod tests {
                 valid_from: 0,
                 valid_until,
                 anchors,
+                relying_parties: Vec::new(),
             })
             .unwrap();
     }
@@ -2100,6 +2101,7 @@ mod tests {
                 valid_from: 0,
                 valid_until: i64::MAX,
                 anchors: Vec::new(),
+                relying_parties: Vec::new(),
             })
             .unwrap();
         assert!(matches!(

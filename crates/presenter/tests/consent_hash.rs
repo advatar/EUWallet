@@ -23,6 +23,10 @@ fn consent(claims: &[&str]) -> ScreenDescription {
         purpose: "age verification".into(),
         requested_claims: claims.iter().map(|s| s.to_string()).collect(),
         not_shared_claims: vec!["family_name".into()],
+        verifier_registration: presenter::VerifierRegistration::Registered,
+        trust_mark: Some(presenter::VerifierTrustMark::EudiWallet),
+        retention: presenter::RetentionDisclosure::NotStored,
+        over_ask: presenter::OverAskResult::WithinRegisteredScope,
     })
 }
 
@@ -35,6 +39,7 @@ fn present_maps_snapshot_to_screen() {
             purpose: "p".into(),
             requested_claims: vec!["age_over_18".into()],
             not_shared_claims: vec!["family_name".into()],
+            ..ConsentScreen::default()
         },
         error: None,
     };
@@ -51,8 +56,8 @@ fn canonical_bytes_are_valid_cbor_and_deterministic() {
     // It is valid canonical CBOR: decoding then re-encoding is a fixed point.
     let decoded = from_canonical_slice(&a).expect("valid canonical CBOR");
     assert_eq!(decoded.to_canonical(), a);
-    // Shape: array(5) whose first element is the text tag "consent".
-    assert_eq!(a[0], 0x85);
+    // Shape: array(9) whose first element is the text tag "consent".
+    assert_eq!(a[0], 0x89);
     assert_eq!(&a[1..9], &[0x67, b'c', b'o', b'n', b's', b'e', b'n', b't']);
 }
 
@@ -73,6 +78,22 @@ fn consent_hash_is_stable_and_tamper_evident() {
     };
     screen.not_shared_claims = vec!["birth_date".into()];
     assert_ne!(consent_hash(&RealDigest, &different_complement), h1);
+
+    let mut different_policy = consent(&["age_over_18"]);
+    let ScreenDescription::Consent(ref mut screen) = different_policy else {
+        unreachable!()
+    };
+    screen.retention = presenter::RetentionDisclosure::Days { days: 30 };
+    assert_ne!(consent_hash(&RealDigest, &different_policy), h1);
+
+    let mut over_ask = consent(&["age_over_18"]);
+    let ScreenDescription::Consent(ref mut screen) = over_ask else {
+        unreachable!()
+    };
+    screen.over_ask = presenter::OverAskResult::ExceedsRegisteredScope {
+        claims: vec!["age_over_18".into()],
+    };
+    assert_ne!(consent_hash(&RealDigest, &over_ask), h1);
 }
 
 #[test]

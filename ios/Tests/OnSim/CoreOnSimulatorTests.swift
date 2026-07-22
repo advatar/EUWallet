@@ -112,7 +112,7 @@ final class CoreOnSimulatorTests: XCTestCase {
 
         // The core validated the RP against the trusted list and computed the minimised consent
         // screen — surfacing ONLY the requested-and-held claim.
-        guard case .consent(_, _, let claims, _)? = screens.last else {
+        guard case .consent(_, _, let claims, _, _, _, _, _)? = screens.last else {
             return XCTFail("expected a consent screen, got \(String(describing: screens.last))")
         }
         XCTAssertEqual(claims, ["age_over_18"])

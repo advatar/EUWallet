@@ -55,6 +55,37 @@ pub struct TrustAnchor {
     pub status: ServiceStatus,
 }
 
+const MAX_RP_REGISTRATIONS: usize = 1_024;
+const MAX_RP_TEXT_BYTES: usize = 256;
+const MAX_RP_CLAIMS: usize = 64;
+const MAX_RP_REDIRECT_URIS: usize = 16;
+
+/// A reviewed trust mark carried by the signed registration feed. Keeping this vocabulary closed
+/// prevents arbitrary operator text from becoming a security badge in the wallet UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrustMark {
+    EudiWallet,
+}
+
+/// The verifier's authenticated retention declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetentionPolicy {
+    NotStored,
+    Days(u16),
+    Unspecified,
+}
+
+/// RP metadata authenticated by the same signed, rollback-protected feed as the trust anchors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelyingPartyRegistration {
+    pub client_id: String,
+    pub display_name: String,
+    pub trust_mark: Option<TrustMark>,
+    pub retention: RetentionPolicy,
+    pub allowed_claims: Vec<String>,
+    pub redirect_uris: Vec<String>,
+}
+
 /// A verified trust list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustList {
@@ -63,6 +94,7 @@ pub struct TrustList {
     pub valid_from: i64,
     pub valid_until: i64,
     pub anchors: Vec<TrustAnchor>,
+    pub relying_parties: Vec<RelyingPartyRegistration>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,11 +189,91 @@ pub fn parse_and_verify(
         });
     }
 
+    let registrations: &[Json] = match payload.get("relying_parties") {
+        None => &[],
+        Some(value) => value.as_array().ok_or(TrustError::Malformed)?.as_slice(),
+    };
+    let mut relying_parties = Vec::new();
+    for registration in registrations {
+        if relying_parties.len() >= MAX_RP_REGISTRATIONS {
+            return Err(TrustError::Malformed);
+        }
+        let bounded_text = |name: &str| -> Result<String, TrustError> {
+            let value = registration
+                .get(name)
+                .and_then(Json::as_str)
+                .ok_or(TrustError::Malformed)?;
+            if value.is_empty()
+                || value.len() > MAX_RP_TEXT_BYTES
+                || value.chars().any(char::is_control)
+            {
+                return Err(TrustError::Malformed);
+            }
+            Ok(value.to_owned())
+        };
+        let client_id = bounded_text("client_id")?;
+        if relying_parties
+            .iter()
+            .any(|existing: &RelyingPartyRegistration| existing.client_id == client_id)
+        {
+            return Err(TrustError::Malformed);
+        }
+        let display_name = bounded_text("display_name")?;
+        let trust_mark = match registration.get("trust_mark") {
+            None | Some(Json::Null) => None,
+            Some(Json::String(value)) if value == "eudi-wallet" => Some(TrustMark::EudiWallet),
+            _ => return Err(TrustError::Malformed),
+        };
+        let retention = match registration.get("retention") {
+            None | Some(Json::Null) => RetentionPolicy::Unspecified,
+            Some(Json::String(value)) if value == "not-stored" => RetentionPolicy::NotStored,
+            Some(Json::Object(value)) if value.len() == 1 => value
+                .get("days")
+                .and_then(Json::as_u64)
+                .and_then(|days| u16::try_from(days).ok())
+                .filter(|days| *days > 0)
+                .map(RetentionPolicy::Days)
+                .ok_or(TrustError::Malformed)?,
+            _ => return Err(TrustError::Malformed),
+        };
+        let bounded_list = |name: &str, maximum: usize| -> Result<Vec<String>, TrustError> {
+            let values = registration
+                .get(name)
+                .and_then(Json::as_array)
+                .ok_or(TrustError::Malformed)?;
+            if values.len() > maximum {
+                return Err(TrustError::Malformed);
+            }
+            let mut parsed = Vec::with_capacity(values.len());
+            for value in values {
+                let value = value.as_str().ok_or(TrustError::Malformed)?;
+                if value.is_empty()
+                    || value.len() > MAX_RP_TEXT_BYTES
+                    || value.chars().any(char::is_control)
+                    || parsed.iter().any(|existing| existing == value)
+                {
+                    return Err(TrustError::Malformed);
+                }
+                parsed.push(value.to_owned());
+            }
+            Ok(parsed)
+        };
+        relying_parties.push(RelyingPartyRegistration {
+            client_id,
+            display_name,
+            trust_mark,
+            retention,
+            allowed_claims: bounded_list("allowed_claims", MAX_RP_CLAIMS)?,
+            redirect_uris: bounded_list("redirect_uris", MAX_RP_REDIRECT_URIS)?,
+        });
+    }
+
     Ok(TrustList {
         sequence_number,
         valid_from,
         valid_until,
         anchors,
+        relying_parties,
     })
 }
 
@@ -242,5 +354,18 @@ impl TrustStore {
             .iter()
             .filter_map(|der| x509::parse_cert(der).ok())
             .collect()
+    }
+
+    /// Signed registration for an exact client identifier, only while the feed is current.
+    pub fn relying_party_at(&self, client_id: &str, now: i64) -> Option<&RelyingPartyRegistration> {
+        self.is_valid_at(now)
+            .then(|| {
+                self.current
+                    .as_ref()?
+                    .relying_parties
+                    .iter()
+                    .find(|registration| registration.client_id.as_bytes() == client_id.as_bytes())
+            })
+            .flatten()
     }
 }

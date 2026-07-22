@@ -2,6 +2,21 @@ package eu.advatar.wallet.shell
 
 /** Closed mirror of presenter::ScreenDescription from the wallet core. */
 sealed interface WalletScreen {
+    enum class VerifierRegistration { REGISTERED, CERTIFICATE_VALIDATED }
+    enum class VerifierTrustMark { EUDI_WALLET }
+
+    data class RetentionDisclosure(val policy: Policy, val days: UShort? = null) {
+        enum class Policy { NOT_STORED, DAYS, UNSPECIFIED }
+    }
+
+    data class OverAskResult(val result: Result, val claims: List<String> = emptyList()) {
+        enum class Result {
+            WITHIN_REGISTERED_SCOPE,
+            EXCEEDS_REGISTERED_SCOPE,
+            REGISTRATION_SCOPE_UNAVAILABLE,
+        }
+    }
+
     data object Loading : WalletScreen
 
     data class Error(
@@ -14,6 +29,10 @@ sealed interface WalletScreen {
         val purpose: String,
         val requestedClaims: List<String>,
         val notSharedClaims: List<String>,
+        val verifierRegistration: VerifierRegistration,
+        val trustMark: VerifierTrustMark?,
+        val retention: RetentionDisclosure,
+        val overAsk: OverAskResult,
     ) : WalletScreen
 
     data class PaymentConfirmation(

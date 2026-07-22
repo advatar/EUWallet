@@ -18,11 +18,19 @@ const RP_DER: &[u8] = include_bytes!("../../x509/tests/vectors/rp.der");
 const RP_PKCS8: &[u8] = include_bytes!("../../x509/tests/vectors/rp.pkcs8.der");
 
 /// A signed trusted list granting the CA as an RP-access CA.
-fn signed_trust_list(operator: &SoftwareSigner) -> Vec<u8> {
+fn signed_trust_list(operator: &SoftwareSigner, allowed_claims: &[&str]) -> Vec<u8> {
     let header = b64(br#"{"alg":"ES256"}"#);
     let payload = b64(serde_json::json!({
         "seq": 1, "valid_from": 0, "valid_until": 4_000_000_000i64,
-        "anchors": [{ "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" }]
+        "anchors": [{ "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" }],
+        "relying_parties": [{
+            "client_id": "rp.example",
+            "display_name": "Example Verifier",
+            "trust_mark": "eudi-wallet",
+            "retention": "not-stored",
+            "allowed_claims": allowed_claims,
+            "redirect_uris": ["https://rp.example/response"]
+        }]
     })
     .to_string()
     .as_bytes());
@@ -109,7 +117,7 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
     });
     // Install the signed trusted list; RP registration is now decided in-core against it.
     core.load_trust_list(
-        &signed_trust_list(&trust_operator),
+        &signed_trust_list(&trust_operator, &["age_over_18"]),
         trust_operator.public_key_raw(),
     )
     .expect("trust list loads");
@@ -140,6 +148,14 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
             // Data minimisation: only the requested-and-held claim is shown, NOT family_name.
             assert_eq!(c.requested_claims, vec!["age_over_18".to_string()]);
             assert_eq!(c.not_shared_claims, vec!["family_name".to_string()]);
+            assert_eq!(c.rp_display_name, "Example Verifier");
+            assert_eq!(
+                c.verifier_registration,
+                presenter::VerifierRegistration::Registered
+            );
+            assert_eq!(c.trust_mark, Some(presenter::VerifierTrustMark::EudiWallet));
+            assert_eq!(c.retention, presenter::RetentionDisclosure::NotStored);
+            assert_eq!(c.over_ask, presenter::OverAskResult::WithinRegisteredScope);
             let mut covered = c.requested_claims.clone();
             covered.extend(c.not_shared_claims.clone());
             covered.sort();
@@ -202,6 +218,57 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
     let fx = core.handle_event(Event::PresentationDelivered);
     assert!(fx.iter().any(|e| matches!(e, Effect::Close)));
     assert_eq!(core.state(), &oid4vp::State::Done);
+}
+
+#[test]
+fn consent_warns_when_authenticated_registration_does_not_entitle_a_claim() {
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let rp = SoftwareSigner::from_pkcs8_der(RP_PKCS8).unwrap();
+    let trust_operator = SoftwareSigner::generate_p256().unwrap();
+    let (issuer_jwt, by_claim) = issue(
+        &issuer,
+        &[
+            ("family_name", json!("Andersson")),
+            ("age_over_18", json!(true)),
+        ],
+    );
+    let mut core = Core::new("wallet.example", "device-key");
+    core.load_unverified_credential_for_testing(HeldCredential {
+        issuer_jwt,
+        disclosures_by_claim: by_claim,
+        status: None,
+    });
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    core.load_trust_list(
+        &signed_trust_list(&trust_operator, &["age_over_18"]),
+        trust_operator.public_key_raw(),
+    )
+    .unwrap();
+    core.handle_event(Event::AuthorizationRequestReceived {
+        request: sign_request(&rp, 424_243, &["family_name"]),
+    });
+    let effects = core.handle_event(Event::RpCertChainResolved {
+        rp_cert_chain: vec![RP_DER.to_vec()],
+        // Signed registration metadata is authoritative; this shell-supplied decoy is ignored.
+        registered_redirect_uris: vec!["https://attacker.example/cb".into()],
+    });
+    let consent = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Render {
+                screen: presenter::ScreenDescription::Consent(consent),
+            } => Some(consent),
+            _ => None,
+        })
+        .expect("consent is rendered with an over-ask warning");
+    assert_eq!(
+        consent.over_ask,
+        presenter::OverAskResult::ExceedsRegisteredScope {
+            claims: vec!["family_name".into()],
+        }
+    );
 }
 
 #[test]

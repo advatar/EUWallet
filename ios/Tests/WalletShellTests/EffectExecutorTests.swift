@@ -37,7 +37,7 @@ final class MockEngine: DurableWalletEngineDriving {
             return #"[{"type":"resolveRpTrust","operationId":1,"resultType":"rpCertChainResolved","clientId":"rp.example"}]"#
         }
         if eventJson.contains("\"rpCertChainResolved\"") {
-            return #"[{"type":"persistNonce","operationId":2,"resultType":"operationSucceeded","nonce":"opaque-nonce"},{"type":"render","operationId":3,"resultType":"presentationDecision","authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"Example RP","purpose":"Prove age","requestedClaims":["age_over_18"],"notSharedClaims":["family_name"]}}]"#
+            return #"[{"type":"persistNonce","operationId":2,"resultType":"operationSucceeded","nonce":"opaque-nonce"},{"type":"render","operationId":3,"resultType":"presentationDecision","authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"Example RP","purpose":"Prove age","requestedClaims":["age_over_18"],"notSharedClaims":["family_name"],"verifierRegistration":"registered","trustMark":"eudiWallet","retention":{"policy":"notStored"},"overAsk":{"result":"withinRegisteredScope"}}}]"#
         }
         if eventJson.contains("\"userConsented\"") {
             return #"[{"type":"sign","operationId":4,"resultType":"deviceSignatureProduced","keyRef":"device-key","payload":[1,2,3]}]"#
@@ -305,12 +305,24 @@ final class EffectExecutorTests: XCTestCase {
         let outcome = try await executor.send(
             eventJson: WalletEventJSON.authorizationRequestReceived(Data([1, 2, 3])))
 
-        guard case .consent(let rp, _, let claims, let notShared)? = rendered.last else {
+        guard case .consent(
+            let rp,
+            _,
+            let claims,
+            let notShared,
+            let registration,
+            let trustMark,
+            let retention,
+            let overAsk)? = rendered.last else {
             return XCTFail("expected a consent screen, got \(String(describing: rendered.last))")
         }
         XCTAssertEqual(rp, "Example RP")
         XCTAssertEqual(claims, ["age_over_18"])
         XCTAssertEqual(notShared, ["family_name"])
+        XCTAssertEqual(registration, .registered)
+        XCTAssertEqual(trustMark, .eudiWallet)
+        XCTAssertEqual(retention.policy, .notStored)
+        XCTAssertEqual(overAsk.result, .withinRegisteredScope)
         XCTAssertEqual(renderedOperationId, 3)
         XCTAssertEqual(renderedAuthorizationHash, Self.authorizationHash)
         XCTAssertEqual(outcome, .awaitingInput)
@@ -393,8 +405,8 @@ final class EffectExecutorTests: XCTestCase {
     }
 
     func testInteractiveRenderRequiresOperationIdAndAuthorizationHash() {
-        let missingId = #"[{"type":"render","authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[],"notSharedClaims":[]}}]"#
-        let shortHash = #"[{"type":"render","operationId":1,"authorizationHash":[0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[],"notSharedClaims":[]}}]"#
+        let missingId = #"[{"type":"render","authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[],"notSharedClaims":[],"verifierRegistration":"certificateValidated","trustMark":null,"retention":{"policy":"unspecified"},"overAsk":{"result":"registrationScopeUnavailable"}}}]"#
+        let shortHash = #"[{"type":"render","operationId":1,"authorizationHash":[0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[],"notSharedClaims":[],"verifierRegistration":"certificateValidated","trustMark":null,"retention":{"policy":"unspecified"},"overAsk":{"result":"registrationScopeUnavailable"}}}]"#
         for output in [missingId, shortHash] {
             XCTAssertThrowsError(try WalletEffect.decodeCoreOutput(output))
         }
@@ -435,7 +447,11 @@ final class EffectExecutorTests: XCTestCase {
                     relyingPartyName: "RP",
                     purpose: "Age",
                     requestedClaims: [],
-                    notSharedClaims: []),
+                    notSharedClaims: [],
+                    verifierRegistration: .registered,
+                    trustMark: .eudiWallet,
+                    retention: RetentionDisclosure(policy: .notStored),
+                    overAsk: OverAskResult(result: .withinRegisteredScope)),
                 .presentation,
                 "userConsented",
                 "userDeclined"),
@@ -487,7 +503,7 @@ final class EffectExecutorTests: XCTestCase {
             if event.contains("\"operationFailed\"") {
                 return #"[{"type":"render","screen":{"screen":"error","code":"rendering_failed","message":"Rendering failed"}},{"type":"close"}]"#
             }
-            return #"[{"type":"render","operationId":31,"authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[],"notSharedClaims":[]}}]"#
+            return #"[{"type":"render","operationId":31,"authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[],"notSharedClaims":[],"verifierRegistration":"certificateValidated","trustMark":null,"retention":{"policy":"unspecified"},"overAsk":{"result":"registrationScopeUnavailable"}}}]"#
         }
         let executor = makeExecutor(engine: engine) { _, _, screen in
             if case .consent = screen {

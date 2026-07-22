@@ -29,12 +29,24 @@ public struct ScreenRenderer: View {
                 Text(code).font(.caption).foregroundStyle(.secondary)
 #endif
             }.accessibilityElement(children: .combine)
-        case .consent(let rp, let purpose, let claims, let notSharedClaims):
+        case .consent(
+            let rp,
+            let purpose,
+            let claims,
+            let notSharedClaims,
+            let verifierRegistration,
+            let trustMark,
+            let retention,
+            let overAsk):
             ConsentView(
                 rp: rp,
                 purpose: purpose,
                 claims: claims,
                 notSharedClaims: notSharedClaims,
+                verifierRegistration: verifierRegistration,
+                trustMark: trustMark,
+                retention: retention,
+                overAsk: overAsk,
                 onConsent: onConsent,
                 onDecline: onDecline)
         case .paymentConfirmation(let creditorName, let creditorAccount, let amountMinor, let currency):
@@ -129,6 +141,10 @@ struct ConsentView: View {
     let purpose: String
     let claims: [String]
     let notSharedClaims: [String]
+    let verifierRegistration: VerifierRegistration
+    let trustMark: VerifierTrustMark?
+    let retention: RetentionDisclosure
+    let overAsk: OverAskResult
     let onConsent: () -> Void
     let onDecline: () -> Void
 
@@ -136,12 +152,43 @@ struct ConsentView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Share information?").font(.title2.bold())
             Text("Requested by \(rp)").font(.subheadline).foregroundStyle(.secondary)
+            Label(
+                verifierRegistration == .registered
+                    ? "Registered verifier" : "Identity certificate verified",
+                systemImage: "checkmark.shield")
+                .font(.subheadline)
+            if trustMark == .eudiWallet {
+                Label("EU Digital Identity trust mark", systemImage: "checkmark.seal.fill")
+                    .font(.subheadline)
+            }
             if !purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(purpose).font(.body)
             }
             Text("Only this information will be shared:").font(.headline).padding(.top, 4)
             ForEach(claims, id: \.self) { claim in
                 Label(ConsumerCopy.claimName(claim), systemImage: "checkmark.seal")
+            }
+            switch retention.policy {
+            case .notStored:
+                Label("The verifier says it will not store this information", systemImage: "clock.badge.xmark")
+                    .font(.subheadline)
+            case .days:
+                if let days = retention.days {
+                    Label("The verifier may keep it for \(days) days", systemImage: "calendar")
+                        .font(.subheadline)
+                }
+            case .unspecified:
+                Label("The verifier has not stated how long it will keep this information", systemImage: "questionmark.circle")
+                    .font(.subheadline)
+            }
+            if overAsk.result == .exceedsRegisteredScope {
+                Label(
+                    "This request includes information outside the verifier’s registered purpose",
+                    systemImage: "exclamationmark.triangle.fill")
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel(
+                        "Warning: This request includes information outside the verifier’s registered purpose")
             }
             if !notSharedClaims.isEmpty {
                 Text("Stays in your wallet").font(.headline).padding(.top, 4)

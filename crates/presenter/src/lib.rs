@@ -73,6 +73,46 @@ pub struct ConsentScreen {
     /// Claim paths present in the selected credential(s) but absent from the disclosure set.
     /// Values never cross this boundary. The whole field is covered by [`consent_hash`].
     pub not_shared_claims: Vec<String>,
+    pub verifier_registration: VerifierRegistration,
+    pub trust_mark: Option<VerifierTrustMark>,
+    pub retention: RetentionDisclosure,
+    pub over_ask: OverAskResult,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VerifierRegistration {
+    Registered,
+    #[default]
+    CertificateValidated,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VerifierTrustMark {
+    EudiWallet,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "policy", rename_all = "camelCase")]
+pub enum RetentionDisclosure {
+    NotStored,
+    Days {
+        days: u16,
+    },
+    #[default]
+    Unspecified,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "camelCase")]
+pub enum OverAskResult {
+    WithinRegisteredScope,
+    ExceedsRegisteredScope {
+        claims: Vec<String>,
+    },
+    #[default]
+    RegistrationScopeUnavailable,
 }
 
 /// Minimal snapshot the presenter reads. Built by wallet-core; keeps presenter dependency-light.
@@ -150,6 +190,41 @@ fn to_value(screen: &ScreenDescription) -> Value {
                     .map(Value::Text)
                     .collect(),
             ),
+            Value::Text(
+                match c.verifier_registration {
+                    VerifierRegistration::Registered => "registered",
+                    VerifierRegistration::CertificateValidated => "certificateValidated",
+                }
+                .into(),
+            ),
+            match c.trust_mark {
+                Some(VerifierTrustMark::EudiWallet) => Value::Text("eudiWallet".into()),
+                None => Value::Null,
+            },
+            match c.retention {
+                RetentionDisclosure::NotStored => {
+                    Value::Array(vec![Value::Text("notStored".into())])
+                }
+                RetentionDisclosure::Days { days } => Value::Array(vec![
+                    Value::Text("days".into()),
+                    Value::Uint(u64::from(days)),
+                ]),
+                RetentionDisclosure::Unspecified => {
+                    Value::Array(vec![Value::Text("unspecified".into())])
+                }
+            },
+            match &c.over_ask {
+                OverAskResult::WithinRegisteredScope => {
+                    Value::Array(vec![Value::Text("withinRegisteredScope".into())])
+                }
+                OverAskResult::ExceedsRegisteredScope { claims } => Value::Array(vec![
+                    Value::Text("exceedsRegisteredScope".into()),
+                    Value::Array(claims.iter().cloned().map(Value::Text).collect()),
+                ]),
+                OverAskResult::RegistrationScopeUnavailable => {
+                    Value::Array(vec![Value::Text("registrationScopeUnavailable".into())])
+                }
+            },
         ]),
         ScreenDescription::PaymentConfirmation(p) => Value::Array(vec![
             tag("paymentConfirmation"),

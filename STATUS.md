@@ -156,7 +156,7 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
-- [ ] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
+- [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror
       the typed result in both shells; and verify it with Rust, formal, decoder, and Xcode tests.

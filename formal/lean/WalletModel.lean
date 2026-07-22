@@ -168,6 +168,16 @@ theorem held_is_shared_or_not_shared (held shared : List String) (claim : String
   · right
     simp [notSharedClaims, h, hs]
 
+def requestWithinRegisteredScope (allowed shared : List String) : Bool :=
+  shared.all fun claim => allowed.contains claim
+
+theorem within_scope_means_every_shared_claim_is_registered
+    (allowed shared : List String) (claim : String)
+    (scope : requestWithinRegisteredScope allowed shared = true)
+    (selected : claim ∈ shared) : claim ∈ allowed := by
+  simp [requestWithinRegisteredScope] at scope
+  exact scope claim selected
+
 /-! ## Invariant 3 — a replayed nonce is always rejected. -/
 
 /-- **Theorem (replay protection).** Presenting a request whose nonce was already used
