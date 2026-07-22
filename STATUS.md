@@ -210,6 +210,10 @@ operational solution needed to enter those processes.
         oracle traces, all six Tamarin models, Android unit/lint/debug/release gates, regenerated
         UniFFI/XCFramework consistency, 134 Swift tests, and clean Xcode simulator build plus three
         on-simulator core tests all passed locally on 2026-07-22.
+  - [ ] [#46](https://github.com/advatar/EUWallet/issues/46): close the residual OpenID4VP
+        conformance gaps after `cd988a6`: enforce the normative bounded ASCII URL-safe string nonce
+        at the production boundary, remove the non-standard `credential_sets[].purpose` extension,
+        and align formal/evidence claims with what the abstract models and concrete wire tests prove.
 - [ ] Obtain the applicable German authority, CAB/BSI certification and Commission listing.
 
 ## Completed
