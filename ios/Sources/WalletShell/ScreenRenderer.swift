@@ -144,7 +144,9 @@ private struct IssuanceOfferView: View {
             Label(offer.issuerName, systemImage: "checkmark.seal.fill").font(.headline)
             Text("Use this document to prove who you are when you choose.").foregroundStyle(.secondary)
             DisclosureGroup("What will be added") {
-                ForEach(offer.attributes, id: \.self) { Label(ConsumerCopy.claimName($0), systemImage: "checkmark") }
+                ForEach(offer.attributes.filter { $0 != "portrait" }, id: \.self) {
+                    Label(ConsumerCopy.claimName($0), systemImage: "checkmark")
+                }
                 if offer.portraitRequired { Label("Portrait", systemImage: "person.crop.rectangle") }
             }
             Spacer()

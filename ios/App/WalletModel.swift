@@ -444,7 +444,8 @@ final class WalletModel: ObservableObject {
                 reloadCredentials()
                 reloadHistory()
                 isIssuing = false
-                phase = .done("Your document is ready.")
+                // The core's final authenticated IssuanceReady screen is the product completion
+                // state. Do not replace it with the shell's generic completion message.
             }
         }
     }
