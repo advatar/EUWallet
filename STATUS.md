@@ -156,6 +156,9 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
+- [ ] [#54](https://github.com/advatar/EUWallet/issues/54): replace payload-free issuance-offer,
+      credential-list, and credential-detail screens with bounded trusted core contracts; strictly
+      decode and render them in Swift and Android; cover serialization and formal correspondence.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror
