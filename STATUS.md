@@ -172,9 +172,10 @@ operational solution needed to enter those processes.
 - [ ] Complete independent review, penetration testing, red team and bug bounty.
 - [ ] Establish signed reproducible releases, SBOM/provenance, incident response, revocation,
       support, monitoring, rollback and disaster recovery.
-  - [ ] [#33](https://github.com/advatar/EUWallet/issues/33): restore green release CI by enforcing
+  - [x] [#33](https://github.com/advatar/EUWallet/issues/33): restored green release CI by enforcing
         coordinator-only durable native composition, byte-stable UniFFI regeneration and narrowly
-        trusted Tamarin installation dependencies.
+        trusted Tamarin installation dependencies; all required gates passed in
+        [CI run 29901869421](https://github.com/advatar/EUWallet/actions/runs/29901869421).
 - [ ] Obtain the applicable German authority, CAB/BSI certification and Commission listing.
 
 ## Completed
