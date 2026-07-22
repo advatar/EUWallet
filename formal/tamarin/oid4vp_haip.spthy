@@ -39,6 +39,12 @@ rule Reveal_ltk:
   --[ Reveal($A) ]->
     [ Out(~ltk) ]
 
+/* The signed RP-registration feed authenticates the exact claim entitlement. */
+rule Register_RP_Claim:
+    [ Fr(~claim) ]
+  --[ RPClaimRegistered($RP, ~claim) ]->
+    [ !RegisteredClaim($RP, ~claim) ]
+
 /* Relying Party sends a SIGNED, BOUND authorization request. */
 rule RP_Request:
     [ Fr(~nonce)
@@ -56,15 +62,16 @@ rule Wallet_Present:
     [ In( <$RP, $Wallet, nonce, reqsig> )
     , !Pk($RP, pkRP)
     , !Ltk($Wallet, ltkW)
-    , Fr(~claim)
+    , !RegisteredClaim($RP, claim)
     ]
   --[ Eq(verify(reqsig, <'req', $RP, $Wallet, nonce>, pkRP), true)
-    , WalletPresents($Wallet, $RP, nonce, ~claim)
-    , SecretClaim($Wallet, $RP, ~claim)
+    , WalletPresents($Wallet, $RP, nonce, claim)
+    , SecretClaim($Wallet, $RP, claim)
+    , ConsentWithinRegisteredScope($RP, claim)
     ]->
     [ Out( <$Wallet, $RP, nonce,
-            aenc(~claim, pkRP),
-            sign(<'vp', $Wallet, $RP, nonce, ~claim>, ltkW)> ) ]
+            aenc(claim, pkRP),
+            sign(<'vp', $Wallet, $RP, nonce, claim>, ltkW)> ) ]
 
 /* RP accepts only a presentation bound to the nonce it issued and signed by the wallet (mandatory
    verification); it decrypts the claim with its long-term key. */
@@ -88,6 +95,10 @@ rule RP_Accept:
 lemma executable:
   exists-trace
   "Ex RP W n c #i. RPAccepts(RP, W, n, c) @ #i"
+
+lemma within_scope_requires_authenticated_registration:
+  "All RP c #i. ConsentWithinRegisteredScope(RP, c) @ #i
+    ==> Ex #j. RPClaimRegistered(RP, c) @ #j & #j < #i"
 
 /* Injective agreement / no replay. */
 lemma injective_agreement:

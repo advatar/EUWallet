@@ -11,25 +11,80 @@ fn b64(b: &[u8]) -> String {
     Base64UrlUnpadded::encode_string(b)
 }
 
+fn sign_payload(operator: &SoftwareSigner, payload: serde_json::Value) -> Vec<u8> {
+    let header = b64(br#"{"alg":"ES256"}"#);
+    let payload = b64(payload.to_string().as_bytes());
+    let signing_input = format!("{header}.{payload}");
+    let signature = operator
+        .sign(&KeyRef("op".into()), Alg::Es256, signing_input.as_bytes())
+        .unwrap();
+    format!("{signing_input}.{}", b64(&signature)).into_bytes()
+}
+
 /// Build a signed trust list (compact JWS) with the given sequence + validity window.
 fn signed_list(operator: &SoftwareSigner, seq: u64, valid_from: i64, valid_until: i64) -> Vec<u8> {
-    let header = b64(br#"{"alg":"ES256"}"#);
-    let payload = b64(serde_json::json!({
-        "seq": seq,
-        "valid_from": valid_from,
-        "valid_until": valid_until,
-        "anchors": [
-            { "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" },
-            { "cert": b64(CA_DER), "service": "pid", "status": "withdrawn" },
-        ]
-    })
-    .to_string()
-    .as_bytes());
-    let si = format!("{header}.{payload}");
-    let sig = operator
-        .sign(&KeyRef("op".into()), Alg::Es256, si.as_bytes())
-        .unwrap();
-    format!("{si}.{}", b64(&sig)).into_bytes()
+    sign_payload(
+        operator,
+        serde_json::json!({
+            "seq": seq,
+            "valid_from": valid_from,
+            "valid_until": valid_until,
+            "anchors": [
+                { "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" },
+                { "cert": b64(CA_DER), "service": "pid", "status": "withdrawn" },
+            ],
+            "relying_parties": [{
+                "client_id": "rp.example",
+                "display_name": "Example Verifier",
+                "trust_mark": "eudi-wallet",
+                "retention": { "days": 30 },
+                "allowed_claims": ["age_over_18"],
+                "redirect_uris": ["https://rp.example/response"]
+            }]
+        }),
+    )
+}
+
+#[test]
+fn malformed_or_unbounded_rp_registration_is_rejected() {
+    let operator = SoftwareSigner::generate_p256().unwrap();
+    let base = |registration: serde_json::Value| {
+        sign_payload(
+            &operator,
+            serde_json::json!({
+                "seq": 1,
+                "valid_from": 0,
+                "valid_until": 4_000_000_000i64,
+                "anchors": [],
+                "relying_parties": [registration]
+            }),
+        )
+    };
+    for registration in [
+        serde_json::json!({
+            "client_id": "rp.example", "display_name": "RP", "trust_mark": "invented",
+            "allowed_claims": [], "redirect_uris": []
+        }),
+        serde_json::json!({
+            "client_id": "rp.example", "display_name": "RP", "retention": {"days": 0},
+            "allowed_claims": [], "redirect_uris": []
+        }),
+        serde_json::json!({
+            "client_id": "rp.example", "display_name": "RP",
+            "allowed_claims": vec!["claim"; 65], "redirect_uris": []
+        }),
+    ] {
+        assert_eq!(
+            parse_and_verify(
+                &base(registration),
+                operator.public_key_raw(),
+                &AwsLc,
+                Alg::Es256,
+                1_790_000_000,
+            ),
+            Err(TrustError::Malformed)
+        );
+    }
 }
 
 #[test]
@@ -60,6 +115,15 @@ fn verifies_and_exposes_granted_anchors() {
     let anchors = store.parsed_anchors(ServiceType::RelyingPartyAccessCa);
     assert_eq!(anchors.len(), 1);
     assert!(anchors[0].is_ca);
+    let registration = store
+        .relying_party_at("rp.example", 1_790_000_000)
+        .expect("signed RP registration");
+    assert_eq!(registration.display_name, "Example Verifier");
+    assert_eq!(registration.trust_mark, Some(trust::TrustMark::EudiWallet));
+    assert_eq!(registration.retention, trust::RetentionPolicy::Days(30));
+    assert!(store
+        .relying_party_at("rp.example", 4_000_000_001)
+        .is_none());
 }
 
 #[test]

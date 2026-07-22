@@ -4,6 +4,7 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 
 sealed interface WalletEffect {
@@ -175,6 +176,18 @@ object WalletEffectDecoder {
             purpose = string(value, "purpose"),
             requestedClaims = strings(value, "requestedClaims"),
             notSharedClaims = strings(value, "notSharedClaims"),
+            verifierRegistration = when (string(value, "verifierRegistration")) {
+                "registered" -> WalletScreen.VerifierRegistration.REGISTERED
+                "certificateValidated" -> WalletScreen.VerifierRegistration.CERTIFICATE_VALIDATED
+                else -> malformed("unknown verifier registration status")
+            },
+            trustMark = when (optionalString(value, "trustMark")) {
+                null -> null
+                "eudiWallet" -> WalletScreen.VerifierTrustMark.EUDI_WALLET
+                else -> malformed("unknown verifier trust mark")
+            },
+            retention = retention(objectValue(value, "retention")),
+            overAsk = overAsk(objectValue(value, "overAsk")),
         )
         "paymentConfirmation" -> WalletScreen.PaymentConfirmation(
             creditorName = string(value, "creditorName"),
@@ -204,6 +217,48 @@ object WalletEffectDecoder {
         val primitive = value[key] as? JsonPrimitive ?: malformed("$key must be a string")
         if (!primitive.isString) malformed("$key must be a string")
         return primitive.content
+    }
+
+    private fun optionalString(value: JsonObject, key: String): String? {
+        val item = value[key] ?: return null
+        if (item is JsonNull) return null
+        val primitive = item as? JsonPrimitive ?: malformed("$key must be a string or null")
+        if (!primitive.isString) malformed("$key must be a string or null")
+        return primitive.content
+    }
+
+    private fun retention(value: JsonObject): WalletScreen.RetentionDisclosure {
+        val policy = when (string(value, "policy")) {
+            "notStored" -> WalletScreen.RetentionDisclosure.Policy.NOT_STORED
+            "days" -> WalletScreen.RetentionDisclosure.Policy.DAYS
+            "unspecified" -> WalletScreen.RetentionDisclosure.Policy.UNSPECIFIED
+            else -> malformed("unknown retention policy")
+        }
+        val days = if ("days" in value) {
+            unsigned(value, "days").takeIf { it in 1uL..UShort.MAX_VALUE.toULong() }
+                ?.toUShort() ?: malformed("retention days outside range")
+        } else {
+            null
+        }
+        if ((policy == WalletScreen.RetentionDisclosure.Policy.DAYS) != (days != null)) {
+            malformed("retention days must match policy")
+        }
+        return WalletScreen.RetentionDisclosure(policy, days)
+    }
+
+    private fun overAsk(value: JsonObject): WalletScreen.OverAskResult {
+        val result = when (string(value, "result")) {
+            "withinRegisteredScope" -> WalletScreen.OverAskResult.Result.WITHIN_REGISTERED_SCOPE
+            "exceedsRegisteredScope" -> WalletScreen.OverAskResult.Result.EXCEEDS_REGISTERED_SCOPE
+            "registrationScopeUnavailable" ->
+                WalletScreen.OverAskResult.Result.REGISTRATION_SCOPE_UNAVAILABLE
+            else -> malformed("unknown over-ask result")
+        }
+        val claims = if ("claims" in value) strings(value, "claims") else emptyList()
+        if ((result == WalletScreen.OverAskResult.Result.EXCEEDS_REGISTERED_SCOPE) != claims.isNotEmpty()) {
+            malformed("over-ask claims must match result")
+        }
+        return WalletScreen.OverAskResult(result, claims)
     }
 
     private fun strings(value: JsonObject, key: String): List<String> {

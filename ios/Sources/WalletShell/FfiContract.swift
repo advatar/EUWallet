@@ -27,6 +27,63 @@ extension FfiContractError: LocalizedError {
 }
 
 /// Mirror of `presenter::ScreenDescription` (internally tagged by `screen`).
+public enum VerifierRegistration: String, Decodable, Equatable {
+    case registered
+    case certificateValidated
+}
+
+public enum VerifierTrustMark: String, Decodable, Equatable {
+    case eudiWallet
+}
+
+public struct RetentionDisclosure: Decodable, Equatable {
+    public enum Policy: String, Decodable { case notStored, days, unspecified }
+    public let policy: Policy
+    public let days: UInt16?
+
+    private enum CodingKeys: String, CodingKey { case policy, days }
+
+    public init(policy: Policy, days: UInt16? = nil) {
+        self.policy = policy
+        self.days = days
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        policy = try c.decode(Policy.self, forKey: .policy)
+        days = try c.decodeIfPresent(UInt16.self, forKey: .days)
+        if (policy == .days) != (days != nil) || days == 0 {
+            throw DecodingError.dataCorruptedError(
+                forKey: .days, in: c, debugDescription: "retention days must match policy")
+        }
+    }
+}
+
+public struct OverAskResult: Decodable, Equatable {
+    public enum Result: String, Decodable {
+        case withinRegisteredScope, exceedsRegisteredScope, registrationScopeUnavailable
+    }
+    public let result: Result
+    public let claims: [String]
+
+    private enum CodingKeys: String, CodingKey { case result, claims }
+
+    public init(result: Result, claims: [String] = []) {
+        self.result = result
+        self.claims = claims
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        result = try c.decode(Result.self, forKey: .result)
+        claims = try c.decodeIfPresent([String].self, forKey: .claims) ?? []
+        if (result == .exceedsRegisteredScope) != !claims.isEmpty {
+            throw DecodingError.dataCorruptedError(
+                forKey: .claims, in: c, debugDescription: "over-ask claims must match result")
+        }
+    }
+}
+
 public enum ScreenDescription: Decodable, Equatable {
     case loading
     case error(code: String, message: String)
@@ -34,13 +91,18 @@ public enum ScreenDescription: Decodable, Equatable {
         relyingPartyName: String,
         purpose: String,
         requestedClaims: [String],
-        notSharedClaims: [String])
+        notSharedClaims: [String],
+        verifierRegistration: VerifierRegistration,
+        trustMark: VerifierTrustMark?,
+        retention: RetentionDisclosure,
+        overAsk: OverAskResult)
     case paymentConfirmation(creditorName: String, creditorAccount: String, amountMinor: UInt64, currency: String)
     case signConfirmation(documentName: String, qtspId: String, documentHashHex: String)
     case other(String)
 
     private enum CodingKeys: String, CodingKey {
         case screen, code, message, rpDisplayName, purpose, requestedClaims, notSharedClaims
+        case verifierRegistration, trustMark, retention, overAsk
         case creditorName, creditorAccount, amountMinor, currency
         case documentName, qtspId, documentHashHex
     }
@@ -58,7 +120,12 @@ public enum ScreenDescription: Decodable, Equatable {
                 relyingPartyName: try c.decode(String.self, forKey: .rpDisplayName),
                 purpose: try c.decode(String.self, forKey: .purpose),
                 requestedClaims: try c.decode([String].self, forKey: .requestedClaims),
-                notSharedClaims: try c.decode([String].self, forKey: .notSharedClaims))
+                notSharedClaims: try c.decode([String].self, forKey: .notSharedClaims),
+                verifierRegistration: try c.decode(
+                    VerifierRegistration.self, forKey: .verifierRegistration),
+                trustMark: try c.decodeIfPresent(VerifierTrustMark.self, forKey: .trustMark),
+                retention: try c.decode(RetentionDisclosure.self, forKey: .retention),
+                overAsk: try c.decode(OverAskResult.self, forKey: .overAsk))
         case "paymentConfirmation":
             self = .paymentConfirmation(
                 creditorName: try c.decode(String.self, forKey: .creditorName),
