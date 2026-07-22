@@ -173,7 +173,7 @@ fn signed_request(rp: &SoftwareSigner, mdoc: bool) -> Vec<u8> {
     let request = if mdoc {
         json!({
             "client_id": "rp.example",
-            "nonce": 77u64,
+            "nonce": "77",
             "aud": "wallet.example",
             "response_uri": RESPONSE_URI,
             "response_mode": "direct_post",
@@ -188,7 +188,7 @@ fn signed_request(rp: &SoftwareSigner, mdoc: bool) -> Vec<u8> {
     } else {
         json!({
             "client_id": "rp.example",
-            "nonce": 77u64,
+            "nonce": "77",
             "aud": "wallet.example",
             "response_uri": RESPONSE_URI,
             "response_mode": "direct_post",

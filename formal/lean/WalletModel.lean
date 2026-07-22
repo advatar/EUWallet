@@ -155,4 +155,64 @@ theorem replay_is_rejected (c : Ctx) (n : Nat) (h : c.usedNonces.contains n = tr
   simp only [step]
   rw [if_pos h]
 
+/-! ## Presentation admission policies
+
+These small policy models cover the security decisions added around the presentation machine. They
+do not model wire parsing: the Rust conformance tests prove the concrete OpenID4VP string grammar
+and exact serialization, while `Nat` remains an equality-only nonce abstraction above.
+-/
+
+inductive CredentialStatus where
+  | valid
+  | revoked
+  | suspended
+  | indeterminate
+  deriving DecidableEq, Repr
+
+/-- Only a positively validated credential status permits device signing/presentation. -/
+def statusAllowsPresentation : CredentialStatus → Bool
+  | .valid => true
+  | .revoked | .suspended | .indeterminate => false
+
+theorem revoked_status_never_allows_presentation :
+    statusAllowsPresentation .revoked = false := by rfl
+
+theorem suspended_status_never_allows_presentation :
+    statusAllowsPresentation .suspended = false := by rfl
+
+theorem indeterminate_status_never_allows_presentation :
+    statusAllowsPresentation .indeterminate = false := by rfl
+
+inductive ClientCertificateBinding where
+  | matched
+  | mismatched
+  deriving DecidableEq, Repr
+
+/-- An x509_san_dns identity is admitted only when it matches the authenticated leaf DNS SAN. -/
+def certificateBindingAllowsRequest : ClientCertificateBinding → Bool
+  | .matched => true
+  | .mismatched => false
+
+theorem mismatched_client_certificate_binding_is_rejected :
+    certificateBindingAllowsRequest .mismatched = false := by rfl
+
+structure PresentationAdmissionFacts where
+  credentialStatus : CredentialStatus
+  clientBinding : ClientCertificateBinding
+  deriving Repr
+
+/-- The shared pre-signing admission gate: both credential status and RP identity binding pass. -/
+def presentationIsAdmitted (facts : PresentationAdmissionFacts) : Bool :=
+  statusAllowsPresentation facts.credentialStatus &&
+    certificateBindingAllowsRequest facts.clientBinding
+
+theorem admission_requires_valid_status (facts : PresentationAdmissionFacts)
+    (h : presentationIsAdmitted facts = true) : facts.credentialStatus = .valid := by
+  cases hs : facts.credentialStatus <;> simp_all [presentationIsAdmitted, statusAllowsPresentation]
+
+theorem admission_requires_matching_client_certificate (facts : PresentationAdmissionFacts)
+    (h : presentationIsAdmitted facts = true) : facts.clientBinding = .matched := by
+  cases hb : facts.clientBinding <;>
+    simp_all [presentationIsAdmitted, certificateBindingAllowsRequest]
+
 end WalletModel

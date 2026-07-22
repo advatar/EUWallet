@@ -45,7 +45,7 @@ const MAGIC: &[u8] = b"EUWALLET-CHECKPOINT";
 const VERSION: u64 = 2;
 /// Maximum bytes of a single persisted OpenID4VP presentation nonce (opaque string). Conformant
 /// verifier nonces are short; this bounds durable growth without constraining real values.
-const MAX_NONCE_BYTES: usize = 256;
+const MAX_NONCE_BYTES: usize = oid4vp::MAX_NONCE_BYTES;
 const MAX_CONTEXT_VALUE_BYTES: usize = 16 * 1024;
 const MAX_SCHEMA_DEPTH: usize = 8;
 const MAX_CONTAINER_ITEMS: usize = MAX_REPLAY_VALUES;

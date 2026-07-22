@@ -56,7 +56,7 @@ fn sign_request(rp: &SoftwareSigner, client_id: &str, nonce: &str, aud: &str) ->
     let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
     let payload = b64(serde_json::to_string(&json!({
         "client_id": client_id,
-        "nonce": nonce,
+        "nonce": nonce.to_string(),
         "aud": aud,
         "response_uri": "https://rp.example/response",
         "response_mode": "direct_post",

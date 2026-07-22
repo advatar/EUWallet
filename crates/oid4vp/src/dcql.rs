@@ -82,10 +82,6 @@ pub struct CredentialSetQuery {
     /// Required by default when omitted on the wire.
     #[serde(default = "required_by_default")]
     pub required: bool,
-    /// Optional human-readable purpose (OpenID4VP 1.0 §6.2) — the spec-defined way a verifier
-    /// states why it needs this set. OpenID4VP has NO top-level `purpose` request parameter.
-    #[serde(default)]
-    pub purpose: Option<String>,
 }
 
 const fn required_by_default() -> bool {
@@ -442,16 +438,6 @@ impl DcqlQuery {
     /// object keyed by these ids (§8.1); the flows we support present one credential per query.
     pub fn first_credential_id(&self) -> Option<String> {
         self.credentials.first().map(|c| c.id.clone())
-    }
-
-    /// The human-readable purpose from the first credential set that declares one (OpenID4VP 1.0
-    /// §6.2). This is the spec-defined purpose channel; a bare request that omits it is valid.
-    pub fn purpose(&self) -> Option<&str> {
-        self.credential_sets
-            .as_ref()?
-            .iter()
-            .find_map(|set| set.purpose.as_deref())
-            .filter(|p| !p.trim().is_empty())
     }
 
     /// Every acceptable SD-JWT VC type (`meta.vct_values`) across the query, de-duplicated. The

@@ -210,6 +210,13 @@ operational solution needed to enter those processes.
         oracle traces, all six Tamarin models, Android unit/lint/debug/release gates, regenerated
         UniFFI/XCFramework consistency, 134 Swift tests, and clean Xcode simulator build plus three
         on-simulator core tests all passed locally on 2026-07-22.
+  - [x] [#46](https://github.com/advatar/EUWallet/issues/46): closed the residual OpenID4VP
+        conformance gaps after `cd988a6`: the production boundary now accepts only bounded,
+        non-empty ASCII URL-safe string nonces; the non-standard `credential_sets[].purpose`
+        extension and conformance claim are removed; Lean proves the combined status and
+        client-certificate admission policy while the evidence explicitly assigns concrete wire
+        parsing/serialization to Rust tests. Formatting, warning-free clippy, the full Rust
+        workspace suite, focused SD-JWT/mdoc/JWE/status tests and `WalletModel` all pass locally.
 - [ ] Obtain the applicable German authority, CAB/BSI certification and Commission listing.
 
 ## Completed

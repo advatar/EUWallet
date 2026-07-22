@@ -57,7 +57,7 @@ fn signed_status(provider: &SoftwareSigner, uri: &str) -> Vec<u8> {
 fn sign_request(rp: &SoftwareSigner) -> Vec<u8> {
     let header = b64(br#"{"alg":"ES256","typ":"oauth-authz-req+jwt"}"#);
     let payload = b64(json!({
-        "client_id":"rp.example","nonce":7u64,"aud":"wallet.example",
+        "client_id":"rp.example","nonce":"7","aud":"wallet.example",
         "response_uri":"https://rp.example/response","response_mode":"direct_post",
         "purpose":"age","claims":["age_over_18"]
     })

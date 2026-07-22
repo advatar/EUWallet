@@ -16,6 +16,11 @@ use serde_json::Value as Json;
 
 pub mod dcql;
 
+/// Maximum UTF-8 bytes accepted for an OpenID4VP transaction nonce. The protocol requires a
+/// fresh, high-entropy ASCII URL-safe string; this implementation bound prevents replay-state and
+/// checkpoint growth from being controlled by an unbounded verifier value.
+pub const MAX_NONCE_BYTES: usize = 256;
+
 /// States of the remote-presentation flow.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
@@ -519,19 +524,10 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
             if !guards::client_id_binds_to_leaf(req, trust) {
                 return (State::Aborted(AbortReason::ClientIdBindingInvalid), vec![]);
             }
-            // OpenID4VP 1.0 has NO mandatory top-level `purpose` request parameter, so we do not
-            // reject requests that omit one (that rejected conformant DCQL requests). For the consent
-            // screen we show a purpose when the verifier supplies one — either a legacy top-level
-            // field or, the spec way, a DCQL `credential_sets[].purpose` (§6.2).
-            let purpose = req
-                .purpose
-                .clone()
-                .or_else(|| {
-                    req.dcql
-                        .as_ref()
-                        .and_then(|dcql| dcql.purpose().map(String::from))
-                })
-                .unwrap_or_default();
+            // OpenID4VP 1.0 has no mandatory request `purpose` parameter and DCQL Credential Set
+            // Queries contain only `options` and `required`. Retain a legacy top-level value solely
+            // as optional display text; it never gates a conformant request.
+            let purpose = req.purpose.clone().unwrap_or_default();
             let rp = req.client_id.clone();
             (
                 State::RequestValidated(req.clone()),
@@ -858,15 +854,18 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
         .and_then(|v| v.as_str())
         .ok_or(())?
         .to_string();
-    // The OpenID4VP nonce is an OPAQUE STRING on the wire (OpenID4VP 1.0 §5.1) — conformant
-    // verifiers (incl. the EUDI reference) send high-entropy strings. Keep it verbatim so it can
-    // be echoed byte-for-byte downstream. A bare JSON number is tolerated as its decimal string so
-    // numeric fixtures keep working; the value is otherwise never interpreted numerically.
-    let nonce = match p.get("nonce") {
-        Some(Json::String(s)) if !s.is_empty() => s.clone(),
-        Some(Json::Number(n)) => n.to_string(),
-        _ => return Err(()),
-    };
+    // OpenID4VP 1.0 §5.2: nonce is a non-empty, case-sensitive String containing only ASCII
+    // URL-safe characters. Preserve it byte-for-byte for KB-JWT, mdoc handover and JWE binding.
+    let nonce = p.get("nonce").and_then(Json::as_str).ok_or(())?;
+    if nonce.is_empty()
+        || nonce.len() > MAX_NONCE_BYTES
+        || !nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+    {
+        return Err(());
+    }
+    let nonce = nonce.to_owned();
     let audience = p.get("aud").and_then(|v| v.as_str()).ok_or(())?.to_string();
     let response_uri = p
         .get("response_uri")
@@ -1229,7 +1228,7 @@ mod internal_tests {
             alg,
             serde_json::json!({
                 "client_id": "rp.example",
-                "nonce": 1,
+                "nonce": "n-0S6_WzA2Mj",
                 "aud": "wallet.example"
             }),
         )
@@ -1265,12 +1264,40 @@ mod internal_tests {
     }
 
     #[test]
+    fn parse_request_enforces_the_openid4vp_nonce_wire_grammar() {
+        let request = |nonce| {
+            req_jws_with_payload(
+                "ES256",
+                serde_json::json!({
+                    "client_id": "rp.example",
+                    "nonce": nonce,
+                    "aud": "wallet.example"
+                }),
+            )
+        };
+
+        let accepted = parse_request(&request(serde_json::json!("Az09-._~"))).unwrap();
+        assert_eq!(accepted.nonce, "Az09-._~");
+
+        for invalid in [
+            serde_json::json!(7),
+            serde_json::json!(""),
+            serde_json::json!("contains space"),
+            serde_json::json!("slash/not-safe"),
+            serde_json::json!("å"),
+            serde_json::json!("x".repeat(super::MAX_NONCE_BYTES + 1)),
+        ] {
+            assert!(parse_request(&request(invalid)).is_err());
+        }
+    }
+
+    #[test]
     fn parse_request_never_downgrades_present_malformed_dcql_to_legacy_claims() {
         let request = req_jws_with_payload(
             "ES256",
             serde_json::json!({
                 "client_id": "rp.example",
-                "nonce": 1,
+                "nonce": "fixture-1",
                 "aud": "wallet.example",
                 "claims": ["age_over_18"],
                 "dcql_query": { "credentials": "malformed" }
@@ -1291,7 +1318,7 @@ mod internal_tests {
             "ES256",
             serde_json::json!({
                 "client_id": "rp.example",
-                "nonce": 1,
+                "nonce": "fixture-1",
                 "aud": "wallet.example",
                 "transaction_data": []
             }),
@@ -1319,7 +1346,7 @@ mod internal_tests {
                 "ES256",
                 serde_json::json!({
                     "client_id": "rp.example",
-                    "nonce": 1,
+                    "nonce": "fixture-1",
                     "aud": "wallet.example",
                     "claims": claims
                 }),
