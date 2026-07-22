@@ -30,11 +30,13 @@ targets:
         link: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.demo
+        PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_CFBundleDisplayName: "Advatar Wallet (demo)"
-        INFOPLIST_KEY_NSCameraUsageDescription: "Scan credential-offer and verifier-request QR codes."
+        INFOPLIST_KEY_CFBundleDisplayName: "Advatar Wallet"
+        INFOPLIST_KEY_NSCameraUsageDescription: "Use the camera to scan QR codes when adding an ID or sharing information."
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         # Standard, exempt encryption only (AES-GCM / ECDH / TLS via the platform + aws-lc). Declaring
         # this lets every TestFlight build distribute immediately instead of stalling on a manual
         # export-compliance question each upload.
@@ -61,6 +63,6 @@ targets:
         link: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.demo.tests
+        PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.tests
         GENERATE_INFOPLIST_FILE: YES
         OTHER_LDFLAGS: "-lc++"

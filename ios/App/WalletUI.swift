@@ -36,7 +36,7 @@ struct CredentialCardView: View {
             Spacer(minLength: 24)
             HStack(alignment: .bottom) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("HOLDER").font(.caption2).foregroundStyle(.white.opacity(0.7))
+                    Text("NAME").font(.caption2).foregroundStyle(.white.opacity(0.8))
                     Text(credential.holder).font(.title3.weight(.semibold)).foregroundStyle(.white)
                 }
                 Spacer()
@@ -77,8 +77,8 @@ struct WalletHomeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Powered by the verified Rust core — every decision made on-device.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("Your documents")
+                    .font(.title2.bold())
 
                 if model.credentials.isEmpty {
                     EmptyWalletView { showAdd = true }
@@ -92,35 +92,29 @@ struct WalletHomeView: View {
                         .buttonStyle(.plain)
                     }
 
-                    // Primary actions (require a held credential to present).
+#if DEBUG
                     HStack(spacing: 12) {
-                        ActionButton(title: "Present", systemImage: "qrcode", action: onPresent)
-                        ActionButton(title: "Pay", systemImage: "creditcard", action: onPay)
+                        ActionButton(title: "Test sharing", systemImage: "qrcode", action: onPresent)
+                        ActionButton(title: "Test payment", systemImage: "creditcard", action: onPay)
                     }
-                    .padding(.top, 4)
-
-                    // mdoc-over-OpenID4VP: only offered when an ISO 18013-5 mDL is held.
-                    if hasMdoc {
-                        ActionButton(
-                            title: "Present mDL (mdoc)",
-                            systemImage: "car.circle.fill",
-                            action: onPresentMdoc)
-                    }
+#endif
                 }
 
                 // Secondary navigation.
                 VStack(spacing: 0) {
-                    WalletRow(title: "Scan a QR", subtitle: "Add via an issuer, or sign in to a verifier",
+                    WalletRow(title: "Scan a QR code", subtitle: "Add a document or share information",
                               systemImage: "qrcode.viewfinder", action: { model.showConnectSheet = true })
                     Divider().padding(.leading, 52)
-                    WalletRow(title: "Add a credential", subtitle: "Issue a PID or mDL (OpenID4VCI)",
+                    WalletRow(title: "Add a document", subtitle: "Choose an ID or driving licence",
                               systemImage: "plus.circle", action: { showAdd = true })
                     Divider().padding(.leading, 52)
-                    WalletRow(title: "Transaction history", subtitle: "\(model.history.count) recorded",
+                    WalletRow(title: "Activity", subtitle: model.history.isEmpty ? "Nothing shared yet" : "\(model.history.count) recent actions",
                               systemImage: "list.bullet.rectangle", action: onOpenHistory)
+#if DEBUG
                     Divider().padding(.leading, 52)
-                    WalletRow(title: "Credential catalogue", subtitle: "Available types",
-                              systemImage: "books.vertical", action: onOpenCatalogue)
+                    WalletRow(title: "Developer catalogue", subtitle: "Supported test types",
+                              systemImage: "hammer", action: onOpenCatalogue)
+#endif
                     Divider().padding(.leading, 52)
                     WalletRow(title: "Settings", subtitle: nil,
                               systemImage: "gear", action: onOpenSettings)
@@ -132,7 +126,7 @@ struct WalletHomeView: View {
         }
         .overlay {
             if model.isIssuing {
-                ProgressView("Issuing credential…")
+                ProgressView("Adding your document…")
                     .padding(20)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                     .shadow(radius: 8)
@@ -141,7 +135,7 @@ struct WalletHomeView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { showAdd = true } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("Add a credential")
+                    .accessibilityLabel("Add a document")
                     .disabled(model.isIssuing)
             }
         }
@@ -169,13 +163,12 @@ private struct EmptyWalletView: View {
         VStack(spacing: 14) {
             Image(systemName: "wallet.pass")
                 .font(.system(size: 44)).foregroundStyle(.tint)
-            Text("Your wallet is empty").font(.headline)
-            Text("Add a credential to get started. It's issued to this device over OpenID4VCI and "
-                 + "stored by the verified core.")
+            Text("Add your first document").font(.headline)
+            Text("Keep your ID safely on this phone and choose exactly what to share.")
                 .font(.callout).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             Button(action: onAdd) {
-                Label("Add a credential", systemImage: "plus")
+                Label("Add a document", systemImage: "plus")
                     .font(.headline).padding(.horizontal, 8).padding(.vertical, 6)
             }
             .buttonStyle(.borderedProminent)
@@ -220,11 +213,10 @@ struct AddCredentialSheet: View {
                         .buttonStyle(.plain)
                     }
                 } footer: {
-                    Text("A trusted issuer signs the credential; the core verifies issuer trust and "
-                         + "the device key attestation, and the device signs the proof of possession.")
+                    Text("Your document is checked before it is saved. You stay in control of when it is shared.")
                 }
             }
-            .navigationTitle("Add a credential")
+            .navigationTitle("Add a document")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -299,11 +291,11 @@ struct CredentialDetailView: View {
                 .background(.quaternary.opacity(0.4))
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-                Text("\(credential.id) · stored on-device; shared only with data minimisation.")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                Label("Saved securely on this phone", systemImage: "lock.fill")
+                    .font(.caption).foregroundStyle(.secondary)
 
                 Button(action: onPresent) {
-                    Label("Present this credential", systemImage: "qrcode")
+                    Label("Use this document", systemImage: "qrcode")
                         .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 12)
                 }
                 .buttonStyle(.borderedProminent)

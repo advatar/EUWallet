@@ -33,22 +33,22 @@ final class WalletModel: ObservableObject {
         var id: String { rawValue }
         var displayName: String {
             switch self {
-            case .pid: return "Person Identification Data"
+            case .pid: return "Digital ID"
             case .mdl: return "Mobile Driving Licence"
             case .passport: return "Passport"
             case .nid: return "National ID Card"
             case .germanId: return "German ID Card"
-            case .mdlMdoc: return "Mobile Driving Licence (mdoc)"
+            case .mdlMdoc: return "Mobile Driving Licence"
             }
         }
         var subtitle: String {
             switch self {
-            case .pid: return "Your core identity attributes (PID)"
-            case .mdl: return "Driving entitlement + identity (mDL)"
-            case .passport: return "Travel document (ICAO 9303)"
+            case .pid: return "Your verified name, age and identity details"
+            case .mdl: return "Your driving licence on this phone"
+            case .passport: return "Your digital travel document"
             case .nid: return "Government identity card"
-            case .germanId: return "Personalausweis (eID)"
-            case .mdlMdoc: return "ISO 18013-5 mDL · mso_mdoc / CBOR"
+            case .germanId: return "Your German identity card"
+            case .mdlMdoc: return "Your driving licence on this phone"
             }
         }
         var systemImage: String {
@@ -117,7 +117,7 @@ final class WalletModel: ObservableObject {
             runtime = try Self.makeRuntime(issuance)
         } catch {
             runtime = nil
-            phase = .failed("Durable wallet startup failed: \(error.localizedDescription)")
+            phase = .failed("We couldn't open your wallet. Please close the app and try again.")
         }
         reloadCredentials()
         reloadHistory()
@@ -252,7 +252,7 @@ final class WalletModel: ObservableObject {
     func addCredential(_ type: CredentialType) {
         guard !isIssuing else { return }
         isIssuing = true
-        log = ["Adding \(type.displayName) via OpenID4VCI…"]
+        log = ["Adding \(type.displayName)…"]
         Task {
             guard await issue(type) else { isIssuing = false; return }
             note("Core ran the issuance machine: issuer-trust decision, WUA key-attestation gate, "
@@ -415,15 +415,15 @@ final class WalletModel: ObservableObject {
             case .presentation:
                 note("Device signed the key-binding JWT; vp_token posted to the RP.")
                 reloadHistory()
-                phase = .done("Presentation delivered — only the requested claim was shared.")
+                phase = .done("Information shared successfully.")
             case .payment:
                 note("Device signed the dynamic-linking binding; auth code posted to the PSP.")
                 reloadHistory()
-                phase = .done("Payment authorised — SCA auth code delivered.")
+                phase = .done("Payment approved.")
             case .qes:
                 note("Device authorized the exact document hash; the response was acknowledged by the QTSP.")
                 reloadHistory()
-                phase = .done("Qualified signature authorised and delivered.")
+                phase = .done("Document signed successfully.")
             }
         }
     }
@@ -447,7 +447,7 @@ final class WalletModel: ObservableObject {
                 eventJson: kind.declineEvent(operationId: operationId),
                 requiring: .declined
             ) else { return }
-            phase = .done("Declined — nothing was shared.")
+            phase = .done("Nothing was shared.")
         }
     }
 

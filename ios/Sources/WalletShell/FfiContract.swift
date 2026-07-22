@@ -116,7 +116,7 @@ public enum WalletDecisionKind: Equatable {
 /// Mirror of `wallet_core::Effect` (internally tagged by `type`, camelCase).
 public enum WalletEffect: Decodable {
     case resolveRpTrust(operationId: UInt64, clientId: String)
-    case persistNonce(operationId: UInt64, nonce: UInt64)
+    case persistNonce(operationId: UInt64, nonce: String)
     case render(operationId: UInt64?, authorizationHash: [UInt8]?, screen: ScreenDescription)
     case sign(operationId: UInt64, keyRef: String, payload: [UInt8])
     case http(
@@ -171,7 +171,7 @@ public enum WalletEffect: Decodable {
         case "persistNonce":
             self = .persistNonce(
                 operationId: try c.decode(UInt64.self, forKey: .operationId),
-                nonce: try c.decode(UInt64.self, forKey: .nonce))
+                nonce: try c.decode(String.self, forKey: .nonce))
         case "render":
             let screen = try c.decode(ScreenDescription.self, forKey: .screen)
             let operationId = try c.decodeIfPresent(UInt64.self, forKey: .operationId)
