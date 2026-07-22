@@ -12,7 +12,8 @@ not a hardware eID/NFC flow. This Playwright test drives that form end to end, h
 ## Run
 
 ```sh
-npm install
+npm ci
+npm run check
 npx playwright install chromium
 ATTEMPTS=6 node issue-pid.js      # prints {"code":...,"verifier":...,...} on success
 ```

@@ -176,6 +176,12 @@ operational solution needed to enter those processes.
         coordinator-only durable native composition, byte-stable UniFFI regeneration and narrowly
         trusted Tamarin installation dependencies; all required gates passed in
         [CI run 29901869421](https://github.com/advatar/EUWallet/actions/runs/29901869421).
+  - [ ] [#35](https://github.com/advatar/EUWallet/issues/35): remediate high-severity
+        CVE-2025-59288 in the PID interoperability UI test, lock the Node dependency graph and
+        verify the automated reference-issuer flow.
+  - [ ] [#36](https://github.com/advatar/EUWallet/issues/36): align SD-JWT and mdoc PID portrait
+        validation with PID Rulebook 1.7, including explicit opt-out semantics, bounded JPEG
+        validation, formal policy coverage and native adapter verification.
 - [ ] Obtain the applicable German authority, CAB/BSI certification and Commission listing.
 
 ## Completed
