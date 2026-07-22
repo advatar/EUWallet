@@ -13,6 +13,7 @@ sealed interface WalletScreen {
         val relyingPartyName: String,
         val purpose: String,
         val requestedClaims: List<String>,
+        val notSharedClaims: List<String>,
     ) : WalletScreen
 
     data class PaymentConfirmation(

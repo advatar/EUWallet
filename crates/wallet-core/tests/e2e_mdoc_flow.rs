@@ -185,6 +185,12 @@ fn full_mdoc_presentation_through_wallet_core_is_third_party_verifiable() {
                 c.requested_claims,
                 vec![format!("{NS}.age_over_18 [retained]")]
             );
+            assert_eq!(c.not_shared_claims, vec![format!("{NS}.family_name")]);
+            assert!(c
+                .requested_claims
+                .iter()
+                .map(|claim| claim.strip_suffix(" [retained]").unwrap_or(claim))
+                .all(|shared| !c.not_shared_claims.iter().any(|hidden| hidden == shared)));
         }
         other => panic!("expected a consent screen, got {other:?}"),
     }

@@ -146,6 +146,28 @@ theorem present_requires_validation (evs : List Ev) :
   have hd : (run evs).disclosed = true := present_foldl evs init hpres hst
   exact (disclose_requires_consent_and_validation evs hd).2
 
+/-! ## Consent claim-set correspondence
+
+The wire-level path extraction is implemented and tested for SD-JWT and mdoc in Rust. This model
+captures the format-independent obligation imposed on the resulting canonical path sets: every
+eligible held claim is classified as shared or not shared, and no not-shared claim is shared.
+-/
+
+def notSharedClaims (held shared : List String) : List String :=
+  held.filter fun claim => !shared.contains claim
+
+theorem not_shared_excludes_shared (held shared : List String) (claim : String)
+    (h : claim ∈ notSharedClaims held shared) : claim ∉ shared := by
+  simp [notSharedClaims] at h
+  exact h.2
+
+theorem held_is_shared_or_not_shared (held shared : List String) (claim : String)
+    (h : claim ∈ held) : claim ∈ shared ∨ claim ∈ notSharedClaims held shared := by
+  by_cases hs : claim ∈ shared
+  · exact Or.inl hs
+  · right
+    simp [notSharedClaims, h, hs]
+
 /-! ## Invariant 3 — a replayed nonce is always rejected. -/
 
 /-- **Theorem (replay protection).** Presenting a request whose nonce was already used

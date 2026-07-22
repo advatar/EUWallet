@@ -22,6 +22,7 @@ fn consent(claims: &[&str]) -> ScreenDescription {
         rp_display_name: "Example RP".into(),
         purpose: "age verification".into(),
         requested_claims: claims.iter().map(|s| s.to_string()).collect(),
+        not_shared_claims: vec!["family_name".into()],
     })
 }
 
@@ -33,6 +34,7 @@ fn present_maps_snapshot_to_screen() {
             rp_display_name: "RP".into(),
             purpose: "p".into(),
             requested_claims: vec!["age_over_18".into()],
+            not_shared_claims: vec!["family_name".into()],
         },
         error: None,
     };
@@ -49,8 +51,8 @@ fn canonical_bytes_are_valid_cbor_and_deterministic() {
     // It is valid canonical CBOR: decoding then re-encoding is a fixed point.
     let decoded = from_canonical_slice(&a).expect("valid canonical CBOR");
     assert_eq!(decoded.to_canonical(), a);
-    // Shape: array(4) whose first element is the text tag "consent".
-    assert_eq!(a[0], 0x84);
+    // Shape: array(5) whose first element is the text tag "consent".
+    assert_eq!(a[0], 0x85);
     assert_eq!(&a[1..9], &[0x67, b'c', b'o', b'n', b's', b'e', b'n', b't']);
 }
 
@@ -64,6 +66,13 @@ fn consent_hash_is_stable_and_tamper_evident() {
     // Any change to what the user sees changes the hash (what-you-see-is-what-you-sign).
     let more = consent(&["age_over_18", "family_name"]);
     assert_ne!(consent_hash(&RealDigest, &more), h1);
+
+    let mut different_complement = base;
+    let ScreenDescription::Consent(ref mut screen) = different_complement else {
+        unreachable!()
+    };
+    screen.not_shared_claims = vec!["birth_date".into()];
+    assert_ne!(consent_hash(&RealDigest, &different_complement), h1);
 }
 
 #[test]

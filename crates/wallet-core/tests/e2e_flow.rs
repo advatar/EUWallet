@@ -139,6 +139,11 @@ fn full_presentation_through_wallet_core_with_data_minimisation() {
         Some(presenter::ScreenDescription::Consent(c)) => {
             // Data minimisation: only the requested-and-held claim is shown, NOT family_name.
             assert_eq!(c.requested_claims, vec!["age_over_18".to_string()]);
+            assert_eq!(c.not_shared_claims, vec!["family_name".to_string()]);
+            let mut covered = c.requested_claims.clone();
+            covered.extend(c.not_shared_claims.clone());
+            covered.sort();
+            assert_eq!(covered, vec!["age_over_18", "family_name"]);
         }
         other => panic!("expected a consent screen, got {other:?}"),
     }

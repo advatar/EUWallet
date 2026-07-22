@@ -4,7 +4,10 @@ import Foundation
 /// authorised by the Rust core; this layer only makes non-security metadata readable.
 public enum ConsumerCopy {
     public static func claimName(_ raw: String) -> String {
-        let key = raw.split(separator: ".").last.map(String.init) ?? raw
+        let retentionSuffix = " [retained]"
+        let retained = raw.hasSuffix(retentionSuffix)
+        let path = retained ? String(raw.dropLast(retentionSuffix.count)) : raw
+        let key = path.split(separator: ".").last.map(String.init) ?? path
         let known = [
             "given_name": "Given name", "family_name": "Family name",
             "birth_date": "Date of birth", "birthdate": "Date of birth",
@@ -12,7 +15,8 @@ public enum ConsumerCopy {
             "nationality": "Nationality", "document_number": "Document number",
             "driving_privileges": "Driving privileges", "expiry_date": "Expiry date"
         ]
-        return known[key] ?? key.replacingOccurrences(of: "_", with: " ").capitalized
+        let label = known[key] ?? key.replacingOccurrences(of: "_", with: " ").capitalized
+        return retained ? "\(label) (kept by requester)" : label
     }
 
     public static func activityName(_ raw: String) -> String {
