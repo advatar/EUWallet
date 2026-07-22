@@ -21,9 +21,9 @@ use oid4vci::pid_profile::{
 };
 use oid4vp::{AbortReason, Env, Input, ResolvedTrust, SelectedCredential, State};
 use presenter::{
-    minimum_claim_set, ConsentScreen, CredentialFormat as DisplayCredentialFormat,
-    IssuanceOfferScreen, OverAskResult, PaymentScreen, RetentionDisclosure, ScreenDescription,
-    SignScreen, VerifierRegistration, VerifierTrustMark,
+    minimum_claim_set, ConsentScreen, CredentialFormat as DisplayCredentialFormat, DocumentStatus,
+    DocumentSummary, IssuanceOfferScreen, OverAskResult, PaymentScreen, RetentionDisclosure,
+    ScreenDescription, SignScreen, VerifierRegistration, VerifierTrustMark,
 };
 use serde::{Deserialize, Serialize};
 use trust::{ServiceType, TrustStore};
@@ -3440,6 +3440,7 @@ impl Core {
     }
 
     fn drive_issuance(&mut self, input: oid4vci::Input) -> Vec<Effect> {
+        let holder_accepted_offer = matches!(input, oid4vci::Input::AcceptOffer);
         // proof_key_attested is computed in-core: the loaded WUA must verify AND bind this device
         // key at High assurance — never a shell boolean.
         let proof_key_attested = self
@@ -3503,10 +3504,21 @@ impl Core {
             }
         }
 
-        let effects: Vec<Effect> = outputs
+        let mut effects: Vec<Effect> = outputs
             .into_iter()
             .map(|o| self.translate_issuance(o))
             .collect();
+
+        if holder_accepted_offer && !matches!(self.issuance, oid4vci::State::Aborted(_)) {
+            if let Some(document) = self.issuance_document_summary(DocumentStatus::Preparing) {
+                effects.insert(
+                    0,
+                    Effect::Render {
+                        screen: ScreenDescription::IssuancePreparing(document),
+                    },
+                );
+            }
+        }
 
         // The moment the credential is issued (once), consume the value that already crossed the
         // authentication/policy boundary. Raw response bytes are never parsed into storage here.
@@ -3533,6 +3545,13 @@ impl Core {
             }
         }
         if matches!(self.issuance, oid4vci::State::CredentialIssued { .. }) {
+            if !was_issued {
+                if let Some(document) = self.issuance_document_summary(DocumentStatus::Ready) {
+                    effects.push(Effect::Render {
+                        screen: ScreenDescription::IssuanceReady(document),
+                    });
+                }
+            }
             self.finish_flow(ActiveFlow::Issuance);
         } else if let oid4vci::State::Aborted(reason) = &self.issuance {
             let reason = *reason;
@@ -3549,6 +3568,51 @@ impl Core {
             }
         }
         effects
+    }
+
+    fn issuance_document_summary(&self, status: DocumentStatus) -> Option<DocumentSummary> {
+        let format = match self.issuance {
+            oid4vci::State::ReviewingOffer { format, .. }
+            | oid4vci::State::OfferParsed { format, .. }
+            | oid4vci::State::Authorizing { format }
+            | oid4vci::State::AwaitingTxCode { format }
+            | oid4vci::State::RequestingToken { format }
+            | oid4vci::State::ProvingPossession { format, .. }
+            | oid4vci::State::RequestingCredential { format }
+            | oid4vci::State::CredentialIssued { format, .. } => format,
+            oid4vci::State::Idle | oid4vci::State::Aborted(_) => return None,
+        };
+        let issuer_name = self
+            .trust_store
+            .credential_issuer_at(&self.issuer_id_current, self.now_epoch)
+            .map(|registration| registration.display_name.clone())
+            .unwrap_or_else(|| "Verified credential issuer".into());
+        let portrait_required = self
+            .issuer_candidates_current
+            .first()
+            .is_some_and(|issuer| issuer.service == IssuerTrustDomain::Pid);
+        let (document_name, display_format) = match format {
+            oid4vci::CredentialFormat::DcSdJwt => (
+                "Digital identity document".into(),
+                DisplayCredentialFormat::DcSdJwt,
+            ),
+            oid4vci::CredentialFormat::MsoMdoc => {
+                ("Mobile document".into(), DisplayCredentialFormat::MsoMdoc)
+            }
+        };
+        let id_binding = [
+            self.issuer_id_current.as_bytes(),
+            format_name(format).as_bytes(),
+        ]
+        .concat();
+        Some(DocumentSummary {
+            document_id: hex_bytes(&AwsLc.sha256(&id_binding)),
+            document_name,
+            issuer_name,
+            format: display_format,
+            status,
+            portrait_required,
+        })
     }
 
     fn translate_issuance(&mut self, output: oid4vci::Output) -> Effect {

@@ -260,6 +260,13 @@ fn full_issuance_with_in_core_trust_and_attestation() {
 
     // Offer accepted (issuer trusted in-core) → RequestToken.
     let fx = approve_offer(&mut core);
+    assert!(fx.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::IssuancePreparing(document)
+        } if document.status == presenter::DocumentStatus::Preparing
+            && document.issuer_name == "Verified credential issuer"
+    )));
     assert!(
         fx.contains(&Effect::RequestToken),
         "issuer should be trusted, got {fx:?}"
@@ -295,7 +302,14 @@ fn full_issuance_with_in_core_trust_and_attestation() {
         format: "dc+sd-jwt".into(),
         bytes: cred.clone(),
     });
-    assert_eq!(effects, vec![Effect::Close]);
+    assert!(matches!(effects.first(), Some(Effect::Close)));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Render {
+            screen: presenter::ScreenDescription::IssuanceReady(document)
+        } if document.status == presenter::DocumentStatus::Ready
+            && document.issuer_name == "Verified credential issuer"
+    )));
     let (fmt, bytes) = core.issued_credential().expect("credential issued");
     assert_eq!(fmt, "dc+sd-jwt");
     assert_eq!(bytes, cred);
