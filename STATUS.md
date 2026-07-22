@@ -200,9 +200,13 @@ operational solution needed to enter those processes.
         issuance implementation, and deleted all four merged or superseded remote branches; all
         required gates passed in
         [CI run 29924091658](https://github.com/advatar/EUWallet/actions/runs/29924091658).
-  - [ ] [#44](https://github.com/advatar/EUWallet/issues/44): revalidate every protocol and native
-        release gate after branch reconciliation, and enforce a one-issue/one-branch lifecycle with
-        ancestry verification and immediate post-merge cleanup in `AGENTS.md`.
+  - [x] [#44](https://github.com/advatar/EUWallet/issues/44): revalidated every protocol and native
+        release gate after branch reconciliation, and enforced a one-issue/one-branch lifecycle
+        with ancestry verification and immediate post-merge cleanup in `AGENTS.md`; focused
+        protocol conformance and wallet end-to-end suites, the RFC 5280 suite, all Lean models and
+        oracle traces, all six Tamarin models, Android unit/lint/debug/release gates, regenerated
+        UniFFI/XCFramework consistency, 134 Swift tests, and clean Xcode simulator build plus three
+        on-simulator core tests all passed locally on 2026-07-22.
 - [ ] Obtain the applicable German authority, CAB/BSI certification and Commission listing.
 
 ## Completed
