@@ -253,7 +253,7 @@ class EffectExecutorTest {
         var authorizationHash: ByteArray? = null
         val executor = makeExecutor(
             engine = RecordingEngine {
-                "[{\"type\":\"render\",\"operationId\":44,\"authorizationHash\":$AUTHORIZATION_HASH_JSON,\"screen\":{\"screen\":\"consent\",\"rpDisplayName\":\"RP\",\"purpose\":\"Age\",\"requestedClaims\":[]}}]"
+                "[{\"type\":\"render\",\"operationId\":44,\"authorizationHash\":$AUTHORIZATION_HASH_JSON,\"screen\":{\"screen\":\"consent\",\"rpDisplayName\":\"RP\",\"purpose\":\"Age\",\"requestedClaims\":[],\"notSharedClaims\":[]}}]"
             },
             renderer = ScreenRenderer { id, hash, _ ->
                 operationId = id

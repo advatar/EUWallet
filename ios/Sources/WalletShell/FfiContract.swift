@@ -30,13 +30,17 @@ extension FfiContractError: LocalizedError {
 public enum ScreenDescription: Decodable, Equatable {
     case loading
     case error(code: String, message: String)
-    case consent(relyingPartyName: String, purpose: String, requestedClaims: [String])
+    case consent(
+        relyingPartyName: String,
+        purpose: String,
+        requestedClaims: [String],
+        notSharedClaims: [String])
     case paymentConfirmation(creditorName: String, creditorAccount: String, amountMinor: UInt64, currency: String)
     case signConfirmation(documentName: String, qtspId: String, documentHashHex: String)
     case other(String)
 
     private enum CodingKeys: String, CodingKey {
-        case screen, code, message, rpDisplayName, purpose, requestedClaims
+        case screen, code, message, rpDisplayName, purpose, requestedClaims, notSharedClaims
         case creditorName, creditorAccount, amountMinor, currency
         case documentName, qtspId, documentHashHex
     }
@@ -53,7 +57,8 @@ public enum ScreenDescription: Decodable, Equatable {
             self = .consent(
                 relyingPartyName: try c.decode(String.self, forKey: .rpDisplayName),
                 purpose: try c.decode(String.self, forKey: .purpose),
-                requestedClaims: try c.decode([String].self, forKey: .requestedClaims))
+                requestedClaims: try c.decode([String].self, forKey: .requestedClaims),
+                notSharedClaims: try c.decode([String].self, forKey: .notSharedClaims))
         case "paymentConfirmation":
             self = .paymentConfirmation(
                 creditorName: try c.decode(String.self, forKey: .creditorName),

@@ -174,6 +174,7 @@ object WalletEffectDecoder {
             relyingPartyName = string(value, "rpDisplayName"),
             purpose = string(value, "purpose"),
             requestedClaims = strings(value, "requestedClaims"),
+            notSharedClaims = strings(value, "notSharedClaims"),
         )
         "paymentConfirmation" -> WalletScreen.PaymentConfirmation(
             creditorName = string(value, "creditorName"),

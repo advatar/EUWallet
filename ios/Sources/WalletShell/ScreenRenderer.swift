@@ -29,8 +29,14 @@ public struct ScreenRenderer: View {
                 Text(code).font(.caption).foregroundStyle(.secondary)
 #endif
             }.accessibilityElement(children: .combine)
-        case .consent(let rp, let purpose, let claims):
-            ConsentView(rp: rp, purpose: purpose, claims: claims, onConsent: onConsent, onDecline: onDecline)
+        case .consent(let rp, let purpose, let claims, let notSharedClaims):
+            ConsentView(
+                rp: rp,
+                purpose: purpose,
+                claims: claims,
+                notSharedClaims: notSharedClaims,
+                onConsent: onConsent,
+                onDecline: onDecline)
         case .paymentConfirmation(let creditorName, let creditorAccount, let amountMinor, let currency):
             PaymentConfirmationView(
                 payee: creditorName, account: creditorAccount, amountMinor: amountMinor,
@@ -122,6 +128,7 @@ struct ConsentView: View {
     let rp: String
     let purpose: String
     let claims: [String]
+    let notSharedClaims: [String]
     let onConsent: () -> Void
     let onDecline: () -> Void
 
@@ -134,7 +141,14 @@ struct ConsentView: View {
             }
             Text("Only this information will be shared:").font(.headline).padding(.top, 4)
             ForEach(claims, id: \.self) { claim in
-                Label(claim, systemImage: "checkmark.seal")
+                Label(ConsumerCopy.claimName(claim), systemImage: "checkmark.seal")
+            }
+            if !notSharedClaims.isEmpty {
+                Text("Stays in your wallet").font(.headline).padding(.top, 4)
+                ForEach(notSharedClaims, id: \.self) { claim in
+                    Label(ConsumerCopy.claimName(claim), systemImage: "lock.shield")
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
             HStack {

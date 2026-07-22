@@ -37,7 +37,7 @@ final class MockEngine: DurableWalletEngineDriving {
             return #"[{"type":"resolveRpTrust","operationId":1,"resultType":"rpCertChainResolved","clientId":"rp.example"}]"#
         }
         if eventJson.contains("\"rpCertChainResolved\"") {
-            return #"[{"type":"persistNonce","operationId":2,"resultType":"operationSucceeded","nonce":"opaque-nonce"},{"type":"render","operationId":3,"resultType":"presentationDecision","authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"Example RP","purpose":"Prove age","requestedClaims":["age_over_18"]}}]"#
+            return #"[{"type":"persistNonce","operationId":2,"resultType":"operationSucceeded","nonce":"opaque-nonce"},{"type":"render","operationId":3,"resultType":"presentationDecision","authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"Example RP","purpose":"Prove age","requestedClaims":["age_over_18"],"notSharedClaims":["family_name"]}}]"#
         }
         if eventJson.contains("\"userConsented\"") {
             return #"[{"type":"sign","operationId":4,"resultType":"deviceSignatureProduced","keyRef":"device-key","payload":[1,2,3]}]"#
@@ -305,11 +305,12 @@ final class EffectExecutorTests: XCTestCase {
         let outcome = try await executor.send(
             eventJson: WalletEventJSON.authorizationRequestReceived(Data([1, 2, 3])))
 
-        guard case .consent(let rp, _, let claims)? = rendered.last else {
+        guard case .consent(let rp, _, let claims, let notShared)? = rendered.last else {
             return XCTFail("expected a consent screen, got \(String(describing: rendered.last))")
         }
         XCTAssertEqual(rp, "Example RP")
         XCTAssertEqual(claims, ["age_over_18"])
+        XCTAssertEqual(notShared, ["family_name"])
         XCTAssertEqual(renderedOperationId, 3)
         XCTAssertEqual(renderedAuthorizationHash, Self.authorizationHash)
         XCTAssertEqual(outcome, .awaitingInput)
@@ -392,8 +393,8 @@ final class EffectExecutorTests: XCTestCase {
     }
 
     func testInteractiveRenderRequiresOperationIdAndAuthorizationHash() {
-        let missingId = #"[{"type":"render","authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[]}}]"#
-        let shortHash = #"[{"type":"render","operationId":1,"authorizationHash":[0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[]}}]"#
+        let missingId = #"[{"type":"render","authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[],"notSharedClaims":[]}}]"#
+        let shortHash = #"[{"type":"render","operationId":1,"authorizationHash":[0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[],"notSharedClaims":[]}}]"#
         for output in [missingId, shortHash] {
             XCTAssertThrowsError(try WalletEffect.decodeCoreOutput(output))
         }
@@ -430,7 +431,11 @@ final class EffectExecutorTests: XCTestCase {
     func testInteractiveDecisionRoutingUsesTheProtocolSpecificEvents() throws {
         let screens: [(ScreenDescription, WalletDecisionKind, String, String)] = [
             (
-                .consent(relyingPartyName: "RP", purpose: "Age", requestedClaims: []),
+                .consent(
+                    relyingPartyName: "RP",
+                    purpose: "Age",
+                    requestedClaims: [],
+                    notSharedClaims: []),
                 .presentation,
                 "userConsented",
                 "userDeclined"),
@@ -482,7 +487,7 @@ final class EffectExecutorTests: XCTestCase {
             if event.contains("\"operationFailed\"") {
                 return #"[{"type":"render","screen":{"screen":"error","code":"rendering_failed","message":"Rendering failed"}},{"type":"close"}]"#
             }
-            return #"[{"type":"render","operationId":31,"authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[]}}]"#
+            return #"[{"type":"render","operationId":31,"authorizationHash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"screen":{"screen":"consent","rpDisplayName":"RP","purpose":"Age","requestedClaims":[],"notSharedClaims":[]}}]"#
         }
         let executor = makeExecutor(engine: engine) { _, _, screen in
             if case .consent = screen {

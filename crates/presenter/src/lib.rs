@@ -70,6 +70,9 @@ pub struct ConsentScreen {
     pub rp_display_name: String,
     pub purpose: String,
     pub requested_claims: Vec<String>, // already minimized to the minimum set
+    /// Claim paths present in the selected credential(s) but absent from the disclosure set.
+    /// Values never cross this boundary. The whole field is covered by [`consent_hash`].
+    pub not_shared_claims: Vec<String>,
 }
 
 /// Minimal snapshot the presenter reads. Built by wallet-core; keeps presenter dependency-light.
@@ -135,6 +138,13 @@ fn to_value(screen: &ScreenDescription) -> Value {
             Value::Text(c.purpose.clone()),
             Value::Array(
                 c.requested_claims
+                    .iter()
+                    .cloned()
+                    .map(Value::Text)
+                    .collect(),
+            ),
+            Value::Array(
+                c.not_shared_claims
                     .iter()
                     .cloned()
                     .map(Value::Text)

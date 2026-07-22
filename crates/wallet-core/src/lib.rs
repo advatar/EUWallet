@@ -4461,12 +4461,60 @@ impl Core {
                 rp_display_name: String::new(),
                 purpose: String::new(),
                 requested_claims: Vec::new(),
+                not_shared_claims: Vec::new(),
             });
         };
+        let mut held_claims = Vec::new();
+        for source in &session.selected_sources {
+            let claims = match source {
+                PresentationCredentialReference::SdJwt {
+                    holding: _,
+                    authenticated: Some(authenticated),
+                } => {
+                    let selected = authenticated
+                        .processed
+                        .disclosures
+                        .iter()
+                        .map(|disclosure| disclosure.digest.clone())
+                        .collect();
+                    visible_sdjwt_claims(authenticated, &selected)
+                }
+                PresentationCredentialReference::SdJwt {
+                    holding,
+                    authenticated: None,
+                } => holding.disclosures_by_claim.keys().cloned().collect(),
+                PresentationCredentialReference::Mdoc(holding) => holding
+                    .issuer_signed
+                    .name_spaces
+                    .iter()
+                    .flat_map(|(namespace, items)| {
+                        items
+                            .iter()
+                            .map(move |item| format!("{namespace}.{}", item.element_id))
+                    })
+                    .collect(),
+            };
+            for claim in claims {
+                if !held_claims.contains(&claim) {
+                    held_claims.push(claim);
+                }
+            }
+        }
+        held_claims.sort();
+        let shared_paths: BTreeSet<&str> = session
+            .selected_revealed_claims
+            .iter()
+            .map(|claim| claim.strip_suffix(" [retained]").unwrap_or(claim))
+            .collect();
+        let not_shared_claims = held_claims
+            .into_iter()
+            .filter(|claim| !shared_paths.contains(claim.as_str()))
+            .collect();
         ScreenDescription::Consent(ConsentScreen {
             rp_display_name: session.rp_client_id.clone(),
             purpose: session.purpose.clone(),
             requested_claims: session.selected_revealed_claims.clone(),
+            not_shared_claims,
         })
     }
 
@@ -5648,6 +5696,7 @@ mod structured_sdjwt_tests {
                     rp_display_name: "RP".into(),
                     purpose: "age".into(),
                     requested_claims: vec!["age_over_18".into()],
+                    not_shared_claims: vec!["family_name".into()],
                 }),
             };
             let mut core = Core::new("wallet.example", "device-key");
@@ -5697,6 +5746,7 @@ mod structured_sdjwt_tests {
                 rp_display_name: "RP".into(),
                 purpose: "age".into(),
                 requested_claims: vec!["age_over_18".into()],
+                not_shared_claims: vec!["family_name".into()],
             });
             let expected_hash = presenter::consent_hash(&AwsLc, &screen);
             let mut core = Core::new("wallet.example", "device-key");
@@ -5733,6 +5783,7 @@ mod structured_sdjwt_tests {
                 rp_display_name: "Other RP".into(),
                 purpose: "different".into(),
                 requested_claims: vec!["family_name".into()],
+                not_shared_claims: vec!["age_over_18".into()],
             });
             let cross_screen_hash =
                 serde_json::to_string(&presenter::consent_hash(&AwsLc, &different_screen)).unwrap();
