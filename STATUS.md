@@ -185,6 +185,9 @@ operational solution needed to enter those processes.
         validation with PID Rulebook 1.7, including explicit opt-out semantics, bounded JPEG
         validation, formal policy coverage and native adapter verification; all required gates
         passed in [CI run 29919838280](https://github.com/advatar/EUWallet/actions/runs/29919838280).
+  - [ ] [#39](https://github.com/advatar/EUWallet/issues/39): restore Android debug and release
+        compilation by repairing the shared canonical ingress URL-validation contract, then run
+        unit tests, lint and both build variants with Android Studio's bundled JDK 21.
 - [ ] Obtain the applicable German authority, CAB/BSI certification and Commission listing.
 
 ## Completed
