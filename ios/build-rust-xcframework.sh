@@ -19,9 +19,9 @@ GEN=ios/Generated
 # 1) Regenerate Swift bindings from a host build of the cdylib.
 cargo build -p wallet-core
 cargo run -p wallet-core --bin uniffi-bindgen -- generate \
-  --library target/debug/libwallet_core.dylib --language swift --out-dir "$GEN"
+  --no-format --library target/debug/libwallet_core.dylib --language swift --out-dir "$GEN"
 # UniFFI currently emits trailing horizontal whitespace. Normalize it here so regeneration is
-# byte-stable across developer machines and CI even when swiftformat is unavailable.
+# byte-stable across developer machines and CI regardless of whether swiftformat is installed.
 perl -pi -e 's/[[:blank:]]+$//' "$GEN"/wallet_core.swift "$GEN"/wallet_coreFFI.h
 
 # 2) Build ONLY the static library for device + simulator (arm64). We use `cargo rustc

@@ -91,6 +91,13 @@ class CiEvidenceConfigurationTests(unittest.TestCase):
         )
         self.assertNotIn("HOMEBREW_NO_REQUIRE_TAP_TRUST", WORKFLOW)
 
+    def test_uniffi_generation_disables_environment_dependent_formatting(self):
+        script = (ROOT / "ios/build-rust-xcframework.sh").read_text()
+        self.assertIn(
+            "uniffi-bindgen -- generate \\\n  --no-format",
+            script,
+        )
+
     def test_evidence_script_is_syntax_valid_and_fail_closed(self):
         subprocess.run(["bash", "-n", EVIDENCE_SCRIPT], check=True)
         self.assertNotIn("$(fail)", EVIDENCE_TEXT)
