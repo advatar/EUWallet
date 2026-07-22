@@ -4,580 +4,423 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Building the wallet — the Add &amp; Prove journeys</title>
-<meta name="description" content="How we are building the consumer experience for our EU Digital Identity wallet: two wallet-owned journeys — Add (issuance) and Prove (consent) — as a testable iOS prototype.">
+<meta name="description" content="Consumer UX direction for our EU Digital Identity wallet: two wallet-owned journeys — Add (issuance) and Prove (consent) — as an accessible, testable iOS prototype.">
 <style>
   :root{
-    --paper:#EEF1F9; --surface:#FFFFFF; --surface-2:#F3F5FC; --line:#D9DEEE; --line-2:#E7EAF5;
-    --ink:#111528;
-    --ink-mut:#4A5170; --brand:#1F3BC2; --brand-ink:#16267F; --on-brand:#FFFFFF;
-    --good:#0E7A4E; --good-bg:#E1F3EA; --warn:#8A5A00; --warn-bg:#FBEFD6; --crit:#B23120; --crit-bg:#FBE6E2;
-    --halo:#E5EAFF;
-    --ui:1; /* large-text multiplier */
+    --paper:#EEF1F9; --surface:#FFFFFF; --surface-2:#F1F4FC; --line:#D6DCEE; --line-2:#E7EAF5;
+    --ink:#0F1426; --ink-mut:#454C6B; --brand:#1E3AC0; --brand-ink:#152479; --on-brand:#FFFFFF;
+    --good:#0C6E46; --good-bg:#DDF1E7; --warn:#7E5200; --warn-bg:#FAECCF; --crit:#A62A1B; --crit-bg:#FADFDA;
+    --halo:#E4E9FF; --ui:1;
     --sans:-apple-system,"SF Pro Text","SF Pro Display",system-ui,"Segoe UI",Roboto,sans-serif;
     --mono:ui-monospace,"SF Mono",Menlo,monospace;
-    --shadow:0 20px 44px -26px rgba(17,21,40,.42);
-    --radius:22px;
+    --shadow:0 20px 44px -26px rgba(15,20,38,.42); --focus:#1E3AC0;
   }
-  @media (prefers-color-scheme:dark){
-    :root{
-      --paper:#080B15; --surface:#141A2B; --surface-2:#0F1524; --line:#2A324C; --line-2:#222a41;
-      --ink:#EFF2FC; --ink-mut:#AEB6D6; --brand:#8AA0FF; --brand-ink:#C6D2FF; --on-brand:#0A1233;
-      --good:#4FC58E; --good-bg:#123227; --warn:#E4AE52; --warn-bg:#33280F; --crit:#F0836E; --crit-bg:#361b17;
-      --halo:#1B2547; --shadow:0 20px 44px -22px rgba(0,0,0,.72);
-    }
-  }
+  @media (prefers-color-scheme:dark){:root{
+    --paper:#070A13; --surface:#131A2B; --surface-2:#0E1524; --line:#2A3350; --line-2:#212a41;
+    --ink:#F0F3FD; --ink-mut:#B2BAD9; --brand:#93A6FF; --brand-ink:#CAD5FF; --on-brand:#0A1233;
+    --good:#54C892; --good-bg:#0F3025; --warn:#E6B25A; --warn-bg:#33280F; --crit:#F2856F; --crit-bg:#361b17;
+    --halo:#1B2547; --shadow:0 20px 44px -22px rgba(0,0,0,.72); --focus:#93A6FF;
+  }}
   :root[data-theme="dark"]{
-    --paper:#080B15; --surface:#141A2B; --surface-2:#0F1524; --line:#2A324C; --line-2:#222a41;
-    --ink:#EFF2FC; --ink-mut:#AEB6D6; --brand:#8AA0FF; --brand-ink:#C6D2FF; --on-brand:#0A1233;
-    --good:#4FC58E; --good-bg:#123227; --warn:#E4AE52; --warn-bg:#33280F; --crit:#F0836E; --crit-bg:#361b17;
-    --halo:#1B2547; --shadow:0 20px 44px -22px rgba(0,0,0,.72);
+    --paper:#070A13; --surface:#131A2B; --surface-2:#0E1524; --line:#2A3350; --line-2:#212a41;
+    --ink:#F0F3FD; --ink-mut:#B2BAD9; --brand:#93A6FF; --brand-ink:#CAD5FF; --on-brand:#0A1233;
+    --good:#54C892; --good-bg:#0F3025; --warn:#E6B25A; --warn-bg:#33280F; --crit:#F2856F; --crit-bg:#361b17;
+    --halo:#1B2547; --shadow:0 20px 44px -22px rgba(0,0,0,.72); --focus:#93A6FF;
   }
   :root[data-theme="light"]{
-    --paper:#EEF1F9; --surface:#FFFFFF; --surface-2:#F3F5FC; --line:#D9DEEE; --line-2:#E7EAF5;
-    --ink:#111528; --ink-mut:#4A5170; --brand:#1F3BC2; --brand-ink:#16267F; --on-brand:#FFFFFF;
-    --good:#0E7A4E; --good-bg:#E1F3EA; --warn:#8A5A00; --warn-bg:#FBEFD6; --crit:#B23120; --crit-bg:#FBE6E2;
-    --halo:#E5EAFF; --shadow:0 20px 44px -26px rgba(17,21,40,.42);
+    --paper:#EEF1F9; --surface:#FFFFFF; --surface-2:#F1F4FC; --line:#D6DCEE; --line-2:#E7EAF5;
+    --ink:#0F1426; --ink-mut:#454C6B; --brand:#1E3AC0; --brand-ink:#152479; --on-brand:#FFFFFF;
+    --good:#0C6E46; --good-bg:#DDF1E7; --warn:#7E5200; --warn-bg:#FAECCF; --crit:#A62A1B; --crit-bg:#FADFDA;
+    --halo:#E4E9FF; --shadow:0 20px 44px -26px rgba(15,20,38,.42); --focus:#1E3AC0;
   }
   *{box-sizing:border-box}
   html{-webkit-text-size-adjust:100%}
   body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.55;
     font-size:calc(17px * var(--ui));-webkit-font-smoothing:antialiased}
   .wrap{max-width:1180px;margin:0 auto;padding:0 clamp(1.1rem,3vw,2.2rem)}
-  a{color:var(--brand);text-underline-offset:3px}
+  a{color:var(--brand)}
   h1,h2,h3{margin:0;letter-spacing:-.02em;line-height:1.12;text-wrap:balance}
   .mono{font-family:var(--mono)}
-  :focus-visible{outline:3px solid var(--brand);outline-offset:3px;border-radius:8px}
+  :focus-visible{outline:3px solid var(--focus);outline-offset:3px;border-radius:9px}
+  .skip{position:absolute;left:-999px;top:0;background:var(--brand);color:var(--on-brand);padding:.7rem 1rem;border-radius:10px;z-index:99}
+  .skip:focus{left:.6rem;top:.6rem}
 
-  /* ---- control bar ---- */
-  .bar{position:sticky;top:0;z-index:50;background:color-mix(in srgb,var(--paper) 88%,transparent);
-    backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+  .bar{position:sticky;top:0;z-index:50;background:color-mix(in srgb,var(--paper) 90%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
   .bar-in{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;padding:.7rem 0}
-  .brandmark{font-weight:800;letter-spacing:-.03em;font-size:1.02rem}
-  .brandmark span{color:var(--brand)}
-  .bar nav{display:flex;gap:.2rem;flex-wrap:wrap;margin-left:.4rem}
-  .bar nav a{color:var(--ink-mut);text-decoration:none;padding:.5rem .6rem;border-radius:9px;font-size:.9rem}
+  .brandmark{font-weight:800;letter-spacing:-.03em;font-size:1.02rem}.brandmark span{color:var(--brand)}
+  .bar nav{display:flex;gap:.15rem;flex-wrap:wrap}
+  .bar nav a{color:var(--ink-mut);text-decoration:none;padding:.55rem .6rem;border-radius:9px;font-size:.92rem;min-height:44px;display:inline-flex;align-items:center}
   .bar nav a:hover{color:var(--ink);background:var(--surface-2)}
-  .toggle{margin-left:auto;display:inline-flex;align-items:center;gap:.55rem;border:1px solid var(--line);
-    background:var(--surface);color:var(--ink);border-radius:12px;padding:.6rem .85rem;font:inherit;
-    font-size:.9rem;font-weight:600;cursor:pointer;min-height:44px}
+  .toggle{margin-left:auto;display:inline-flex;align-items:center;gap:.5rem;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);border-radius:12px;padding:.55rem .9rem;font:inherit;font-size:.95rem;font-weight:650;cursor:pointer;min-height:44px}
   .toggle[aria-pressed="true"]{background:var(--brand);color:var(--on-brand);border-color:var(--brand)}
 
-  /* ---- hero ---- */
-  header.hero{padding:clamp(2.6rem,6vw,4.6rem) 0 clamp(1.6rem,3vw,2.6rem)}
-  .eyebrow{font-family:var(--mono);font-size:.76rem;letter-spacing:.16em;text-transform:uppercase;color:var(--brand);font-weight:600}
-  .hero h1{font-size:clamp(2rem,1.3rem + 3vw,3.3rem);font-weight:820;margin:.9rem 0}
-  .hero h1 em{font-style:normal;color:var(--brand)}
-  .hero .lede{font-size:clamp(1.08rem,1rem + .5vw,1.35rem);color:var(--ink-mut);max-width:60ch;margin:0}
-  .owns{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:2rem}
+  header.hero{padding:clamp(2.4rem,6vw,4.4rem) 0 clamp(1.4rem,3vw,2.2rem)}
+  .eyebrow{font-family:var(--mono);font-size:.78rem;letter-spacing:.16em;text-transform:uppercase;color:var(--brand);font-weight:600}
+  .hero h1{font-size:clamp(2rem,1.3rem + 3vw,3.2rem);font-weight:820;margin:.9rem 0}.hero h1 em{font-style:normal;color:var(--brand)}
+  .hero .lede{font-size:clamp(1.1rem,1rem + .55vw,1.38rem);color:var(--ink-mut);max-width:60ch;margin:0}
+  .owns{display:grid;grid-template-columns:1fr 1.25fr;gap:1rem;margin-top:2rem}
   @media(max-width:720px){.owns{grid-template-columns:1fr}}
   .owns .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:1.15rem 1.25rem}
-  .owns .card h3{font-size:.82rem;font-family:var(--mono);letter-spacing:.1em;text-transform:uppercase;margin-bottom:.5rem}
-  .owns .os h3{color:var(--ink-mut)} .owns .you h3{color:var(--brand)}
-  .owns ul{margin:.2rem 0 0;padding-left:1.1rem} .owns li{margin:.35rem 0;color:var(--ink)}
+  .owns .card h2{font-size:.84rem;font-family:var(--mono);letter-spacing:.1em;text-transform:uppercase;margin-bottom:.55rem}
+  .owns .os h2{color:var(--ink-mut)}.owns .you h2{color:var(--brand)}
+  .owns ul{margin:.2rem 0 0;padding-left:1.15rem}.owns li{margin:.4rem 0}
   .owns .you{border-color:color-mix(in srgb,var(--brand) 40%,var(--line))}
-  .callout{margin-top:1.2rem;border-left:4px solid var(--brand);background:var(--surface);padding:.9rem 1.1rem;border-radius:0 12px 12px 0;color:var(--ink);max-width:75ch}
 
-  /* ---- sections ---- */
-  section{padding:clamp(2.2rem,4.5vw,3.6rem) 0;border-top:1px solid var(--line)}
-  .sec-head{max-width:64ch;margin-bottom:1.8rem}
-  .sec-head h2{font-size:clamp(1.5rem,1.2rem + 1.3vw,2.1rem);font-weight:760;margin-top:.45rem}
-  .sec-head p{color:var(--ink-mut);margin:.6rem 0 0}
+  section{padding:clamp(2.2rem,4.5vw,3.4rem) 0;border-top:1px solid var(--line)}
+  .sec-head{max-width:66ch;margin-bottom:1.7rem}
+  .sec-head h2{font-size:clamp(1.5rem,1.2rem + 1.3vw,2.05rem);font-weight:760;margin-top:.4rem}
+  .sec-head p{color:var(--ink-mut);margin:.55rem 0 0}
 
-  /* ---- phone frame ---- */
-  .rail{display:flex;gap:clamp(1rem,2.4vw,1.9rem);overflow-x:auto;padding:.4rem .2rem 1.4rem;
-    scroll-snap-type:x proximity}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:clamp(1rem,2.4vw,1.7rem)}
-  figure.frame{margin:0;scroll-snap-align:start;display:flex;flex-direction:column;gap:.8rem;min-width:232px}
-  .rail figure.frame{flex:0 0 244px}
+  /* binding map */
+  table.map{width:100%;border-collapse:collapse;font-size:.98rem}
+  .map caption{text-align:left;color:var(--ink-mut);margin-bottom:.7rem;font-size:.95rem}
+  .map th,.map td{text-align:left;vertical-align:top;padding:.8rem .9rem;border-bottom:1px solid var(--line)}
+  .map thead th{font-family:var(--mono);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--brand)}
+  .map td.plain{font-weight:650}
+  .map .wrapx{overflow-x:auto}
+
+  .scrollhint{font-family:var(--mono);font-size:.82rem;color:var(--ink-mut);margin-bottom:.4rem}
+  .rail{display:flex;gap:clamp(1rem,2.4vw,1.8rem);overflow-x:auto;padding:.3rem .2rem 1.3rem;scroll-snap-type:x proximity}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:clamp(1rem,2.4vw,1.6rem)}
+  figure.frame{margin:0;scroll-snap-align:start;display:flex;flex-direction:column;gap:.8rem;min-width:238px}
+  .rail figure.frame{flex:0 0 250px}
   .phone{background:#04060d;border-radius:34px;padding:8px;box-shadow:var(--shadow);width:100%}
-  .screen{background:var(--surface);border-radius:27px;overflow:hidden;position:relative;
-    display:flex;flex-direction:column;height:498px;font-size:calc(14.5px * var(--ui))}
+  .screen{background:var(--surface);border-radius:27px;overflow:hidden;position:relative;display:flex;flex-direction:column;height:508px;font-size:calc(15px * var(--ui))}
   .notch{position:absolute;top:7px;left:50%;transform:translateX(-50%);width:78px;height:17px;background:#04060d;border-radius:0 0 11px 11px;z-index:4}
-  .statusbar{height:30px;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;
-    padding:0 15px;font-family:var(--mono);font-size:.66rem;font-weight:600;color:var(--ink)}
-  .scr{flex:1;display:flex;flex-direction:column;padding:12px 14px 10px;gap:10px;overflow:hidden}
-  .homebar{height:5px;width:38%;background:var(--ink);opacity:.25;border-radius:99px;margin:2px auto 9px}
-  .title{font-size:1.42em;font-weight:800;letter-spacing:-.02em;line-height:1.1}
-  .sub{color:var(--ink-mut);font-size:.98em;margin-top:-3px}
-  /* grouped ios rows — flat, no nested cards */
+  .statusbar{height:30px;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:0 15px;font-family:var(--mono);font-size:.66rem;font-weight:600;color:var(--ink)}
+  .scr{flex:1;display:flex;flex-direction:column;padding:12px 14px 10px;gap:10px;overflow-y:auto;overscroll-behavior:contain}
+  .homebar{height:5px;width:38%;background:var(--ink);opacity:.22;border-radius:99px;margin:2px auto 9px}
+  h3.title{font-size:1.4em;font-weight:800;letter-spacing:-.02em;line-height:1.12}
+  .sub{color:var(--ink-mut);font-size:1em;margin:0}
   .rows{display:flex;flex-direction:column;background:var(--surface-2);border-radius:13px;overflow:hidden}
-  .row{display:flex;align-items:center;gap:9px;padding:11px 12px;font-size:.98em}
+  .row{display:flex;align-items:center;gap:9px;padding:11px 12px;font-size:1em}
   .row+.row{border-top:1px solid var(--line-2)}
-  .row .g{width:26px;height:26px;border-radius:7px;flex:0 0 auto;display:grid;place-items:center;color:#fff;
-    font-weight:800;font-family:var(--mono);font-size:.82em;background:linear-gradient(135deg,var(--brand-ink),var(--brand))}
-  .row .tx{flex:1;line-height:1.25}
-  .row .tx b{font-weight:700}
-  .row .tx small{display:block;color:var(--ink-mut);font-size:.82em;margin-top:1px}
-  .row .chk{color:var(--good);font-weight:800}
-  .verified{color:var(--good);font-weight:700;font-size:.9em;display:inline-flex;gap:5px;align-items:center}
+  .row .g{width:27px;height:27px;border-radius:7px;flex:0 0 auto;display:grid;place-items:center;color:#fff;font-weight:800;font-family:var(--mono);font-size:.8em;background:linear-gradient(135deg,var(--brand-ink),var(--brand))}
+  .row .tx{flex:1;line-height:1.28}.row .tx b{font-weight:700}
+  .row .tx small{display:block;color:var(--ink-mut);font-size:.84em;margin-top:1px}
+  .row .chk{color:var(--good);font-weight:800;font-size:1.1em}
+  .verified{color:var(--good);font-weight:700}
   .spring{flex:1}
-  .btn{border:none;border-radius:14px;min-height:calc(50px * var(--ui));padding:0 14px;font:inherit;
-    font-weight:750;font-size:1.02em;background:var(--brand);color:var(--on-brand);cursor:pointer;
-    display:flex;align-items:center;justify-content:center;text-align:center;width:100%;letter-spacing:-.01em}
-  .btn.sec{background:transparent;color:var(--brand);font-weight:650}
-  .btn.gold{background:var(--warn-bg);color:var(--warn)}
-  .btn.plain{background:var(--surface-2);color:var(--ink);font-weight:650}
+  .live{font-weight:650;color:var(--brand);margin:0}
+  button{font:inherit}
+  .btn{border:none;border-radius:14px;min-height:calc(50px * var(--ui));padding:0 14px;font-weight:750;font-size:1.02em;background:var(--brand);color:var(--on-brand);cursor:pointer;display:flex;align-items:center;justify-content:center;text-align:center;width:100%;letter-spacing:-.01em}
+  .btn.sec{background:var(--surface-2);color:var(--brand);font-weight:700}
+  .linkbtn{background:none;border:none;color:var(--brand);font-weight:700;font-size:1em;cursor:pointer;min-height:44px;width:100%;text-align:center;padding:6px;text-decoration:underline;text-underline-offset:3px}
   .stack{display:flex;flex-direction:column;gap:8px}
-  .disc{font-size:.86em;color:var(--ink-mut);text-align:center;line-height:1.4}
-  .link{color:var(--brand);font-weight:650;font-size:.96em;text-align:center;padding:8px;min-height:44px;display:flex;align-items:center;justify-content:center}
-
-  /* centered state screens */
-  .center{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px;text-align:center}
-  .disc-wide{width:100%;border-radius:14px;padding:13px;color:#fff;background:linear-gradient(135deg,var(--brand-ink),var(--brand))}
-  .disc-wide .k{font-family:var(--mono);font-size:.66em;letter-spacing:.14em;text-transform:uppercase;opacity:.82}
-  .disc-wide .n{font-size:1.16em;font-weight:800;margin-top:6px}
-  .disc-wide .m{font-size:.84em;opacity:.9;margin-top:3px}
+  .center{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center}
+  .cardface{width:100%;border-radius:14px;padding:13px;color:#fff;background:linear-gradient(135deg,var(--brand-ink),var(--brand))}
+  .cardface .k{font-family:var(--mono);font-size:.66em;letter-spacing:.13em;text-transform:uppercase;opacity:.85}
+  .cardface .n{font-size:1.16em;font-weight:800;margin-top:6px}.cardface .m{font-size:.86em;opacity:.92;margin-top:3px}
   .orb{width:74px;height:74px;border-radius:50%;display:grid;place-items:center;font-size:1.9em;background:var(--halo)}
-  .orb.g{background:var(--good-bg);color:var(--good)} .orb.w{background:var(--warn-bg);color:var(--warn)} .orb.c{background:var(--crit-bg);color:var(--crit)}
-  .nfc{position:relative;width:104px;height:104px;display:grid;place-items:center}
-  .nfc .card{width:66px;height:42px;border-radius:8px;z-index:2;background:linear-gradient(135deg,var(--brand-ink),var(--brand));box-shadow:0 6px 14px -6px var(--brand)}
+  .orb.g{background:var(--good-bg);color:var(--good)}.orb.w{background:var(--warn-bg);color:var(--warn)}.orb.c{background:var(--crit-bg);color:var(--crit)}
+  .nfc{position:relative;width:100px;height:100px;display:grid;place-items:center}
+  .nfc .cardvis{width:64px;height:40px;border-radius:8px;z-index:2;background:linear-gradient(135deg,var(--brand-ink),var(--brand))}
   .nfc .ring{position:absolute;inset:0;border-radius:50%;border:2px solid var(--brand);opacity:0}
   @media(prefers-reduced-motion:no-preference){.nfc .ring{animation:pl 2.4s ease-out infinite}.nfc .ring.b{animation-delay:.8s}.nfc .ring.c{animation-delay:1.6s}}
-  @keyframes pl{0%{transform:scale(.5);opacity:.65}70%{opacity:.07}100%{transform:scale(1.12);opacity:0}}
-  .prog{width:100%;height:7px;border-radius:99px;background:var(--surface-2);overflow:hidden}
-  .prog i{display:block;height:100%;width:60%;background:var(--brand);border-radius:99px}
-
-  .note{border-radius:12px;padding:10px 11px;font-size:.9em;line-height:1.4;display:flex;gap:8px}
-  .note.warn{background:var(--warn-bg);color:var(--warn)} .note.crit{background:var(--crit-bg);color:var(--crit)}
-  .note .i{font-weight:800;flex:0 0 auto}
-
-  /* caption / annotation (outside the frame, readable size) */
+  @keyframes pl{0%{transform:scale(.5);opacity:.6}70%{opacity:.06}100%{transform:scale(1.12);opacity:0}}
+  .prog{width:100%;height:7px;border-radius:99px;background:var(--surface-2);overflow:hidden}.prog i{display:block;height:100%;width:60%;background:var(--brand);border-radius:99px}
+  .note{border-radius:12px;padding:10px 11px;font-size:.94em;line-height:1.4;display:flex;gap:8px}
+  .note.warn{background:var(--warn-bg);color:var(--warn)}.note.crit{background:var(--crit-bg);color:var(--crit)}.note .i{font-weight:800;flex:0 0 auto}
   figcaption{display:flex;flex-direction:column;gap:.35rem}
-  .cap-step{font-family:var(--mono);font-size:.74rem;letter-spacing:.08em;color:var(--brand);font-weight:600}
-  .cap-title{font-weight:720;font-size:1.02rem;margin:0}
-  .cap-note{margin:0;color:var(--ink-mut);font-size:.92rem}
+  .cap-step{font-family:var(--mono);font-size:.76rem;letter-spacing:.08em;color:var(--brand);font-weight:600}
+  .cap-title{font-weight:720;font-size:1.04rem;margin:0}.cap-note{margin:0;color:var(--ink-mut);font-size:.94rem}
   .vo{margin-top:.15rem;border-top:1px dashed var(--line);padding-top:.5rem}
-  .vo>summary{cursor:pointer;font-family:var(--mono);font-size:.74rem;letter-spacing:.05em;color:var(--ink-mut);font-weight:600}
-  .vo ol{margin:.5rem 0 0;padding-left:1.2rem;font-size:.86rem;color:var(--ink-mut)}
-  .vo li{margin:.25rem 0}
-
-  /* a11y spec cards */
-  .cols{display:grid;grid-template-columns:1fr 1fr;gap:clamp(1rem,2.4vw,1.6rem)}
-  @media(max-width:760px){.cols{grid-template-columns:1fr}}
+  .vo>summary{cursor:pointer;font-family:var(--mono);font-size:.76rem;letter-spacing:.04em;color:var(--ink-mut);font-weight:600;min-height:44px;display:flex;align-items:center}
+  .vo ol{margin:.4rem 0 0;padding-left:1.25rem;font-size:.9rem;color:var(--ink-mut)}.vo li{margin:.25rem 0}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:clamp(1rem,2.4vw,1.6rem)}@media(max-width:760px){.cols{grid-template-columns:1fr}}
   .panel{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:1.3rem 1.4rem}
-  .panel h3{font-size:1.1rem;font-weight:720;margin-bottom:.4rem}
-  .panel ul{margin:.6rem 0 0;padding-left:1.1rem;color:var(--ink-mut)}
-  .panel li{margin:.4rem 0} .panel li b{color:var(--ink);font-weight:650}
-  footer{border-top:1px solid var(--line);padding:2.2rem 0 3.4rem;color:var(--ink-mut);font-size:.9rem}
-  footer .mono{font-size:.76rem;line-height:1.7}
-  .scrollhint{font-size:.82rem;color:var(--ink-mut);font-family:var(--mono);margin-bottom:.5rem}
-  @media print{
-    .bar,.scrollhint{display:none} .rail{overflow:visible;flex-wrap:wrap} *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
-    figure.frame{break-inside:avoid} .nfc .ring{animation:none}
-  }
+  .panel h3{font-size:1.12rem;font-weight:720;margin-bottom:.4rem}
+  .panel ul{margin:.6rem 0 0;padding-left:1.15rem;color:var(--ink-mut)}.panel li{margin:.45rem 0}.panel li b{color:var(--ink);font-weight:650}
+  footer{border-top:1px solid var(--line);padding:2.2rem 0 3.4rem;color:var(--ink-mut);font-size:.92rem}
+  footer .mono{font-size:.78rem;line-height:1.7}
+  @media print{.bar,.scrollhint{display:none}.rail{overflow:visible;flex-wrap:wrap}*{-webkit-print-color-adjust:exact;print-color-adjust:exact}figure.frame{break-inside:avoid}.nfc .ring{animation:none}}
 </style>
 </head>
 <body>
+<a class="skip" href="#add">Skip to the flow</a>
 
 <div class="bar"><div class="wrap bar-in">
   <span class="brandmark">Building the wallet · <span>Add &amp; Prove</span></span>
   <nav aria-label="Sections">
-    <a href="#add">Add</a><a href="#home">Home</a><a href="#prove">Prove</a><a href="#states">States</a><a href="#a11y">Accessibility</a>
+    <a href="#boundary">Boundary</a><a href="#add">Add</a><a href="#home">Home</a><a href="#prove">Prove</a><a href="#states">States</a><a href="#a11y">Accessibility</a>
   </nav>
-  <button id="lg" class="toggle" aria-pressed="false" aria-label="Toggle large text">Aa Large text</button>
+  <button id="lg" class="toggle" type="button" aria-pressed="false">Aa&nbsp;&nbsp;Large text</button>
 </div></div>
 
 <header class="hero"><div class="wrap">
   <p class="eyebrow">How we’re building this · consumer UX direction</p>
   <h1>Two journeys the wallet owns:<br><em>Add</em> and <em>Prove</em>.</h1>
-  <p class="lede">Getting a document in, and sharing the minimum to prove something. A phone’s chooser may decide <em>which</em> wallet answers a website — but everything that defines trust happens here, in the wallet.</p>
+  <p class="lede">Getting a trusted document in, and sharing the minimum to prove something. A phone may decide <em>which</em> wallet answers — it does not take over the wallet’s job.</p>
   <div class="owns">
-    <div class="card os"><h3>The platform may own</h3><ul>
+    <div class="card os"><h2>The platform may mediate</h2><ul>
       <li>Which wallet or document is offered to a website (the chooser sheet).</li>
     </ul></div>
-    <div class="card you"><h3>The wallet always owns</h3><ul>
-      <li>Authenticating the verifier &amp; its registered purpose</li>
-      <li>Consent, and sharing the <b>minimum</b></li>
-      <li>Your approval (Face&nbsp;ID / passcode) &amp; building the response</li>
-      <li>Recovery, and the durable home for your documents</li>
+    <div class="card you"><h2>The wallet remains responsible for</h2><ul>
+      <li>Authenticating the verifier &amp; validating the request</li>
+      <li>Understandable consent, and sharing the <b>minimum</b></li>
+      <li>Explicit approval, and building the response securely</li>
+      <li>Delivery, and recovery when things go wrong</li>
     </ul></div>
   </div>
-  <p class="callout">Both iOS and Android let our wallet participate as a provider — Apple gives the selected provider its <b>own authorization UI</b>, and the EU framework keeps <b>consent and relying-party authentication with the wallet</b>, not the browser or OS. So consent is a flagship journey, not an afterthought.</p>
 </div></header>
 
-<!-- =================== ADD =================== -->
-<section id="add"><div class="wrap">
-  <div class="sec-head"><span class="eyebrow">Journey · Add</span>
-    <h2>Add your National ID — as few screens as it takes</h2>
-    <p>Issuer-first, ordinary verbs, no protocol words. We show progress and ask only what’s needed; a confident user can move quickly, an unsure one is never stuck. (Horizontal scroll →)</p>
+<!-- BINDING MAP -->
+<section id="boundary"><div class="wrap">
+  <div class="sec-head"><span class="eyebrow">The boundary that must hold</span>
+    <h2>Plain words on top — verified data underneath</h2>
+    <p>Protocol terms never reach the person. But every simplified line is <b>bound to the verified protocol data</b> beneath it: simplification must never weaken verifier identity, consent integrity, or minimisation.</p>
   </div>
-  <p class="scrollhint" aria-hidden="true">← scroll to see every screen →</p>
+  <div class="wrapx"><table class="map">
+    <caption>Each consumer line is the plain-language face of a security decision — not a replacement for it.</caption>
+    <thead><tr><th scope="col">What the person sees</th><th scope="col">What it is bound to (never weakened)</th></tr></thead>
+    <tbody>
+      <tr><td class="plain">“✓ Verified issuer — Bundesdruckerei”</td><td>Authenticated certificate path to a trusted issuer; the name comes from the certificate, never from caller-supplied text.</td></tr>
+      <tr><td class="plain">“weindeals.example · registered verifier”</td><td>Verifier authenticated and its identifier bound to its certificate; the shown name is the authenticated one, and its stated purpose comes from its registration.</td></tr>
+      <tr><td class="plain">“Over 18: Yes” — and nothing else</td><td>A single selectively-disclosed claim from a credential whose issuer signature and device key-binding verified; only that claim is placed in the response.</td></tr>
+      <tr><td class="plain">“Not shared: name, date of birth, address”</td><td>Data minimisation: attributes outside the request are never assembled into the response — the “not shared” line is the true response contents.</td></tr>
+      <tr><td class="plain">“This site is asking for more than it registered for”</td><td>The request is checked against the verifier’s registration; an over-ask is flagged before anything is shared.</td></tr>
+      <tr><td class="plain">“Approve with Face&nbsp;ID”</td><td>A device-key signature over the exact request nonce (proof of possession). No approval → no response leaves the device.</td></tr>
+    </tbody>
+  </table></div>
+</div></section>
+
+<!-- ADD -->
+<section id="add"><div class="wrap">
+  <div class="sec-head"><span class="eyebrow">Journey · Add (issuance)</span>
+    <h2>Add your National ID — calm, understandable, recoverable</h2>
+    <p>Issuer-first, ordinary verbs, no protocol words. As few screens as it takes; a confident user moves quickly, an unsure one is never stuck. Every screen’s controls are real and reach VoiceOver in reading order.</p>
+  </div>
+  <p class="scrollhint">← scroll to see every screen →</p>
   <div class="rail">
 
-    <figure class="frame">
-      <div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Screen: Add your National ID. Issued by Bundesdruckerei, a verified issuer. Buttons: Add, Not now.">
-        <div class="statusbar"><span>9:41</span><span>5G</span></div>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Add, screen 1 of 6: Add your National ID">
         <div class="scr">
-          <div class="title">Add your National ID?</div>
-          <div class="rows"><div class="row"><span class="g">DE</span><span class="tx"><b>Bundesdruckerei</b><small class="verified">✓ Verified issuer</small></span></div></div>
-          <div class="sub">Use your phone to prove who you are — online and in person.</div>
+          <h3 class="title">Add your National ID?</h3>
+          <div class="rows"><div class="row"><span class="g" aria-hidden="true">DE</span><span class="tx"><b>Bundesdruckerei</b><small class="verified">✓ Verified issuer</small></span></div></div>
+          <p class="sub">Use your phone to prove who you are — online and in person.</p>
           <div class="spring"></div>
-          <div class="stack">
-            <button class="btn">Add</button>
-            <div class="link">What will be added?</div>
-            <button class="btn sec">Not now</button>
-          </div>
-        </div><div class="homebar"></div>
+          <div class="stack"><button class="btn" type="button">Add</button><button class="linkbtn" type="button">What will be added?</button><button class="btn sec" type="button">Not now</button></div>
+        </div><div class="homebar" aria-hidden="true"></div>
       </div></div>
-      <figcaption>
-        <span class="cap-step">ADD · 1</span>
-        <p class="cap-title">Meet the offer, issuer first</p>
-        <p class="cap-note">The authority is named and verified up front. Purpose in one line; the full attribute list is an <em>optional</em> “What will be added?” — never an approval wall.</p>
-        <details class="vo"><summary>VoiceOver order &amp; labels</summary><ol>
-          <li>Heading: “Add your National ID?”</li>
-          <li>“Bundesdruckerei, verified issuer.”</li>
-          <li>“Use your phone to prove who you are, online and in person.”</li>
-          <li>Button: “Add your National ID.”</li>
-          <li>Button: “What will be added? Shows the full list.”</li>
-          <li>Button: “Not now.”</li>
-        </ol></details>
-      </figcaption>
-    </figure>
+      <figcaption><span class="cap-step">ADD · 1</span><p class="cap-title">Meet the offer, issuer first</p><p class="cap-note">The authority is named and verified up front; purpose in one line; the attribute list is an optional button, never an approval wall.</p>
+        <details class="vo"><summary>VoiceOver reading order</summary><ol><li>Heading “Add your National ID?”</li><li>“Bundesdruckerei, verified issuer.”</li><li>“Use your phone to prove who you are, online and in person.”</li><li>Button “Add.”</li><li>Button “What will be added?”</li><li>Button “Not now.”</li></ol></details></figcaption></figure>
 
-    <figure class="frame">
-      <div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Screen: Do you know your ID card PIN? Options: Yes I know it; I'm not sure.">
-        <div class="statusbar"><span>9:41</span><span>5G</span></div>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Add, screen 2 of 6: Do you know your ID card PIN?">
         <div class="scr">
-          <div class="title">Do you know your ID card PIN?</div>
-          <div class="sub">The 6-digit PIN you chose for your ID card. You’ll enter it when you tap the card.</div>
+          <h3 class="title">Do you know your ID card PIN?</h3>
+          <p class="sub">The 6-digit PIN you chose for your ID card. You’ll enter it when you tap the card.</p>
           <div class="spring"></div>
-          <div class="stack">
-            <button class="btn">Yes, I know it</button>
-            <button class="btn plain">I’m not sure</button>
-          </div>
-          <div class="disc">“I’m not sure” shows how to check or reset it — no rush.</div>
-        </div><div class="homebar"></div>
+          <div class="stack"><button class="btn" type="button">Yes, I know it</button><button class="btn sec" type="button">I’m not sure</button></div>
+          <p class="sub" style="text-align:center">“I’m not sure” shows how to check or reset it — no rush.</p>
+        </div><div class="homebar" aria-hidden="true"></div>
       </div></div>
-      <figcaption>
-        <span class="cap-step">ADD · 2</span>
-        <p class="cap-title">Ask about the PIN before the tap — calmly</p>
-        <p class="cap-note">We never assume a known PIN. “I’m not sure” leads to help (reset / transport-PIN), framed as normal, not failure. Transport-PIN, CAN and blocked-PIN detail live in that contextual help, not here.</p>
-        <details class="vo"><summary>VoiceOver order &amp; labels</summary><ol>
-          <li>Heading: “Do you know your ID card PIN?”</li>
-          <li>“The six-digit PIN you chose for your ID card. You’ll enter it when you tap the card.”</li>
-          <li>Button: “Yes, I know it.”</li>
-          <li>Button: “I’m not sure. Shows how to check or reset your PIN.”</li>
-        </ol></details>
-      </figcaption>
-    </figure>
+      <figcaption><span class="cap-step">ADD · 2</span><p class="cap-title">Ask about the PIN before the tap — calmly</p><p class="cap-note">We never assume a known PIN. “I’m not sure” leads to help framed as normal, not failure. Transport-PIN, CAN and blocked-PIN detail live in that help, not here.</p>
+        <details class="vo"><summary>VoiceOver reading order</summary><ol><li>Heading “Do you know your ID card PIN?”</li><li>“The six-digit PIN you chose… you’ll enter it when you tap the card.”</li><li>Button “Yes, I know it.”</li><li>Button “I’m not sure.”</li><li>“Shows how to check or reset it, no rush.”</li></ol></details></figcaption></figure>
 
-    <figure class="frame">
-      <div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Screen: Hold your ID card to the top of your phone. Reading in progress. Button: Cancel.">
-        <div class="statusbar"><span>9:41</span><span>5G</span></div>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Add, screen 3 of 6: Hold your card to the top of your phone">
         <div class="scr">
-          <div class="title">Hold your card to the top of your phone</div>
-          <div class="center">
-            <div class="nfc"><span class="ring"></span><span class="ring b"></span><span class="ring c"></span><span class="card"></span></div>
+          <h3 class="title">Hold your card to the top of your phone</h3>
+          <div class="center"><div class="nfc" aria-hidden="true"><span class="ring"></span><span class="ring b"></span><span class="ring c"></span><span class="cardvis"></span></div>
             <div class="prog" aria-hidden="true"><i></i></div>
-            <div class="sub" style="color:var(--brand);font-weight:650">Reading… keep the card still</div>
-          </div>
-          <div class="stack"><div class="link">Where is the chip on my card?</div><button class="btn sec">Cancel</button></div>
-        </div><div class="homebar"></div>
+            <p class="live" aria-live="polite">Reading… keep the card still</p></div>
+          <div class="stack"><button class="linkbtn" type="button">Where is the chip on my card?</button><button class="btn sec" type="button">Cancel</button></div>
+        </div><div class="homebar" aria-hidden="true"></div>
       </div></div>
-      <figcaption>
-        <span class="cap-step">ADD · 3</span>
-        <p class="cap-title">The tap — guided, and always cancellable</p>
-        <p class="cap-note">Device-specific placement, live “reading… keep still”, and a “where’s the chip?” hint. Every NFC and network step can be cancelled and resumed; a slip reconnects, it never restarts the whole journey.</p>
-        <details class="vo"><summary>VoiceOver order &amp; labels</summary><ol>
-          <li>Heading: “Hold your card to the top of your phone.”</li>
-          <li>Live region: “Reading your card. Keep it still.” (updates to “Connection lost, reposition” if it drops)</li>
-          <li>Button: “Where is the chip on my card?”</li>
-          <li>Button: “Cancel.”</li>
-        </ol></details>
-      </figcaption>
-    </figure>
+      <figcaption><span class="cap-step">ADD · 3</span><p class="cap-title">The tap — guided, and always cancellable</p><p class="cap-note">Live spoken status (“Reading… keep still”, and “Connection lost, reposition” on a slip). Every NFC and network step can be cancelled and resumed; a slip reconnects — it never restarts the journey.</p>
+        <details class="vo"><summary>VoiceOver reading order</summary><ol><li>Heading “Hold your card to the top of your phone.”</li><li>Live region announces “Reading, keep the card still” (updates on interruption).</li><li>Button “Where is the chip on my card?”</li><li>Button “Cancel.”</li></ol></details></figcaption></figure>
 
-    <figure class="frame">
-      <div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Screen: Bundesdruckerei will add your National ID. Purpose explained. Button: Confirm; link What will be added.">
-        <div class="statusbar"><span>9:41</span><span>5G</span></div>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Add, screen 4 of 6: Add your National ID to this wallet?">
         <div class="scr">
-          <div class="title">Add your National ID to this wallet?</div>
-          <div class="rows"><div class="row"><span class="g">DE</span><span class="tx"><b>Bundesdruckerei</b><small>Germany’s federal issuer</small></span><span class="verified">✓</span></div></div>
-          <div class="sub">This lets you prove your identity and age, and sign in to public services.</div>
+          <h3 class="title">Add your National ID to this wallet?</h3>
+          <div class="rows"><div class="row"><span class="g" aria-hidden="true">DE</span><span class="tx"><b>Bundesdruckerei</b><small>Germany’s federal issuer</small></span><span class="chk" aria-hidden="true">✓</span></div></div>
+          <p class="sub">This lets you prove your identity and age, and sign in to public services.</p>
           <div class="spring"></div>
-          <div class="stack">
-            <button class="btn">Confirm</button>
-            <div class="link">What will be added?</div>
-          </div>
-        </div><div class="homebar"></div>
+          <div class="stack"><button class="btn" type="button">Confirm</button><button class="linkbtn" type="button">What will be added?</button></div>
+        </div><div class="homebar" aria-hidden="true"></div>
       </div></div>
-      <figcaption>
-        <span class="cap-step">ADD · 4</span>
-        <p class="cap-title">Confirm by purpose &amp; issuer — not an attribute checklist</p>
-        <p class="cap-note">We explain what the document is <em>for</em> and who stands behind it. The detailed attributes stay behind an optional “What will be added?”, so the primary screen is calm.</p>
-        <details class="vo"><summary>VoiceOver order &amp; labels</summary><ol>
-          <li>Heading: “Add your National ID to this wallet?”</li>
-          <li>“Bundesdruckerei, Germany’s federal issuer, verified.”</li>
-          <li>“This lets you prove your identity and age, and sign in to public services.”</li>
-          <li>Button: “Confirm.”</li>
-          <li>Button: “What will be added?”</li>
-        </ol></details>
-      </figcaption>
-    </figure>
+      <figcaption><span class="cap-step">ADD · 4</span><p class="cap-title">Confirm by purpose &amp; issuer — not a checklist</p><p class="cap-note">We explain what the document is <em>for</em> and who stands behind it; the detailed attributes stay behind “What will be added?”, so the primary screen is calm.</p>
+        <details class="vo"><summary>VoiceOver reading order</summary><ol><li>Heading “Add your National ID to this wallet?”</li><li>“Bundesdruckerei, Germany’s federal issuer, verified.”</li><li>“This lets you prove your identity and age, and sign in to public services.”</li><li>Button “Confirm.”</li><li>Button “What will be added?”</li></ol></details></figcaption></figure>
 
-    <figure class="frame">
-      <div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Screen: Your National ID is being prepared. We'll notify you. You can close the app.">
-        <div class="statusbar"><span>9:41</span><span>5G</span></div>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Add, screen 5 of 6: Preparing your National ID">
         <div class="scr">
-          <div class="center">
-            <div class="orb" aria-hidden="true">⏳</div>
-            <div class="title">Preparing your National ID</div>
-            <div class="sub">We’ll send you a notification the moment it’s ready. You can close the app.</div>
-          </div>
-          <button class="btn sec">Done</button>
-        </div><div class="homebar"></div>
+          <div class="center"><div class="orb" aria-hidden="true">⏳</div><h3 class="title">Preparing your National ID</h3>
+            <p class="sub" aria-live="polite">We’ll send you a notification the moment it’s ready. You can close the app.</p></div>
+          <button class="btn sec" type="button">Done</button>
+        </div><div class="homebar" aria-hidden="true"></div>
       </div></div>
-      <figcaption>
-        <span class="cap-step">ADD · 5</span>
-        <p class="cap-title">Preparing is a state, not a spinner</p>
-        <p class="cap-note">Issuers deliver asynchronously. We say so plainly, let the user leave, and continue on the <b>home card</b> (next section) — with a notification when it’s ready. No time promises until we’ve measured the real Ausweis SDK + network + issuer paths.</p>
-        <details class="vo"><summary>VoiceOver order &amp; labels</summary><ol>
-          <li>Heading: “Preparing your National ID.”</li>
-          <li>Live region: “We’ll notify you the moment it’s ready. You can close the app.”</li>
-          <li>Button: “Done.”</li>
-        </ol></details>
-      </figcaption>
-    </figure>
+      <figcaption><span class="cap-step">ADD · 5</span><p class="cap-title">Preparing is a state, not a spinner</p><p class="cap-note">Issuers deliver asynchronously; we say so, let the user leave, and continue on the home card with a notification when ready. No time promises until measured with the real Ausweis SDK, network and issuer paths.</p>
+        <details class="vo"><summary>VoiceOver reading order</summary><ol><li>Heading “Preparing your National ID.”</li><li>Live region “We’ll notify you the moment it’s ready. You can close the app.”</li><li>Button “Done.”</li></ol></details></figcaption></figure>
 
-    <figure class="frame">
-      <div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Screen: Your National ID is ready. Next action: Prove your age.">
-        <div class="statusbar"><span>9:41</span><span>5G</span></div>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Add, screen 6 of 6: Your National ID is ready">
         <div class="scr">
-          <div class="center" style="justify-content:flex-start;padding-top:6px">
-            <div class="orb g" aria-hidden="true">✓</div><div class="title">Your National ID is ready</div>
-          </div>
-          <div class="disc-wide"><div class="k">National ID · Germany</div><div class="n">Astrid Andersson</div><div class="m">Ready · kept on this device</div></div>
+          <div class="center" style="justify-content:flex-start;padding-top:6px"><div class="orb g" aria-hidden="true">✓</div><h3 class="title">Your National ID is ready</h3></div>
+          <div class="cardface"><div class="k">National ID · Germany</div><div class="n">Astrid Andersson</div><div class="m">Ready · kept on this device</div></div>
           <div class="spring"></div>
-          <div class="stack"><button class="btn">Prove your age</button><button class="btn sec">Go to Wallet</button></div>
-        </div><div class="homebar"></div>
+          <div class="stack"><button class="btn" type="button">Prove your age</button><button class="btn sec" type="button">Go to Wallet</button></div>
+        </div><div class="homebar" aria-hidden="true"></div>
       </div></div>
-      <figcaption>
-        <span class="cap-step">ADD · 6</span>
-        <p class="cap-title">End on something useful to do</p>
-        <p class="cap-note">Success leads straight into a real, privacy-preserving action (prove age without revealing name or birth date) — turning a one-time add into an active wallet.</p>
-        <details class="vo"><summary>VoiceOver order &amp; labels</summary><ol>
-          <li>Heading: “Your National ID is ready.”</li>
-          <li>“National ID, Germany. Astrid Andersson. Ready, kept on this device.”</li>
-          <li>Button: “Prove your age.”</li>
-          <li>Button: “Go to Wallet.”</li>
-        </ol></details>
-      </figcaption>
-    </figure>
+      <figcaption><span class="cap-step">ADD · 6</span><p class="cap-title">End on something useful to do</p><p class="cap-note">Success leads into a real, privacy-preserving action — prove age without revealing name or birth date — turning a one-time add into an active wallet.</p>
+        <details class="vo"><summary>VoiceOver reading order</summary><ol><li>Heading “Your National ID is ready.”</li><li>“National ID, Germany. Astrid Andersson. Ready, kept on this device.”</li><li>Button “Prove your age.”</li><li>Button “Go to Wallet.”</li></ol></details></figcaption></figure>
 
   </div>
 </div></section>
 
-<!-- =================== HOME CARD =================== -->
+<!-- HOME -->
 <section id="home"><div class="wrap">
   <div class="sec-head"><span class="eyebrow">Durable state · Wallet home</span>
     <h2>The document lives as a home card — Preparing, Ready, Needs attention</h2>
-    <p>Issuance status is a persistent card the user can leave and return to, not a page they must not close. The card carries its own action so recovery is one tap away.</p>
+    <p>Issuance status is a persistent card the user can leave and return to, carrying its own action so recovery is one tap away. It survives closing the app and rebooting.</p>
   </div>
   <div class="grid">
-    <figure class="frame">
-      <div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Wallet home. National ID card, status Preparing.">
-        <div class="statusbar"><span>9:41</span><span>5G</span></div>
-        <div class="scr">
-          <div class="title">Wallet</div>
-          <div class="disc-wide" style="opacity:.9"><div class="k">National ID · Germany</div><div class="n">Preparing…</div><div class="m">We’ll notify you when it’s ready</div></div>
-          <div class="note" style="background:var(--surface-2);color:var(--ink-mut)"><span class="i">i</span> You can keep using your phone — nothing to do right now.</div>
-          <div class="spring"></div>
-        </div><div class="homebar"></div>
-      </div></div>
-      <figcaption><span class="cap-step">HOME · Preparing</span><p class="cap-title">Preparing</p><p class="cap-note">Calm, no action needed; survives app close and reboot.</p></figcaption>
-    </figure>
-    <figure class="frame">
-      <div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Wallet home. National ID card, status Ready, with Prove button.">
-        <div class="statusbar"><span>9:41</span><span>5G</span></div>
-        <div class="scr">
-          <div class="title">Wallet</div>
-          <div class="disc-wide"><div class="k">National ID · Germany</div><div class="n">Astrid Andersson</div><div class="m">✓ Ready</div></div>
-          <div class="spring"></div>
-          <button class="btn">Use / Prove</button>
-        </div><div class="homebar"></div>
-      </div></div>
-      <figcaption><span class="cap-step">HOME · Ready</span><p class="cap-title">Ready</p><p class="cap-note">The card is now usable; its primary action is to prove/share.</p></figcaption>
-    </figure>
-    <figure class="frame">
-      <div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Wallet home. National ID card, status Needs attention, with Continue button.">
-        <div class="statusbar"><span>9:41</span><span>5G</span></div>
-        <div class="scr">
-          <div class="title">Wallet</div>
-          <div class="disc-wide" style="background:linear-gradient(135deg,#7a4f00,var(--warn))"><div class="k">National ID · Germany</div><div class="n">Needs attention</div><div class="m">One quick step to finish</div></div>
-          <div class="note warn"><span class="i">!</span> We couldn’t finish adding your ID. Your progress is saved.</div>
-          <div class="spring"></div>
-          <button class="btn">Continue</button>
-        </div><div class="homebar"></div>
-      </div></div>
-      <figcaption><span class="cap-step">HOME · Needs attention</span><p class="cap-title">Needs attention</p><p class="cap-note">A recoverable problem, saved progress, one-tap continue — never a dead end.</p></figcaption>
-    </figure>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Wallet home, document status Preparing"><div class="scr">
+        <h3 class="title">Wallet</h3>
+        <div class="cardface" style="opacity:.92"><div class="k">National ID · Germany</div><div class="n">Preparing…</div><div class="m">We’ll notify you when it’s ready</div></div>
+        <div class="note" style="background:var(--surface-2);color:var(--ink-mut)"><span class="i" aria-hidden="true">i</span> Nothing to do right now — keep using your phone.</div>
+        <div class="spring"></div></div><div class="homebar" aria-hidden="true"></div></div></div>
+      <figcaption><span class="cap-step">HOME · Preparing</span><p class="cap-title">Preparing</p><p class="cap-note">Calm, no action needed.</p></figcaption></figure>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Wallet home, document Ready"><div class="scr">
+        <h3 class="title">Wallet</h3>
+        <div class="cardface"><div class="k">National ID · Germany</div><div class="n">Astrid Andersson</div><div class="m">✓ Ready</div></div>
+        <div class="spring"></div><button class="btn" type="button">Use / Prove</button></div><div class="homebar" aria-hidden="true"></div></div></div>
+      <figcaption><span class="cap-step">HOME · Ready</span><p class="cap-title">Ready</p><p class="cap-note">Usable; its primary action is to prove/share.</p></figcaption></figure>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Wallet home, document Needs attention"><div class="scr">
+        <h3 class="title">Wallet</h3>
+        <div class="cardface" style="background:linear-gradient(135deg,#6a4600,var(--warn))"><div class="k">National ID · Germany</div><div class="n">Needs attention</div><div class="m">One quick step to finish</div></div>
+        <div class="note warn"><span class="i" aria-hidden="true">!</span> We couldn’t finish adding your ID. Your progress is saved.</div>
+        <div class="spring"></div><button class="btn" type="button">Continue</button></div><div class="homebar" aria-hidden="true"></div></div></div>
+      <figcaption><span class="cap-step">HOME · Needs attention</span><p class="cap-title">Needs attention</p><p class="cap-note">Recoverable, progress saved, one-tap continue — never a dead end.</p></figcaption></figure>
   </div>
 </div></section>
 
-<!-- =================== PROVE / CONSENT =================== -->
+<!-- PROVE -->
 <section id="prove"><div class="wrap">
   <div class="sec-head"><span class="eyebrow">Journey · Prove (consent)</span>
     <h2>Consent is the wallet’s — who’s asking, what’s shared, why, and what isn’t</h2>
-    <p>When a website or reader asks, our wallet authenticates the verifier, shows a plain-language request, shares the minimum, and gets the user’s approval. This screen is ours to get right — it is not delegated to the browser or OS.</p>
+    <p>When a website or reader asks, the wallet authenticates the verifier, validates the request, shows a plain request, shares the minimum, and takes an explicit approval. This screen is ours to get right.</p>
   </div>
   <div class="rail">
-    <figure class="frame">
-      <div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Screen: Share with WineDeals? Sharing only Over 18 yes. Name, date of birth and address are not shared. Approve with Face ID.">
-        <div class="statusbar"><span>9:41</span><span>5G</span></div>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Prove: Share with WineDeals? Sharing only that you are over 18">
         <div class="scr">
-          <div class="title">Share with WineDeals?</div>
-          <div class="rows">
-            <div class="row"><span class="g" style="background:linear-gradient(135deg,#5b3fb0,#8a6be0)">W</span><span class="tx"><b>weindeals.example</b><small class="verified">✓ Registered verifier · age check at checkout</small></span></div>
-          </div>
-          <div class="rows">
-            <div class="row"><span class="chk">✓</span><span class="tx"><b>Over 18: Yes</b></span></div>
-          </div>
-          <div class="sub"><b>Not shared:</b> your name, date of birth, or address.</div>
+          <h3 class="title">Share with WineDeals?</h3>
+          <div class="rows"><div class="row"><span class="g" aria-hidden="true" style="background:linear-gradient(135deg,#4a2f9e,#7b5fd4)">W</span><span class="tx"><b>weindeals.example</b><small class="verified">✓ Registered verifier · age check at checkout</small></span></div></div>
+          <div class="rows"><div class="row"><span class="chk" aria-hidden="true">✓</span><span class="tx"><b>Over 18: Yes</b></span></div></div>
+          <p class="sub"><b>Not shared:</b> your name, date of birth, or address. <b>Not stored</b> by the site.</p>
           <div class="spring"></div>
-          <div class="stack"><button class="btn">Approve with Face ID</button><div class="link">See exactly what’s shared</div><button class="btn sec">Don’t share</button></div>
-        </div><div class="homebar"></div>
+          <div class="stack"><button class="btn" type="button">Approve with Face ID</button><button class="linkbtn" type="button">See exactly what’s shared</button><button class="btn sec" type="button">Don’t share</button></div>
+        </div><div class="homebar" aria-hidden="true"></div>
       </div></div>
-      <figcaption>
-        <span class="cap-step">PROVE · 1</span>
-        <p class="cap-title">Who · what · why · and what is <em>not</em> shared</p>
-        <p class="cap-note">One legible request: the verifier’s name + registered purpose, the single answer being shared, and an explicit “Not shared” line. Approval is a deliberate Face ID action. Retention is stated where relevant (“not stored”).</p>
-        <details class="vo"><summary>VoiceOver order &amp; labels</summary><ol>
-          <li>Heading: “Share with WineDeals?”</li>
-          <li>“weindeals.example, registered verifier, purpose: age check at checkout.”</li>
-          <li>“Sharing: Over 18, yes.”</li>
-          <li>“Not shared: your name, date of birth, or address.”</li>
-          <li>Button: “Approve with Face ID.”</li>
-          <li>Button: “See exactly what’s shared.”</li>
-          <li>Button: “Don’t share.”</li>
-        </ol></details>
-      </figcaption>
-    </figure>
-    <figure class="frame">
-      <div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Screen: This site is asking for more than it registered for. Over-ask warning.">
-        <div class="statusbar"><span>9:41</span><span>5G</span></div>
+      <figcaption><span class="cap-step">PROVE · 1</span><p class="cap-title">Who · what · why · retention · and what is <em>not</em> shared</p><p class="cap-note">One legible request: verifier + registered purpose, the single answer shared, retention stated, and an explicit “Not shared” line. Approval is a deliberate Face ID action.</p>
+        <details class="vo"><summary>VoiceOver reading order</summary><ol><li>Heading “Share with WineDeals?”</li><li>“weindeals.example, registered verifier, purpose: age check at checkout.”</li><li>“Sharing: Over 18, yes.”</li><li>“Not shared: your name, date of birth, or address. Not stored by the site.”</li><li>Button “Approve with Face ID.”</li><li>Button “See exactly what’s shared.”</li><li>Button “Don’t share.”</li></ol></details></figcaption></figure>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Prove: Check this request — the site is over-asking">
         <div class="scr">
-          <div class="title">Check this request</div>
-          <div class="rows"><div class="row"><span class="g" style="background:linear-gradient(135deg,#6b6b6b,#9a9a9a)">?</span><span class="tx"><b>news.example</b><small>Purpose given: “read articles”</small></span></div></div>
-          <div class="note warn"><span class="i">!</span> This site is asking for your <b>full ID</b> — more than it’s registered to need to let you read articles.</div>
-          <div class="sub">You can share nothing, or only what makes sense.</div>
+          <h3 class="title">Check this request</h3>
+          <div class="rows"><div class="row"><span class="g" aria-hidden="true" style="background:linear-gradient(135deg,#5c5c5c,#8f8f8f)">?</span><span class="tx"><b>news.example</b><small>Purpose given: “read articles”</small></span></div></div>
+          <div class="note warn"><span class="i" aria-hidden="true">!</span> This site is asking for your <b>full ID</b> — more than it’s registered to need to let you read articles.</div>
+          <p class="sub">You can share nothing, or only what makes sense.</p>
           <div class="spring"></div>
-          <div class="stack"><button class="btn sec">Don’t share</button><div class="link">Share only what’s needed</div></div>
-        </div><div class="homebar"></div>
+          <div class="stack"><button class="btn sec" type="button">Don’t share</button><button class="linkbtn" type="button">Share only what’s needed</button></div>
+        </div><div class="homebar" aria-hidden="true"></div>
       </div></div>
-      <figcaption>
-        <span class="cap-step">PROVE · over-ask</span>
-        <p class="cap-title">Warn on over-asking — a safety moment</p>
-        <p class="cap-note">Because the wallet authenticates the verifier against its registration, it can flag a request for more than the declared purpose. Default is “don’t share”. This is protection a passive OS chooser can’t offer.</p>
-        <details class="vo"><summary>VoiceOver order &amp; labels</summary><ol>
-          <li>Heading: “Check this request.”</li>
-          <li>Alert: “news.example is asking for your full ID, more than it’s registered to need to let you read articles.”</li>
-          <li>Button: “Don’t share.”</li>
-          <li>Button: “Share only what’s needed.”</li>
-        </ol></details>
-      </figcaption>
-    </figure>
+      <figcaption><span class="cap-step">PROVE · over-ask</span><p class="cap-title">Warn on over-asking — a safety moment</p><p class="cap-note">Because the wallet authenticates the verifier against its registration, it flags a request beyond the declared purpose. The default is “don’t share”. Protection a passive chooser cannot offer.</p>
+        <details class="vo"><summary>VoiceOver reading order</summary><ol><li>Heading “Check this request.”</li><li>Alert “news.example is asking for your full ID, more than it’s registered to need.”</li><li>Button “Don’t share.”</li><li>Button “Share only what’s needed.”</li></ol></details></figcaption></figure>
   </div>
 </div></section>
 
-<!-- =================== STATES =================== -->
+<!-- STATES -->
 <section id="states"><div class="wrap">
   <div class="sec-head"><span class="eyebrow">Every path that isn’t happy</span>
     <h2>Errors, interruptions, and coming back later</h2>
     <p>Each names what happened in plain words and offers one clear recovery. Nothing dead-ends; progress is always saved.</p>
   </div>
   <div class="grid">
-
-    <figure class="frame"><div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Wrong PIN. Two attempts left. Try again.">
-      <div class="statusbar"><span>9:41</span><span>5G</span></div>
-      <div class="scr"><div class="center"><div class="orb w">⌫</div><div class="title">That PIN didn’t match</div><div class="sub">You have <b>2 tries</b> left. Take your time.</div></div>
-      <div class="stack"><button class="btn">Try again</button><div class="link">I’m not sure of my PIN</div></div></div><div class="homebar"></div>
-    </div></div><figcaption><span class="cap-step">STATE · wrong PIN</span><p class="cap-title">Wrong PIN</p><p class="cap-note">Attempts remaining shown; help offered before the last try.</p></figcaption></figure>
-
-    <figure class="frame"><div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="PIN blocked. Reset your PIN to continue.">
-      <div class="statusbar"><span>9:41</span><span>5G</span></div>
-      <div class="scr"><div class="center"><div class="orb c">🔒</div><div class="title">Your card PIN is blocked</div><div class="sub">For safety, it locks after three wrong tries. You can reset it and pick up where you left off.</div></div>
-      <div class="stack"><button class="btn">How to reset my PIN</button><button class="btn sec">Later</button></div></div><div class="homebar"></div>
-    </div></div><figcaption><span class="cap-step">STATE · blocked PIN</span><p class="cap-title">Blocked PIN</p><p class="cap-note">CAN / reset detail lives here, in context — not on the calm primary screens. Resume after reset.</p></figcaption></figure>
-
-    <figure class="frame"><div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Card connection lost. Reposition and hold still.">
-      <div class="statusbar"><span>9:41</span><span>5G</span></div>
-      <div class="scr"><div class="center"><div class="orb w">📶</div><div class="title">Lost the card</div><div class="sub">Line up the top of your phone with the card and hold still.</div></div>
-      <div class="stack"><button class="btn">Try the tap again</button><button class="btn sec">Cancel</button></div></div><div class="homebar"></div>
-    </div></div><figcaption><span class="cap-step">STATE · NFC lost</span><p class="cap-title">NFC interrupted</p><p class="cap-note">Auto-resume the read; never restart the whole flow. Cancel is always present.</p></figcaption></figure>
-
-    <figure class="frame"><div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="This phone can't read ID cards. Alternatives offered.">
-      <div class="statusbar"><span>9:41</span><span>5G</span></div>
-      <div class="scr"><div class="center"><div class="orb">📱</div><div class="title">This phone can’t read your card</div><div class="sub">It doesn’t have the chip reader (NFC) needed. You can still add your ID another way.</div></div>
-      <div class="stack"><button class="btn">See other ways to add</button></div></div><div class="homebar"></div>
-    </div></div><figcaption><span class="cap-step">STATE · unsupported device</span><p class="cap-title">Unsupported device</p><p class="cap-note">Detected before the tap; routed to alternatives, not a blank failure.</p></figcaption></figure>
-
-    <figure class="frame"><div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Issuer couldn't add the ID. Reason shown, with retry.">
-      <div class="statusbar"><span>9:41</span><span>5G</span></div>
-      <div class="scr"><div class="center"><div class="orb c">✕</div><div class="title">Couldn’t add your ID</div><div class="sub">Bundesdruckerei couldn’t confirm your details right now. <b>Reason:</b> the card has expired.</div></div>
-      <div class="stack"><button class="btn">Try again</button><div class="link">Contact the issuer</div></div></div><div class="homebar"></div>
-    </div></div><figcaption><span class="cap-step">STATE · issuer rejection</span><p class="cap-title">Issuer rejection</p><p class="cap-note">The exact, human reason from the issuer — plus retry and a real contact path.</p></figcaption></figure>
-
-    <figure class="frame"><div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Connection timed out. Progress saved.">
-      <div class="statusbar"><span>9:41</span><span>5G</span></div>
-      <div class="scr"><div class="center"><div class="orb w">↻</div><div class="title">The connection dropped</div><div class="sub">Your progress is saved. You can pick up right where you left off.</div></div>
-      <div class="stack"><button class="btn">Resume</button><button class="btn sec">Later</button></div></div><div class="homebar"></div>
-    </div></div><figcaption><span class="cap-step">STATE · timeout</span><p class="cap-title">Timeout</p><p class="cap-note">Saved progress + resume; the same pattern for any network step.</p></figcaption></figure>
-
-    <figure class="frame"><div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Still preparing, taking longer than usual. Check status or get notified.">
-      <div class="statusbar"><span>9:41</span><span>5G</span></div>
-      <div class="scr"><div class="center"><div class="orb">⏳</div><div class="title">Still preparing</div><div class="sub">This is taking longer than usual at the issuer. You don’t need to wait here.</div></div>
-      <div class="stack"><button class="btn">Notify me when ready</button><div class="link">Check status</div></div></div><div class="homebar"></div>
-    </div></div><figcaption><span class="cap-step">STATE · pending too long</span><p class="cap-title">Pending too long</p><p class="cap-note">Honest about issuer delay; converts waiting into a notification + status check on the home card.</p></figcaption></figure>
-
-    <figure class="frame"><div class="phone"><div class="notch"></div><div class="screen" role="img" aria-label="Welcome back. Resume adding your National ID.">
-      <div class="statusbar"><span>9:41</span><span>5G</span></div>
-      <div class="scr"><div class="center" style="justify-content:flex-start;padding-top:8px"><div class="orb">👋</div><div class="title">Welcome back</div><div class="sub">You were adding your <b>National ID</b>. Want to finish?</div></div>
-      <div class="spring"></div><div class="stack"><button class="btn">Continue</button><button class="btn sec">Start over</button></div></div><div class="homebar"></div>
-    </div></div><figcaption><span class="cap-step">STATE · returning / interrupted</span><p class="cap-title">Returning &amp; interrupted session</p><p class="cap-note">A resumed session is greeted, not reset; the user chooses to continue or start over.</p></figcaption></figure>
-
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Recovery: That PIN didn’t match, two tries left"><div class="scr">
+        <div class="center"><div class="orb w" aria-hidden="true">⌫</div><h3 class="title">That PIN didn’t match</h3><p class="sub">You have <b>2 tries</b> left. Take your time.</p></div>
+        <div class="stack"><button class="btn" type="button">Try again</button><button class="linkbtn" type="button">I’m not sure of my PIN</button></div></div><div class="homebar" aria-hidden="true"></div></div></div>
+      <figcaption><span class="cap-step">STATE · wrong PIN</span><p class="cap-title">Wrong PIN</p><p class="cap-note">Tries remaining shown; help offered before the last try.</p></figcaption></figure>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Recovery: Your card PIN is blocked"><div class="scr">
+        <div class="center"><div class="orb c" aria-hidden="true">🔒</div><h3 class="title">Your card PIN is blocked</h3><p class="sub">For safety it locks after three wrong tries. You can reset it and pick up where you left off.</p></div>
+        <div class="stack"><button class="btn" type="button">How to reset my PIN</button><button class="btn sec" type="button">Later</button></div></div><div class="homebar" aria-hidden="true"></div></div></div>
+      <figcaption><span class="cap-step">STATE · blocked PIN</span><p class="cap-title">Blocked PIN</p><p class="cap-note">CAN / reset detail lives here in context, not on the calm primary screens. Resume after reset.</p></figcaption></figure>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Recovery: Lost the card, reposition"><div class="scr">
+        <div class="center"><div class="orb w" aria-hidden="true">📶</div><h3 class="title">Lost the card</h3><p class="sub">Line up the top of your phone with the card and hold still.</p></div>
+        <div class="stack"><button class="btn" type="button">Try the tap again</button><button class="btn sec" type="button">Cancel</button></div></div><div class="homebar" aria-hidden="true"></div></div></div>
+      <figcaption><span class="cap-step">STATE · NFC lost</span><p class="cap-title">NFC interrupted</p><p class="cap-note">Auto-resume the read; never restart the whole flow. Cancel always present.</p></figcaption></figure>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Recovery: This phone can’t read your card"><div class="scr">
+        <div class="center"><div class="orb" aria-hidden="true">📱</div><h3 class="title">This phone can’t read your card</h3><p class="sub">It doesn’t have the chip reader (NFC) needed. You can still add your ID another way.</p></div>
+        <button class="btn" type="button">See other ways to add</button></div><div class="homebar" aria-hidden="true"></div></div></div>
+      <figcaption><span class="cap-step">STATE · unsupported device</span><p class="cap-title">Unsupported device</p><p class="cap-note">Detected before the tap; routed to alternatives, not a blank failure.</p></figcaption></figure>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Recovery: Couldn’t add your ID, reason shown"><div class="scr">
+        <div class="center"><div class="orb c" aria-hidden="true">✕</div><h3 class="title">Couldn’t add your ID</h3><p class="sub">Bundesdruckerei couldn’t confirm your details. <b>Reason:</b> the card has expired.</p></div>
+        <div class="stack"><button class="btn" type="button">Try again</button><button class="linkbtn" type="button">Contact the issuer</button></div></div><div class="homebar" aria-hidden="true"></div></div></div>
+      <figcaption><span class="cap-step">STATE · issuer rejection</span><p class="cap-title">Issuer rejection</p><p class="cap-note">The exact human reason from the issuer, plus retry and a real contact path.</p></figcaption></figure>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Recovery: The connection dropped, progress saved"><div class="scr">
+        <div class="center"><div class="orb w" aria-hidden="true">↻</div><h3 class="title">The connection dropped</h3><p class="sub">Your progress is saved. You can pick up right where you left off.</p></div>
+        <div class="stack"><button class="btn" type="button">Resume</button><button class="btn sec" type="button">Later</button></div></div><div class="homebar" aria-hidden="true"></div></div></div>
+      <figcaption><span class="cap-step">STATE · timeout</span><p class="cap-title">Timeout</p><p class="cap-note">Saved progress + resume; same pattern for any network step.</p></figcaption></figure>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Recovery: Still preparing, taking longer than usual"><div class="scr">
+        <div class="center"><div class="orb" aria-hidden="true">⏳</div><h3 class="title">Still preparing</h3><p class="sub">This is taking longer than usual at the issuer. You don’t need to wait here.</p></div>
+        <div class="stack"><button class="btn" type="button">Notify me when ready</button><button class="linkbtn" type="button">Check status</button></div></div><div class="homebar" aria-hidden="true"></div></div></div>
+      <figcaption><span class="cap-step">STATE · pending too long</span><p class="cap-title">Pending too long</p><p class="cap-note">Honest about issuer delay; converts waiting into a notification + status on the home card.</p></figcaption></figure>
+    <figure class="frame"><div class="phone"><div class="statusbar" aria-hidden="true"><span>9:41</span><span>5G</span></div><div class="notch" aria-hidden="true"></div>
+      <div class="screen" role="group" aria-label="Returning: Welcome back, resume adding your National ID"><div class="scr">
+        <div class="center" style="justify-content:flex-start;padding-top:8px"><div class="orb" aria-hidden="true">👋</div><h3 class="title">Welcome back</h3><p class="sub">You were adding your <b>National ID</b>. Want to finish?</p></div>
+        <div class="spring"></div><div class="stack"><button class="btn" type="button">Continue</button><button class="btn sec" type="button">Start over</button></div></div><div class="homebar" aria-hidden="true"></div></div></div>
+      <figcaption><span class="cap-step">STATE · returning / interrupted</span><p class="cap-title">Returning &amp; interrupted session</p><p class="cap-note">A resumed session is greeted, not reset; continue or start over.</p></figcaption></figure>
   </div>
 </div></section>
 
-<!-- =================== ACCESSIBILITY =================== -->
+<!-- ACCESSIBILITY -->
 <section id="a11y"><div class="wrap">
-  <div class="sec-head"><span class="eyebrow">Built to be tested with people aged ~65–85</span>
+  <div class="sec-head"><span class="eyebrow">Validated for large text, VoiceOver &amp; older users</span>
     <h2>Accessibility is a design constraint, not a pass at the end</h2>
-    <p>Use the <b>“Aa Large text”</b> toggle at the top to see every screen scale. The rules below are baked into these frames.</p>
+    <p>Use the <b>“Aa Large text”</b> button at the top to scale every screen. Full method and results: <code>docs/ux/accessibility-validation.md</code>. Empirical testing with people aged ~65–85 is the remaining gate before this is called final.</p>
   </div>
   <div class="cols">
-    <div class="panel"><h3>What we hold to</h3><ul>
-      <li><b>Large, adjustable type</b> — the whole prototype honours a large-text setting (toggle above); nothing is pinned to a tiny size.</li>
-      <li><b>44&nbsp;pt minimum controls</b>, full-width primary buttons, generous spacing between tap targets.</li>
-      <li><b>High contrast</b> — dark text on light (and the reverse in dark mode); no low-contrast grey for anything a person must read or do.</li>
-      <li><b>No card-within-card</b> — flat grouped rows and dividers, so structure is scannable, not nested boxes.</li>
-      <li><b>Critical instructions stay on screen</b> — never below the fold; the primary action is always reachable without scrolling.</li>
-      <li><b>Plain verbs</b> — Add, Check, Tap, Confirm, Ready; no “PID”, no protocol words, no jargon.</li>
-      <li><b>Reduced motion</b> respected; the tap animation is decorative only, with a text status beside it.</li>
+    <div class="panel"><h3>Built in</h3><ul>
+      <li><b>Real controls, real reading order</b> — every action is a button; each screen is a labelled group; reading order equals visual order (no screen is a single flat image).</li>
+      <li><b>Adjustable large text</b> — the whole prototype honours the large-text toggle; nothing is pinned tiny.</li>
+      <li><b>44 pt minimum targets</b>, full-width primary buttons, generous spacing.</li>
+      <li><b>High contrast</b> both themes; no low-contrast grey for anything a person must read or do.</li>
+      <li><b>Flat structure</b> — grouped rows and dividers, no card-within-card; criticals stay on screen.</li>
+      <li><b>Plain verbs</b> — Add, Check, Tap, Confirm, Ready; no “PID”, no protocol words.</li>
+      <li><b>Reduced motion</b> respected; the tap animation is decorative with a spoken status beside it.</li>
     </ul></div>
-    <div class="panel"><h3>VoiceOver &amp; testing</h3><ul>
-      <li>Every screen has a reading order and spoken labels (expand “VoiceOver order &amp; labels” under each frame).</li>
-      <li>Screens announce as a heading first, then context, then actions — so a listener knows where they are before what to do.</li>
-      <li>Live regions narrate progress and interruptions (“Reading your card… connection lost, reposition”).</li>
-      <li><b>Clickable prototype:</b> this page is intended for moderated sessions — sit beside a participant, let them talk through “Add your National ID” and “Prove your age”, and watch where hesitation happens (the PIN question and the tap are the moments to study).</li>
-      <li><b>No time claims</b> shown to users until measured with the real Ausweis SDK, network, issuer, and PIN-recovery paths.</li>
+    <div class="panel"><h3>How we validate before “final”</h3><ul>
+      <li><b>Large text:</b> render at the large setting and confirm no clipping and every control reachable.</li>
+      <li><b>VoiceOver:</b> traverse each screen — heading first, then context, then actions; live regions narrate the tap and preparing states.</li>
+      <li><b>Contrast &amp; targets:</b> WCAG AA (AAA where feasible) and ≥44 pt, checked against the tokens.</li>
+      <li><b>Older users (65–85):</b> moderated sessions on the two tasks — “add your National ID”, “prove your age” — watching the PIN question and the tap. Protocol in the validation doc.</li>
     </ul></div>
   </div>
 </div></section>
 
 <footer><div class="wrap">
   <p>Concept prototype for internal UX direction and moderated user testing — a design proposal, not a shipping product or an official government interface. Issuer names and personal details are illustrative.</p>
-  <p class="mono">Framing grounded in: Android credential-holder integration (developer.android.com/identity/digital-credentials/credential-holder) · Apple IdentityDocumentServices provider, with its own authorization UI (developer.apple.com/documentation/identitydocumentservices) · EUDI ARF Topic F — consent &amp; relying-party authentication remain with the wallet (eudi.dev/2.9.0/discussion-topics/f-digital-credential-api). Full write-up: docs/ux/issuance-first-proposal.md.</p>
+  <p class="mono">Boundary grounded in: Android credential-holder integration (developer.android.com/identity/digital-credentials/credential-holder) · Apple IdentityDocumentServices, provider-owned authorization UI (developer.apple.com/documentation/identitydocumentservices) · EUDI ARF Topic F — consent &amp; relying-party authentication remain with the wallet (eudi.dev/2.9.0/discussion-topics/f-digital-credential-api). Full write-up: docs/ux/issuance-first-proposal.md · validation: docs/ux/accessibility-validation.md.</p>
 </div></footer>
 
 <script>
-  (function(){
-    var btn=document.getElementById('lg'), root=document.documentElement;
-    btn.addEventListener('click',function(){
-      var on=root.style.getPropertyValue('--ui').trim()==='1.28';
-      root.style.setProperty('--ui', on?'1':'1.28');
-      btn.setAttribute('aria-pressed', on?'false':'true');
-    });
-  })();
+  (function(){var b=document.getElementById('lg'),r=document.documentElement;
+    b.addEventListener('click',function(){var on=r.style.getPropertyValue('--ui').trim()==='1.3';
+      r.style.setProperty('--ui',on?'1':'1.3');b.setAttribute('aria-pressed',on?'false':'true');});})();
 </script>
 </body>
 </html>
