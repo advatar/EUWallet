@@ -59,6 +59,10 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         # The xcframework vends the `wallet_coreFFI` clang module via its bundled module.modulemap.
         OTHER_LDFLAGS: "-lc++"
+        # AusweisApp 2.5.4's official module map still loads its deprecated compatibility header
+        # alongside AusweisApp.h. Suppress only that upstream pragma message; our adapter imports
+        # the supported Swift wrapper and never imports AusweisApp2.h directly.
+        OTHER_SWIFT_FLAGS: "$(inherited) -Xcc -Wno-#pragma-messages"
     postBuildScripts:
       - name: Verify installable app bundle
         script: '"${SRCROOT}/verify-app-bundle.sh" "${TARGET_BUILD_DIR}/${WRAPPER_NAME}"'

@@ -235,6 +235,11 @@ operational solution needed to enter those processes.
       explicitly to `MainActor`; 143 Swift tests and the Xcode simulator build pass, and a fresh
       install plus issuance launch remained alive without publication, crash, assertion, or signal
       errors in the simulator log.
+- [x] [#64](https://github.com/advatar/EUWallet/issues/64): removed the remaining app-owned SwiftUI
+      and official AusweisApp integration deprecation warnings from device builds without
+      patching generated DerivedData or weakening the pinned production adapter. A clean unsigned
+      physical-device Debug build contains neither diagnostic, 143 Swift tests pass, and all eight
+      native consumer XCUITests pass.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror

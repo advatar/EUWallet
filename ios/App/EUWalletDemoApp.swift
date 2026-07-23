@@ -28,7 +28,7 @@ struct ContentView: View {
         }
         // Derive coarse navigation milestones from what the core rendered — a thin mapping, NOT
         // protocol logic (the machine never sees credential data).
-        .onChange(of: model.phase) { phase in
+        .onChange(of: model.phase) { _, phase in
             switch phase {
             case .screen: nav.send(.startPresentation)
             case .done, .failed: nav.send(.presentationCompleted)
