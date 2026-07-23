@@ -156,6 +156,12 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
+- [ ] [#58](https://github.com/advatar/EUWallet/issues/58): implement the approved consumer Add and
+      Prove experience at full native visual fidelity rather than leaving the strict screen
+      contracts behind a basic system-control renderer. Land the iOS/TestFlight slice first with
+      coherent visual tokens, document/trust/status cards, progress and recovery treatments,
+      externalisable copy, Dynamic Type, VoiceOver, reduced-motion and large-target verification;
+      then bind equivalent Android Compose screens to the existing `WalletScreen` contract.
 - [x] [Landing #1](https://github.com/advatar/euro-wallet-echo/issues/1): refreshed the public landing
       page against the current `main` evidence, correct superseded OpenID4VP/PID/profile claims,
       describe official native adapters and process-death recovery without overstating deployment,
