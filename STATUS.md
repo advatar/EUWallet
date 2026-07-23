@@ -206,6 +206,12 @@ operational solution needed to enter those processes.
       `ios/EUWalletDemo.xcodeproj`. Reset only `EUWalletDemo-*` DerivedData and
       reopen the project from this repository's `main` before validating the
       simulator install.
+- [x] [#59](https://github.com/advatar/EUWallet/issues/59): reconcile every local and remote topic
+      branch against `origin/main`, distinguish ancestry, patch-equivalence and intentional
+      supersession from genuinely missing work, run the complete applicable regression suite, and
+      delete only branches whose effective changes are verified on or superseded by `main`. The
+      complete disposition and green regression evidence are recorded in
+      `docs/certification-evidence/branch-reconciliation-2026-07-23.md`.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror
