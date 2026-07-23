@@ -23,5 +23,15 @@ final class ConsumerDesignTests: XCTestCase {
             [.qrCode, .verifiedLink])
         XCTAssertEqual(ConsumerIssuanceEntryPolicy.addActionTitle, "Scan a QR code")
     }
+
+    func testSettingsCopyIsConsumerFacingAndProtocolFree() {
+        let copy = ConsumerSettingsCopy.allText.joined(separator: " ").lowercased()
+        for developerTerm in ["openid", "oid4", "ffi", "credential", "protocol", "debug"] {
+            XCTAssertFalse(copy.contains(developerTerm), "Settings copy exposed \(developerTerm)")
+        }
+        XCTAssertTrue(copy.contains("nothing is shared until"))
+        XCTAssertTrue(copy.contains("stays private"))
+        XCTAssertTrue(copy.contains("protected"))
+    }
 }
 #endif

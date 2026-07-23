@@ -68,7 +68,7 @@ struct ContentView: View {
         }
     }
 
-    /// UI-test / screenshot affordance: `-autostart presentation|payment|history|catalogue`.
+    /// UI-test / screenshot affordance: `-autostart presentation|payment|history|catalogue|settings`.
     private func handleLaunchArguments() {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-autostart"), i + 1 < args.count else { return }
@@ -112,6 +112,9 @@ struct ContentView: View {
         case "catalogue":
             nav.send(.finishedOnboarding)
             nav.send(.openCatalogue)
+        case "settings":
+            nav.send(.finishedOnboarding)
+            nav.send(.openSettings)
         default: break
         }
     }
@@ -225,8 +228,6 @@ struct HistoryView: View {
                 .listStyle(.plain)
             }
             HStack(spacing: 12) {
-                Button("Done", action: onBack).buttonStyle(.borderedProminent)
-                Spacer()
                 Button {
                     model.exportPreview = model.makeExport()
                 } label: {
@@ -241,6 +242,13 @@ struct HistoryView: View {
             .font(.subheadline)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .navigationTitle("Activity")
+        .navigationBarTitleDisplayMode(.large)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done", action: onBack)
+            }
+        }
         .sheet(item: $model.exportPreview) { preview in
             ExportSheet(preview: preview)
         }
@@ -387,25 +395,86 @@ struct CatalogueView: View {
                 }
                 .listStyle(.plain)
             }
-            Button("Back", action: onBack).buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .navigationTitle("Document catalogue")
+        .navigationBarTitleDisplayMode(.large)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done", action: onBack)
+            }
+        }
     }
 }
 
 /// App-shell settings (no core involvement); back returns home via `.cancelled`.
 struct SettingsView: View {
     let onBack: () -> Void
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Label("Protected on this device", systemImage: "lock.shield")
-                .font(.headline)
-            Text("You will always see what an organisation is requesting before anything is shared.")
-                .font(.callout).foregroundStyle(.secondary)
-            Spacer()
-            Button("Back", action: onBack).buttonStyle(.borderedProminent)
+        List {
+            Section("Privacy") {
+                SettingsInfoRow(
+                    systemImage: "checkmark.shield.fill",
+                    title: ConsumerSettingsCopy.approvalTitle,
+                    detail: ConsumerSettingsCopy.approvalDetail)
+                SettingsInfoRow(
+                    systemImage: "eye.slash.fill",
+                    title: ConsumerSettingsCopy.minimumDataTitle,
+                    detail: ConsumerSettingsCopy.minimumDataDetail)
+            }
+
+            Section {
+                SettingsInfoRow(
+                    systemImage: "lock.shield.fill",
+                    title: ConsumerSettingsCopy.deviceTitle,
+                    detail: ConsumerSettingsCopy.deviceDetail)
+                SettingsInfoRow(
+                    systemImage: "person.badge.key.fill",
+                    title: ConsumerSettingsCopy.confirmationTitle,
+                    detail: ConsumerSettingsCopy.confirmationDetail)
+            } header: {
+                Text("On this iPhone")
+            } footer: {
+                Text("You can review recent activity from the wallet home.")
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(ConsumerDesign.paper)
+        .navigationTitle("Settings")
+        .navigationBarTitleDisplayMode(.large)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done", action: onBack)
+            }
+        }
+    }
+}
+
+private struct SettingsInfoRow: View {
+    let systemImage: String
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.title3)
+                .foregroundStyle(ConsumerDesign.brand)
+                .frame(width: 30, height: 30)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .combine)
     }
 }
 

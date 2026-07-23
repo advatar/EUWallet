@@ -17,6 +17,25 @@ public enum ConsumerIssuanceEntryPolicy {
     public static let addActionTitle = "Scan a QR code"
 }
 
+public enum ConsumerSettingsCopy {
+    public static let approvalTitle = "You approve every request"
+    public static let approvalDetail =
+        "Nothing is shared until you review the organisation, why it is asking, and the information requested."
+    public static let minimumDataTitle = "Only share what is needed"
+    public static let minimumDataDetail =
+        "Before you approve, the wallet shows what will be shared and what stays private."
+    public static let deviceTitle = "Protected on this iPhone"
+    public static let deviceDetail = "Your documents and activity stay protected on this iPhone."
+    public static let confirmationTitle = "Your phone confirms it is you"
+    public static let confirmationDetail =
+        "A protected action requires confirmation with your device security."
+
+    public static let allText = [
+        approvalTitle, approvalDetail, minimumDataTitle, minimumDataDetail,
+        deviceTitle, deviceDetail, confirmationTitle, confirmationDetail,
+    ]
+}
+
 /// Visual tokens from the approved Add & Prove prototype. These are presentation-only: trusted
 /// names, claims, retention and decisions continue to come exclusively from ScreenDescription.
 public enum ConsumerDesign {

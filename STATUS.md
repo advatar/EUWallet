@@ -218,6 +218,11 @@ operational solution needed to enter those processes.
       by QR or verified link. Swift 6 builds with 142 tests passing; the Xcode simulator target
       builds with a verified executable, and both dark- and light-appearance screenshots were
       visually checked on the target simulator.
+- [x] [#61](https://github.com/advatar/EUWallet/issues/61): replace the placeholder Settings screen
+      and inconsistent utility-screen dismissal with accessible, consumer-facing native navigation
+      and content. Swift 6 builds with 143 tests passing; the Xcode simulator build produces a
+      verified executable, installs and launches on the target simulator, and Settings was visually
+      checked in both dark and light appearances.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror
