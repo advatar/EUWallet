@@ -156,12 +156,13 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
-- [ ] [Landing #2](https://github.com/advatar/euro-wallet-echo/issues/2): explain how a future
+- [x] [Landing #2](https://github.com/advatar/euro-wallet-echo/issues/2): explain how a future
       fully-green, officially conformant and version-pinned wallet can act as a known-good
       interoperability counterpart for issuer, verifier and wallet implementations developed in
       parallel. Cover reproducible traces, negative cases, differential results and evidence
       capture without presenting this role as a replacement for official conformance,
-      certification or independent audit.
+      certification or independent audit. Published on landing `main` with scoped lint, typecheck
+      and production-build verification.
 - [ ] [#58](https://github.com/advatar/EUWallet/issues/58): implement the approved consumer Add and
       Prove experience at full native visual fidelity rather than leaving the strict screen
       contracts behind a basic system-control renderer. Land the iOS/TestFlight slice first with
