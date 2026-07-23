@@ -223,6 +223,9 @@ operational solution needed to enter those processes.
       and content. Swift 6 builds with 143 tests passing; the Xcode simulator build produces a
       verified executable, installs and launches on the target simulator, and Settings was visually
       checked in both dark and light appearances.
+- [ ] [#62](https://github.com/advatar/EUWallet/issues/62): complete a screen-by-screen consumer UI
+      coherence audit across Home, Add, consent, issuance, recovery, Activity and Catalogue; remove
+      remaining duplicated/demo-facing presentation and verify every journey in light and dark mode.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror
