@@ -156,6 +156,11 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
+- [ ] [Landing #1](https://github.com/advatar/euro-wallet-echo/issues/1): refresh the public landing
+      page against the current `main` evidence, correct superseded OpenID4VP/PID/profile claims,
+      describe official native adapters and process-death recovery without overstating deployment,
+      and publish an accurate TestFlight/certification status after typecheck, lint and production
+      build verification.
 - [x] [#54](https://github.com/advatar/EUWallet/issues/54): land the complete consumer Add and Prove
       design vocabulary: bounded trusted offer/list/detail contracts; eID PIN/NFC,
       preparing/ready and recovery screens; wallet-owned hash-bound offer approval; signed issuer
