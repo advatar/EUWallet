@@ -1,8 +1,8 @@
-# Android wallet shell foundation
+# Android wallet
 
-This directory is a reproducible Android library project for the first production shell boundary.
-It is deliberately an AAR rather than a pretend application: the repository does not yet contain
-an Android UI, a generated UniFFI/JNI bridge, or approved national-wallet service adapters.
+This directory contains an installable consumer application (`wallet-app`) and its security- and
+protocol-facing Android library (`wallet-shell`). QR and verified-link credential offers are the
+primary add-document entry points; the app does not expose an obsolete document-type catalogue.
 
 ## What is implemented
 
@@ -23,6 +23,9 @@ an Android UI, a generated UniFFI/JNI bridge, or approved national-wallet servic
   refuses to run unless its detector identifies an emulator. It is absent from release artifacts.
 - A blocking, redirect-disabled, HTTPS-only `UrlConnectionHttpClient` with finite timeouts and a
   one-MiB response limit. Run the executor on a worker thread.
+- A high-contrast, large-target Compose application shell with wallet, activity and settings
+  destinations, standards-based credential-offer deep links, explicit consent messaging, adaptive
+  orientation support, backup exclusion, and Compose instrumentation tests.
 
 The production signing policy requires hardware-enforced user authentication with a 30-second
 validity window by default. The host application must complete an allowed biometric or device-
@@ -37,8 +40,8 @@ Install Android SDK platform 36 and use JDK 17. From this directory:
 export JAVA_HOME=/path/to/jdk-17
 export ANDROID_HOME=/path/to/android-sdk
 ./gradlew :wallet-shell:testDebugUnitTest
-./gradlew :wallet-shell:lint
-./gradlew :wallet-shell:assembleRelease
+./gradlew :wallet-app:assembleDebug :wallet-app:lintDebug
+./gradlew :wallet-app:connectedDebugAndroidTest # with an emulator or device attached
 ```
 
 The project does not require `local.properties`; CI should supply `ANDROID_HOME` or `sdk.dir` by
@@ -46,7 +49,7 @@ its normal secure mechanism.
 
 ## Required production integration
 
-This foundation does not make the Android wallet launch-ready. The host application still needs:
+This application is not yet Android launch-ready. It still needs:
 
 - the generated Rust bridge and lifecycle-safe engine adapter;
 - approved durable anti-replay storage (there is intentionally no in-memory production fallback);
@@ -54,7 +57,8 @@ This foundation does not make the Android wallet launch-ready. The host applicat
   and wallet-to-wallet transport;
 - national-wallet key enrollment/attestation and device-integrity policy in addition to local
   `KeyInfo` checks;
-- biometric/device-credential UX, Android UI and accessibility, deep links, secure backup/migration
-  policy, telemetry/privacy controls, and physical-device interoperability/conformance testing.
+- complete biometric/device-credential UX, every core-rendered journey, Credential Manager holder
+  registration, secure migration policy, telemetry/privacy controls, and physical-device
+  interoperability/conformance testing.
 
 Until those adapters exist, unsupported effects throw instead of fabricating progress.

@@ -4,6 +4,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -262,13 +263,15 @@ class DurableLifecycleCoordinatorTest {
         oldEngine.response =
             """[{"type":"sign","payload":[115,101,99,114,101,116]}]"""
         var oldLifecycle: DurableLifecycleCoordinator? = coordinator(oldEngine, sharedStore)
-        oldLifecycle!!.bootstrap(environment)
+        val activeLifecycle = requireNotNull(oldLifecycle)
+        activeLifecycle.bootstrap(environment)
         assertThrows(DurableLifecycleException::class.java) {
-            oldLifecycle!!.handleEventJson("""{"type":"start"}""")
+            activeLifecycle.handleEventJson("""{"type":"start"}""")
         }
-        assertTrue(oldLifecycle!!.hasPendingCommit)
+        assertTrue(activeLifecycle.hasPendingCommit)
 
         oldLifecycle = null
+        assertNull(oldLifecycle)
         val restartedEngine = AndroidScriptedDurableEngine()
         val restarted = coordinator(restartedEngine, sharedStore)
         restarted.bootstrap(environment)

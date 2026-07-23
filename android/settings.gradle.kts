@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "EUWalletAndroid"
 include(":wallet-shell")
+include(":wallet-app")
