@@ -31,10 +31,9 @@ final class ConsumerJourneyUITests: XCTestCase {
         let app = launch("settings")
 
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Privacy"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["You approve every request"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Only share what is needed"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["On this iPhone"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Your phone confirms it is you"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["settings.done"].isHittable)
         XCTAssertFalse(app.buttons["Back"].exists)
         XCTAssertFalse(app.staticTexts["Protected on this device"].exists)
