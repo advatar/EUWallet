@@ -200,6 +200,12 @@ operational solution needed to enter those processes.
       Keep the generated product, executable, bundle plist and TestFlight display name coherent;
       Xcode must never stage `EUWallet.app` without the exact executable named by
       `CFBundleExecutable`.
+    - [x] Diagnose the recurring simulator `MissingBundleExecutable` failure:
+      Xcode was running the unrelated, dirty `EUWallet2/IOSWallet/EUWallet.xcodeproj`
+      checkout instead of this repository's generated
+      `ios/EUWalletDemo.xcodeproj`. Reset only `EUWalletDemo-*` DerivedData and
+      reopen the project from this repository's `main` before validating the
+      simulator install.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror
