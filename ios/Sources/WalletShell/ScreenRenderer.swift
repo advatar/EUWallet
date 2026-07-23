@@ -22,17 +22,29 @@ public struct ScreenRenderer: View {
     @ViewBuilder private var content: some View {
         switch screen {
         case .loading:
-            ProgressView("Loading…")
+            JourneyProgressView(
+                title: "Just a moment",
+                message: "Your wallet is preparing the next step.")
         case .error(let code, let message):
-            VStack(spacing: 12) {
-                Image(systemName: "exclamationmark.triangle").font(.largeTitle)
-                Text("Something went wrong").font(.headline)
-                Text("Please try again. Nothing was shared.").font(.body)
+            JourneyChoiceView(
+                title: "Something went wrong",
+                message: "Nothing was shared. You can safely return to your wallet and try again.",
+                icon: "exclamationmark.triangle.fill",
+                iconTint: ConsumerDesign.critical,
+                iconBackground: ConsumerDesign.criticalBackground,
+                primary: "Return to wallet",
+                secondary: nil,
+                onPrimary: onDecline,
+                onSecondary: {})
 #if DEBUG
-                Text(message).font(.caption).foregroundStyle(.secondary)
-                Text(code).font(.caption).foregroundStyle(.secondary)
+                .overlay(alignment: .bottom) {
+                    Text("\(code): \(message)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .padding(.bottom, 84)
+                        .accessibilityHidden(true)
+                }
 #endif
-            }.accessibilityElement(children: .combine)
         case .consent(
             let rp,
             let purpose,
@@ -83,11 +95,30 @@ public struct ScreenRenderer: View {
         case .issuanceReady(let document):
             IssuanceStatusView(document: document, ready: true, onDone: onConsent)
         case .issuanceNeedsAttention(let document, let recovery):
-            IssuanceNeedsAttentionView(document: document, recovery: recovery, onContinue: onConsent)
+            IssuanceNeedsAttentionView(
+                document: document,
+                recovery: recovery,
+                onContinue: onConsent,
+                onLater: onDecline)
         case .issuanceRecovery(let recovery):
             IssuanceRecoveryView(recovery: recovery, onPrimary: onConsent, onSecondary: onDecline)
         case .other(let name):
-            Text(name)
+            JourneyChoiceView(
+                title: "This step isn’t available",
+                message: "Return to your wallet and try again.",
+                icon: "exclamationmark.circle",
+                iconTint: ConsumerDesign.warning,
+                iconBackground: ConsumerDesign.warningBackground,
+                primary: "Return to wallet",
+                secondary: nil,
+                onPrimary: onDecline,
+                onSecondary: {})
+#if DEBUG
+                .overlay(alignment: .bottom) {
+                    Text(name).font(.caption2).foregroundStyle(.tertiary)
+                        .padding(.bottom, 84).accessibilityHidden(true)
+                }
+#endif
         }
     }
 }
@@ -155,27 +186,45 @@ private struct IssuanceOfferView: View {
     let onAdd: () -> Void
     let onDecline: () -> Void
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("ADD A DOCUMENT").font(.caption.weight(.bold)).tracking(1.5).foregroundStyle(ConsumerDesign.brand)
-            Text("Add your \(offer.documentName)").font(.largeTitle.bold())
-            HStack(spacing: 12) {
-                Image(systemName: "checkmark.seal.fill").foregroundStyle(ConsumerDesign.good)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(offer.issuerName).font(.headline)
-                    Text("Verified issuer").font(.subheadline).foregroundStyle(ConsumerDesign.good)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("ADD A DOCUMENT")
+                    .font(.caption.weight(.bold))
+                    .tracking(1.5)
+                    .foregroundStyle(ConsumerDesign.brand)
+                Text("Add your \(offer.documentName)")
+                    .font(.largeTitle.bold())
+                    .accessibilityAddTraits(.isHeader)
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.seal.fill").foregroundStyle(ConsumerDesign.good)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(offer.issuerName).font(.headline)
+                        Text("Verified issuer").font(.subheadline).foregroundStyle(ConsumerDesign.good)
+                    }
+                }.consumerSurface()
+                Text("Use this document to prove who you are when you choose.")
+                    .foregroundStyle(.secondary)
+                DisclosureGroup("What will be added") {
+                    ForEach(offer.attributes.filter { $0 != "portrait" }, id: \.self) {
+                        Label(ConsumerCopy.claimName($0), systemImage: "checkmark")
+                    }
+                    if offer.portraitRequired {
+                        Label("Portrait", systemImage: "person.crop.rectangle")
+                    }
                 }
-            }.consumerSurface()
-            Text("Use this document to prove who you are when you choose.").foregroundStyle(.secondary)
-            DisclosureGroup("What will be added") {
-                ForEach(offer.attributes.filter { $0 != "portrait" }, id: \.self) {
-                    Label(ConsumerCopy.claimName($0), systemImage: "checkmark")
-                }
-                if offer.portraitRequired { Label("Portrait", systemImage: "person.crop.rectangle") }
             }
-            Spacer()
-            Button("Add document", action: onAdd).buttonStyle(ConsumerPrimaryButtonStyle())
-            Button("Not now", role: .cancel, action: onDecline).buttonStyle(ConsumerSecondaryButtonStyle())
-        }.padding(20)
+            .padding(20)
+        }
+        .safeAreaInset(edge: .bottom) {
+            ConsumerActionBar {
+                Button("Add document", action: onAdd)
+                    .buttonStyle(ConsumerPrimaryButtonStyle())
+                    .accessibilityIdentifier("issuance.add")
+                Button("Not now", role: .cancel, action: onDecline)
+                    .buttonStyle(ConsumerSecondaryButtonStyle())
+                    .accessibilityIdentifier("issuance.cancel")
+            }
+        }
     }
 }
 
@@ -223,8 +272,22 @@ private struct IssuanceStatusView: View {
     }
 }
 private struct IssuanceNeedsAttentionView: View {
-    let document: DocumentSummary; let recovery: IssuanceRecovery; let onContinue: () -> Void
-    var body: some View { JourneyChoiceView(title: "One quick step to finish", message: "Your progress is saved. Continue when you’re ready.", icon: "exclamationmark.circle", primary: "Continue", secondary: "Later", onPrimary: onContinue, onSecondary: {}) }
+    let document: DocumentSummary
+    let recovery: IssuanceRecovery
+    let onContinue: () -> Void
+    let onLater: () -> Void
+    var body: some View {
+        JourneyChoiceView(
+            title: "One quick step to finish",
+            message: "Your progress is saved. Continue when you’re ready.",
+            icon: "exclamationmark.circle",
+            iconTint: ConsumerDesign.warning,
+            iconBackground: ConsumerDesign.warningBackground,
+            primary: "Continue",
+            secondary: "Later",
+            onPrimary: onContinue,
+            onSecondary: onLater)
+    }
 }
 private struct IssuanceRecoveryView: View {
     let recovery: IssuanceRecoveryScreen; let onPrimary: () -> Void; let onSecondary: () -> Void
@@ -235,17 +298,77 @@ private struct IssuanceRecoveryView: View {
     private var message: String { if let attempts = recovery.attemptsRemaining { return "You have \(attempts) tries left. Take your time." }; return recovery.canResume ? "Your progress is saved, so you can continue where you left off." : "Nothing was added. Your existing wallet information is safe." }
 }
 private struct JourneyChoiceView: View {
-    let title: String; let message: String; let icon: String; let primary: String; let secondary: String
-    let onPrimary: () -> Void; let onSecondary: () -> Void
+    let title: String
+    let message: String
+    let icon: String
+    var iconTint: Color = ConsumerDesign.brand
+    var iconBackground: Color? = nil
+    let primary: String
+    let secondary: String?
+    let onPrimary: () -> Void
+    let onSecondary: () -> Void
+
     var body: some View {
         VStack(spacing: 20) {
-            ConsumerStatusOrb(systemImage: icon)
+            Spacer(minLength: 20)
+            ConsumerStatusOrb(systemImage: icon, tint: iconTint, background: iconBackground)
             Text(title).font(.largeTitle.bold()).multilineTextAlignment(.center)
+                .accessibilityAddTraits(.isHeader)
             Text(message).font(.title3).foregroundStyle(ConsumerDesign.mutedInk).multilineTextAlignment(.center)
             Spacer()
-            Button(primary, action: onPrimary).buttonStyle(ConsumerPrimaryButtonStyle())
-            Button(secondary, action: onSecondary).buttonStyle(ConsumerSecondaryButtonStyle())
-        }.padding(20)
+        }
+        .padding(20)
+        .safeAreaInset(edge: .bottom) {
+            ConsumerActionBar {
+                Button(primary, action: onPrimary).buttonStyle(ConsumerPrimaryButtonStyle())
+                if let secondary {
+                    Button(secondary, action: onSecondary).buttonStyle(ConsumerSecondaryButtonStyle())
+                }
+            }
+        }
+    }
+}
+
+private struct JourneyProgressView: View {
+    let title: String
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+            ConsumerStatusOrb(systemImage: "checkmark.shield.fill")
+            Text(title)
+                .font(.largeTitle.bold())
+                .multilineTextAlignment(.center)
+                .accessibilityAddTraits(.isHeader)
+            Text(message)
+                .font(.title3)
+                .foregroundStyle(ConsumerDesign.mutedInk)
+                .multilineTextAlignment(.center)
+            ProgressView()
+                .controlSize(.large)
+                .accessibilityLabel(title)
+            Spacer()
+        }
+        .padding(24)
+    }
+}
+
+private struct ConsumerActionBar<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            content
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+        .background(.bar)
     }
 }
 
@@ -257,23 +380,38 @@ struct SignConfirmationView: View {
     let onDecline: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Sign this document?").font(.headline)
-            Text(documentName).font(.title2.bold())
-            Text("Signing service: \(qtspId)").font(.subheadline)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                ConsumerStatusOrb(systemImage: "signature")
+                Text("Sign this document?")
+                    .font(.largeTitle.bold())
+                    .accessibilityAddTraits(.isHeader)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(documentName).font(.title2.bold())
+                    Label(qtspId, systemImage: "checkmark.seal.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(ConsumerDesign.good)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .consumerSurface()
+                Text("Review the document name and signing service before you approve.")
+                    .foregroundStyle(.secondary)
 #if DEBUG
-            Text("Document hash: \(documentHashHex)")
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
+                Text("Document hash: \(documentHashHex)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
 #endif
-            Spacer()
-            HStack {
+            }
+            .padding(20)
+        }
+        .safeAreaInset(edge: .bottom) {
+            ConsumerActionBar {
+                Button("Approve and sign", action: onConsent)
+                    .buttonStyle(ConsumerPrimaryButtonStyle())
                 Button("Cancel", role: .cancel, action: onDecline)
-                Spacer()
-                Button("Sign", action: onConsent).buttonStyle(.borderedProminent)
+                    .buttonStyle(ConsumerSecondaryButtonStyle())
             }
         }
-        .padding()
         .accessibilityElement(children: .contain)
     }
 }
@@ -300,19 +438,44 @@ struct PaymentConfirmationView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Confirm payment").font(.headline)
-            Text(amountText).font(.largeTitle.bold())
-            Text("to \(payee)").font(.subheadline)
-            Text(account).font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            HStack {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                ConsumerStatusOrb(systemImage: "creditcard.fill")
+                Text("Confirm payment")
+                    .font(.largeTitle.bold())
+                    .accessibilityAddTraits(.isHeader)
+                Text(amountText)
+                    .font(.system(.largeTitle, design: .rounded, weight: .bold))
+                    .minimumScaleFactor(0.7)
+                    .accessibilityIdentifier("payment.amount")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Paying").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(payee).font(.title3.bold())
+                    Text("Account").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(account)
+                        .font(.subheadline.monospaced())
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .consumerSurface()
+                Label(
+                    "Your approval applies only to this amount and recipient.",
+                    systemImage: "checkmark.shield.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(20)
+        }
+        .safeAreaInset(edge: .bottom) {
+            ConsumerActionBar {
+                Button("Pay \(amountText)", action: onConsent)
+                    .buttonStyle(ConsumerPrimaryButtonStyle())
+                    .accessibilityIdentifier("payment.approve")
                 Button("Cancel", role: .cancel, action: onDecline)
-                Spacer()
-                Button("Pay \(amountText)", action: onConsent).buttonStyle(.borderedProminent)
+                    .buttonStyle(ConsumerSecondaryButtonStyle())
+                    .accessibilityIdentifier("payment.cancel")
             }
         }
-        .padding()
         .accessibilityElement(children: .contain)
     }
 }
@@ -393,7 +556,10 @@ struct ConsentView: View {
                 retentionLabel
 
                 if !notSharedClaims.isEmpty {
-                    Text("Stays in your wallet").font(.headline)
+                    Text("Not shared")
+                        .font(.headline)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     Text(notSharedClaims.map(ConsumerCopy.claimName).joined(separator: ", "))
                         .foregroundStyle(ConsumerDesign.mutedInk)
                         .padding(16)
@@ -401,19 +567,27 @@ struct ConsentView: View {
                         .background(ConsumerDesign.surfaceRaised, in: RoundedRectangle(cornerRadius: 14))
                 }
 
+            }
+            .padding(20)
+        }
+        .safeAreaInset(edge: .bottom) {
+            ConsumerActionBar {
                 if overAsk.result == .exceedsRegisteredScope {
                     Button("Don’t share", role: .cancel, action: onDecline)
                         .buttonStyle(ConsumerPrimaryButtonStyle())
+                        .accessibilityIdentifier("consent.decline")
                     Button("Share only this information", action: onConsent)
                         .buttonStyle(ConsumerSecondaryButtonStyle())
+                        .accessibilityIdentifier("consent.approve")
                 } else {
                     Button("Approve and share", action: onConsent)
                         .buttonStyle(ConsumerPrimaryButtonStyle())
+                        .accessibilityIdentifier("consent.approve")
                     Button("Don’t share", role: .cancel, action: onDecline)
                         .buttonStyle(ConsumerSecondaryButtonStyle())
+                        .accessibilityIdentifier("consent.decline")
                 }
             }
-            .padding(20)
         }
         .accessibilityElement(children: .contain)
     }

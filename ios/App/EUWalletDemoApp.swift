@@ -96,9 +96,13 @@ struct ContentView: View {
             model.showConnectSheet = true
             model.probeReferenceIssuer()
         case "presentation": nav.send(.startPresentation); model.startPresentation()
+#if DEBUG
+        case "consent":
+            nav.send(.startPresentation)
+            model.showConsentFixtureForUITest()
+#endif
         case "payment": nav.send(.startPresentation); model.startPayment()
         case "history":
-            model.seedHistoryForDemo()
             nav.send(.finishedOnboarding)
             nav.send(.openHistory)
         case "history-redacted":
@@ -240,9 +244,12 @@ struct HistoryView: View {
                 }
             }
             .font(.subheadline)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 8)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .navigationTitle("Activity")
+        .accessibilityIdentifier("activity.screen")
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -374,30 +381,31 @@ struct CatalogueView: View {
             } else {
                 List {
                     ForEach(items, id: \.id) { item in
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 10) {
                             Text(item.displayName).font(.headline)
-                            Text("\(item.id) · \(item.format)")
-                                .font(.caption.monospaced()).foregroundStyle(.secondary)
+                            Text("Information this document may contain")
+                                .font(.subheadline).foregroundStyle(.secondary)
                             ForEach(item.claims, id: \.path) { claim in
                                 HStack(spacing: 6) {
-                                    Image(systemName: claim.mandatory ? "asterisk.circle.fill" : "circle")
+                                    Image(systemName: claim.mandatory ? "checkmark.circle.fill" : "circle")
                                         .font(.caption2)
                                         .foregroundStyle(claim.mandatory ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
                                     Text(claim.displayName).font(.subheadline)
-                                    Text(claim.path).font(.caption.monospaced()).foregroundStyle(.tertiary)
+                                    Spacer()
+                                    Text(claim.mandatory ? "Required" : "Optional")
+                                        .font(.caption).foregroundStyle(.secondary)
                                 }
                             }
-                            Text("Issuers: \(item.trustedIssuers.joined(separator: ", "))")
-                                .font(.caption).foregroundStyle(.secondary)
                         }
-                        .listRowInsets(EdgeInsets(top: 10, leading: 4, bottom: 10, trailing: 4))
+                        .padding(.vertical, 6)
                     }
                 }
-                .listStyle(.plain)
+                .listStyle(.insetGrouped)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .navigationTitle("Document catalogue")
+        .accessibilityIdentifier("catalogue.screen")
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -443,10 +451,12 @@ struct SettingsView: View {
         .scrollContentBackground(.hidden)
         .background(ConsumerDesign.paper)
         .navigationTitle("Settings")
+        .accessibilityIdentifier("settings.screen")
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Done", action: onBack)
+                    .accessibilityIdentifier("settings.done")
             }
         }
     }
@@ -487,22 +497,30 @@ struct ResultView: View {
     let onDone: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 10) {
-                Image(systemName: symbol).font(.largeTitle).foregroundStyle(tint)
-                Text(message).font(.headline)
-            }
+        VStack(spacing: 18) {
+            Spacer()
+            ConsumerStatusOrb(systemImage: symbol, tint: tint, background: tint.opacity(0.12))
+            Text(message)
+                .font(.largeTitle.bold())
+                .multilineTextAlignment(.center)
+                .accessibilityAddTraits(.isHeader)
 #if DEBUG
             if !log.isEmpty {
-                Divider()
-                ForEach(Array(log.enumerated()), id: \.offset) { _, line in
-                    Text("• \(line)").font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(log.enumerated()), id: \.offset) { _, line in
+                        Text("• \(line)").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
+                .consumerSurface()
+                .accessibilityHidden(true)
             }
 #endif
             Spacer()
-            Button("Back to wallet", action: onDone).buttonStyle(.borderedProminent)
+            Button("Back to wallet", action: onDone)
+                .buttonStyle(ConsumerPrimaryButtonStyle())
+                .accessibilityIdentifier("result.done")
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(20)
+        .frame(maxWidth: .infinity)
     }
 }

@@ -84,3 +84,16 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.tests
         GENERATE_INFOPLIST_FILE: YES
         OTHER_LDFLAGS: "-lc++"
+
+  EUWalletDemoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Tests/UI
+    dependencies:
+      - target: EUWalletDemo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: EUWalletDemo

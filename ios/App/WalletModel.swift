@@ -334,6 +334,22 @@ final class WalletModel: ObservableObject {
         }
     }
 
+#if DEBUG
+    /// Deterministic visual-test fixture for the renderer. Core-to-screen correspondence is tested
+    /// separately through `EffectExecutorTests`; XCUITest owns layout, copy, actions and accessibility.
+    func showConsentFixtureForUITest() {
+        phase = .screen(.consent(
+            relyingPartyName: "Example service",
+            purpose: "Confirm that you are over 18",
+            requestedClaims: ["age_over_18"],
+            notSharedClaims: ["given_name", "family_name", "birth_date", "portrait"],
+            verifierRegistration: .registered,
+            trustMark: .eudiWallet,
+            retention: RetentionDisclosure(policy: .notStored),
+            overAsk: OverAskResult(result: .withinRegisteredScope)))
+    }
+#endif
+
     /// A pre-authorized `mso_mdoc` credential offer — the mdoc analogue of `issuance.offer`, which
     /// declares `dc+sd-jwt`. The offer format must match the issued credential's format (the core
     /// aborts on mismatch), so the mdoc issuance path advertises `mso_mdoc` up front.

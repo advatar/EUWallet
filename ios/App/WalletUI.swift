@@ -79,6 +79,7 @@ struct WalletHomeView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Your documents")
                     .font(.largeTitle.bold())
+                    .accessibilityIdentifier("home.title")
 
                 if model.credentials.isEmpty {
                     EmptyWalletView(onAdd: openCredentialOffer)
@@ -152,6 +153,7 @@ private struct EmptyWalletView: View {
                 .multilineTextAlignment(.center)
             Button(ConsumerIssuanceEntryPolicy.addActionTitle, action: onAdd)
                 .buttonStyle(ConsumerPrimaryButtonStyle())
+                .accessibilityIdentifier("home.add")
         }
         .frame(maxWidth: .infinity)
         .consumerSurface(radius: 20)

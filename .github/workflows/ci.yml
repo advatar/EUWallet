@@ -163,6 +163,10 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+      - name: Install XcodeGen
+        run: command -v xcodegen >/dev/null || brew install xcodegen
+      - name: Native consumer UI tests
+        run: ./run-ui-tests.sh
 
   android-shell:
     name: Android shell (test, lint, debug + release)
