@@ -172,6 +172,11 @@ operational solution needed to enter those processes.
       Public BankID interfaces are not an authoritative EUDI PID issuer or a source of raw passport
       chip data/portrait; production entitlement, response schema, privacy and assurance mapping
       require direct BankID confirmation. This research track is not a TestFlight blocker.
+- [ ] [#57](https://github.com/advatar/EUWallet/issues/57): make TestFlight distribution signing
+      reproducible from `ios/project.yml`, produce and validate a signed Release archive, and upload
+      it to App Store Connect. A real archive currently fails because XcodeGen erases the
+      UI-selected Development Team; the intended Team ID must be selected from the multiple local
+      accounts rather than guessed, and no matching `eu.advatar.wallet` profile is installed.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror
