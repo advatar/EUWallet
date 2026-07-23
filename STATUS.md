@@ -240,6 +240,12 @@ operational solution needed to enter those processes.
       patching generated DerivedData or weakening the pinned production adapter. A clean unsigned
       physical-device Debug build contains neither diagnostic, 143 Swift tests pass, and all eight
       native consumer XCUITests pass.
+- [x] [#65](https://github.com/advatar/EUWallet/issues/65): persisted the Apple Identity Document
+      Provider capability, its four approved mobile-document types, complete data protection,
+      NFC access and the selected Apple team in the XcodeGen source of truth. A CI regression gate
+      regenerates and verifies the contract; repeated regeneration is stable, the signed Release
+      device app contains the expected entitlements, 143 Swift tests pass, and all eight native
+      consumer XCUITests pass.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror

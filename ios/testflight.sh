@@ -18,7 +18,6 @@ cd "$(dirname "$0")"
 SCHEME=EUWalletDemo
 ARCHIVE="$PWD/build/EUWalletDemo.xcarchive"
 EXPORT="$PWD/build/export"
-ENTITLEMENTS="$PWD/EUWalletDemo.entitlements"
 
 echo "==> [1/5] Generating the Xcode project (xcodegen)"
 xcodegen generate
@@ -34,8 +33,7 @@ xcodebuild archive \
   -destination 'generic/platform=iOS' \
   -archivePath "$ARCHIVE" \
   DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
-  CODE_SIGN_STYLE=Automatic \
-  CODE_SIGN_ENTITLEMENTS="$ENTITLEMENTS"
+  CODE_SIGN_STYLE=Automatic
 
 echo "==> [4/5] Exporting a signed .ipa"
 rm -rf "$EXPORT"

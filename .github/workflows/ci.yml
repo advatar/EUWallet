@@ -165,6 +165,10 @@ jobs:
         run: swift test
       - name: Install XcodeGen
         run: command -v xcodegen >/dev/null || brew install xcodegen
+      - name: Verify Identity Document Provider capability
+        run: |
+          xcodegen generate --spec project.yml
+          ./verify-identity-document-capability.sh
       - name: Native consumer UI tests
         run: ./run-ui-tests.sh
 

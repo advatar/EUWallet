@@ -24,8 +24,9 @@ account setup, which can't be committed to the repo.
 2. **App record** in App Store Connect for bundle id `eu.advatar.wallet` (My Apps → + → New App).
 3. **App Store Connect API key** (Users and Access → Integrations → App Store Connect API → +):
    download the `AuthKey_<KEY_ID>.p8` once, and note the **Key ID** and **Issuer ID**.
-4. First archive enables the **Data Protection** capability (the app's entitlement) automatically
-   under automatic signing.
+4. The generated project preserves **Data Protection**, **NFC Tag Reading**, and the Apple
+   **Digital Credentials API – Mobile Document Provider** entitlement (EU age verification,
+   photo ID, mDL and EU PID). Automatic signing must use a profile that contains these entitlements.
 
 ## Run
 
