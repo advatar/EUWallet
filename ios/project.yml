@@ -36,11 +36,14 @@ targets:
       - package: AusweisApp2SDKWrapper
     settings:
       base:
+        # Pin the bundle wrapper and Mach-O name together. Without this, a manual/cached Xcode
+        # PRODUCT_NAME override can stage EUWallet.app while Info.plist still points elsewhere.
+        PRODUCT_NAME: EUWallet
         PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: App/Info.plist
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_CFBundleDisplayName: "Advatar Wallet"
+        INFOPLIST_KEY_CFBundleDisplayName: "EU Wallet"
         INFOPLIST_KEY_NSCameraUsageDescription: "Use the camera to scan QR codes when adding an ID or sharing information."
         INFOPLIST_KEY_NFCReaderUsageDescription: "Hold your ID card to your iPhone to add your verified ID."
         CODE_SIGN_ENTITLEMENTS: App/EUWalletDemo.entitlements
