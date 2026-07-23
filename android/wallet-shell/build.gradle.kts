@@ -40,6 +40,7 @@ kotlin {
 
 dependencies {
     implementation("com.governikus:ausweisapp:2.5.4")
+    implementation("androidx.annotation:annotation:1.9.1")
     implementation("net.java.dev.jna:jna:5.18.1@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     testImplementation("junit:junit:4.13.2")

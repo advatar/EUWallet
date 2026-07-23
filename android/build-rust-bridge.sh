@@ -24,7 +24,10 @@ cargo run -p wallet-core --bin uniffi-bindgen -- generate \
 # Kotlin 2.3 diagnoses one conversion emitted by UniFFI 0.28. Keep application warnings fatal while
 # suppressing that generator-owned diagnostic at the generated-file boundary.
 perl -pi -e \
-  's/\@file:Suppress\\("NAME_SHADOWING"\\)/\@file:Suppress("NAME_SHADOWING", "REDUNDANT_CALL_OF_CONVERSION_METHOD")/' \
+  's/\@file:Suppress\("NAME_SHADOWING"\)/\@file:Suppress("NAME_SHADOWING", "REDUNDANT_CALL_OF_CONVERSION_METHOD")/' \
+  "$GEN/uniffi/wallet_core/wallet_core.kt"
+grep -Fq \
+  '@file:Suppress("NAME_SHADOWING", "REDUNDANT_CALL_OF_CONVERSION_METHOD")' \
   "$GEN/uniffi/wallet_core/wallet_core.kt"
 
 # Production devices and Google Play use arm64. Emulator x86_64 is built in CI after its Rust
