@@ -716,6 +716,10 @@ class DeterministicGermanEidClient(
     private var lastContinuedPause: GermanEidInteractionId? = null
     private var lastSubmittedSecret: GermanEidInteractionId? = null
 
+    @get:Synchronized
+    internal val activeProviderContractForAdapter: GermanEidProviderContract
+        get() = activeContract ?: fail(GermanEidClientError.INVALID_TRANSITION)
+
     init {
         if (
             supportedApiLevels.isEmpty() ||
