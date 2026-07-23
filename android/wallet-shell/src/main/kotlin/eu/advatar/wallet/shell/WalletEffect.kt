@@ -234,7 +234,9 @@ object WalletEffectDecoder {
         )
         "issuanceRecovery" -> {
             val reason = issuanceRecovery(string(value, "reason"))
-            val attempts = if ("attemptsRemaining" in value) {
+            val attempts = if (value["attemptsRemaining"] != null &&
+                value["attemptsRemaining"] !is JsonNull
+            ) {
                 unsigned(value, "attemptsRemaining").takeIf { it in 1uL..UByte.MAX_VALUE.toULong() }
                     ?.toUByte() ?: malformed("attempts remaining outside range")
             } else null

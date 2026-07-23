@@ -79,6 +79,43 @@ class EffectExecutorTest {
     }
 
     @Test
+    fun restoredIssuanceInterruptionRendersWithoutInvokingCore() {
+        val engine = RecordingEngine { "[]" }
+        var rendered: WalletScreen? = null
+        val executor = makeExecutor(
+            engine = engine,
+            renderer = ScreenRenderer { operationId, hash, screen ->
+                assertEquals(null, operationId)
+                assertEquals(null, hash)
+                rendered = screen
+            },
+        )
+
+        executor.presentRestoredState(
+            """[{"type":"render","screen":{"screen":"issuanceRecovery","reason":"sessionInterrupted","documentName":"Digital identity document","attemptsRemaining":null,"canResume":false}}]""",
+        )
+
+        assertTrue(engine.events.isEmpty())
+        val recovery = rendered as WalletScreen.IssuanceRecoveryScreen
+        assertEquals(WalletScreen.IssuanceRecovery.SESSION_INTERRUPTED, recovery.reason)
+        assertFalse(recovery.canResume)
+    }
+
+    @Test
+    fun restoredStateRejectsInteractiveResumableAndConsequentialEffects() {
+        val executor = makeExecutor(engine = RecordingEngine { "[]" })
+        listOf(
+            """[{"type":"render","operationId":9,"screen":{"screen":"issuanceRecovery","reason":"sessionInterrupted","documentName":"ID","attemptsRemaining":null,"canResume":false}}]""",
+            """[{"type":"render","screen":{"screen":"issuanceRecovery","reason":"sessionInterrupted","documentName":"ID","attemptsRemaining":null,"canResume":true}}]""",
+            """[{"type":"requestToken","operationId":3}]""",
+        ).forEach { output ->
+            assertThrows(WalletShellException.MalformedCoreOutput::class.java) {
+                executor.presentRestoredState(output)
+            }
+        }
+    }
+
+    @Test
     fun blockedTransactionHistoryMutationCannotBeReportedAsIdleSuccess() {
         val executor = makeExecutor(
             engine = RecordingEngine {

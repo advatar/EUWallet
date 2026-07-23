@@ -59,6 +59,42 @@ class EffectExecutor(
         return drain(WalletEffectDecoder.decodeCoreOutput(output), eventType(eventJson))
     }
 
+    /**
+     * Render the one non-interactive recovery projection permitted after process death. This path
+     * cannot invoke Core, resume a callback or execute any transport/signing effect.
+     */
+    fun presentRestoredState(coreOutput: String) {
+        val effects = WalletEffectDecoder.decodeCoreOutput(coreOutput)
+        if (effects.size > 1) {
+            throw WalletShellException.MalformedCoreOutput(
+                "durable recovery contains multiple effects",
+            )
+        }
+        effects.forEach { effect ->
+            val render = effect as? WalletEffect.Render
+                ?: throw WalletShellException.MalformedCoreOutput(
+                    "durable recovery is not a render",
+                )
+            val recovery = render.screen as? WalletScreen.IssuanceRecoveryScreen
+            if (
+                render.operationId != null ||
+                render.authorizationHash != null ||
+                recovery == null ||
+                recovery.reason != WalletScreen.IssuanceRecovery.SESSION_INTERRUPTED ||
+                recovery.canResume
+            ) {
+                throw WalletShellException.MalformedCoreOutput(
+                    "durable recovery is not a safe interruption screen",
+                )
+            }
+            try {
+                renderer.render(null, null, recovery)
+            } catch (error: Exception) {
+                throw WalletShellException.RenderingFailure(error)
+            }
+        }
+    }
+
     @Synchronized
     private fun retryPendingCoreOutput(): Pair<String, String> {
         val eventJson = pendingDurableEventJson

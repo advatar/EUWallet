@@ -50,6 +50,8 @@ interface DurableWalletEngineDriving : WalletEngineDriving {
     fun makeDurableCheckpoint(generation: Long): CoreDurableCheckpoint
 
     fun restoreDurableCheckpointRecord(checkpoint: CoreDurableCheckpoint)
+
+    fun durableResumeEffectsJson(): String = "[]"
 }
 
 /** Exact retry seam consumed by [EffectExecutor]. */
@@ -203,6 +205,12 @@ class DurableLifecycleCoordinator(
                 state = State.Ready(record.generation)
             }
         }
+    }
+
+    @Synchronized
+    fun restoredEffectsJson(): String {
+        if (state !is State.Ready) fail(DurableLifecycleErrorCode.NOT_BOOTSTRAPPED)
+        return engine.durableResumeEffectsJson()
     }
 
     @Synchronized
