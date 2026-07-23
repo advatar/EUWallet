@@ -71,6 +71,7 @@ fn full_issuance_with_real_proof_of_possession() {
     let offer =
         br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#.to_vec();
     let (s, _) = step(&State::Idle, &Input::CredentialOffer(offer), &env);
+    let (s, _) = step(&s, &Input::AcceptOffer, &env);
     let (s, out) = step(
         &s,
         &Input::TokenResponse {
@@ -147,6 +148,7 @@ fn issuer_rejects_proof_signed_by_wrong_key() {
     let offer =
         br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#.to_vec();
     let (s, _) = step(&State::Idle, &Input::CredentialOffer(offer), &env);
+    let (s, _) = step(&s, &Input::AcceptOffer, &env);
     let (s, out) = step(
         &s,
         &Input::TokenResponse {
