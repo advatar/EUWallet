@@ -1409,6 +1409,65 @@ fn conformant_deferred_response_enters_bounded_pending_state_only_when_advertise
         .unwrap();
     assert!(effects.is_empty());
     assert_eq!(flow.status(), FlowStatus::Deferred);
+
+    assert!(matches!(
+        flow.step(
+            CredentialInput::PollDeferred,
+            &credential_environment(&random, NOW + 14, &[]),
+        ),
+        Err(CredentialError::DeferredPollTooEarly)
+    ));
+    assert_eq!(flow.status(), FlowStatus::Deferred);
+
+    let signing = match flow
+        .step(
+            CredentialInput::PollDeferred,
+            &credential_environment(&random, NOW + 15, &[]),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+    {
+        CredentialEffect::SignDpop(request) => request,
+        other => panic!("expected deferred DPoP signing, got {other:?}"),
+    };
+    let deferred = match flow
+        .step(
+            CredentialInput::DpopSignature(SignatureResult::new(
+                signing.request_id(),
+                signing.signing_input().to_vec(),
+                vec![9; 64],
+            )),
+            &credential_environment(&random, NOW + 15, &[]),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+    {
+        CredentialEffect::SendDeferred(request) => request,
+        other => panic!("expected deferred request, got {other:?}"),
+    };
+    assert_eq!(deferred.endpoint(), "https://issuer.example/deferred");
+    assert_eq!(
+        serde_json::from_slice::<Value>(deferred.body()).unwrap(),
+        serde_json::json!({"transaction_id": "opaque-later"})
+    );
+    let deferred_request_id = deferred.request_id();
+    flow.step(
+        CredentialInput::CredentialResponse(endpoint_response(
+            deferred_request_id,
+            "https://issuer.example/deferred",
+            200,
+            vec![],
+            vec![],
+            immediate_response(&sd_jwt(ISSUER, "urn:eudi:pid:1", "dc+sd-jwt", "ES256")),
+        )),
+        &credential_environment(&random, NOW + 16, &[]),
+    )
+    .unwrap();
+    assert_eq!(flow.status(), FlowStatus::Complete);
 }
 
 struct MdocStub;

@@ -80,6 +80,7 @@ pub enum CredentialError {
     DpopNonceInvalid,
     DpopNonceStale,
     DpopNonceRetryLimit,
+    DeferredPollTooEarly,
     KeyAttestationBindingMismatch,
     KeyAttestationInvalid,
     CredentialProofSigningMismatch,
@@ -104,6 +105,8 @@ pub enum FlowStatus {
     AwaitingDpopSignature,
     AwaitingCredentialResponse,
     Deferred,
+    AwaitingDeferredDpopSignature,
+    AwaitingDeferredResponse,
     Complete,
     Failed,
 }
@@ -586,6 +589,7 @@ pub enum CredentialEffect {
     SignCredentialProof(SigningRequest),
     SignDpop(SigningRequest),
     SendCredential(CredentialRequest),
+    SendDeferred(CredentialRequest),
 }
 
 impl fmt::Debug for CredentialEffect {
@@ -594,7 +598,7 @@ impl fmt::Debug for CredentialEffect {
             Self::SendNonce(value) => value.fmt(formatter),
             Self::AcquireKeyAttestation(value) => value.fmt(formatter),
             Self::SignCredentialProof(value) | Self::SignDpop(value) => value.fmt(formatter),
-            Self::SendCredential(value) => value.fmt(formatter),
+            Self::SendCredential(value) | Self::SendDeferred(value) => value.fmt(formatter),
         }
     }
 }
@@ -665,6 +669,7 @@ pub enum CredentialInput {
     CredentialProofSignature(SignatureResult),
     DpopSignature(SignatureResult),
     CredentialResponse(EndpointResponse),
+    PollDeferred,
 }
 
 impl fmt::Debug for CredentialInput {
@@ -675,6 +680,7 @@ impl fmt::Debug for CredentialInput {
             Self::CredentialProofSignature(_) => "CredentialProofSignature([REDACTED])",
             Self::DpopSignature(_) => "DpopSignature([REDACTED])",
             Self::CredentialResponse(_) => "CredentialResponse([REDACTED])",
+            Self::PollDeferred => "PollDeferred",
         })
     }
 }
@@ -786,10 +792,22 @@ enum Stage {
         nonce_retry_count: u8,
     },
     Deferred {
-        _transaction_id: SecretString,
-        _interval_seconds: u32,
-        _next_poll_epoch_seconds: i64,
-        _c_nonce_hash: [u8; 32],
+        transaction_id: SecretString,
+        next_poll_epoch_seconds: i64,
+        c_nonce_hash: [u8; 32],
+    },
+    SigningDeferredDpop {
+        request_id: CorrelationId,
+        transaction_id: SecretString,
+        c_nonce_hash: [u8; 32],
+        signing_input: SecretBytes,
+        nonce_retry_count: u8,
+    },
+    AwaitingDeferredResponse {
+        request_id: CorrelationId,
+        transaction_id: SecretString,
+        c_nonce_hash: [u8; 32],
+        nonce_retry_count: u8,
     },
     Complete(IssuedCredential),
     Failed(CredentialError),
@@ -866,6 +884,8 @@ impl CredentialFlow {
             Stage::SigningDpop { .. } => FlowStatus::AwaitingDpopSignature,
             Stage::AwaitingCredentialResponse { .. } => FlowStatus::AwaitingCredentialResponse,
             Stage::Deferred { .. } => FlowStatus::Deferred,
+            Stage::SigningDeferredDpop { .. } => FlowStatus::AwaitingDeferredDpopSignature,
+            Stage::AwaitingDeferredResponse { .. } => FlowStatus::AwaitingDeferredResponse,
             Stage::Complete(_) => FlowStatus::Complete,
             Stage::Failed(_) => FlowStatus::Failed,
         }
@@ -904,6 +924,17 @@ impl CredentialFlow {
         self.context.last_now_epoch_seconds = environment.now_epoch_seconds;
         if matches!(self.stage, Stage::Complete(_) | Stage::Failed(_)) {
             return Err(CredentialError::AlreadyTerminal);
+        }
+        if matches!(input, CredentialInput::PollDeferred)
+            && matches!(
+                self.stage,
+                Stage::Deferred {
+                    next_poll_epoch_seconds,
+                    ..
+                } if environment.now_epoch_seconds < next_poll_epoch_seconds
+            )
+        {
+            return Err(CredentialError::DeferredPollTooEarly);
         }
         let previous = core::mem::replace(
             &mut self.stage,
@@ -995,6 +1026,48 @@ impl CredentialFlow {
                 request_id,
                 c_nonce_hash,
                 credential_proof,
+                nonce_retry_count,
+                response,
+                environment,
+            ),
+            (
+                Stage::Deferred {
+                    transaction_id,
+                    c_nonce_hash,
+                    ..
+                },
+                CredentialInput::PollDeferred,
+            ) => self.deferred_dpop_signing_stage(transaction_id, c_nonce_hash, 0, environment),
+            (
+                Stage::SigningDeferredDpop {
+                    request_id,
+                    transaction_id,
+                    c_nonce_hash,
+                    signing_input,
+                    nonce_retry_count,
+                },
+                CredentialInput::DpopSignature(signature),
+            ) => self.accept_deferred_dpop_signature(
+                request_id,
+                transaction_id,
+                c_nonce_hash,
+                signing_input,
+                nonce_retry_count,
+                signature,
+                environment.random,
+            ),
+            (
+                Stage::AwaitingDeferredResponse {
+                    request_id,
+                    transaction_id,
+                    c_nonce_hash,
+                    nonce_retry_count,
+                },
+                CredentialInput::CredentialResponse(response),
+            ) => self.accept_deferred_response(
+                request_id,
+                transaction_id,
+                c_nonce_hash,
                 nonce_retry_count,
                 response,
                 environment,
@@ -1283,10 +1356,9 @@ impl CredentialFlow {
                 .ok_or(CredentialError::InvalidClock)?;
             return Ok((
                 Stage::Deferred {
-                    _transaction_id: SecretString::from_string(transaction_id),
-                    _interval_seconds: interval_seconds,
-                    _next_poll_epoch_seconds: next_poll_epoch_seconds,
-                    _c_nonce_hash: c_nonce_hash,
+                    transaction_id: SecretString::from_string(transaction_id),
+                    next_poll_epoch_seconds,
+                    c_nonce_hash,
                 },
                 Vec::new(),
             ));
@@ -1307,6 +1379,187 @@ impl CredentialFlow {
             }),
             Vec::new(),
         ))
+    }
+
+    fn deferred_dpop_signing_stage(
+        &mut self,
+        transaction_id: SecretString,
+        c_nonce_hash: [u8; 32],
+        nonce_retry_count: u8,
+        environment: &CredentialEnvironment<'_>,
+    ) -> Result<(Stage, Vec<CredentialEffect>), CredentialError> {
+        let endpoint = self
+            .context
+            .deferred_credential_endpoint
+            .as_ref()
+            .ok_or(CredentialError::DeferredIssuanceUnsupported)?;
+        let jti = base64url(&fresh_random(
+            environment.random,
+            &mut self.context.used_random_values,
+        )?);
+        let signing_input = build_dpop_signing_input(
+            endpoint.as_str(),
+            &self.context.dpop_public_jwk,
+            self.context.access_token.expose(),
+            &jti,
+            environment.now_epoch_seconds,
+            self.context.credential_endpoint_nonce.as_ref(),
+            environment.digest,
+        )?;
+        let request_id = CorrelationId::from_bytes(fresh_random(
+            environment.random,
+            &mut self.context.used_random_values,
+        )?);
+        let effect = CredentialEffect::SignDpop(SigningRequest {
+            request_id,
+            key_ref: self.context.dpop_key_ref.clone(),
+            signing_input: SecretBytes::new(signing_input.expose().to_vec()),
+        });
+        Ok((
+            Stage::SigningDeferredDpop {
+                request_id,
+                transaction_id,
+                c_nonce_hash,
+                signing_input,
+                nonce_retry_count,
+            },
+            vec![effect],
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accept_deferred_dpop_signature(
+        &mut self,
+        request_id: CorrelationId,
+        transaction_id: SecretString,
+        c_nonce_hash: [u8; 32],
+        signing_input: SecretBytes,
+        nonce_retry_count: u8,
+        signature: SignatureResult,
+        random: &dyn Random,
+    ) -> Result<(Stage, Vec<CredentialEffect>), CredentialError> {
+        if !ct_eq(request_id.as_bytes(), signature.request_id.as_bytes())
+            || signing_input.expose().len() != signature.signing_input.expose().len()
+            || !ct_eq(signing_input.expose(), signature.signing_input.expose())
+        {
+            return Err(CredentialError::DpopSigningMismatch);
+        }
+        if signature.signature.expose().len() != 64 {
+            return Err(CredentialError::DpopSignatureInvalid);
+        }
+        let endpoint = self
+            .context
+            .deferred_credential_endpoint
+            .as_ref()
+            .ok_or(CredentialError::DeferredIssuanceUnsupported)?;
+        let dpop_proof = assemble_compact_jwt(&signing_input, &signature.signature)?;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "transaction_id": transaction_id.expose()
+        }))
+        .map_err(|_| CredentialError::InvalidConfiguration)?;
+        let response_request_id =
+            CorrelationId::from_bytes(fresh_random(random, &mut self.context.used_random_values)?);
+        let request = CredentialRequest {
+            request_id: response_request_id,
+            endpoint: endpoint.as_str().to_owned(),
+            authorization: SecretString::from_string(format!(
+                "DPoP {}",
+                self.context.access_token.expose()
+            )),
+            dpop_proof: SecretString::from_string(dpop_proof),
+            body: SecretBytes::new(body),
+        };
+        Ok((
+            Stage::AwaitingDeferredResponse {
+                request_id: response_request_id,
+                transaction_id,
+                c_nonce_hash,
+                nonce_retry_count,
+            },
+            vec![CredentialEffect::SendDeferred(request)],
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accept_deferred_response(
+        &mut self,
+        request_id: CorrelationId,
+        transaction_id: SecretString,
+        c_nonce_hash: [u8; 32],
+        nonce_retry_count: u8,
+        response: EndpointResponse,
+        environment: &CredentialEnvironment<'_>,
+    ) -> Result<(Stage, Vec<CredentialEffect>), CredentialError> {
+        let endpoint = self
+            .context
+            .deferred_credential_endpoint
+            .as_ref()
+            .ok_or(CredentialError::DeferredIssuanceUnsupported)?;
+        validate_transport_binding(request_id, endpoint.as_str(), "POST", &response)?;
+        if response.body.expose().len() > MAX_CREDENTIAL_RESPONSE_BYTES {
+            return Err(CredentialError::InvalidCredentialResponse);
+        }
+        validate_common_response_headers(&response, true)?;
+        let nonce = parse_single_dpop_nonce(&response.dpop_nonce_headers)?;
+        if response.status == 401
+            && is_use_dpop_nonce_challenge(&response.www_authenticate_headers)?
+        {
+            let nonce = nonce.ok_or(CredentialError::DpopNonceInvalid)?;
+            parse_use_dpop_nonce_body(response.body.expose())?;
+            if nonce_retry_count >= MAX_RESOURCE_DPOP_NONCE_RETRIES {
+                return Err(CredentialError::DpopNonceRetryLimit);
+            }
+            self.rotate_credential_endpoint_nonce(nonce)?;
+            return self.deferred_dpop_signing_stage(
+                transaction_id,
+                c_nonce_hash,
+                nonce_retry_count + 1,
+                environment,
+            );
+        }
+        if !response.www_authenticate_headers.is_empty() {
+            return Err(CredentialError::CredentialRejected);
+        }
+        if let Some(nonce) = nonce {
+            self.rotate_credential_endpoint_nonce(nonce)?;
+        }
+        match response.status {
+            200 => {
+                let raw = parse_immediate_credential(
+                    response.body.expose(),
+                    self.context.format,
+                    self.context.credential_issuer.as_str(),
+                )?;
+                Ok((
+                    Stage::Complete(IssuedCredential {
+                        format: self.context.format,
+                        raw,
+                        c_nonce_hash,
+                    }),
+                    Vec::new(),
+                ))
+            }
+            202 => {
+                let (returned_id, interval_seconds) =
+                    parse_deferred_credential(response.body.expose())?;
+                if !ct_eq(returned_id.as_bytes(), transaction_id.expose().as_bytes()) {
+                    return Err(CredentialError::InvalidCredentialResponse);
+                }
+                let next_poll_epoch_seconds = environment
+                    .now_epoch_seconds
+                    .checked_add(i64::from(interval_seconds))
+                    .ok_or(CredentialError::InvalidClock)?;
+                Ok((
+                    Stage::Deferred {
+                        transaction_id,
+                        next_poll_epoch_seconds,
+                        c_nonce_hash,
+                    },
+                    Vec::new(),
+                ))
+            }
+            _ => Err(CredentialError::CredentialRejected),
+        }
     }
 
     fn rotate_credential_endpoint_nonce(
