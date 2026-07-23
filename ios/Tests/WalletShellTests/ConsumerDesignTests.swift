@@ -15,5 +15,13 @@ final class ConsumerDesignTests: XCTestCase {
         XCTAssertEqual(ConsumerDesign.actionCornerRadius, 14)
         XCTAssertEqual(ConsumerDesign.surfaceCornerRadius, 16)
     }
+
+    func testIssuanceStartsOnlyFromAReceivedCredentialOffer() {
+        XCTAssertFalse(ConsumerIssuanceEntryPolicy.supportsArbitraryCredentialTypeSelection)
+        XCTAssertEqual(
+            ConsumerIssuanceEntryPolicy.supportedModes,
+            [.qrCode, .verifiedLink])
+        XCTAssertEqual(ConsumerIssuanceEntryPolicy.addActionTitle, "Scan a QR code")
+    }
 }
 #endif

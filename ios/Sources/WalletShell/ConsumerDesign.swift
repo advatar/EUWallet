@@ -1,5 +1,21 @@
 #if canImport(SwiftUI)
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
+
+public enum CredentialOfferEntryMode: Equatable, Sendable {
+    case qrCode
+    case verifiedLink
+}
+
+/// A holder does not choose an arbitrary credential type. Issuance starts from an offer whose
+/// issuer, configuration and format are subsequently authenticated by the core.
+public enum ConsumerIssuanceEntryPolicy {
+    public static let supportedModes: [CredentialOfferEntryMode] = [.qrCode, .verifiedLink]
+    public static let supportsArbitraryCredentialTypeSelection = false
+    public static let addActionTitle = "Scan a QR code"
+}
 
 /// Visual tokens from the approved Add & Prove prototype. These are presentation-only: trusted
 /// names, claims, retention and decisions continue to come exclusively from ScreenDescription.
@@ -8,14 +24,31 @@ public enum ConsumerDesign {
     public static let primaryActionHeight: CGFloat = 50
     public static let actionCornerRadius: CGFloat = 14
     public static let surfaceCornerRadius: CGFloat = 16
+    #if canImport(UIKit)
+    public static let brand = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 126 / 255, green: 151 / 255, blue: 1, alpha: 1)
+            : UIColor(red: 30 / 255, green: 58 / 255, blue: 192 / 255, alpha: 1)
+    })
+    public static let brandInk = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 201 / 255, green: 211 / 255, blue: 1, alpha: 1)
+            : UIColor(red: 21 / 255, green: 36 / 255, blue: 121 / 255, alpha: 1)
+    })
+    public static let paper = Color(uiColor: .systemGroupedBackground)
+    public static let surface = Color(uiColor: .secondarySystemGroupedBackground)
+    public static let surfaceRaised = Color(uiColor: .tertiarySystemGroupedBackground)
+    public static let line = Color(uiColor: .separator)
+    #else
     public static let brand = Color(red: 30 / 255, green: 58 / 255, blue: 192 / 255)
     public static let brandInk = Color(red: 21 / 255, green: 36 / 255, blue: 121 / 255)
-    public static let ink = Color(red: 15 / 255, green: 20 / 255, blue: 38 / 255)
-    public static let mutedInk = Color(red: 69 / 255, green: 76 / 255, blue: 107 / 255)
     public static let paper = Color(red: 238 / 255, green: 241 / 255, blue: 249 / 255)
     public static let surface = Color.white
     public static let surfaceRaised = Color(red: 241 / 255, green: 244 / 255, blue: 252 / 255)
     public static let line = Color(red: 214 / 255, green: 220 / 255, blue: 238 / 255)
+    #endif
+    public static let ink = Color.primary
+    public static let mutedInk = Color.secondary
     public static let good = Color(red: 12 / 255, green: 110 / 255, blue: 70 / 255)
     public static let goodBackground = Color(red: 221 / 255, green: 241 / 255, blue: 231 / 255)
     public static let warning = Color(red: 126 / 255, green: 82 / 255, blue: 0)
@@ -27,7 +60,6 @@ public enum ConsumerDesign {
 public struct ConsumerPageModifier: ViewModifier {
     public func body(content: Content) -> some View {
         content
-            .foregroundStyle(ConsumerDesign.ink)
             .tint(ConsumerDesign.brand)
             .background(ConsumerDesign.paper.ignoresSafeArea())
     }

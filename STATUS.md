@@ -212,6 +212,12 @@ operational solution needed to enter those processes.
       delete only branches whose effective changes are verified on or superseded by `main`. The
       complete disposition and green regression evidence are recorded in
       `docs/certification-evidence/branch-reconciliation-2026-07-23.md`.
+- [x] [#60](https://github.com/advatar/EUWallet/issues/60): fix the consumer UI's dark-appearance
+      contrast regression by using adaptive semantic colors, remove the demo-only arbitrary
+      document-type issuance picker, and route Add to authenticated credential-offer acquisition
+      by QR or verified link. Swift 6 builds with 142 tests passing; the Xcode simulator target
+      builds with a verified executable, and both dark- and light-appearance screenshots were
+      visually checked on the target simulator.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror

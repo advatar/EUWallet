@@ -69,10 +69,10 @@ struct WalletHomeView: View {
     let onOpenSettings: () -> Void
 
     @State private var detail: WalletCredential?
-    @State private var showAdd = false
 
-    private var heldTypeNames: Set<String> { Set(model.credentials.map(\.typeName)) }
-    private var hasMdoc: Bool { model.credentials.contains { $0.format == "mso_mdoc" } }
+    private func openCredentialOffer() {
+        model.showConnectSheet = true
+    }
 
     var body: some View {
         ScrollView {
@@ -81,7 +81,7 @@ struct WalletHomeView: View {
                     .font(.largeTitle.bold())
 
                 if model.credentials.isEmpty {
-                    EmptyWalletView { showAdd = true }
+                    EmptyWalletView(onAdd: openCredentialOffer)
                 } else {
                     ForEach(model.credentials) { credential in
                         Button {
@@ -104,9 +104,6 @@ struct WalletHomeView: View {
                 VStack(spacing: 0) {
                     WalletRow(title: "Scan a QR code", subtitle: "Add a document or share information",
                               systemImage: "qrcode.viewfinder", action: { model.showConnectSheet = true })
-                    Divider().padding(.leading, 52)
-                    WalletRow(title: "Add a document", subtitle: "Choose an ID or driving licence",
-                              systemImage: "plus.circle", action: { showAdd = true })
                     Divider().padding(.leading, 52)
                     WalletRow(title: "Activity", subtitle: model.history.isEmpty ? "Nothing shared yet" : "\(model.history.count) recent actions",
                               systemImage: "list.bullet.rectangle", action: onOpenHistory)
@@ -131,14 +128,11 @@ struct WalletHomeView: View {
         .consumerPage()
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button { showAdd = true } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("Add a document")
+                Button(action: openCredentialOffer) {
+                    Image(systemName: "qrcode.viewfinder")
+                }
+                    .accessibilityLabel(ConsumerIssuanceEntryPolicy.addActionTitle)
                     .disabled(model.isIssuing)
-            }
-        }
-        .sheet(isPresented: $showAdd) {
-            AddCredentialSheet(heldTypeNames: heldTypeNames) { type in
-                model.addCredential(type)
             }
         }
         .sheet(isPresented: $model.showConnectSheet) {
@@ -163,60 +157,11 @@ private struct EmptyWalletView: View {
             Text("Keep your ID safely on this phone and choose exactly what to share.")
                 .font(.body).foregroundStyle(ConsumerDesign.mutedInk)
                 .multilineTextAlignment(.center)
-            Button("Add a document", action: onAdd)
+            Button(ConsumerIssuanceEntryPolicy.addActionTitle, action: onAdd)
                 .buttonStyle(ConsumerPrimaryButtonStyle())
         }
         .frame(maxWidth: .infinity)
         .consumerSurface(radius: 20)
-    }
-}
-
-/// Pick a credential type to be issued. Each choice runs a real OpenID4VCI issuance in the core.
-struct AddCredentialSheet: View {
-    let heldTypeNames: Set<String>
-    let onAdd: (WalletModel.CredentialType) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    ForEach(WalletModel.CredentialType.allCases) { type in
-                        Button {
-                            onAdd(type)
-                            dismiss()
-                        } label: {
-                            HStack(spacing: 14) {
-                                Image(systemName: type.systemImage)
-                                    .font(.title3).frame(width: 30).foregroundStyle(.tint)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(type.displayName).font(.body).foregroundStyle(.primary)
-                                    Text(type.subtitle).font(.caption).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                if heldTypeNames.contains(type.displayName) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundStyle(.green)
-                                } else {
-                                    Image(systemName: "plus.circle").foregroundStyle(.tint)
-                                }
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                } footer: {
-                    Text("Your document is checked before it is saved. You stay in control of when it is shared.")
-                }
-            }
-            .navigationTitle("Add a document")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-            }
-        }
     }
 }
 

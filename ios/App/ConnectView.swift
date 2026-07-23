@@ -13,7 +13,7 @@ struct ConnectView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Scan") {
+                Section {
                     if #available(iOS 16.0, *), QRScannerView.isAvailable {
                         Button { scanning = true } label: {
                             Label("Scan a QR code", systemImage: "qrcode.viewfinder")
@@ -32,6 +32,11 @@ struct ConnectView: View {
                     if let scan = model.lastScan {
                         Text(scan).font(.callout).foregroundStyle(.primary)
                     }
+                } header: {
+                    Text("Add or use a document")
+                } footer: {
+                    Text("Scan the QR code from the organisation offering or requesting a document. "
+                         + "You will review who they are and what they ask for before anything happens.")
                 }
 
 #if DEBUG
