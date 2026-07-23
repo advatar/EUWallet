@@ -1,5 +1,27 @@
 import Foundation
 
+/// `EffectExecutor` is deliberately UI-agnostic and may invoke render callbacks on its current
+/// executor. Keep the synchronous correlation values behind a lock; SwiftUI publication is
+/// separately handed to the main actor.
+private final class IssuanceReviewCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var operationId: UInt64?
+    private var authorizationHash: Data?
+
+    func record(operationId: UInt64?, authorizationHash: Data?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.operationId = operationId
+        self.authorizationHash = authorizationHash
+    }
+
+    func value() -> (operationId: UInt64?, authorizationHash: Data?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (operationId, authorizationHash)
+    }
+}
+
 // WalletShell sources, the generated UniFFI bindings, and these App sources are compiled into one
 // app module (see ios/project.yml), so no cross-module import is needed.
 
@@ -335,17 +357,18 @@ final class WalletModel: ObservableObject {
             credentialCompact: Data(compact.utf8),
             cNonce: nextNonce(),
             format: type.issuanceFormat)
-        var reviewOperationId: UInt64?
-        var reviewAuthorizationHash: Data?
+        let review = IssuanceReviewCapture()
         guard let ex = makeExecutor(issuer: issuer, render: {
             [weak self] operationId, authorizationHash, screen in
-            reviewOperationId = operationId
-            reviewAuthorizationHash = authorizationHash
-            guard requiresReview, let self else { return }
-            self.decisionOperationId = operationId
-            self.decisionAuthorizationHash = authorizationHash
-            self.decisionKind = WalletDecisionKind(screen: screen)
-            self.phase = .screen(screen)
+            review.record(operationId: operationId, authorizationHash: authorizationHash)
+            guard requiresReview else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.decisionOperationId = operationId
+                self.decisionAuthorizationHash = authorizationHash
+                self.decisionKind = WalletDecisionKind(screen: screen)
+                self.phase = .screen(screen)
+            }
         }) else {
             return false
         }
@@ -355,6 +378,7 @@ final class WalletModel: ObservableObject {
             issuerCertChain: issuance.issuerCertChain,
             issuerId: issuance.issuerId), requiring: .awaitingInput) else { return false }
         if requiresReview { return true }
+        let (reviewOperationId, reviewAuthorizationHash) = review.value()
         guard let reviewOperationId, let reviewAuthorizationHash else { return false }
         return await run(
             ex,

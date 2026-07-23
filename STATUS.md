@@ -226,6 +226,12 @@ operational solution needed to enter those processes.
 - [ ] [#62](https://github.com/advatar/EUWallet/issues/62): complete a screen-by-screen consumer UI
       coherence audit across Home, Add, consent, issuance, recovery, Activity and Catalogue; remove
       remaining duplicated/demo-facing presentation and verify every journey in light and dark mode.
+- [x] [#63](https://github.com/advatar/EUWallet/issues/63): eliminate background-thread SwiftUI
+      publication during launch and verify asynchronous UI-state callbacks obey main-actor
+      isolation. Issuance correlation capture is synchronized while all rendered state crosses
+      explicitly to `MainActor`; 143 Swift tests and the Xcode simulator build pass, and a fresh
+      install plus issuance launch remained alive without publication, crash, assertion, or signal
+      errors in the simulator log.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror
