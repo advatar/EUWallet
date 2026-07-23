@@ -156,10 +156,17 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
-- [ ] [#54](https://github.com/advatar/EUWallet/issues/54): land the complete consumer Add and Prove
-      design: bounded trusted offer/list/detail contracts; eID PIN and NFC, preparing/ready and every
-      recovery state; wallet-owned consent and approval; strict Swift/Android decoding, accessible
-      native rendering, durable transitions, serialization tests, and formal correspondence.
+- [x] [#54](https://github.com/advatar/EUWallet/issues/54): land the complete consumer Add and Prove
+      design vocabulary: bounded trusted offer/list/detail contracts; eID PIN/NFC,
+      preparing/ready and recovery screens; wallet-owned hash-bound offer approval; signed issuer
+      display metadata; strict Swift/Android decoding; accessible native iOS rendering; canonical
+      serialization tests; authenticated preparing/ready/recovery transitions; and Lean/Rust
+      approval and UI-state correspondence. The exact-revision Rust workspace, clippy, Lean, 138
+      Swift tests, Android unit tests, regenerated UniFFI/XCFramework and Xcode simulator build pass.
+- [ ] [#55](https://github.com/advatar/EUWallet/issues/55): connect the consumer journey to the
+      official AusweisApp SDK adapters and implement secret-free, authenticated durable resume for
+      deferred OID4VCI issuance. Live German eID/PIN/NFC callbacks and process-death recovery must
+      be backed by validated native/protocol transitions; no simulated release path is acceptable.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror
