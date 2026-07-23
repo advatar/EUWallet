@@ -160,12 +160,18 @@ fn live_issuance_then_plaintext_presentation_is_rejected() {
     });
 
     // ---- ISSUANCE, live: offer → /token → in-core WUA gate → proof → /credential → issued. ----
-    let outcome = shell.handle(Event::CredentialOfferReceived {
+    let review = shell.handle(Event::CredentialOfferReceived {
         offer: br#"{"format":"dc+sd-jwt","grant":"pre-authorized","tx_code_required":false}"#
             .to_vec(),
         issuer_cert_chain: issuance.issuer_cert_chain,
         issuer_id: issuance.issuer_id,
     });
+    assert!(review.errors.is_empty(), "{:?}", review.errors);
+    assert!(matches!(
+        shell.last_screen(),
+        Some(presenter::ScreenDescription::IssuanceOffer(_))
+    ));
+    let outcome = shell.handle(Event::CredentialOfferAccepted);
     assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
     assert_eq!(
         outcome.http_posts.len(),
