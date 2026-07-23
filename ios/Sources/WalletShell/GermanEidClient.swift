@@ -356,6 +356,9 @@ public struct GermanEidStartRequest: CustomStringConvertible, CustomDebugStringC
     fileprivate var hasAvailableSecrets: Bool {
         !tcTokenURL.isConsumed
     }
+
+    /// Native adapter correlation only. The bytes remain private and redacted.
+    var adapterSessionID: GermanEidSessionID { sessionID }
 }
 
 public struct GermanEidRunAuthCommand: CustomStringConvertible, CustomDebugStringConvertible {
@@ -758,6 +761,17 @@ public final class DeterministicGermanEidClient: GermanEidClient, @unchecked Sen
     private var activeSessionID: GermanEidSessionID?
     private var authorizationAccepted = false
     private var authorizedRights: Set<GermanEidAccessRight> = []
+
+    /// Read only by the official native adapter while processing the terminal callback. The
+    /// contract itself remains redacted and never crosses the native boundary.
+    var activeProviderContractForAdapter: GermanEidProviderContract {
+        get throws {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            guard let activeContract else { throw GermanEidClientError.invalidTransition }
+            return activeContract
+        }
+    }
     private var lastReader: GermanEidReaderState?
     private var interactionCounter: UInt64 = 0
     private var lastAcceptedConsent: GermanEidInteractionID?

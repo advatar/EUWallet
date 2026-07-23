@@ -9,7 +9,7 @@ import PackageDescription
 // Section 3 replaces these with the UniFFI-generated bindings.
 let package = Package(
     name: "WalletShell",
-    platforms: [.iOS(.v16), .macOS(.v13)],
+    platforms: [.iOS(.v17), .macOS(.v13)],
     products: [
         .library(name: "WalletShell", targets: ["WalletShell"])
     ],

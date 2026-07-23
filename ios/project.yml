@@ -2,8 +2,13 @@ name: EUWalletDemo
 options:
   bundleIdPrefix: eu.advatar.wallet
   deploymentTarget:
-    iOS: "16.0"
+    iOS: "17.0"
   createIntermediateGroups: true
+
+packages:
+  AusweisApp2SDKWrapper:
+    url: https://github.com/Governikus/AusweisApp2Wrapper-iOS-SPM
+    exactVersion: 2.5.4
 
 settings:
   base:
@@ -28,13 +33,17 @@ targets:
       - framework: WalletCore.xcframework
         embed: false
         link: true
+      - package: AusweisApp2SDKWrapper
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet
-        GENERATE_INFOPLIST_FILE: YES
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: App/Info.plist
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_CFBundleDisplayName: "Advatar Wallet"
         INFOPLIST_KEY_NSCameraUsageDescription: "Use the camera to scan QR codes when adding an ID or sharing information."
+        INFOPLIST_KEY_NFCReaderUsageDescription: "Hold your ID card to your iPhone to add your verified ID."
+        CODE_SIGN_ENTITLEMENTS: App/EUWalletDemo.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         # Standard, exempt encryption only (AES-GCM / ECDH / TLS via the platform + aws-lc). Declaring
@@ -61,6 +70,7 @@ targets:
       - framework: WalletCore.xcframework
         embed: false
         link: true
+      - package: AusweisApp2SDKWrapper
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.tests
