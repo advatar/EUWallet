@@ -167,6 +167,11 @@ operational solution needed to enter those processes.
       official AusweisApp SDK adapters and implement secret-free, authenticated durable resume for
       deferred OID4VCI issuance. Live German eID/PIN/NFC callbacks and process-death recovery must
       be backed by validated native/protocol transitions; no simulated release path is acceptable.
+- [ ] [#56](https://github.com/advatar/EUWallet/issues/56): assess BankID MRTD extra control and
+      digital-ID-card verification as an optional Swedish identity bootstrap/step-up integration.
+      Public BankID interfaces are not an authoritative EUDI PID issuer or a source of raw passport
+      chip data/portrait; production entitlement, response schema, privacy and assurance mapping
+      require direct BankID confirmation. This research track is not a TestFlight blocker.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror
