@@ -157,7 +157,7 @@ private struct IssuanceOfferView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("ADD A DOCUMENT").font(.caption.weight(.bold)).tracking(1.5).foregroundStyle(ConsumerDesign.brand)
-            Text("Add your \(offer.documentName)?").font(.largeTitle.bold())
+            Text("Add your \(offer.documentName)").font(.largeTitle.bold())
             HStack(spacing: 12) {
                 Image(systemName: "checkmark.seal.fill").foregroundStyle(ConsumerDesign.good)
                 VStack(alignment: .leading, spacing: 2) {

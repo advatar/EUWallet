@@ -102,9 +102,11 @@ struct WalletHomeView: View {
 
                 // Secondary navigation.
                 VStack(spacing: 0) {
-                    WalletRow(title: "Scan a QR code", subtitle: "Add a document or share information",
-                              systemImage: "qrcode.viewfinder", action: { model.showConnectSheet = true })
-                    Divider().padding(.leading, 52)
+                    if !model.credentials.isEmpty {
+                        WalletRow(title: "Scan a QR code", subtitle: "Add a document or share information",
+                                  systemImage: "qrcode.viewfinder", action: { model.showConnectSheet = true })
+                        Divider().padding(.leading, 52)
+                    }
                     WalletRow(title: "Activity", subtitle: model.history.isEmpty ? "Nothing shared yet" : "\(model.history.count) recent actions",
                               systemImage: "list.bullet.rectangle", action: onOpenHistory)
                     Divider().padding(.leading, 52)
@@ -126,15 +128,6 @@ struct WalletHomeView: View {
             }
         }
         .consumerPage()
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(action: openCredentialOffer) {
-                    Image(systemName: "qrcode.viewfinder")
-                }
-                    .accessibilityLabel(ConsumerIssuanceEntryPolicy.addActionTitle)
-                    .disabled(model.isIssuing)
-            }
-        }
         .sheet(isPresented: $model.showConnectSheet) {
             ConnectView(model: model)
         }
