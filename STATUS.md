@@ -177,6 +177,9 @@ operational solution needed to enter those processes.
       it to App Store Connect. A real archive currently fails because XcodeGen erases the
       UI-selected Development Team; the intended Team ID must be selected from the multiple local
       accounts rather than guessed, and no matching `eu.advatar.wallet` profile is installed.
+      Keep the generated product, executable, bundle plist and TestFlight display name coherent;
+      Xcode must never stage `EUWallet.app` without the exact executable named by
+      `CFBundleExecutable`.
 - [x] [#52](https://github.com/advatar/EUWallet/issues/52): carry authenticated RP-registration
       assurances, retention policy, and claim entitlements into the Rust consent contract; bind
       registered-verifier, Trust Mark, retention, and over-ask results into authorization; mirror
