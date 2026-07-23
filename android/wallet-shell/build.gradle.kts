@@ -40,6 +40,7 @@ kotlin {
 
 dependencies {
     implementation("com.governikus:ausweisapp:2.5.4")
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     testImplementation("junit:junit:4.13.2")
     // Android supplies org.json on-device; local JVM tests need its reference implementation.

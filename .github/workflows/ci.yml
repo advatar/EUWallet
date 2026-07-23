@@ -187,6 +187,10 @@ jobs:
           cache: gradle
       - name: Verify production shell
         run: |
+          rustup target add aarch64-linux-android
+          cargo install cargo-ndk --version 4.1.2 --locked
+          ./build-rust-bridge.sh
+          git diff --exit-code -- wallet-shell/src/main/kotlin/uniffi/wallet_core/wallet_core.kt
           ./gradlew --no-daemon clean test lint assembleDebug assembleRelease
           test -f wallet-app/build/outputs/apk/debug/wallet-app-debug.apk
 

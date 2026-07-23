@@ -39,6 +39,7 @@ Install Android SDK platform 36 and use JDK 17. From this directory:
 ```sh
 export JAVA_HOME=/path/to/jdk-17
 export ANDROID_HOME=/path/to/android-sdk
+./build-rust-bridge.sh
 ./gradlew :wallet-shell:testDebugUnitTest
 ./gradlew :wallet-app:assembleDebug :wallet-app:lintDebug
 ./gradlew :wallet-app:connectedDebugAndroidTest # with an emulator or device attached
