@@ -18,6 +18,10 @@ if [[ -z "$EXECUTABLE" || "$EXECUTABLE" == *'$('* || "$EXECUTABLE" == */* ]]; th
   echo "CFBundleExecutable is missing, unresolved, or unsafe: $EXECUTABLE" >&2
   exit 1
 fi
+if [[ "$EXECUTABLE" != "EUWallet" ]]; then
+  echo "CFBundleExecutable must be EUWallet, got: $EXECUTABLE" >&2
+  exit 1
+fi
 if [[ ! -f "$APP/$EXECUTABLE" || ! -x "$APP/$EXECUTABLE" ]]; then
   echo "CFBundleExecutable does not name an executable bundle file: $EXECUTABLE" >&2
   exit 1

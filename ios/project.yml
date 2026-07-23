@@ -39,6 +39,7 @@ targets:
         # Pin the bundle wrapper and Mach-O name together. Without this, a manual/cached Xcode
         # PRODUCT_NAME override can stage EUWallet.app while Info.plist still points elsewhere.
         PRODUCT_NAME: EUWallet
+        EXECUTABLE_NAME: EUWallet
         PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: App/Info.plist
@@ -58,6 +59,10 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         # The xcframework vends the `wallet_coreFFI` clang module via its bundled module.modulemap.
         OTHER_LDFLAGS: "-lc++"
+    postBuildScripts:
+      - name: Verify installable app bundle
+        script: '"${SRCROOT}/verify-app-bundle.sh" "${TARGET_BUILD_DIR}/${WRAPPER_NAME}"'
+        basedOnDependencyAnalysis: false
 
   # Runs the REAL Rust core (aws-lc-rs, compiled for the simulator) end to end, on the simulator.
   # Deterministic proof that the flows work on-device, independent of UI screenshotting.
