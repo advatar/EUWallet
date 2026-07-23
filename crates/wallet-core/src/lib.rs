@@ -1421,6 +1421,9 @@ pub struct Core {
     trust_store: TrustStore,
     // Issuance (OID4VCI) flow.
     issuance: oid4vci::State,
+    /// Authenticated, secret-free fact restored from a durable checkpoint when process death
+    /// interrupted issuance. Protocol state and callbacks are never restored.
+    durable_issuance_interrupted: bool,
     iss_seen_c_nonces: Vec<u64>,
     device_public_key: Vec<u8>,
     wua: Option<wua::WalletUnitAttestation>,
@@ -1484,6 +1487,7 @@ impl Core {
             pending_operations: BTreeMap::new(),
             trust_store: TrustStore::new(),
             issuance: oid4vci::State::Idle,
+            durable_issuance_interrupted: false,
             iss_seen_c_nonces: Vec::new(),
             device_public_key: Vec::new(),
             wua: None,
@@ -4896,6 +4900,24 @@ impl Core {
     pub fn state(&self) -> &State {
         &self.vp
     }
+
+    /// Project the only UI that may be recovered after process death. The checkpoint carries one
+    /// authenticated bit, never the interrupted protocol machine or issuer-controlled strings.
+    /// A fresh issuance offer is required to continue.
+    pub fn durable_resume_effects_json(&self) -> String {
+        if !self.durable_issuance_interrupted {
+            return "[]".into();
+        }
+        serde_json::to_string(&vec![Effect::Render {
+            screen: ScreenDescription::IssuanceRecovery(presenter::IssuanceRecoveryScreen {
+                reason: presenter::IssuanceRecovery::SessionInterrupted,
+                document_name: "Digital identity document".into(),
+                attempts_remaining: None,
+                can_resume: false,
+            }),
+        }])
+        .expect("fixed durable recovery effect must serialize")
+    }
 }
 
 const MAX_DURABLE_TRUST_LIST_BYTES: usize = 4 * 1024 * 1024;
@@ -5091,6 +5113,16 @@ impl WalletEngine {
             .restore_durable_checkpoint(&checkpoint.bytes, checkpoint.generation)?;
         inner.durable_phase = DurableEnginePhase::Running;
         Ok(())
+    }
+
+    /// Return a secret-free recovery projection after authenticated checkpoint restoration.
+    /// This never resumes a protocol session or allocates an operation callback.
+    pub fn durable_resume_effects_json(&self) -> String {
+        let inner = self.inner.lock().expect("poisoned");
+        if inner.durable_phase != DurableEnginePhase::Running {
+            return "[]".into();
+        }
+        inner.core.durable_resume_effects_json()
     }
 
     /// Install/update the signed trusted list. Returns "" on success, else an error string.

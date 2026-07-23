@@ -12,7 +12,11 @@
 //! authenticated envelope pins the complete checkpoint; the internal head alone is not rollback
 //! protection.
 //!
-//! Schema v2 represents the OpenID4VP presentation replay set as opaque TEXT nonces (matching the
+//! Schema v3 adds one secret-free interruption bit. It lets a restored shell explain that an
+//! issuance session ended with process death without serializing or reviving any protocol state,
+//! callback, token, PIN, URL or issuer-controlled display value.
+//!
+//! Schema v2 represented the OpenID4VP presentation replay set as opaque TEXT nonces (matching the
 //! OpenID4VP 1.0 wire model). The OID4VCI `c_nonce`, payment and QES replay sets remain numeric
 //! `u64`; the final OpenID4VCI string nonce model is a separate future migration, never an in-place
 //! reinterpretation of prior bytes. The version is bumped so a v1 checkpoint is rejected outright
@@ -42,7 +46,7 @@ pub const MAX_CREDENTIAL_EVIDENCE_BYTES: usize = 24 * 1024 * 1024;
 pub const MAX_REPLAY_VALUES: usize = 65_536;
 
 const MAGIC: &[u8] = b"EUWALLET-CHECKPOINT";
-const VERSION: u64 = 2;
+const VERSION: u64 = 3;
 /// Maximum bytes of a single persisted OpenID4VP presentation nonce (opaque string). Conformant
 /// verifier nonces are short; this bounds durable growth without constraining real values.
 const MAX_NONCE_BYTES: usize = oid4vp::MAX_NONCE_BYTES;
@@ -200,6 +204,7 @@ struct Checkpoint {
     replay: ReplaySets,
     transaction_entries: Vec<txnlog::Entry>,
     transaction_head: [u8; 32],
+    issuance_interrupted: bool,
 }
 
 fn resource_limit(resource: Resource, max: usize, actual: usize) -> DurableCheckpointError {
@@ -564,6 +569,10 @@ impl Core {
             replay,
             transaction_entries,
             transaction_head,
+            issuance_interrupted: self.active == ActiveFlow::Issuance
+                && self
+                    .issuance_document_summary(DocumentStatus::Preparing)
+                    .is_some(),
         })
     }
 
@@ -706,6 +715,7 @@ impl Core {
         self.next_operation_id = staged_next_operation_id;
         self.pending_operations.clear();
         self.issuance = oid4vci::State::Idle;
+        self.durable_issuance_interrupted = checkpoint.issuance_interrupted;
         self.issuer_trusted_current = false;
         self.issuer_id_current.clear();
         self.issuer_cert_chain_current.clear();
@@ -813,7 +823,7 @@ impl Encoder {
 
 fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Vec<u8>, DurableCheckpointError> {
     let mut out = Encoder::new();
-    out.map(8)?;
+    out.map(9)?;
     out.uint(1)?;
     out.bytes(MAGIC)?;
     out.uint(2)?;
@@ -879,6 +889,8 @@ fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Vec<u8>, DurableCheckpoi
     }
     out.uint(2)?;
     out.bytes(&checkpoint.transaction_head)?;
+    out.uint(9)?;
+    out.bool(checkpoint.issuance_interrupted)?;
     Ok(out.bytes)
 }
 
@@ -1259,7 +1271,7 @@ impl<'a> Cursor<'a> {
 fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, DurableCheckpointError> {
     structural_preflight(bytes)?;
     let mut input = Cursor::new(bytes);
-    input.exact_map(8)?;
+    input.exact_map(9)?;
     input.key(1)?;
     if input.borrowed_bytes(MAGIC.len())? != MAGIC {
         return Err(DurableCheckpointError::Malformed);
@@ -1379,6 +1391,8 @@ fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, DurableCheckpointError>
     }
     input.key(2)?;
     let transaction_head = input.hash()?;
+    input.key(9)?;
+    let issuance_interrupted = input.bool()?;
     if input.position != bytes.len() {
         return Err(DurableCheckpointError::NonCanonical);
     }
@@ -1400,6 +1414,7 @@ fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, DurableCheckpointError>
         },
         transaction_entries,
         transaction_head,
+        issuance_interrupted,
     })
 }
 
@@ -1653,6 +1668,7 @@ mod tests {
             },
             transaction_entries: Vec::new(),
             transaction_head: [0u8; 32],
+            issuance_interrupted: false,
         }
     }
 
@@ -1680,6 +1696,7 @@ mod tests {
         next_operation_id: u64,
         pending_operations: BTreeMap<u64, PendingOperation>,
         issuance: oid4vci::State,
+        durable_issuance_interrupted: bool,
         seen_nonces: Vec<String>,
         pay_seen_nonces: Vec<u64>,
         iss_seen_c_nonces: Vec<u64>,
@@ -1720,6 +1737,7 @@ mod tests {
             next_operation_id: core.next_operation_id,
             pending_operations: core.pending_operations.clone(),
             issuance: core.issuance.clone(),
+            durable_issuance_interrupted: core.durable_issuance_interrupted,
             seen_nonces: core.seen_nonces.clone(),
             pay_seen_nonces: core.pay_seen_nonces.clone(),
             iss_seen_c_nonces: core.iss_seen_c_nonces.clone(),
@@ -1915,6 +1933,56 @@ mod tests {
             .handle_event_json(r#"{"type":"operationSucceeded","operationId":42}"#)
             .unwrap_err();
         assert!(stale.contains("stale or unknown operationId 42"));
+    }
+
+    #[test]
+    fn process_death_restores_only_a_secret_free_non_resumable_issuance_notice() {
+        let scenario = DemoWallet::new().issuance_scenario();
+        let mut source = configured_core(&scenario, "wallet.example", "device-key");
+        source.active = ActiveFlow::Issuance;
+        source.issuance = oid4vci::State::Authorizing {
+            format: oid4vci::CredentialFormat::DcSdJwt,
+        };
+        source.issuer_id_current = "secret issuer session value".into();
+        source.pending_operations.insert(
+            77,
+            PendingOperation {
+                flow: ActiveFlow::Issuance,
+                result: OperationResultKind::AuthorizationCode,
+                authorization_hash: None,
+            },
+        );
+
+        let bytes = source.export_durable_checkpoint(1).unwrap();
+        assert!(!bytes
+            .windows(b"secret issuer session value".len())
+            .any(|window| window == b"secret issuer session value"));
+
+        let mut restored = configured_core(&scenario, "wallet.example", "device-key");
+        restored.restore_durable_checkpoint(&bytes, 1).unwrap();
+
+        assert!(matches!(restored.active, ActiveFlow::None));
+        assert!(matches!(restored.issuance, oid4vci::State::Idle));
+        assert!(restored.pending_operations.is_empty());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&restored.durable_resume_effects_json())
+                .unwrap(),
+            serde_json::json!([{
+                "type": "render",
+                "screen": {
+                    "screen": "issuanceRecovery",
+                    "reason": "sessionInterrupted",
+                    "documentName": "Digital identity document",
+                    "attemptsRemaining": null,
+                    "canResume": false
+                }
+            }])
+        );
+
+        let clean = restored.export_durable_checkpoint(2).unwrap();
+        let mut relaunched = configured_core(&scenario, "wallet.example", "device-key");
+        relaunched.restore_durable_checkpoint(&clean, 2).unwrap();
+        assert_eq!(relaunched.durable_resume_effects_json(), "[]");
     }
 
     #[test]
@@ -2315,7 +2383,7 @@ mod tests {
             DurableCheckpointError::NonCanonical
         );
         let mut nonshortest_map = Vec::with_capacity(valid.len() + 1);
-        nonshortest_map.extend_from_slice(&[0xb8, 8]);
+        nonshortest_map.extend_from_slice(&[0xb8, 9]);
         nonshortest_map.extend_from_slice(&valid[1..]);
         assert_eq!(
             atomic_error(&mut target, &nonshortest_map, 14),
@@ -2323,7 +2391,7 @@ mod tests {
         );
 
         let mut cursor = Cursor::new(&valid);
-        cursor.exact_map(8).unwrap();
+        cursor.exact_map(9).unwrap();
         cursor.key(1).unwrap();
         cursor.borrowed_bytes(MAGIC.len()).unwrap();
         let second_key = cursor.position;
@@ -2337,12 +2405,12 @@ mod tests {
 
         cursor.key(2).unwrap();
         let version_position = cursor.position;
-        assert_eq!(valid[version_position], 2);
+        assert_eq!(valid[version_position], 3);
         let mut future = valid.clone();
-        future[version_position] = 3;
+        future[version_position] = 4;
         assert_eq!(
             atomic_error(&mut target, &future, 14),
-            DurableCheckpointError::UnsupportedVersion(3)
+            DurableCheckpointError::UnsupportedVersion(4)
         );
         let mut zero_version = valid.clone();
         zero_version[version_position] = 0;
