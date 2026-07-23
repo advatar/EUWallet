@@ -19,9 +19,12 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            container
-                .navigationTitle("My Wallet")
-                .padding()
+            ZStack {
+                ConsumerDesign.paper.ignoresSafeArea()
+                container
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .consumerPage()
         }
         // Derive coarse navigation milestones from what the core rendered — a thin mapping, NOT
         // protocol logic (the machine never sees credential data).
@@ -118,20 +121,27 @@ struct ContentView: View {
 struct OnboardingView: View {
     let onContinue: () -> Void
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 18) {
             Spacer()
-            Image(systemName: "wallet.pass").font(.system(size: 48)).foregroundStyle(.tint)
-            Text("Your ID, safely on your phone").font(.title.bold())
+            ConsumerStatusOrb(systemImage: "wallet.pass.fill")
+            Text("Your ID, safely on your phone")
+                .font(.largeTitle.bold())
+                .accessibilityAddTraits(.isHeader)
             Text("Add trusted documents, use them when asked, and always see what you are sharing before you approve.")
-                .font(.body).foregroundStyle(.secondary)
-            Label("You choose what to share", systemImage: "checkmark.shield")
-            Label("Protected on this device", systemImage: "lock")
-            Label("Simple activity history", systemImage: "clock.arrow.circlepath")
+                .font(.title3).foregroundStyle(ConsumerDesign.mutedInk)
+            VStack(alignment: .leading, spacing: 0) {
+                Label("You choose what to share", systemImage: "checkmark.shield")
+                Divider().padding(.vertical, 12)
+                Label("Protected on this device", systemImage: "lock")
+                Divider().padding(.vertical, 12)
+                Label("Simple activity history", systemImage: "clock.arrow.circlepath")
+            }
+            .consumerSurface()
             Spacer()
             Button("Set up my wallet", action: onContinue)
-                .buttonStyle(.borderedProminent)
-                .frame(maxWidth: .infinity)
+                .buttonStyle(ConsumerPrimaryButtonStyle())
         }
+        .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -145,7 +155,18 @@ struct PresentingContainer: View {
     var body: some View {
         switch model.phase {
         case .running, .home:
-            ProgressView("Please wait…")
+            VStack(spacing: 20) {
+                ConsumerStatusOrb(systemImage: "checkmark.shield.fill")
+                Text("Checking the request")
+                    .font(.largeTitle.bold())
+                    .multilineTextAlignment(.center)
+                Text("Making sure it is safe and showing only what is needed.")
+                    .font(.title3)
+                    .foregroundStyle(ConsumerDesign.mutedInk)
+                    .multilineTextAlignment(.center)
+                ProgressView().controlSize(.large).accessibilityLabel("Checking the request")
+            }
+            .padding(24)
         case .screen(let screen):
             ScreenRenderer(screen: screen, onConsent: model.approve, onDecline: model.decline)
         case .done(let message):

@@ -16,6 +16,10 @@ public struct ScreenRenderer: View {
     }
 
     public var body: some View {
+        content.consumerPage()
+    }
+
+    @ViewBuilder private var content: some View {
         switch screen {
         case .loading:
             ProgressView("Loading…")
@@ -98,7 +102,14 @@ private struct DocumentBadge: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(20)
-        .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 20))
+        .foregroundStyle(.white)
+        .background(
+            LinearGradient(
+                colors: [ConsumerDesign.brandInk, ConsumerDesign.brand],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: ConsumerDesign.brandInk.opacity(0.22), radius: 16, y: 8)
         .accessibilityElement(children: .combine)
     }
     private var statusText: String {
@@ -112,7 +123,12 @@ private struct DocumentBadge: View {
 private struct DocumentListView: View {
     let documents: [DocumentSummary]
     var body: some View {
-        ScrollView { LazyVStack(spacing: 16) { ForEach(documents) { DocumentBadge(document: $0) } }.padding() }
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                Text("Your documents").font(.largeTitle.bold())
+                ForEach(documents) { DocumentBadge(document: $0) }
+            }.padding(20)
+        }
             .navigationTitle("Your documents")
     }
 }
@@ -128,7 +144,7 @@ private struct DocumentDetailScreenView: View {
                     LabeledContent(item.label, value: item.value)
                 }
                 Label("Kept securely on this phone", systemImage: "lock.fill").foregroundStyle(.secondary)
-                Button("Use this document", action: onUse).buttonStyle(.borderedProminent).controlSize(.large)
+                Button("Use this document", action: onUse).buttonStyle(ConsumerPrimaryButtonStyle())
             }.padding()
         }
     }
@@ -140,8 +156,15 @@ private struct IssuanceOfferView: View {
     let onDecline: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
+            Text("ADD A DOCUMENT").font(.caption.weight(.bold)).tracking(1.5).foregroundStyle(ConsumerDesign.brand)
             Text("Add your \(offer.documentName)?").font(.largeTitle.bold())
-            Label(offer.issuerName, systemImage: "checkmark.seal.fill").font(.headline)
+            HStack(spacing: 12) {
+                Image(systemName: "checkmark.seal.fill").foregroundStyle(ConsumerDesign.good)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(offer.issuerName).font(.headline)
+                    Text("Verified issuer").font(.subheadline).foregroundStyle(ConsumerDesign.good)
+                }
+            }.consumerSurface()
             Text("Use this document to prove who you are when you choose.").foregroundStyle(.secondary)
             DisclosureGroup("What will be added") {
                 ForEach(offer.attributes.filter { $0 != "portrait" }, id: \.self) {
@@ -150,9 +173,9 @@ private struct IssuanceOfferView: View {
                 if offer.portraitRequired { Label("Portrait", systemImage: "person.crop.rectangle") }
             }
             Spacer()
-            Button("Add", action: onAdd).buttonStyle(.borderedProminent).controlSize(.large).frame(maxWidth: .infinity)
-            Button("Not now", role: .cancel, action: onDecline).frame(maxWidth: .infinity).frame(minHeight: 44)
-        }.padding()
+            Button("Add document", action: onAdd).buttonStyle(ConsumerPrimaryButtonStyle())
+            Button("Not now", role: .cancel, action: onDecline).buttonStyle(ConsumerSecondaryButtonStyle())
+        }.padding(20)
     }
 }
 
@@ -172,25 +195,31 @@ private struct NfcReadingView: View {
     let state: NfcReadState; let onCancel: () -> Void
     var body: some View {
         VStack(spacing: 24) {
-            Image(systemName: state == .connectionLost ? "iphone.slash" : "wave.3.right.circle.fill").font(.system(size: 64)).foregroundStyle(.tint)
+            ConsumerStatusOrb(
+                systemImage: state == .connectionLost ? "iphone.slash" : "wave.3.right.circle.fill",
+                tint: state == .connectionLost ? ConsumerDesign.warning : ConsumerDesign.brand,
+                background: state == .connectionLost ? ConsumerDesign.warningBackground : nil)
             Text(state == .connectionLost ? "Move the card back into place" : state == .reading ? "Reading your card" : "Waiting for your card").font(.largeTitle.bold()).multilineTextAlignment(.center)
             Text(state == .connectionLost ? "Nothing was lost. Hold it at the top of your phone to continue." : "Keep the card still until this finishes.").foregroundStyle(.secondary).multilineTextAlignment(.center)
             ProgressView().accessibilityLabel(state == .connectionLost ? "Connection interrupted" : "Reading card")
             Spacer(); Button("Cancel", role: .cancel, action: onCancel).frame(minHeight: 44)
-        }.padding().accessibilityElement(children: .contain)
+        }.padding(20).accessibilityElement(children: .contain)
     }
 }
 private struct IssuanceStatusView: View {
     let document: DocumentSummary; let ready: Bool; let onDone: () -> Void
     var body: some View {
         VStack(spacing: 22) {
-            Image(systemName: ready ? "checkmark.circle.fill" : "clock.fill")
-                .font(.system(size: 64))
-                .foregroundStyle(ready ? Color.green : Color.accentColor)
+            ConsumerStatusOrb(
+                systemImage: ready ? "checkmark" : "clock.fill",
+                tint: ready ? ConsumerDesign.good : ConsumerDesign.brand,
+                background: ready ? ConsumerDesign.goodBackground : nil)
             Text(ready ? "Your \(document.documentName) is ready" : "Preparing your \(document.documentName)").font(.largeTitle.bold()).multilineTextAlignment(.center)
             if ready { DocumentBadge(document: document) } else { Text("We’ll let you know when it’s ready. You can close the app.").foregroundStyle(.secondary).multilineTextAlignment(.center) }
-            Spacer(); Button(ready ? "Go to Wallet" : "Done", action: onDone).buttonStyle(.borderedProminent).controlSize(.large)
-        }.padding()
+            Spacer()
+            Button(ready ? "Go to Wallet" : "Done", action: onDone)
+                .buttonStyle(ConsumerPrimaryButtonStyle())
+        }.padding(20)
     }
 }
 private struct IssuanceNeedsAttentionView: View {
@@ -210,13 +239,13 @@ private struct JourneyChoiceView: View {
     let onPrimary: () -> Void; let onSecondary: () -> Void
     var body: some View {
         VStack(spacing: 20) {
-            Image(systemName: icon).font(.system(size: 56)).foregroundStyle(.tint)
+            ConsumerStatusOrb(systemImage: icon)
             Text(title).font(.largeTitle.bold()).multilineTextAlignment(.center)
-            Text(message).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Text(message).font(.title3).foregroundStyle(ConsumerDesign.mutedInk).multilineTextAlignment(.center)
             Spacer()
-            Button(primary, action: onPrimary).buttonStyle(.borderedProminent).controlSize(.large).frame(maxWidth: .infinity)
-            Button(secondary, action: onSecondary).frame(maxWidth: .infinity).frame(minHeight: 44)
-        }.padding()
+            Button(primary, action: onPrimary).buttonStyle(ConsumerPrimaryButtonStyle())
+            Button(secondary, action: onSecondary).buttonStyle(ConsumerSecondaryButtonStyle())
+        }.padding(20)
     }
 }
 
@@ -303,63 +332,106 @@ struct ConsentView: View {
     let onDecline: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Share information?").font(.title2.bold())
-            Text("Requested by \(rp)").font(.subheadline).foregroundStyle(.secondary)
-            Label(
-                verifierRegistration == .registered
-                    ? "Registered verifier" : "Identity certificate verified",
-                systemImage: "checkmark.shield")
-                .font(.subheadline)
-            if trustMark == .eudiWallet {
-                Label("EU Digital Identity trust mark", systemImage: "checkmark.seal.fill")
-                    .font(.subheadline)
-            }
-            if !purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(purpose).font(.body)
-            }
-            Text("Only this information will be shared:").font(.headline).padding(.top, 4)
-            ForEach(claims, id: \.self) { claim in
-                Label(ConsumerCopy.claimName(claim), systemImage: "checkmark.seal")
-            }
-            switch retention.policy {
-            case .notStored:
-                Label("The verifier says it will not store this information", systemImage: "clock.badge.xmark")
-                    .font(.subheadline)
-            case .days:
-                if let days = retention.days {
-                    Label("The verifier may keep it for \(days) days", systemImage: "calendar")
-                        .font(.subheadline)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text(overAsk.result == .exceedsRegisteredScope ? "Check this request" : "Share with \(rp)?")
+                    .font(.largeTitle.bold())
+                    .accessibilityAddTraits(.isHeader)
+
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "checkmark.shield.fill")
+                        .font(.title2)
+                        .foregroundStyle(ConsumerDesign.good)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(rp).font(.headline)
+                        Text(
+                            verifierRegistration == .registered
+                                ? "Registered verifier" : "Identity certificate verified")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(ConsumerDesign.good)
+                        if !purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text(purpose).font(.subheadline).foregroundStyle(ConsumerDesign.mutedInk)
+                        }
+                    }
+                    Spacer()
                 }
-            case .unspecified:
-                Label("The verifier has not stated how long it will keep this information", systemImage: "questionmark.circle")
-                    .font(.subheadline)
-            }
-            if overAsk.result == .exceedsRegisteredScope {
-                Label(
-                    "This request includes information outside the verifier’s registered purpose",
-                    systemImage: "exclamationmark.triangle.fill")
-                    .font(.headline)
-                    .foregroundStyle(.orange)
-                    .accessibilityLabel(
-                        "Warning: This request includes information outside the verifier’s registered purpose")
-            }
-            if !notSharedClaims.isEmpty {
-                Text("Stays in your wallet").font(.headline).padding(.top, 4)
-                ForEach(notSharedClaims, id: \.self) { claim in
-                    Label(ConsumerCopy.claimName(claim), systemImage: "lock.shield")
-                        .foregroundStyle(.secondary)
+                .consumerSurface()
+
+                if trustMark == .eudiWallet {
+                    Label("EU Digital Identity trust mark", systemImage: "checkmark.seal.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(ConsumerDesign.good)
+                }
+
+                if overAsk.result == .exceedsRegisteredScope {
+                    Label(
+                        "This request asks for more information than the verifier is registered to need.",
+                        systemImage: "exclamationmark.triangle.fill")
+                        .font(.headline)
+                        .foregroundStyle(ConsumerDesign.warning)
+                        .padding(16)
+                        .background(
+                            ConsumerDesign.warningBackground,
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .accessibilityLabel(
+                            "Warning: This request asks for more information than the verifier is registered to need.")
+                }
+
+                Text("Sharing").font(.headline)
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(claims.enumerated()), id: \.offset) { index, claim in
+                        if index > 0 { Divider() }
+                        Label(ConsumerCopy.claimName(claim), systemImage: "checkmark")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(ConsumerDesign.ink)
+                            .padding(.vertical, 12)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .background(ConsumerDesign.surfaceRaised, in: RoundedRectangle(cornerRadius: 14))
+
+                retentionLabel
+
+                if !notSharedClaims.isEmpty {
+                    Text("Stays in your wallet").font(.headline)
+                    Text(notSharedClaims.map(ConsumerCopy.claimName).joined(separator: ", "))
+                        .foregroundStyle(ConsumerDesign.mutedInk)
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(ConsumerDesign.surfaceRaised, in: RoundedRectangle(cornerRadius: 14))
+                }
+
+                if overAsk.result == .exceedsRegisteredScope {
+                    Button("Don’t share", role: .cancel, action: onDecline)
+                        .buttonStyle(ConsumerPrimaryButtonStyle())
+                    Button("Share only this information", action: onConsent)
+                        .buttonStyle(ConsumerSecondaryButtonStyle())
+                } else {
+                    Button("Approve and share", action: onConsent)
+                        .buttonStyle(ConsumerPrimaryButtonStyle())
+                    Button("Don’t share", role: .cancel, action: onDecline)
+                        .buttonStyle(ConsumerSecondaryButtonStyle())
                 }
             }
-            Spacer()
-            HStack {
-                Button("Not now", role: .cancel, action: onDecline)
-                Spacer()
-                Button("Share information", action: onConsent).buttonStyle(.borderedProminent)
-            }
+            .padding(20)
         }
-        .padding()
         .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder private var retentionLabel: some View {
+        switch retention.policy {
+        case .notStored:
+            Label("The verifier says it will not store this information", systemImage: "clock.badge.xmark")
+                .font(.subheadline)
+        case .days:
+            if let days = retention.days {
+                Label("The verifier may keep it for \(days) days", systemImage: "calendar")
+                    .font(.subheadline)
+            }
+        case .unspecified:
+            Label("The verifier has not said how long it will keep this information", systemImage: "questionmark.circle")
+                .font(.subheadline)
+        }
     }
 }
 #endif

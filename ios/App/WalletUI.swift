@@ -78,7 +78,7 @@ struct WalletHomeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Your documents")
-                    .font(.title2.bold())
+                    .font(.largeTitle.bold())
 
                 if model.credentials.isEmpty {
                     EmptyWalletView { showAdd = true }
@@ -110,11 +110,6 @@ struct WalletHomeView: View {
                     Divider().padding(.leading, 52)
                     WalletRow(title: "Activity", subtitle: model.history.isEmpty ? "Nothing shared yet" : "\(model.history.count) recent actions",
                               systemImage: "list.bullet.rectangle", action: onOpenHistory)
-#if DEBUG
-                    Divider().padding(.leading, 52)
-                    WalletRow(title: "Developer catalogue", subtitle: "Supported test types",
-                              systemImage: "hammer", action: onOpenCatalogue)
-#endif
                     Divider().padding(.leading, 52)
                     WalletRow(title: "Settings", subtitle: nil,
                               systemImage: "gear", action: onOpenSettings)
@@ -123,6 +118,7 @@ struct WalletHomeView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .padding(.top, 4)
             }
+            .padding(20)
         }
         .overlay {
             if model.isIssuing {
@@ -132,6 +128,7 @@ struct WalletHomeView: View {
                     .shadow(radius: 8)
             }
         }
+        .consumerPage()
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { showAdd = true } label: { Image(systemName: "plus") }
@@ -161,20 +158,16 @@ private struct EmptyWalletView: View {
     let onAdd: () -> Void
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "wallet.pass")
-                .font(.system(size: 44)).foregroundStyle(.tint)
-            Text("Add your first document").font(.headline)
+            ConsumerStatusOrb(systemImage: "wallet.pass.fill")
+            Text("Add your first document").font(.title2.bold())
             Text("Keep your ID safely on this phone and choose exactly what to share.")
-                .font(.callout).foregroundStyle(.secondary)
+                .font(.body).foregroundStyle(ConsumerDesign.mutedInk)
                 .multilineTextAlignment(.center)
-            Button(action: onAdd) {
-                Label("Add a document", systemImage: "plus")
-                    .font(.headline).padding(.horizontal, 8).padding(.vertical, 6)
-            }
-            .buttonStyle(.borderedProminent)
+            Button("Add a document", action: onAdd)
+                .buttonStyle(ConsumerPrimaryButtonStyle())
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 32)
+        .consumerSurface(radius: 20)
     }
 }
 
