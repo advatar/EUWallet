@@ -267,7 +267,12 @@ operational solution needed to enter those processes.
       Simulator slices pass explicit symbol verification; the app builds cleanly and both on-device
       simulator tests pass under Xcode 26.5.
 - [ ] Separate production and demo iOS targets; add encrypted persistence and lifecycle flows.
-- [ ] Build the Android client with equivalent StrongBox/KeyMint security behavior.
+- [ ] [#15](https://github.com/advatar/EUWallet/issues/15): make Android a first-class production
+      wallet client: runnable application and Rust bridge; StrongBox/KeyMint and attestation;
+      encrypted process-death recovery; Credential Manager/Digital Credentials provider; QR and
+      verified-link ingress; biometric approval; complete consumer Compose journeys; Android-
+      specific formal navigation/lifecycle correspondence; instrumentation, accessibility,
+      physical-device and signed-release evidence.
 - [ ] Implement German eID/eAT onboarding, live PID issuance, RP registration, trust, WIA/WUA,
       status and revocation integration.
 - [ ] Implement final OpenID4VCI/OpenID4VP/HAIP profiles and ISO 18013-5 proximity transports.
