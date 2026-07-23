@@ -767,6 +767,12 @@ public protocol WalletEngineProtocol : AnyObject {
      */
     func attestationCatalogueJson()  -> String
 
+    /**
+     * Return a secret-free recovery projection after authenticated checkpoint restoration.
+     * This never resumes a protocol session or allocates an operation callback.
+     */
+    func durableResumeEffectsJson()  -> String
+
     func exportDurableCheckpoint(generation: UInt64) throws  -> FfiDurableCheckpoint
 
     /**
@@ -919,6 +925,17 @@ public convenience init(walletClientId: String, deviceKeyRef: String) {
 open func attestationCatalogueJson() -> String {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_wallet_core_fn_method_walletengine_attestation_catalogue_json(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return a secret-free recovery projection after authenticated checkpoint restoration.
+     * This never resumes a protocol session or allocates an operation callback.
+     */
+open func durableResumeEffectsJson() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_durable_resume_effects_json(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -1947,6 +1964,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_attestation_catalogue_json() != 15813) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_durable_resume_effects_json() != 43625) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_export_durable_checkpoint() != 8892) {

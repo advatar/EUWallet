@@ -56,6 +56,11 @@ public protocol DurableWalletEngineDriving: WalletEngineDriving {
     func prepareForDurableRestore(environment: CoreDurableEnvironment) throws
     func makeDurableCheckpoint(generation: UInt64) throws -> CoreDurableCheckpoint
     func restoreDurableCheckpointRecord(_ checkpoint: CoreDurableCheckpoint) throws
+    func durableResumeEffectsJson() -> String
+}
+
+public extension DurableWalletEngineDriving {
+    func durableResumeEffectsJson() -> String { "[]" }
 }
 
 /// Retry seam consumed by `EffectExecutor`. The exact event must match the blocked transition;
@@ -262,6 +267,17 @@ public final class DurableLifecycleCoordinator: WalletEngineDriving, DurableLife
             }
             state = .ready(record.generation)
         }
+    }
+
+    /// Read the core's secret-free post-restore UI projection. It is not an external effect
+    /// outbox: only a non-interactive recovery render is permitted by the core contract.
+    public func restoredEffectsJSON() throws -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .ready = state else {
+            throw DurableLifecycleError.notBootstrapped
+        }
+        return engine.durableResumeEffectsJson()
     }
 
     /// `WalletEngineDriving` entry point used transparently by the existing effect executor.

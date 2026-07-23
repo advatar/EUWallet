@@ -270,6 +270,37 @@ final class EffectExecutorTests: XCTestCase {
         XCTAssertEqual(store.record?.generation, 1)
     }
 
+    func testRestoredIssuanceInterruptionRendersWithoutInvokingCore() throws {
+        let engine = MockEngine()
+        var rendered: ScreenDescription?
+        let executor = makeExecutor(engine: engine) { operationId, hash, screen in
+            XCTAssertNil(operationId)
+            XCTAssertNil(hash)
+            rendered = screen
+        }
+
+        try executor.presentRestoredState(
+            coreOutput: #"[{"type":"render","screen":{"screen":"issuanceRecovery","reason":"sessionInterrupted","documentName":"Digital identity document","attemptsRemaining":null,"canResume":false}}]"#)
+
+        XCTAssertTrue(engine.receivedEvents.isEmpty)
+        guard case .issuanceRecovery(let recovery) = rendered else {
+            return XCTFail("expected issuance recovery")
+        }
+        XCTAssertEqual(recovery.reason, .sessionInterrupted)
+        XCTAssertFalse(recovery.canResume)
+    }
+
+    func testRestoredStateRejectsInteractiveOrResumableEffects() {
+        let executor = makeExecutor()
+        for output in [
+            #"[{"type":"render","operationId":9,"screen":{"screen":"issuanceRecovery","reason":"sessionInterrupted","documentName":"ID","attemptsRemaining":null,"canResume":false}}]"#,
+            #"[{"type":"render","screen":{"screen":"issuanceRecovery","reason":"sessionInterrupted","documentName":"ID","attemptsRemaining":null,"canResume":true}}]"#,
+            #"[{"type":"requestToken"}]"#,
+        ] {
+            XCTAssertThrowsError(try executor.presentRestoredState(coreOutput: output))
+        }
+    }
+
     func testHistoryMaintenanceEventsAreDurablyCommittedIdleTransitions() async throws {
         let engine = MockEngine { _ in "[]" }
         let store = ExecutorTestDurableStore()

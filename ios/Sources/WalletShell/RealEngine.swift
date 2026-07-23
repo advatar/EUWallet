@@ -50,6 +50,10 @@ import Foundation
                     generation: checkpoint.generation,
                     bytes: checkpoint.bytes))
         }
+
+        func durableResumeEffectsJson() -> String {
+            engine.durableResumeEffectsJson()
+        }
     }
 
     /// Controlled live composition for the generated Core. Mutations are exposed only through
@@ -121,6 +125,9 @@ import Foundation
         func transactionReportJSON() -> String { engine.transactionReportJson() }
         func exportJSON() -> String { engine.exportJson() }
         func attestationCatalogueJSON() -> String { engine.attestationCatalogueJson() }
+        func durableResumeEffectsJSON() throws -> String {
+            try lifecycle.restoredEffectsJSON()
+        }
     }
 
     /// Process-local CAS store used only by the demo/test runtime above. It exercises the exact

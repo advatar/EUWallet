@@ -121,6 +121,7 @@ final class WalletModel: ObservableObject {
         }
         reloadCredentials()
         reloadHistory()
+        presentRestoredStateIfNeeded()
     }
 
     // MARK: - Engine + executor
@@ -180,6 +181,20 @@ final class WalletModel: ObservableObject {
         }) else { return nil }
         self.executor = ex
         return ex
+    }
+
+    private func presentRestoredStateIfNeeded() {
+        guard let runtime,
+            let recovery = try? runtime.durableResumeEffectsJSON(),
+            recovery != "[]",
+            let executor = liveExecutor()
+        else { return }
+        self.executor = executor
+        do {
+            try executor.presentRestoredState(coreOutput: recovery)
+        } catch {
+            phase = .failed("We couldn't restore your wallet safely. Please start again.")
+        }
     }
 
     private func nextNonce() -> UInt64 {

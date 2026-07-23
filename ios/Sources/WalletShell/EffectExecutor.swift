@@ -412,6 +412,28 @@ public final class EffectExecutor {
             initialEventType: Self.eventType(eventJson))
     }
 
+    /// Present the core's post-restore projection without treating it as a resumable effect
+    /// cascade. Process-death recovery is deliberately limited to one non-interactive render.
+    public func presentRestoredState(coreOutput: String) throws {
+        let effects = try decode(coreOutput)
+        guard effects.count <= 1 else {
+            throw EffectExecutorError.ffi(
+                .malformedCoreOutput("durable recovery contains multiple effects"))
+        }
+        for effect in effects {
+            guard case .render(let operationId, let authorizationHash, let screen) = effect,
+                operationId == nil, authorizationHash == nil,
+                case .issuanceRecovery(let recovery) = screen,
+                recovery.reason == .sessionInterrupted,
+                recovery.canResume == false
+            else {
+                throw EffectExecutorError.ffi(
+                    .malformedCoreOutput("durable recovery is not a safe interruption screen"))
+            }
+            try render(nil, nil, screen)
+        }
+    }
+
     private func drain(
         initialCoreOutput: String,
         initialEventType: String?
