@@ -16,6 +16,7 @@ def evJson : Ev → String
   | .token b a      => "{" ++ q "kind" ++ ":" ++ q "token" ++ "," ++ q "bound" ++ ":" ++ boolJson b ++ "," ++ q "attested" ++ ":" ++ boolJson a ++ "}"
   | .proof          => "{" ++ q "kind" ++ ":" ++ q "proof" ++ "}"
   | .credential v p => "{" ++ q "kind" ++ ":" ++ q "credential" ++ "," ++ q "valid" ++ ":" ++ boolJson v ++ "," ++ q "portraitProfileValid" ++ ":" ++ boolJson p ++ "}"
+  | .processDeath   => "{" ++ q "kind" ++ ":" ++ q "processDeath" ++ "}"
 
 def stJson : St → String
   | .idle => "idle"
@@ -55,7 +56,9 @@ def suite : List (List Ev) :=
     -- missing or malformed mandatory portrait ⇒ aborted
     [.offer true, .approveOffer, .token true true, .proof, .credential true false],
     -- proof-of-possession stage reached, not yet issued
-    [.offer true, .approveOffer, .token true true, .proof]
+    [.offer true, .approveOffer, .token true true, .proof],
+    -- process death destroys the active session and projects only recovery
+    [.offer true, .approveOffer, .token true true, .processDeath]
   ]
 
 def main : IO Unit := do

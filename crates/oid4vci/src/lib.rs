@@ -465,6 +465,7 @@ pub mod model {
             valid: bool,
             portrait_profile_valid: bool,
         },
+        ProcessDeath,
     }
 
     #[derive(Clone, Debug)]
@@ -538,6 +539,17 @@ pub mod model {
                     } else {
                         c.st = St::Aborted; // guard: CredentialInvalid
                     }
+                }
+            }
+            Ev::ProcessDeath => {
+                if matches!(
+                    c.st,
+                    St::ReviewingOffer
+                        | St::OfferParsed
+                        | St::ProvingPossession
+                        | St::RequestingCredential
+                ) {
+                    c.st = St::Aborted;
                 }
             }
         }

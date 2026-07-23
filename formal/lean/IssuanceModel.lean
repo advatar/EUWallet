@@ -21,6 +21,7 @@ inductive Ev where
   | token (bound attested : Bool)   -- sender-bound token + proof-key attested (WUA High)
   | proof                           -- device proof-of-possession assembled
   | credential (valid portraitProfileValid : Bool)
+  | processDeath                    -- no protocol/session state survives restoration
   deriving Repr
 
 /-- Machine states (mirror of the security-relevant subset of `oid4vci::State`). -/
@@ -94,6 +95,11 @@ def step (c : Ctx) : Ev → Ctx
             { c with st := .credentialIssued, portraitProfileValid := true }
           else { c with st := .aborted }                              -- guard: CredentialInvalid
       | _ => c
+  | .processDeath =>
+      match c.st with
+      | .reviewingOffer | .offerParsed | .provingPossession | .requestingCredential =>
+          { c with st := .aborted }
+      | .idle | .credentialIssued | .aborted => c
 
 def run (evs : List Ev) : Ctx := evs.foldl step init
 
@@ -145,6 +151,9 @@ theorem step_preserves_inv (c : Ctx) (e : Ev) (h : Inv c) : Inv (step c e) := by
         · refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all [h4 hst]
         · refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> intro hnew <;> simp_all
       · exact ⟨h1, h2, h3, h4, h5⟩
+  | processDeath =>
+      simp only [step]
+      split <;> simp_all [Inv]
 
 theorem inv_foldl (evs : List Ev) (c : Ctx) (h : Inv c) : Inv (evs.foldl step c) := by
   induction evs generalizing c with
@@ -197,5 +206,21 @@ theorem offer_parsed_preparing_requires_approval (evs : List Ev) :
 theorem untrusted_issuer_is_rejected (c : Ctx) (h : c.st = St.idle) :
     (step c (.offer false)).st = St.aborted := by
   simp [step, h]
+
+/-- Process death in every non-terminal issuance state fails closed and renders recovery. It can
+    never manufacture an issued credential or a resumable protocol state. -/
+theorem process_death_aborts_active (c : Ctx)
+    (h : c.st = St.reviewingOffer ∨ c.st = St.offerParsed ∨
+      c.st = St.provingPossession ∨ c.st = St.requestingCredential) :
+    (step c .processDeath).st = St.aborted ∧
+      uiFor (step c .processDeath).st = Ui.recovery := by
+  rcases h with h | h | h | h <;> simp [step, h, uiFor]
+
+theorem process_death_never_issues_from_active (c : Ctx)
+    (h : c.st = St.reviewingOffer ∨ c.st = St.offerParsed ∨
+      c.st = St.provingPossession ∨ c.st = St.requestingCredential) :
+    (step c .processDeath).st ≠ St.credentialIssued := by
+  have haborted := (process_death_aborts_active c h).1
+  simp [haborted]
 
 end IssuanceModel

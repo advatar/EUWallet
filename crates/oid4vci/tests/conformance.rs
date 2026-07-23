@@ -22,6 +22,7 @@ fn parse_event(v: &Value) -> Ev {
                 .as_bool()
                 .expect("portraitProfileValid"),
         },
+        "processDeath" => Ev::ProcessDeath,
         other => panic!("unknown event kind: {other}"),
     }
 }
