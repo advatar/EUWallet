@@ -82,6 +82,7 @@ fn plan(format: GermanPidFormat) -> GermanPidIssuancePlan {
         proof_signing_algorithm: "ES256".to_owned(),
         credential_endpoint: HttpsEndpoint::parse(CREDENTIAL).unwrap(),
         nonce_endpoint: HttpsEndpoint::parse(NONCE).unwrap(),
+        deferred_credential_endpoint: None,
         authorization_endpoint: HttpsEndpoint::parse("https://as.example/authorize").unwrap(),
         token_endpoint: HttpsEndpoint::parse(TOKEN).unwrap(),
         pushed_authorization_request_endpoint: HttpsEndpoint::parse(PAR).unwrap(),
@@ -1374,6 +1375,40 @@ fn immediate_response_rejects_deferred_batch_notification_reissuance_and_wrong_p
             expected
         );
     }
+}
+
+#[test]
+fn conformant_deferred_response_enters_bounded_pending_state_only_when_advertised() {
+    let random = SequenceRandom::new();
+    let mut selected = plan(GermanPidFormat::DcSdJwt);
+    selected.deferred_credential_endpoint =
+        Some(HttpsEndpoint::parse("https://issuer.example/deferred").unwrap());
+    let AtCredentialRequest {
+        mut flow,
+        request_id,
+        ..
+    } = flow_at_credential_request(
+        &random,
+        &selected,
+        CredentialSelection::ConfigurationId,
+        &[],
+        vec![],
+    );
+    let effects = flow
+        .step(
+            CredentialInput::CredentialResponse(endpoint_response(
+                request_id,
+                CREDENTIAL,
+                202,
+                vec![],
+                vec![],
+                br#"{"transaction_id":"opaque-later","interval":10}"#.to_vec(),
+            )),
+            &credential_environment(&random, NOW + 5, &[]),
+        )
+        .unwrap();
+    assert!(effects.is_empty());
+    assert_eq!(flow.status(), FlowStatus::Deferred);
 }
 
 struct MdocStub;

@@ -400,6 +400,7 @@ fn issuer_metadata(configuration_id: &str, configuration: Value) -> Value {
         "authorization_servers": [AS_ONE],
         "credential_endpoint": "https://issuer.example/tenant/credential?version=1",
         "nonce_endpoint": "https://issuer.example/tenant/nonce",
+        "deferred_credential_endpoint": "https://issuer.example/tenant/deferred",
         "credential_configurations_supported": {
             configuration_id: configuration
         },
@@ -437,6 +438,7 @@ fn issuer_and_as_metadata_parse_exact_identifiers_endpoints_and_features() {
     assert_eq!(issuer.credential_issuer.as_str(), ISSUER);
     assert_eq!(issuer.authorization_servers[0].as_str(), AS_ONE);
     assert!(issuer.features.nonce_endpoint);
+    assert!(issuer.features.deferred_credential_endpoint);
     assert!(!issuer.features.credential_request_encryption_required);
     assert_eq!(
         issuer.credential_endpoint.as_str(),
@@ -572,6 +574,12 @@ fn german_first_enrolment_selects_only_exact_current_pid_profiles() {
     );
     assert_eq!(plan.scope, "pid_sd");
     assert_eq!(plan.pid_provider_trust, PidProviderTrust::Unresolved);
+    assert_eq!(
+        plan.deferred_credential_endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.as_str()),
+        Some("https://issuer.example/tenant/deferred")
+    );
 
     let (offer, issuer, server) = valid_setup("pid-mdoc", mdoc_configuration());
     let plan = select_german_first_enrolment(&offer, &issuer, &[server], "pid-mdoc").unwrap();

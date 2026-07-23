@@ -59,6 +59,7 @@ fn plan() -> GermanPidIssuancePlan {
         proof_signing_algorithm: "ES256".to_owned(),
         credential_endpoint: HttpsEndpoint::parse("https://issuer.example/credential").unwrap(),
         nonce_endpoint: HttpsEndpoint::parse("https://issuer.example/nonce").unwrap(),
+        deferred_credential_endpoint: None,
         authorization_endpoint: HttpsEndpoint::parse("https://as.example/authorize").unwrap(),
         token_endpoint: HttpsEndpoint::parse(TOKEN).unwrap(),
         pushed_authorization_request_endpoint: HttpsEndpoint::parse(PAR).unwrap(),

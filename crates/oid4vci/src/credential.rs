@@ -103,6 +103,7 @@ pub enum FlowStatus {
     AwaitingCredentialProofSignature,
     AwaitingDpopSignature,
     AwaitingCredentialResponse,
+    Deferred,
     Complete,
     Failed,
 }
@@ -217,6 +218,7 @@ pub struct CredentialFlowConfig {
     format: GermanPidFormat,
     credential_endpoint: HttpsEndpoint,
     nonce_endpoint: HttpsEndpoint,
+    deferred_credential_endpoint: Option<HttpsEndpoint>,
     request_target: SelectedRequestTarget,
     dpop_key_ref: KeyRef,
     dpop_public_jwk: Es256PublicJwk,
@@ -295,6 +297,7 @@ impl CredentialFlowConfig {
             format: plan.format,
             credential_endpoint: plan.credential_endpoint.clone(),
             nonce_endpoint: plan.nonce_endpoint.clone(),
+            deferred_credential_endpoint: plan.deferred_credential_endpoint.clone(),
             request_target,
             dpop_key_ref: grant.dpop_key_ref().clone(),
             dpop_public_jwk: grant.dpop_public_jwk().clone(),
@@ -735,6 +738,7 @@ struct Context {
     format: GermanPidFormat,
     credential_endpoint: HttpsEndpoint,
     nonce_endpoint: HttpsEndpoint,
+    deferred_credential_endpoint: Option<HttpsEndpoint>,
     request_target: SelectedRequestTarget,
     dpop_key_ref: KeyRef,
     dpop_public_jwk: Es256PublicJwk,
@@ -780,6 +784,12 @@ enum Stage {
         c_nonce_hash: [u8; 32],
         credential_proof: SecretString,
         nonce_retry_count: u8,
+    },
+    Deferred {
+        _transaction_id: SecretString,
+        _interval_seconds: u32,
+        _next_poll_epoch_seconds: i64,
+        _c_nonce_hash: [u8; 32],
     },
     Complete(IssuedCredential),
     Failed(CredentialError),
@@ -828,6 +838,7 @@ impl CredentialFlow {
             format: config.format,
             credential_endpoint: config.credential_endpoint,
             nonce_endpoint: config.nonce_endpoint,
+            deferred_credential_endpoint: config.deferred_credential_endpoint,
             request_target: config.request_target,
             dpop_key_ref: config.dpop_key_ref,
             dpop_public_jwk: config.dpop_public_jwk,
@@ -854,6 +865,7 @@ impl CredentialFlow {
             Stage::SigningCredentialProof { .. } => FlowStatus::AwaitingCredentialProofSignature,
             Stage::SigningDpop { .. } => FlowStatus::AwaitingDpopSignature,
             Stage::AwaitingCredentialResponse { .. } => FlowStatus::AwaitingCredentialResponse,
+            Stage::Deferred { .. } => FlowStatus::Deferred,
             Stage::Complete(_) => FlowStatus::Complete,
             Stage::Failed(_) => FlowStatus::Failed,
         }
@@ -1259,7 +1271,25 @@ impl CredentialFlow {
             self.rotate_credential_endpoint_nonce(nonce)?;
         }
         if response.status == 202 {
-            return Err(CredentialError::DeferredIssuanceUnsupported);
+            self.context
+                .deferred_credential_endpoint
+                .as_ref()
+                .ok_or(CredentialError::DeferredIssuanceUnsupported)?;
+            let (transaction_id, interval_seconds) =
+                parse_deferred_credential(response.body.expose())?;
+            let next_poll_epoch_seconds = environment
+                .now_epoch_seconds
+                .checked_add(i64::from(interval_seconds))
+                .ok_or(CredentialError::InvalidClock)?;
+            return Ok((
+                Stage::Deferred {
+                    _transaction_id: SecretString::from_string(transaction_id),
+                    _interval_seconds: interval_seconds,
+                    _next_poll_epoch_seconds: next_poll_epoch_seconds,
+                    _c_nonce_hash: c_nonce_hash,
+                },
+                Vec::new(),
+            ));
         }
         if response.status != 200 {
             return Err(CredentialError::CredentialRejected);
@@ -1880,6 +1910,26 @@ fn parse_immediate_credential(
         GermanPidFormat::DcSdJwt => validate_sd_jwt_pid(credential, expected_issuer),
         GermanPidFormat::MsoMdoc => validate_mdoc_pid(credential),
     }
+}
+
+fn parse_deferred_credential(input: &[u8]) -> Result<(String, u32), CredentialError> {
+    let object = bounded_json::parse_object(input, CREDENTIAL_JSON_LIMITS)
+        .map_err(|_| CredentialError::InvalidCredentialResponse)?;
+    if object.contains_key("credentials") || object.contains_key("acceptance_token") {
+        return Err(CredentialError::InvalidCredentialResponse);
+    }
+    let transaction_id = object
+        .get("transaction_id")
+        .and_then(Value::as_str)
+        .filter(|value| valid_bounded_text(value, 2_048))
+        .ok_or(CredentialError::InvalidCredentialResponse)?;
+    let interval = object
+        .get("interval")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or(CredentialError::InvalidCredentialResponse)?;
+    Ok((transaction_id.to_owned(), interval))
 }
 
 fn validate_sd_jwt_pid(compact: &str, expected_issuer: &str) -> Result<Vec<u8>, CredentialError> {
