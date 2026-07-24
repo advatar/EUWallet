@@ -32,8 +32,10 @@ fi
 
 grep -q 'CODE_SIGN_ENTITLEMENTS = App/EUWalletDemo.entitlements;' "${project}"
 grep -q 'DEVELOPMENT_TEAM = L2AF8KFX35;' "${project}"
-if [[ ! -f "${app_scheme}" ]] || ! grep -q 'BuildableName = "EUWallet.app"' "${app_scheme}"; then
-  echo "Shared EUWalletDemo app/archive scheme is missing or does not build EUWallet.app" >&2
+if [[ ! -f "${app_scheme}" ]] || \
+  ! grep -q 'BlueprintName = "EUWalletDemo"' "${app_scheme}" || \
+  ! grep -A2 '<ArchiveAction' "${app_scheme}" | grep -q 'buildConfiguration = "Release"'; then
+  echo "Shared EUWalletDemo app scheme is missing, points at the wrong target, or cannot archive Release" >&2
   exit 1
 fi
 actual_extension_point="$(/usr/libexec/PlistBuddy \
