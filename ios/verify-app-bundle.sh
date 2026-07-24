@@ -34,4 +34,20 @@ if [[ "$IDENTIFIER" != "eu.advatar.wallet" || "$PACKAGE_TYPE" != "APPL" ]]; then
   exit 1
 fi
 
-echo "Verified $APP: CFBundleExecutable=$EXECUTABLE"
+EXTENSION="$APP/Extensions/EUWalletDocumentProvider.appex"
+if [[ ! -d "$EXTENSION" ]]; then
+  EXTENSION="$APP/PlugIns/EUWalletDocumentProvider.appex"
+fi
+EXTENSION_PLIST="$EXTENSION/Info.plist"
+if [[ ! -f "$EXTENSION_PLIST" ]]; then
+  echo "Identity Document Provider UI extension is missing from the app bundle" >&2
+  exit 1
+fi
+EXTENSION_POINT=$(/usr/libexec/PlistBuddy \
+  -c "Print :EXAppExtensionAttributes:EXExtensionPointIdentifier" "$EXTENSION_PLIST")
+if [[ "$EXTENSION_POINT" != "com.apple.identity-document-services.document-provider-ui" ]]; then
+  echo "unexpected Identity Document Provider extension point: $EXTENSION_POINT" >&2
+  exit 1
+fi
+
+echo "Verified $APP: CFBundleExecutable=$EXECUTABLE, provider=$EXTENSION_POINT"
