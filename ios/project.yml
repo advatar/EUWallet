@@ -135,3 +135,22 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.uitests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: EUWalletDemo
+
+schemes:
+  EUWalletDemo:
+    build:
+      targets:
+        EUWalletDemo: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - EUWalletDemoTests
+        - EUWalletDemoUITests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

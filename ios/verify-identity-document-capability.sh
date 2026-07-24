@@ -3,6 +3,7 @@ set -euo pipefail
 
 entitlements="App/EUWalletDemo.entitlements"
 project="EUWalletDemo.xcodeproj/project.pbxproj"
+app_scheme="EUWalletDemo.xcodeproj/xcshareddata/xcschemes/EUWalletDemo.xcscheme"
 capability="com.apple.developer.identity-document-services.document-provider.mobile-document-types"
 extension_plist="DocumentProvider/Info.plist"
 extension_point="com.apple.identity-document-services.document-provider-ui"
@@ -31,6 +32,10 @@ fi
 
 grep -q 'CODE_SIGN_ENTITLEMENTS = App/EUWalletDemo.entitlements;' "${project}"
 grep -q 'DEVELOPMENT_TEAM = L2AF8KFX35;' "${project}"
+if [[ ! -f "${app_scheme}" ]] || ! grep -q 'BuildableName = "EUWallet.app"' "${app_scheme}"; then
+  echo "Shared EUWalletDemo app/archive scheme is missing or does not build EUWallet.app" >&2
+  exit 1
+fi
 actual_extension_point="$(/usr/libexec/PlistBuddy \
   -c 'Print :EXAppExtensionAttributes:EXExtensionPointIdentifier' "${extension_plist}")"
 if [[ "${actual_extension_point}" != "${extension_point}" ]]; then
