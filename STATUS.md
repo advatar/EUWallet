@@ -163,6 +163,15 @@ operational solution needed to enter those processes.
   - [x] Add exact offer/metadata vectors and malformed/adversarial coverage.
   - [ ] Wire generic development-attestation acquisition and custody after the live issuance
         coordinator tracked by #55 is available; current production flow remains PID-specific.
+    - [ ] Complete authorization-code issuance for
+          `dev.advatar.tlsn.evidence.sd-jwt`.
+    - [ ] Authenticate, validate, and store only
+          `vct=dev.advatar.tlsn.evidence.1`, preserving holder binding, issuer trust, status,
+          expiry, and deletion controls.
+    - [ ] Render the credential explicitly as development TLSNotary evidence and prove it cannot
+          be classified as PID, EAA, QEAA, KYC, or accredited identity evidence.
+    - [ ] Add a live VCIssuer end-to-end interoperability test covering acquisition, authenticated
+          custody, display classification, and deletion.
   - [x] Pass focused Rust and Swift qualification, commit, push, merge, and verify `origin/main`.
 
 - [x] [Landing #2](https://github.com/advatar/euro-wallet-echo/issues/2): explain how a future
