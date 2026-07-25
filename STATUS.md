@@ -163,7 +163,7 @@ operational solution needed to enter those processes.
   - [x] Add exact offer/metadata vectors and malformed/adversarial coverage.
   - [ ] Wire generic development-attestation acquisition and custody after the live issuance
         coordinator tracked by #55 is available; current production flow remains PID-specific.
-  - [ ] Pass focused Rust and Swift qualification, commit, push, merge, and verify `origin/main`.
+  - [x] Pass focused Rust and Swift qualification, commit, push, merge, and verify `origin/main`.
 
 - [x] [Landing #2](https://github.com/advatar/euro-wallet-echo/issues/2): explain how a future
       fully-green, officially conformant and version-pinned wallet can act as a known-good
