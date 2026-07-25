@@ -456,6 +456,37 @@ fn issuer_and_as_metadata_parse_exact_identifiers_endpoints_and_features() {
 }
 
 #[test]
+fn tlsnotary_development_evidence_is_parsed_but_never_promoted_to_pid() {
+    const TLSN_ID: &str = "dev.advatar.tlsn.evidence.sd-jwt";
+    let configuration = json!({
+        "format": "dc+sd-jwt",
+        "scope": TLSN_ID,
+        "vct": "dev.advatar.tlsn.evidence.1",
+        "cryptographic_binding_methods_supported": ["jwk"],
+        "credential_signing_alg_values_supported": ["ES256"],
+        "proof_types_supported": {
+            "jwt": {
+                "proof_signing_alg_values_supported": ["ES256"],
+                "key_attestations_required": {
+                    "key_storage": ["iso_18045_high"],
+                    "user_authentication": ["iso_18045_high"]
+                }
+            }
+        }
+    });
+    let offer = parse_offer(&authorization_offer(ISSUER, TLSN_ID));
+    let issuer = parse_issuer(&issuer_metadata(TLSN_ID, configuration));
+    let mut server = authorization_server_metadata(AS_ONE);
+    server["scopes_supported"] = json!([TLSN_ID]);
+    let server = parse_as(&server, AS_ONE);
+
+    assert_eq!(
+        select_german_first_enrolment(&offer, &issuer, &[server], TLSN_ID),
+        Err(ProfileSelectionError::UnsupportedPidConfiguration)
+    );
+}
+
+#[test]
 fn metadata_rejects_identifier_mismatch_bad_endpoints_and_empty_collections() {
     let value = issuer_metadata("pid", sd_configuration());
     assert_eq!(
