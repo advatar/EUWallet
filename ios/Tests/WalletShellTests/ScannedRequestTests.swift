@@ -38,6 +38,19 @@ final class ScannedRequestTests: XCTestCase {
             .credentialOfferByReference(uri: "https://issuer.eudiw.dev/offer/abc123"))
     }
 
+    func testVCIssuerTLSNotaryEvidenceDeepLink() {
+        let text = url(
+            scheme: "openid-credential-offer",
+            items: [
+                "credential_offer_uri":
+                    "https://issuer.advatar.systems/credential-offer/tlsn-session"
+            ])
+        XCTAssertEqual(
+            ScannedRequest.parse(text),
+            .credentialOfferByReference(
+                uri: "https://issuer.advatar.systems/credential-offer/tlsn-session"))
+    }
+
     func testPresentationByRequestUri() {
         let text = url(scheme: "openid4vp",
                        items: ["client_id": "verifier.eudiw.dev",
