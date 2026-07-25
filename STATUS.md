@@ -156,6 +156,23 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
+- [ ] [#69](https://github.com/advatar/EUWallet/issues/69): generalize acquisition and custody
+      from PID-specific journeys to every authenticated, policy-registered credential supported
+      by the wallet's standard formats.
+  - [ ] Introduce an exact credential-policy registry binding configuration identifier, format,
+        `vct` or `docType`, issuer trust, mandatory claims, holder binding, status and expiry
+        requirements, and an explicit display and assurance classification.
+  - [ ] Route generic credentials through the central authenticated ingestion, presentation,
+        status, export and deletion controls; never accept arbitrary unclassified credential
+        bytes as wallet documents.
+  - [ ] Model PID eligibility independently per credential policy as no prerequisite, valid PID
+        present, or explicit PID-bound proof required. A PID prerequisite must never promote the
+        acquired credential to PID, EAA, QEAA, KYC or accredited identity evidence.
+  - [ ] Add unit, adversarial, integration, formal-correspondence and native-decoder coverage for
+        exact-type admission, PID-gate enforcement, assurance non-promotion and lifecycle parity.
+  - [ ] Use the TLSNotary development-evidence profile in #67 as the first generic-attestation
+        implementation on top of the live issuance coordinator tracked by #55.
+
 - [ ] [#67](https://github.com/advatar/EUWallet/issues/67): interoperate with VCIssuer
       authorization-code offers derived from verified TLSNotary evidence.
   - [x] Accept the exact VCIssuer by-reference deep link and parse the development configuration.
