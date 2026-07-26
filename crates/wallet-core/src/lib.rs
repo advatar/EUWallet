@@ -2001,6 +2001,11 @@ impl Core {
             .map(|stored| {
                 let c = &stored.holding;
                 let (vct, jwt_issuer) = credential_vct_and_issuer(&c.issuer_jwt);
+                let display_name = self
+                    .catalogue
+                    .get(&vct)
+                    .map(|credential_type| credential_type.display_name.as_str())
+                    .unwrap_or("Digital credential");
                 let issuer = match &stored.provenance {
                     StoredProvenance::Authenticated(provenance) => {
                         provenance.issuer.identity.as_str()
@@ -2014,8 +2019,8 @@ impl Core {
                     .collect::<Vec<_>>()
                     .join(",");
                 format!(
-                    r#"{{"vct":{:?},"issuer":{:?},"format":"dc+sd-jwt","disclosuresByClaim":{{{}}}}}"#,
-                    vct, issuer, disclosures
+                    r#"{{"vct":{:?},"displayName":{:?},"issuer":{:?},"format":"dc+sd-jwt","disclosuresByClaim":{{{}}}}}"#,
+                    vct, display_name, issuer, disclosures
                 )
             })
             .collect();

@@ -178,21 +178,25 @@ operational solution needed to enter those processes.
   - [x] Add lifecycle and anti-promotion tests and qualify the #69 implementation slice.
   - [x] Keep generic holder-proof admission wallet-owned instead of requiring PID-only
         key-attestation declarations in third-party issuer metadata.
-  - [ ] Merge and delete the #69 branch before starting the TLSNotary-specific follow-up.
+  - [x] Merge and delete the #69 branch before starting the TLSNotary-specific follow-up.
 
 - [ ] [#67](https://github.com/advatar/EUWallet/issues/67): interoperate with VCIssuer
       authorization-code offers derived from verified TLSNotary evidence.
   - [x] Accept the exact VCIssuer by-reference deep link and parse the development configuration.
   - [x] Preserve the non-PID/non-(Q)EAA assurance boundary by rejecting PID profile promotion.
   - [x] Add exact offer/metadata vectors and malformed/adversarial coverage.
-  - [ ] Wire generic development-attestation acquisition and custody after the live issuance
-        coordinator tracked by #55 is available; current production flow remains PID-specific.
+  - [x] Register a named wallet-owned TLSNotary development policy and preserve its exact
+        configuration identifier, `vct`, assurance class, and no-PID prerequisite.
+  - [x] Prove authenticated TLSNotary custody requires the full mandatory disclosure set and
+        expose the catalogue display name to the native wallet UI.
+  - [ ] Wire generic development-attestation acquisition and custody through the shared live
+        issuance coordinator; keep the production PID journey independently typed.
     - [ ] Complete authorization-code issuance for
           `dev.advatar.tlsn.evidence.sd-jwt`.
     - [ ] Authenticate, validate, and store only
           `vct=dev.advatar.tlsn.evidence.1`, preserving holder binding, issuer trust, status,
           expiry, and deletion controls.
-    - [ ] Render the credential explicitly as development TLSNotary evidence and prove it cannot
+    - [x] Render the credential explicitly as development TLSNotary evidence and prove it cannot
           be classified as PID, EAA, QEAA, KYC, or accredited identity evidence.
     - [ ] Add a live VCIssuer end-to-end interoperability test covering acquisition, authenticated
           custody, display classification, and deletion.

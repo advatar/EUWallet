@@ -4,7 +4,7 @@
 
 use base64ct::{Base64, Base64UrlUnpadded, Encoding};
 use crypto_backend::{AwsLc, SoftwareSigner};
-use crypto_traits::{Alg, KeyRef, Signer};
+use crypto_traits::{Alg, Digest, KeyRef, Signer};
 use mdoc::cbor::Value;
 use mdoc::{IssuerSignedItem, ValidityInfo};
 use serde_json::json;
@@ -213,6 +213,101 @@ fn remove_sd_jwt_disclosure(compact: &str, claim: &str) -> String {
         })
         .collect::<Vec<_>>();
     format!("{issuer_jwt}~{}~", disclosures.join("~"))
+}
+
+fn tlsnotary_evidence_credential(scenario: &IssuanceScenario) -> Vec<u8> {
+    let issuer = SoftwareSigner::from_pkcs8_der(ISSUER_PKCS8).expect("issuer key");
+    let point = &scenario.device_public_key;
+    let claims = [
+        ("tlsn_session_id", json!("tlsn-session-1")),
+        ("tlsn_issued_at", json!(scenario.epoch)),
+        (
+            "tlsn_verifier_output",
+            json!({"serverName":"example.com","status":200}),
+        ),
+        ("assurance", json!("development-unregulated")),
+    ];
+    let mut disclosures = Vec::new();
+    let mut digests = Vec::new();
+    for (index, (name, value)) in claims.into_iter().enumerate() {
+        let disclosure = Base64UrlUnpadded::encode_string(
+            serde_json::to_string(&json!([format!("tlsn-{index}"), name, value]))
+                .expect("serialize disclosure")
+                .as_bytes(),
+        );
+        digests.push(Base64UrlUnpadded::encode_string(
+            &AwsLc.sha256(disclosure.as_bytes()),
+        ));
+        disclosures.push(disclosure);
+    }
+    let header = Base64UrlUnpadded::encode_string(br#"{"alg":"ES256","typ":"dc+sd-jwt"}"#);
+    let payload = Base64UrlUnpadded::encode_string(
+        serde_json::to_string(&json!({
+            "iss": scenario.issuer_id,
+            "iat": scenario.epoch,
+            "exp": scenario.epoch + 300,
+            "vct": "dev.advatar.tlsn.evidence.1",
+            "_sd_alg": "sha-256",
+            "_sd": digests,
+            "cnf": {"jwk": {
+                "kty": "EC", "crv": "P-256",
+                "x": Base64UrlUnpadded::encode_string(&point[1..33]),
+                "y": Base64UrlUnpadded::encode_string(&point[33..65]),
+            }},
+        }))
+        .expect("serialize credential")
+        .as_bytes(),
+    );
+    let signing_input = format!("{header}.{payload}");
+    let signature = issuer
+        .sign(
+            &KeyRef("tlsn-issuer".into()),
+            Alg::Es256,
+            signing_input.as_bytes(),
+        )
+        .expect("sign TLSNotary credential");
+    format!(
+        "{signing_input}.{}~{}~",
+        Base64UrlUnpadded::encode_string(&signature),
+        disclosures.join("~")
+    )
+    .into_bytes()
+}
+
+#[test]
+fn tlsnotary_development_evidence_enters_authenticated_custody_without_pid_promotion() {
+    let scenario = DemoWallet::new().issuance_scenario();
+    let credential = tlsnotary_evidence_credential(&scenario);
+    let mut core = ready_core(&scenario);
+
+    core.ingest_credential(
+        "dc+sd-jwt",
+        &credential,
+        &scenario.issuer_cert_chain,
+        &scenario.issuer_id,
+    )
+    .expect("policy-registered TLSNotary evidence is accepted");
+
+    let held = core.held_credentials_json();
+    assert!(held.contains("dev.advatar.tlsn.evidence.1"));
+    assert!(held.contains("TLSNotary web evidence (development)"));
+    assert!(!held.contains("Person Identification Data"));
+
+    let missing_claim = remove_sd_jwt_disclosure(
+        std::str::from_utf8(&credential).expect("credential UTF-8"),
+        "assurance",
+    );
+    let mut rejected = ready_core(&scenario);
+    assert_eq!(
+        rejected.ingest_credential(
+            "dc+sd-jwt",
+            missing_claim.as_bytes(),
+            &scenario.issuer_cert_chain,
+            &scenario.issuer_id,
+        ),
+        Err(CredentialIngestionError::MandatoryClaimsMissing)
+    );
+    assert_eq!(rejected.held_credentials_json(), "[]");
 }
 
 #[test]
