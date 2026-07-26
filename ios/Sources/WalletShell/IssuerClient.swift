@@ -11,8 +11,19 @@ public enum IssuerClientError: Error, Equatable {
     case httpStatus(Int)
 }
 
-public protocol IssuerAuthorizationPresenting {
+@MainActor
+public protocol IssuerAuthorizationPresenting: Sendable {
     func authorize(url: URL, callbackScheme: String) async throws -> URL
+}
+
+public struct LiveIssuerContext: Equatable {
+    public let offer: Data
+    public let issuer: String
+
+    public init(offer: Data, issuer: String) {
+        self.offer = offer
+        self.issuer = issuer
+    }
 }
 
 public protocol IssuerRequesting {
@@ -44,6 +55,7 @@ public final class LiveIssuerClient: IssuerResponder {
     private let keyReference: String
     private let publicKey: Data
     private let issuer: String
+    private let offer: Data
     private let configurationId: String
     private let scope: String
     private let issuerState: String
@@ -117,7 +129,7 @@ public final class LiveIssuerClient: IssuerResponder {
         let verifier = randomBase64Url(count: 32)
         return try LiveIssuerClient(
             transport: transport, authorizer: authorizer, signer: signer,
-            keyReference: keyReference, publicKey: publicKey, issuer: issuer,
+            keyReference: keyReference, publicKey: publicKey, issuer: issuer, offer: offerResponse.body,
             configurationId: tlsnotaryConfiguration, scope: scope, issuerState: issuerState,
             authorizationEndpoint: authorizationEndpoint, parEndpoint: parEndpoint,
             tokenEndpoint: tokenEndpoint, nonceEndpoint: nonce, credentialEndpoint: endpoint,
@@ -127,7 +139,7 @@ public final class LiveIssuerClient: IssuerResponder {
 
     private init(
         transport: IssuerRequesting, authorizer: IssuerAuthorizationPresenting, signer: Signer,
-        keyReference: String, publicKey: Data, issuer: String, configurationId: String,
+        keyReference: String, publicKey: Data, issuer: String, offer: Data, configurationId: String,
         scope: String, issuerState: String, authorizationEndpoint: String, parEndpoint: String,
         tokenEndpoint: String, nonceEndpoint: String, credentialEndpoint: String, clientId: String,
         redirectUri: String, verifier: String, state: String
@@ -142,6 +154,7 @@ public final class LiveIssuerClient: IssuerResponder {
         self.keyReference = keyReference
         self.publicKey = publicKey
         self.issuer = issuer
+        self.offer = offer
         self.configurationId = configurationId
         self.scope = scope
         self.issuerState = issuerState
@@ -156,6 +169,10 @@ public final class LiveIssuerClient: IssuerResponder {
         self.verifier = verifier
         self.challenge = Self.base64url(Data(SHA256.hash(data: Data(verifier.utf8))))
         self.state = state
+    }
+
+    public func context() -> LiveIssuerContext {
+        LiveIssuerContext(offer: offer, issuer: issuer)
     }
 
     public func pushAuthorizationRequest() async throws -> Bool {
