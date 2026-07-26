@@ -459,6 +459,30 @@ public final class URLSessionHttpClient: HttpClient {
             acceptedContentTypes: ["application/statuslist+jwt"])
     }
 
+    /// Send one bounded OpenID4VCI issuer request. Redirects remain disabled and every endpoint
+    /// crosses the same HTTPS/DNS destination policy as metadata and offer retrieval.
+    public func issuerRequest(
+        url: String,
+        method: String,
+        body: Data? = nil,
+        headers: [String: String] = [:],
+        maximumResponseBytes: Int = URLSessionHttpClient.maximumMetadataBytes
+    ) async throws -> HttpResponse {
+        guard method == "GET" || method == "POST",
+              maximumResponseBytes > 0,
+              maximumResponseBytes <= self.maximumResponseBytes
+        else { throw HttpClientError.invalidProtocolBody("invalid issuer request") }
+        let endpoint = try validatedURL(url)
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = method
+        request.httpBody = body
+        headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        return try await perform(
+            request,
+            limit: maximumResponseBytes,
+            acceptedContentTypes: ["application/json"])
+    }
+
     private func validatedURL(_ value: String) throws -> URL {
         #if DEBUG
         if allowsDebugLoopback {

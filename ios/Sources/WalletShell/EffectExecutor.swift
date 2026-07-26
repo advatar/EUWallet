@@ -746,8 +746,34 @@ public final class EffectExecutor {
                 return WalletEventJSON.operationFailed(
                     operationId: operationId, failure: .transport)
             }
-        case .pushPar(let operationId), .openAuthBrowser(let operationId),
-             .promptTxCode(let operationId):
+        case .pushPar(let operationId):
+            guard let issuer else {
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .missingDependency)
+            }
+            do {
+                let pkceS256 = try await issuer.pushAuthorizationRequest()
+                return WalletEventJSON.parPushed(
+                    operationId: operationId, pkceS256: pkceS256)
+            } catch is CancellationError {
+                return WalletEventJSON.operationCancelled(operationId: operationId)
+            } catch {
+                return WalletEventJSON.operationFailed(operationId: operationId, failure: .issuer)
+            }
+        case .openAuthBrowser(let operationId):
+            guard let issuer else {
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .missingDependency)
+            }
+            do {
+                return WalletEventJSON.authorizationCodeReturned(
+                    operationId: operationId, code: try await issuer.authorize())
+            } catch is CancellationError {
+                return WalletEventJSON.operationCancelled(operationId: operationId)
+            } catch {
+                return WalletEventJSON.operationFailed(operationId: operationId, failure: .issuer)
+            }
+        case .promptTxCode(let operationId):
             return WalletEventJSON.operationFailed(
                 operationId: operationId, failure: .unsupported)
         case .close:

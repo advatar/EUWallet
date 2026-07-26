@@ -44,6 +44,10 @@ final class DemoIssuer: IssuerResponder {
         self.format = format
     }
 
+    func pushAuthorizationRequest() async -> Bool { true }
+
+    func authorize() async -> Data { Data("demo-code".utf8) }
+
     func token() async -> (bound: Bool, cNonce: UInt64) { (true, cNonce) }
 
     func credential(proofJwt: Data) async -> (format: String, bytes: Data) {

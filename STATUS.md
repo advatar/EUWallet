@@ -193,6 +193,14 @@ operational solution needed to enter those processes.
         issuance coordinator; keep the production PID journey independently typed.
     - [ ] Complete authorization-code issuance for
           `dev.advatar.tlsn.evidence.sd-jwt`.
+      - [x] Replace the demo-only Swift `IssuerResponder` contract with live PAR, authorization,
+            token, nonce, DPoP, and final `proofs.jwt` credential transport operations.
+      - [x] Bind a fetched by-reference offer and discovered endpoints to one issuer session and
+            reject redirects, endpoint substitution, malformed responses, and replay.
+      - [x] Add deterministic transport tests for the complete Swift issuer cascade and
+            adversarial endpoint substitution.
+      - [ ] Wire the live client and an ASWebAuthenticationSession presenter into the app's
+            scanner after production issuer certificate-path resolution is available.
     - [ ] Authenticate, validate, and store only
           `vct=dev.advatar.tlsn.evidence.1`, preserving holder binding, issuer trust, status,
           expiry, and deletion controls.
