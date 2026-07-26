@@ -997,7 +997,7 @@ final class EffectExecutorTests: XCTestCase {
             if event.contains("operationFailed") {
                 return #"[{"type":"render","screen":{"screen":"error","code":"operation_failed","message":"Operation failed"}},{"type":"close"}]"#
             }
-            return #"[{"type":"pushPar","operationId":22,"resultType":"parPushed"}]"#
+            return #"[{"type":"promptTxCode","operationId":22,"resultType":"transactionCodeEntered"}]"#
         }
         let executor = makeExecutor(engine: engine)
 

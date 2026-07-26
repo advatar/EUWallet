@@ -587,10 +587,24 @@ public enum WalletEventJSON {
 /// `RequestCredential`. A production shell POSTs these over TLS; the demo returns an issuer-signed
 /// credential in-process. The core still runs the whole issuance machine either way.
 public protocol IssuerResponder {
+    /// Push the authorization request with PKCE S256 and retain the one-time request URI.
+    func pushAuthorizationRequest() async throws -> Bool
+    /// Complete browser authorization and return the exact authorization code bytes.
+    func authorize() async throws -> Data
     /// The `/token` response: whether the token is sender-bound, and a fresh `c_nonce`.
     func token() async throws -> (bound: Bool, cNonce: UInt64)
     /// The `/credential` response for the assembled proof: the format + credential bytes.
     func credential(proofJwt: Data) async throws -> (format: String, bytes: Data)
+}
+
+public extension IssuerResponder {
+    func pushAuthorizationRequest() async throws -> Bool {
+        throw IssuerClientError.unsupportedFlow
+    }
+
+    func authorize() async throws -> Data {
+        throw IssuerClientError.unsupportedFlow
+    }
 }
 
 /// Fetches an RP's certificate chain (network I/O; injected so it can be stubbed in tests). The
