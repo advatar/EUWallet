@@ -201,7 +201,7 @@ operational solution needed to enter those processes.
             adversarial endpoint substitution.
       - [ ] Wire the live client and an ASWebAuthenticationSession presenter into the app's
             scanner after production issuer certificate-path resolution is available.
-        - [ ] Add the system browser presenter with exact callback cancellation/error handling.
+        - [x] Add the system browser presenter with exact callback cancellation/error handling.
         - [ ] Resolve credential-signing certificate evidence independently of the TLS transport
               certificate and require the Rust trust store to authorize that exact issuer path.
         - [ ] Start the live effect cascade from a scanned by-reference TLSNotary offer and refresh

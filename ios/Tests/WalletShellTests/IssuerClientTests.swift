@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import WalletShell
 
-private class IssuerTransportMock: IssuerRequesting {
+private class IssuerTransportMock: IssuerRequesting, @unchecked Sendable {
     struct Request {
         let url: String
         let method: String
@@ -92,7 +92,7 @@ private class IssuerTransportMock: IssuerRequesting {
     }
 }
 
-private final class IssuerAuthorizerMock: IssuerAuthorizationPresenting {
+private final class IssuerAuthorizerMock: IssuerAuthorizationPresenting, @unchecked Sendable {
     let transport: IssuerTransportMock
     init(transport: IssuerTransportMock) { self.transport = transport }
 
@@ -146,7 +146,7 @@ final class IssuerClientTests: XCTestCase {
     }
 
     func testDiscoveryRejectsAnIssuerEndpointOnAnotherOrigin() async throws {
-        final class SubstitutionTransport: IssuerTransportMock {
+        final class SubstitutionTransport: IssuerTransportMock, @unchecked Sendable {
             override func fetchIssuerMetadata(issuer: String) async throws -> HttpResponse {
                 let response = try await super.fetchIssuerMetadata(issuer: issuer)
                 var object = try JSONSerialization.jsonObject(with: response.body) as! [String: Any]
