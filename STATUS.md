@@ -214,7 +214,7 @@ operational solution needed to enter those processes.
     - [ ] Add a live VCIssuer end-to-end interoperability test covering acquisition, authenticated
           custody, display classification, and deletion.
     - [x] Build, sign, install, and launch the live scanner build on a connected physical iPhone.
-    - [ ] Merge the physical-device scanner slice, verify `origin/main`, and delete the branch.
+    - [x] Merge the physical-device scanner slice, verify `origin/main`, and delete the branch.
   - [x] Pass focused Rust and Swift qualification, commit, push, merge, and verify `origin/main`.
 
 - [x] [Landing #2](https://github.com/advatar/euro-wallet-echo/issues/2): explain how a future
