@@ -158,6 +158,8 @@ pub struct Env<'a> {
     pub seen_c_nonces: &'a [u64],
     /// The device key the shell signs the proof with.
     pub device_key_ref: &'a str,
+    /// SEC1 uncompressed P-256 public key included as the proof JWT's JOSE `jwk`.
+    pub device_public_key: &'a [u8],
     /// The credential issuer identifier — the proof JWT `aud`.
     pub issuer_id: &'a str,
     /// Unix seconds from the shell (the core has no clock) for the proof `iat`.
@@ -301,7 +303,12 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
             if !guards::proof_key_is_attested(env) {
                 return (State::Aborted(AbortReason::ProofKeyNotAttested), vec![]);
             }
-            let proof_signing_input = proof_signing_input(env.issuer_id, *c_nonce, env.now_epoch);
+            let proof_signing_input = proof_signing_input(
+                env.issuer_id,
+                *c_nonce,
+                env.now_epoch,
+                env.device_public_key,
+            );
             let bytes = proof_signing_input.clone().into_bytes();
             (
                 State::ProvingPossession {
@@ -384,8 +391,23 @@ fn base64url(bytes: &[u8]) -> String {
 
 /// Build the OpenID4VCI proof-of-possession JWT signing input (`openid4vci-proof+jwt`), binding
 /// the wallet's key to the issuer (`aud`) and the issuer's `c_nonce`.
-fn proof_signing_input(issuer_id: &str, c_nonce: u64, iat: i64) -> String {
-    let header = base64url(br#"{"alg":"ES256","typ":"openid4vci-proof+jwt"}"#);
+fn proof_signing_input(
+    issuer_id: &str,
+    c_nonce: u64,
+    iat: i64,
+    device_public_key: &[u8],
+) -> String {
+    let (x, y) = if device_public_key.len() == 65 && device_public_key[0] == 4 {
+        (&device_public_key[1..33], &device_public_key[33..65])
+    } else {
+        (&[][..], &[][..])
+    };
+    let header_value = serde_json::json!({
+        "alg": "ES256",
+        "typ": "openid4vci-proof+jwt",
+        "jwk": {"kty": "EC", "crv": "P-256", "x": base64url(x), "y": base64url(y)}
+    });
+    let header = base64url(header_value.to_string().as_bytes());
     let payload = serde_json::json!({ "aud": issuer_id, "iat": iat, "nonce": c_nonce });
     let payload_b64 = base64url(
         serde_json::to_string(&payload)
@@ -395,11 +417,25 @@ fn proof_signing_input(issuer_id: &str, c_nonce: u64, iat: i64) -> String {
     format!("{header}.{payload_b64}")
 }
 
-/// Parse a (simplified) credential offer: `{ "format": "...", "grant": "...", "tx_code_required": bool }`.
-/// A full offer carries `credential_issuer` + `credential_configuration_ids` + `grants`; this is
-/// the minimal shape the machine needs. Returns `Err(())` on anything non-HAIP.
+/// Parse either the internal demo offer or the final by-reference OpenID4VCI offer. The live shape
+/// is deliberately closed to the single TLSNotary development configuration.
 fn parse_offer(bytes: &[u8]) -> Result<(HaipGrant, CredentialFormat), ()> {
     let v: Json = serde_json::from_slice(bytes).map_err(|_| ())?;
+    if v.get("credential_issuer").is_some() {
+        let ids = v
+            .get("credential_configuration_ids")
+            .and_then(Json::as_array)
+            .ok_or(())?;
+        if ids.len() != 1
+            || ids[0].as_str() != Some("dev.advatar.tlsn.evidence.sd-jwt")
+            || v.get("grants")
+                .and_then(|grants| grants.get("authorization_code"))
+                .is_none()
+        {
+            return Err(());
+        }
+        return Ok((HaipGrant::AuthorizationCode, CredentialFormat::DcSdJwt));
+    }
     let format = match v.get("format").and_then(|f| f.as_str()) {
         Some("mso_mdoc") => CredentialFormat::MsoMdoc,
         Some("dc+sd-jwt") | Some("vc+sd-jwt") => CredentialFormat::DcSdJwt,

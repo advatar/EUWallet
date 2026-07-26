@@ -19,10 +19,14 @@ public protocol IssuerAuthorizationPresenting: Sendable {
 public struct LiveIssuerContext: Equatable {
     public let offer: Data
     public let issuer: String
+    public let signingLeaf: Data
+    public let signingRoot: Data
 
-    public init(offer: Data, issuer: String) {
+    public init(offer: Data, issuer: String, signingLeaf: Data, signingRoot: Data) {
         self.offer = offer
         self.issuer = issuer
+        self.signingLeaf = signingLeaf
+        self.signingRoot = signingRoot
     }
 }
 
@@ -56,6 +60,8 @@ public final class LiveIssuerClient: IssuerResponder {
     private let publicKey: Data
     private let issuer: String
     private let offer: Data
+    private let signingLeaf: Data
+    private let signingRoot: Data
     private let configurationId: String
     private let scope: String
     private let issuerState: String
@@ -109,7 +115,19 @@ public final class LiveIssuerClient: IssuerResponder {
               config["format"] as? String == "dc+sd-jwt",
               config["vct"] as? String == tlsnotaryVct,
               let scope = config["scope"] as? String,
-              scope == tlsnotaryConfiguration
+              scope == tlsnotaryConfiguration,
+              let certificateEndpoint = config["credential_signing_certificate_endpoint"] as? String,
+              sameOrigin(certificateEndpoint, issuer)
+        else { throw IssuerClientError.invalidConfiguration }
+
+        let certificateObject = try json(try await transport.issuerRequest(
+            url: certificateEndpoint, method: "GET", body: nil, headers: [:],
+            maximumResponseBytes: maximumProtocolResponseBytes))
+        guard certificateObject["credential_configuration_id"] as? String == tlsnotaryConfiguration,
+              certificateObject["development_only"] as? Bool == true,
+              let x5c = certificateObject["x5c"] as? [String], x5c.count == 2,
+              let signingLeaf = Data(base64Encoded: x5c[0]), !signingLeaf.isEmpty,
+              let signingRoot = Data(base64Encoded: x5c[1]), !signingRoot.isEmpty
         else { throw IssuerClientError.invalidConfiguration }
 
         let oauth = try json(try await transport.issuerRequest(
@@ -130,7 +148,8 @@ public final class LiveIssuerClient: IssuerResponder {
         return try LiveIssuerClient(
             transport: transport, authorizer: authorizer, signer: signer,
             keyReference: keyReference, publicKey: publicKey, issuer: issuer, offer: offerResponse.body,
-            configurationId: tlsnotaryConfiguration, scope: scope, issuerState: issuerState,
+            configurationId: tlsnotaryConfiguration, signingLeaf: signingLeaf,
+            signingRoot: signingRoot, scope: scope, issuerState: issuerState,
             authorizationEndpoint: authorizationEndpoint, parEndpoint: parEndpoint,
             tokenEndpoint: tokenEndpoint, nonceEndpoint: nonce, credentialEndpoint: endpoint,
             clientId: clientId, redirectUri: redirectUri,
@@ -140,6 +159,7 @@ public final class LiveIssuerClient: IssuerResponder {
     private init(
         transport: IssuerRequesting, authorizer: IssuerAuthorizationPresenting, signer: Signer,
         keyReference: String, publicKey: Data, issuer: String, offer: Data, configurationId: String,
+        signingLeaf: Data, signingRoot: Data,
         scope: String, issuerState: String, authorizationEndpoint: String, parEndpoint: String,
         tokenEndpoint: String, nonceEndpoint: String, credentialEndpoint: String, clientId: String,
         redirectUri: String, verifier: String, state: String
@@ -155,6 +175,8 @@ public final class LiveIssuerClient: IssuerResponder {
         self.publicKey = publicKey
         self.issuer = issuer
         self.offer = offer
+        self.signingLeaf = signingLeaf
+        self.signingRoot = signingRoot
         self.configurationId = configurationId
         self.scope = scope
         self.issuerState = issuerState
@@ -172,7 +194,8 @@ public final class LiveIssuerClient: IssuerResponder {
     }
 
     public func context() -> LiveIssuerContext {
-        LiveIssuerContext(offer: offer, issuer: issuer)
+        LiveIssuerContext(
+            offer: offer, issuer: issuer, signingLeaf: signingLeaf, signingRoot: signingRoot)
     }
 
     public func pushAuthorizationRequest() async throws -> Bool {

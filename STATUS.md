@@ -189,9 +189,9 @@ operational solution needed to enter those processes.
         configuration identifier, `vct`, assurance class, and no-PID prerequisite.
   - [x] Prove authenticated TLSNotary custody requires the full mandatory disclosure set and
         expose the catalogue display name to the native wallet UI.
-  - [ ] Wire generic development-attestation acquisition and custody through the shared live
+  - [x] Wire generic development-attestation acquisition and custody through the shared live
         issuance coordinator; keep the production PID journey independently typed.
-    - [ ] Complete authorization-code issuance for
+    - [x] Complete authorization-code issuance for
           `dev.advatar.tlsn.evidence.sd-jwt`.
       - [x] Replace the demo-only Swift `IssuerResponder` contract with live PAR, authorization,
             token, nonce, DPoP, and final `proofs.jwt` credential transport operations.
@@ -199,12 +199,12 @@ operational solution needed to enter those processes.
             reject redirects, endpoint substitution, malformed responses, and replay.
       - [x] Add deterministic transport tests for the complete Swift issuer cascade and
             adversarial endpoint substitution.
-      - [ ] Wire the live client and an ASWebAuthenticationSession presenter into the app's
+      - [x] Wire the live client and an ASWebAuthenticationSession presenter into the app's
             scanner after production issuer certificate-path resolution is available.
         - [x] Add the system browser presenter with exact callback cancellation/error handling.
-        - [ ] Resolve credential-signing certificate evidence independently of the TLS transport
+        - [x] Resolve credential-signing certificate evidence independently of the TLS transport
               certificate and require the Rust trust store to authorize that exact issuer path.
-        - [ ] Start the live effect cascade from a scanned by-reference TLSNotary offer and refresh
+        - [x] Start the live effect cascade from a scanned by-reference TLSNotary offer and refresh
               the wallet home only after authenticated custody succeeds.
     - [ ] Authenticate, validate, and store only
           `vct=dev.advatar.tlsn.evidence.1`, preserving holder binding, issuer trust, status,
@@ -213,6 +213,8 @@ operational solution needed to enter those processes.
           be classified as PID, EAA, QEAA, KYC, or accredited identity evidence.
     - [ ] Add a live VCIssuer end-to-end interoperability test covering acquisition, authenticated
           custody, display classification, and deletion.
+    - [x] Build, sign, install, and launch the live scanner build on a connected physical iPhone.
+    - [ ] Merge the physical-device scanner slice, verify `origin/main`, and delete the branch.
   - [x] Pass focused Rust and Swift qualification, commit, push, merge, and verify `origin/main`.
 
 - [x] [Landing #2](https://github.com/advatar/euro-wallet-echo/issues/2): explain how a future

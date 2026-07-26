@@ -3516,6 +3516,7 @@ impl Core {
                 proof_key_attested,
                 seen_c_nonces: &self.iss_seen_c_nonces,
                 device_key_ref: &self.config.device_key_ref,
+                device_public_key: &self.device_public_key,
                 issuer_id: &self.issuer_id_current,
                 now_epoch: self.now_epoch,
             };

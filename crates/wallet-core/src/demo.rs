@@ -304,6 +304,42 @@ impl DemoWallet {
             mdl_mdoc_credential: self.mdl_mdoc_credential(),
         }
     }
+
+    /// Development provisioning only: sign a WUA for a native device/Secure Enclave public key.
+    pub fn development_wua_jwt(&self, device_public_key: Vec<u8>) -> Vec<u8> {
+        self.wua_jwt_for(&device_public_key)
+    }
+
+    /// Development provisioning only: add an exact issuer and its independent credential-signing
+    /// CA to the attestation trust service. HTTPS server certificates are never accepted here.
+    pub fn development_trust_list(&self, issuer_id: String, issuer_root_der: Vec<u8>) -> Vec<u8> {
+        let header = b64(br#"{"alg":"ES256"}"#);
+        let payload = b64(
+            json!({
+                "seq": 2,
+                "valid_from": 0,
+                "valid_until": 4_000_000_000i64,
+                "anchors": [
+                    { "cert": b64(CA_DER), "service": "rp-access-ca", "status": "granted" },
+                    { "cert": b64(CA_DER), "service": "pid", "status": "granted" },
+                    { "cert": b64(CA_DER), "service": "attestation", "status": "granted" },
+                    { "cert": b64(&issuer_root_der), "service": "attestation", "status": "granted" },
+                ],
+                "credential_issuers": [
+                    {"issuer_id": "https://issuer.example", "display_name": "Federal identity authority"},
+                    {"issuer_id": issuer_id, "display_name": "TLSNotary development issuer"}
+                ]
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let signing_input = format!("{header}.{payload}");
+        let sig = self
+            .operator
+            .sign(&KeyRef("op".into()), Alg::Es256, signing_input.as_bytes())
+            .expect("operator sign");
+        format!("{signing_input}.{}", b64(&sig)).into_bytes()
+    }
 }
 
 impl DemoWallet {
@@ -389,12 +425,16 @@ impl DemoWallet {
     }
 
     pub fn wua_jwt(&self) -> Vec<u8> {
+        self.wua_jwt_for(self.device.public_key_raw())
+    }
+
+    fn wua_jwt_for(&self, device_public_key: &[u8]) -> Vec<u8> {
         let header = b64(br#"{"alg":"ES256","typ":"wallet-unit-attestation+jwt"}"#);
         let payload = b64(json!({
             "iss": "https://wp.example",
             "exp": 4_000_000_000i64,
             "aal": "high",
-            "cnf": { "jwk_raw": b64(self.device.public_key_raw()) },
+            "cnf": { "jwk_raw": b64(device_public_key) },
         })
         .to_string()
         .as_bytes());

@@ -1,4 +1,5 @@
 //! oid4vci transition tests (plan Section 5.2): both HAIP happy paths + every abort path.
+use base64ct::{Base64UrlUnpadded, Encoding};
 use oid4vci::{step, AbortReason, CredentialFormat, Env, Input, Output, State};
 
 fn env<'a>(seen: &'a [u64]) -> Env<'a> {
@@ -7,6 +8,11 @@ fn env<'a>(seen: &'a [u64]) -> Env<'a> {
         proof_key_attested: true,
         seen_c_nonces: seen,
         device_key_ref: "device-key",
+        device_public_key: &[
+            4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+            2, 2, 2, 2, 2, 2, 2,
+        ],
         issuer_id: "https://issuer.example",
         now_epoch: 1_790_000_000,
     }
@@ -106,6 +112,43 @@ fn happy_authorization_code_par_pkce() {
     let (s, out) = drive(&s, Input::AuthCodeReturned(b"code".to_vec()), &seen);
     assert!(matches!(s, State::RequestingToken { .. }));
     assert_eq!(out, vec![Output::RequestToken]);
+}
+
+#[test]
+fn final_tlsnotary_offer_is_accepted_and_other_configurations_are_closed() {
+    let live = br#"{"credential_issuer":"https://issuer.example","credential_configuration_ids":["dev.advatar.tlsn.evidence.sd-jwt"],"grants":{"authorization_code":{"issuer_state":"one"}}}"#;
+    let (state, output) = drive(&State::Idle, Input::CredentialOffer(live.to_vec()), &[]);
+    assert!(matches!(state, State::ReviewingOffer { .. }));
+    assert!(matches!(output.as_slice(), [Output::ReviewOffer { .. }]));
+
+    let other = br#"{"credential_issuer":"https://issuer.example","credential_configuration_ids":["unknown"],"grants":{"authorization_code":{}}}"#;
+    assert_eq!(
+        drive(&State::Idle, Input::CredentialOffer(other.to_vec()), &[]).0,
+        State::Aborted(AbortReason::UnsupportedGrant)
+    );
+}
+
+#[test]
+fn credential_proof_header_contains_the_attested_device_jwk() {
+    let state = to_requesting_token(&[]);
+    let (_, outputs) = drive(
+        &state,
+        Input::TokenResponse {
+            bound: true,
+            c_nonce: 99,
+        },
+        &[],
+    );
+    let Output::SignProof { signing_input, .. } = &outputs[0] else {
+        panic!("sign proof")
+    };
+    let protected = signing_input.split(|byte| *byte == b'.').next().unwrap();
+    let decoded = Base64UrlUnpadded::decode_vec(std::str::from_utf8(protected).unwrap()).unwrap();
+    let header: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+    assert_eq!(header["jwk"]["kty"], "EC");
+    assert_eq!(header["jwk"]["crv"], "P-256");
+    assert!(!header["jwk"]["x"].as_str().unwrap().is_empty());
+    assert!(!header["jwk"]["y"].as_str().unwrap().is_empty());
 }
 
 #[test]
