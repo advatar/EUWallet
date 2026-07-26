@@ -208,6 +208,38 @@ impl Catalogue {
 pub fn default_catalogue() -> Catalogue {
     let mut c = Catalogue::new();
     c.register(AttestationType {
+        id: "dev.advatar.tlsn.evidence.1".into(),
+        display_name: "TLSNotary web evidence (development)".into(),
+        format: "dc+sd-jwt".into(),
+        issuer_trust_domain: IssuerTrustDomain::Attestation,
+        claims: vec![
+            ClaimSpec {
+                path: "tlsn_session_id".into(),
+                display_name: "Notary session".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "tlsn_issued_at".into(),
+                display_name: "Evidence time".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "tlsn_verifier_output".into(),
+                display_name: "Verified web evidence".into(),
+                mandatory: true,
+            },
+            ClaimSpec {
+                path: "assurance".into(),
+                display_name: "Development evidence classification".into(),
+                mandatory: true,
+            },
+        ],
+        trusted_issuers: vec![
+            "https://issuer.advatar.systems".into(),
+            "https://issuer.example".into(),
+        ],
+    });
+    c.register(AttestationType {
         id: "urn:eudi:pid:1".into(),
         display_name: "Person Identification Data".into(),
         format: "dc+sd-jwt".into(),

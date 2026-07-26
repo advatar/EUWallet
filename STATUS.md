@@ -172,6 +172,11 @@ operational solution needed to enter those processes.
         exact-type admission, PID-gate enforcement, assurance non-promotion and lifecycle parity.
   - [ ] Use the TLSNotary development-evidence profile in #67 as the first generic-attestation
         implementation on top of the live issuance coordinator tracked by #55.
+  - [x] Add a typed generic issuance plan that preserves exact configuration/type and assurance.
+  - [x] Reuse the existing PAR/PKCE/DPoP and credential-proof machines without PID coercion.
+  - [x] Bind authenticated custody to catalogue trust domain, issuer, mandatory claims and type.
+  - [x] Add lifecycle and anti-promotion tests and qualify the #69 implementation slice.
+  - [ ] Merge and delete the #69 branch before starting the TLSNotary-specific follow-up.
 
 - [ ] [#67](https://github.com/advatar/EUWallet/issues/67): interoperate with VCIssuer
       authorization-code offers derived from verified TLSNotary evidence.

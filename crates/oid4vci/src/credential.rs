@@ -16,8 +16,9 @@
 use crate::authorization::{AccessTokenGrant, CorrelationId, Es256PublicJwk};
 use crate::bounded_json::{self, JsonLimits};
 use crate::foundation::{
-    CredentialSigningAlgorithm, GermanPidFormat, GermanPidIssuancePlan, HolderBindingMethod,
-    HttpsEndpoint, HttpsIdentifier, MDOC_PID_DOCTYPE, SD_JWT_PID_VCT,
+    CredentialSigningAlgorithm, GenericCredentialIssuancePlan, GermanPidFormat,
+    GermanPidIssuancePlan, HolderBindingMethod, HttpsEndpoint, HttpsIdentifier, PidProviderTrust,
+    MDOC_PID_DOCTYPE, SD_JWT_PID_VCT,
 };
 use base64ct::{Base64, Base64UrlUnpadded, Encoding};
 use crypto_traits::{Alg, Digest, KeyRef, Random};
@@ -219,6 +220,7 @@ pub struct CredentialFlowConfig {
     credential_issuer: HttpsIdentifier,
     configuration_id: String,
     format: GermanPidFormat,
+    expected_vct: String,
     credential_endpoint: HttpsEndpoint,
     nonce_endpoint: HttpsEndpoint,
     deferred_credential_endpoint: Option<HttpsEndpoint>,
@@ -254,6 +256,37 @@ impl fmt::Debug for CredentialFlowConfig {
 }
 
 impl CredentialFlowConfig {
+    pub fn from_generic_authorization(
+        grant: AccessTokenGrant,
+        plan: &GenericCredentialIssuancePlan,
+        selection: CredentialSelection,
+        credential_key: CredentialKeyBinding,
+    ) -> Result<Self, CredentialError> {
+        let transport_plan = GermanPidIssuancePlan {
+            credential_issuer: plan.credential_issuer.clone(),
+            authorization_server: plan.authorization_server.clone(),
+            configuration_id: plan.configuration_id.clone(),
+            format: GermanPidFormat::DcSdJwt,
+            scope: plan.scope.clone(),
+            holder_binding: HolderBindingMethod::Jwk,
+            credential_signing_algorithm: CredentialSigningAlgorithm::JoseEs256,
+            proof_signing_algorithm: "ES256".into(),
+            credential_endpoint: plan.credential_endpoint.clone(),
+            nonce_endpoint: plan.nonce_endpoint.clone(),
+            deferred_credential_endpoint: plan.deferred_credential_endpoint.clone(),
+            authorization_endpoint: plan.authorization_endpoint.clone(),
+            token_endpoint: plan.token_endpoint.clone(),
+            pushed_authorization_request_endpoint: plan
+                .pushed_authorization_request_endpoint
+                .clone(),
+            pid_provider_trust: PidProviderTrust::Unresolved,
+        };
+        let mut config =
+            Self::from_authorization(grant, &transport_plan, selection, credential_key)?;
+        config.expected_vct = plan.expected_vct.clone();
+        Ok(config)
+    }
+
     pub fn from_authorization(
         grant: AccessTokenGrant,
         plan: &GermanPidIssuancePlan,
@@ -298,6 +331,7 @@ impl CredentialFlowConfig {
             credential_issuer: plan.credential_issuer.clone(),
             configuration_id: plan.configuration_id.clone(),
             format: plan.format,
+            expected_vct: SD_JWT_PID_VCT.into(),
             credential_endpoint: plan.credential_endpoint.clone(),
             nonce_endpoint: plan.nonce_endpoint.clone(),
             deferred_credential_endpoint: plan.deferred_credential_endpoint.clone(),
@@ -742,6 +776,7 @@ struct Context {
     token_expires_in_seconds: Option<u32>,
     credential_issuer: HttpsIdentifier,
     format: GermanPidFormat,
+    expected_vct: String,
     credential_endpoint: HttpsEndpoint,
     nonce_endpoint: HttpsEndpoint,
     deferred_credential_endpoint: Option<HttpsEndpoint>,
@@ -854,6 +889,7 @@ impl CredentialFlow {
             token_expires_in_seconds: config.token_expires_in_seconds,
             credential_issuer: config.credential_issuer,
             format: config.format,
+            expected_vct: config.expected_vct,
             credential_endpoint: config.credential_endpoint,
             nonce_endpoint: config.nonce_endpoint,
             deferred_credential_endpoint: config.deferred_credential_endpoint,
@@ -1370,6 +1406,7 @@ impl CredentialFlow {
             response.body.expose(),
             self.context.format,
             self.context.credential_issuer.as_str(),
+            &self.context.expected_vct,
         )?;
         Ok((
             Stage::Complete(IssuedCredential {
@@ -1529,6 +1566,7 @@ impl CredentialFlow {
                     response.body.expose(),
                     self.context.format,
                     self.context.credential_issuer.as_str(),
+                    &self.context.expected_vct,
                 )?;
                 Ok((
                     Stage::Complete(IssuedCredential {
@@ -2125,6 +2163,7 @@ fn parse_immediate_credential(
     input: &[u8],
     format: GermanPidFormat,
     expected_issuer: &str,
+    expected_vct: &str,
 ) -> Result<Vec<u8>, CredentialError> {
     let object = bounded_json::parse_object(input, CREDENTIAL_JSON_LIMITS)
         .map_err(|_| CredentialError::InvalidCredentialResponse)?;
@@ -2160,7 +2199,7 @@ fn parse_immediate_credential(
         .filter(|value| !value.is_empty() && value.len() <= MAX_CREDENTIAL_BYTES)
         .ok_or(CredentialError::InvalidCredentialResponse)?;
     match format {
-        GermanPidFormat::DcSdJwt => validate_sd_jwt_pid(credential, expected_issuer),
+        GermanPidFormat::DcSdJwt => validate_sd_jwt(credential, expected_issuer, expected_vct),
         GermanPidFormat::MsoMdoc => validate_mdoc_pid(credential),
     }
 }
@@ -2185,7 +2224,11 @@ fn parse_deferred_credential(input: &[u8]) -> Result<(String, u32), CredentialEr
     Ok((transaction_id.to_owned(), interval))
 }
 
-fn validate_sd_jwt_pid(compact: &str, expected_issuer: &str) -> Result<Vec<u8>, CredentialError> {
+fn validate_sd_jwt(
+    compact: &str,
+    expected_issuer: &str,
+    expected_vct: &str,
+) -> Result<Vec<u8>, CredentialError> {
     let separators = compact.bytes().filter(|byte| *byte == b'~').count();
     if !(1..=MAX_SD_JWT_COMPONENT_SEPARATORS).contains(&separators) {
         return Err(CredentialError::CredentialFormatMismatch);
@@ -2214,7 +2257,7 @@ fn validate_sd_jwt_pid(compact: &str, expected_issuer: &str) -> Result<Vec<u8>, 
         .map_err(|_| CredentialError::CredentialFormatMismatch)?;
     if header.get("alg").and_then(Value::as_str) != Some("ES256")
         || header.get("typ").and_then(Value::as_str) != Some("dc+sd-jwt")
-        || payload.get("vct").and_then(Value::as_str) != Some(SD_JWT_PID_VCT)
+        || payload.get("vct").and_then(Value::as_str) != Some(expected_vct)
         || payload.get("iss").and_then(Value::as_str) != Some(expected_issuer)
     {
         return Err(CredentialError::CredentialFormatMismatch);
@@ -2345,4 +2388,28 @@ fn ct_eq(left: &[u8], right: &[u8]) -> bool {
 
 fn base64url(bytes: &[u8]) -> String {
     Base64UrlUnpadded::encode_string(bytes)
+}
+
+#[cfg(test)]
+mod generic_profile_tests {
+    use super::*;
+
+    fn unsigned_shape(vct: &str) -> String {
+        let header = base64url(br#"{"alg":"ES256","typ":"dc+sd-jwt"}"#);
+        let payload =
+            base64url(format!(r#"{{"iss":"https://issuer.example","vct":"{vct}"}}"#).as_bytes());
+        let signature = base64url(&[7; 64]);
+        format!("{header}.{payload}.{signature}~")
+    }
+
+    #[test]
+    fn exact_generic_vct_is_admitted_without_pid_promotion() {
+        let development_vct = "dev.advatar.tlsn.evidence.1";
+        let credential = unsigned_shape(development_vct);
+        assert!(validate_sd_jwt(&credential, "https://issuer.example", development_vct).is_ok());
+        assert_eq!(
+            validate_sd_jwt(&credential, "https://issuer.example", SD_JWT_PID_VCT),
+            Err(CredentialError::CredentialFormatMismatch)
+        );
+    }
 }
