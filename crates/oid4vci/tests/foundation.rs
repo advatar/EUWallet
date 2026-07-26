@@ -5,12 +5,13 @@ use oid4vci::bounded_json::{
 use oid4vci::foundation::{
     parse_authorization_server_metadata, parse_credential_issuer_metadata, parse_credential_offer,
     select_authorization_server, select_german_first_enrolment, select_policy_registered_sd_jwt,
-    CredentialAssuranceClass, CredentialSigningAlgorithm, GermanPidFormat, HolderBindingMethod,
-    HttpsEndpoint, HttpsIdentifier, MetadataError, OfferError, OfferGrantSource, PidPrerequisite,
-    PidProviderTrust, ProfileSelectionError, SdJwtCredentialPolicy, TransactionCodeInputMode,
-    UrlSyntaxError, MAX_AUTHORIZATION_SERVERS, MAX_CONFIGURATIONS, MAX_CONFIGURATION_IDS,
-    MAX_CONFIGURATION_ID_BYTES, MAX_ENDPOINT_BYTES, MAX_OPAQUE_VALUE_BYTES, MAX_SCOPE_BYTES,
-    MDOC_PID_DOCTYPE, SD_JWT_PID_VCT,
+    tlsnotary_development_policy, CredentialAssuranceClass, CredentialSigningAlgorithm,
+    GermanPidFormat, HolderBindingMethod, HttpsEndpoint, HttpsIdentifier, MetadataError,
+    OfferError, OfferGrantSource, PidPrerequisite, PidProviderTrust, ProfileSelectionError,
+    TransactionCodeInputMode, UrlSyntaxError, MAX_AUTHORIZATION_SERVERS, MAX_CONFIGURATIONS,
+    MAX_CONFIGURATION_IDS, MAX_CONFIGURATION_ID_BYTES, MAX_ENDPOINT_BYTES, MAX_OPAQUE_VALUE_BYTES,
+    MAX_SCOPE_BYTES, MDOC_PID_DOCTYPE, SD_JWT_PID_VCT, TLSNOTARY_EVIDENCE_CONFIGURATION_ID,
+    TLSNOTARY_EVIDENCE_VCT,
 };
 use serde_json::{json, Value};
 
@@ -458,11 +459,10 @@ fn issuer_and_as_metadata_parse_exact_identifiers_endpoints_and_features() {
 
 #[test]
 fn tlsnotary_development_evidence_is_parsed_but_never_promoted_to_pid() {
-    const TLSN_ID: &str = "dev.advatar.tlsn.evidence.sd-jwt";
     let configuration = json!({
         "format": "dc+sd-jwt",
-        "scope": TLSN_ID,
-        "vct": "dev.advatar.tlsn.evidence.1",
+        "scope": TLSNOTARY_EVIDENCE_CONFIGURATION_ID,
+        "vct": TLSNOTARY_EVIDENCE_VCT,
         "cryptographic_binding_methods_supported": ["jwk"],
         "credential_signing_alg_values_supported": ["ES256"],
         "proof_types_supported": {
@@ -471,23 +471,29 @@ fn tlsnotary_development_evidence_is_parsed_but_never_promoted_to_pid() {
             }
         }
     });
-    let offer = parse_offer(&authorization_offer(ISSUER, TLSN_ID));
-    let issuer = parse_issuer(&issuer_metadata(TLSN_ID, configuration));
+    let offer = parse_offer(&authorization_offer(
+        ISSUER,
+        TLSNOTARY_EVIDENCE_CONFIGURATION_ID,
+    ));
+    let issuer = parse_issuer(&issuer_metadata(
+        TLSNOTARY_EVIDENCE_CONFIGURATION_ID,
+        configuration,
+    ));
     let mut server = authorization_server_metadata(AS_ONE);
-    server["scopes_supported"] = json!([TLSN_ID]);
+    server["scopes_supported"] = json!([TLSNOTARY_EVIDENCE_CONFIGURATION_ID]);
     let server = parse_as(&server, AS_ONE);
 
     assert_eq!(
-        select_german_first_enrolment(&offer, &issuer, std::slice::from_ref(&server), TLSN_ID),
+        select_german_first_enrolment(
+            &offer,
+            &issuer,
+            std::slice::from_ref(&server),
+            TLSNOTARY_EVIDENCE_CONFIGURATION_ID,
+        ),
         Err(ProfileSelectionError::KeyAttestationMissing)
     );
 
-    let policy = SdJwtCredentialPolicy {
-        configuration_id: TLSN_ID.into(),
-        vct: "dev.advatar.tlsn.evidence.1".into(),
-        assurance: CredentialAssuranceClass::DevelopmentUnregulated,
-        pid_prerequisite: PidPrerequisite::None,
-    };
+    let policy = tlsnotary_development_policy();
     let plan = select_policy_registered_sd_jwt(&offer, &issuer, &[server], &policy)
         .expect("registered development policy");
     assert_eq!(plan.expected_vct, policy.vct);

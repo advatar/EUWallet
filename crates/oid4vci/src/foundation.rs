@@ -1371,6 +1371,9 @@ pub enum PidPrerequisite {
     PidBoundProofRequired,
 }
 
+pub const TLSNOTARY_EVIDENCE_CONFIGURATION_ID: &str = "dev.advatar.tlsn.evidence.sd-jwt";
+pub const TLSNOTARY_EVIDENCE_VCT: &str = "dev.advatar.tlsn.evidence.1";
+
 /// Wallet-owned admission policy for a non-PID SD-JWT credential. Issuer metadata can match this
 /// policy, but can never create or widen it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1379,6 +1382,17 @@ pub struct SdJwtCredentialPolicy {
     pub vct: String,
     pub assurance: CredentialAssuranceClass,
     pub pid_prerequisite: PidPrerequisite,
+}
+
+/// The wallet-shipped admission policy for VCIssuer credentials derived from verified TLSNotary
+/// evidence. This credential is deliberately development-only and carries no PID prerequisite.
+pub fn tlsnotary_development_policy() -> SdJwtCredentialPolicy {
+    SdJwtCredentialPolicy {
+        configuration_id: TLSNOTARY_EVIDENCE_CONFIGURATION_ID.into(),
+        vct: TLSNOTARY_EVIDENCE_VCT.into(),
+        assurance: CredentialAssuranceClass::DevelopmentUnregulated,
+        pid_prerequisite: PidPrerequisite::None,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
