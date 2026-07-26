@@ -1469,19 +1469,9 @@ pub fn select_policy_registered_sd_jwt(
     {
         return Err(ProfileSelectionError::ProofAlgorithmMissing);
     }
-    let key_attestation = jwt
-        .key_attestations_required
-        .as_ref()
-        .ok_or(ProfileSelectionError::KeyAttestationMissing)?;
-    if !contains_value(key_attestation.key_storage.as_deref(), "iso_18045_high") {
-        return Err(ProfileSelectionError::HighKeyStorageMissing);
-    }
-    if !contains_value(
-        key_attestation.user_authentication.as_deref(),
-        "iso_18045_high",
-    ) {
-        return Err(ProfileSelectionError::HighUserAuthenticationMissing);
-    }
+    // Generic admission is governed by wallet policy. The wallet still creates its credential
+    // proof with its locally attested key, but a development issuer need not advertise the PID
+    // profile's mandatory key-attestation metadata in order to receive that holder-bound proof.
     let server = select_authorization_server(offer, issuer, authorization_servers, Some(&scope))?;
     if !server.features.authorization_code {
         return Err(ProfileSelectionError::AuthorizationCodeUnsupported);

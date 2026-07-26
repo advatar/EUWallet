@@ -176,6 +176,8 @@ operational solution needed to enter those processes.
   - [x] Reuse the existing PAR/PKCE/DPoP and credential-proof machines without PID coercion.
   - [x] Bind authenticated custody to catalogue trust domain, issuer, mandatory claims and type.
   - [x] Add lifecycle and anti-promotion tests and qualify the #69 implementation slice.
+  - [x] Keep generic holder-proof admission wallet-owned instead of requiring PID-only
+        key-attestation declarations in third-party issuer metadata.
   - [ ] Merge and delete the #69 branch before starting the TLSNotary-specific follow-up.
 
 - [ ] [#67](https://github.com/advatar/EUWallet/issues/67): interoperate with VCIssuer

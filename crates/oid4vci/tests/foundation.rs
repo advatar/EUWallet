@@ -467,11 +467,7 @@ fn tlsnotary_development_evidence_is_parsed_but_never_promoted_to_pid() {
         "credential_signing_alg_values_supported": ["ES256"],
         "proof_types_supported": {
             "jwt": {
-                "proof_signing_alg_values_supported": ["ES256"],
-                "key_attestations_required": {
-                    "key_storage": ["iso_18045_high"],
-                    "user_authentication": ["iso_18045_high"]
-                }
+                "proof_signing_alg_values_supported": ["ES256"]
             }
         }
     });
@@ -483,7 +479,7 @@ fn tlsnotary_development_evidence_is_parsed_but_never_promoted_to_pid() {
 
     assert_eq!(
         select_german_first_enrolment(&offer, &issuer, std::slice::from_ref(&server), TLSN_ID),
-        Err(ProfileSelectionError::UnsupportedPidConfiguration)
+        Err(ProfileSelectionError::KeyAttestationMissing)
     );
 
     let policy = SdJwtCredentialPolicy {
