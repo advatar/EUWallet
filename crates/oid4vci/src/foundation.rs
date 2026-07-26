@@ -1360,6 +1360,164 @@ pub struct GermanPidIssuancePlan {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialAssuranceClass {
+    DevelopmentUnregulated,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PidPrerequisite {
+    None,
+    ValidPidPresent,
+    PidBoundProofRequired,
+}
+
+/// Wallet-owned admission policy for a non-PID SD-JWT credential. Issuer metadata can match this
+/// policy, but can never create or widen it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SdJwtCredentialPolicy {
+    pub configuration_id: String,
+    pub vct: String,
+    pub assurance: CredentialAssuranceClass,
+    pub pid_prerequisite: PidPrerequisite,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenericCredentialIssuancePlan {
+    pub credential_issuer: HttpsIdentifier,
+    pub authorization_server: HttpsIdentifier,
+    pub configuration_id: String,
+    pub expected_vct: String,
+    pub scope: String,
+    pub credential_endpoint: HttpsEndpoint,
+    pub nonce_endpoint: HttpsEndpoint,
+    pub deferred_credential_endpoint: Option<HttpsEndpoint>,
+    pub authorization_endpoint: HttpsEndpoint,
+    pub token_endpoint: HttpsEndpoint,
+    pub pushed_authorization_request_endpoint: HttpsEndpoint,
+    pub assurance: CredentialAssuranceClass,
+    pub pid_prerequisite: PidPrerequisite,
+}
+
+pub fn select_policy_registered_sd_jwt(
+    offer: &CredentialOffer,
+    issuer: &CredentialIssuerMetadata,
+    authorization_servers: &[AuthorizationServerMetadata],
+    policy: &SdJwtCredentialPolicy,
+) -> Result<GenericCredentialIssuancePlan, ProfileSelectionError> {
+    if offer.credential_issuer != issuer.credential_issuer {
+        return Err(ProfileSelectionError::OfferIssuerMismatch);
+    }
+    if !offer.authorization_code_eligible() {
+        return Err(ProfileSelectionError::AuthorizationCodeRequired);
+    }
+    if !offer
+        .credential_configuration_ids
+        .iter()
+        .any(|id| id == &policy.configuration_id)
+    {
+        return Err(ProfileSelectionError::ConfigurationNotOffered);
+    }
+    if policy.configuration_id.is_empty()
+        || policy.configuration_id.len() > MAX_CONFIGURATION_ID_BYTES
+        || policy.vct.is_empty()
+        || policy.vct.len() > MAX_CONFIGURATION_ID_BYTES
+    {
+        return Err(ProfileSelectionError::UnsupportedPidConfiguration);
+    }
+    let configuration = issuer
+        .credential_configurations_supported
+        .get(&policy.configuration_id)
+        .ok_or(ProfileSelectionError::ConfigurationUnknown)?;
+    if configuration.format != "dc+sd-jwt"
+        || configuration.vct.as_deref() != Some(policy.vct.as_str())
+        || configuration.doctype.is_some()
+    {
+        return Err(ProfileSelectionError::UnsupportedPidConfiguration);
+    }
+    let scope = configuration
+        .scope
+        .clone()
+        .filter(|value| !value.is_empty())
+        .ok_or(ProfileSelectionError::ScopeMissing)?;
+    if !configuration
+        .cryptographic_binding_methods_supported
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|value| value == "jwk")
+    {
+        return Err(ProfileSelectionError::BindingMethodMissing);
+    }
+    if !configuration
+        .credential_signing_algorithms
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|value| matches!(value, AlgorithmIdentifier::Jose(alg) if alg == "ES256"))
+    {
+        return Err(ProfileSelectionError::CredentialSigningAlgorithmMissing);
+    }
+    let jwt = configuration
+        .proof_types_supported
+        .as_ref()
+        .and_then(|types| types.get("jwt"))
+        .ok_or(ProfileSelectionError::JwtProofMissing)?;
+    if !jwt
+        .signing_algorithms
+        .iter()
+        .any(|value| matches!(value, AlgorithmIdentifier::Jose(alg) if alg == "ES256"))
+    {
+        return Err(ProfileSelectionError::ProofAlgorithmMissing);
+    }
+    // Generic admission is governed by wallet policy. The wallet still creates its credential
+    // proof with its locally attested key, but a development issuer need not advertise the PID
+    // profile's mandatory key-attestation metadata in order to receive that holder-bound proof.
+    let server = select_authorization_server(offer, issuer, authorization_servers, Some(&scope))?;
+    if !server.features.authorization_code {
+        return Err(ProfileSelectionError::AuthorizationCodeUnsupported);
+    }
+    if !server.features.response_type_code {
+        return Err(ProfileSelectionError::ResponseTypeCodeUnsupported);
+    }
+    if !server.features.pkce_s256 {
+        return Err(ProfileSelectionError::PkceS256Unsupported);
+    }
+    if !server.features.dpop_es256 {
+        return Err(ProfileSelectionError::DpopEs256Unsupported);
+    }
+    if !server.features.authorization_response_issuer {
+        return Err(ProfileSelectionError::AuthorizationResponseIssuerUnsupported);
+    }
+    Ok(GenericCredentialIssuancePlan {
+        credential_issuer: issuer.credential_issuer.clone(),
+        authorization_server: server.issuer.clone(),
+        configuration_id: policy.configuration_id.clone(),
+        expected_vct: policy.vct.clone(),
+        scope,
+        credential_endpoint: issuer.credential_endpoint.clone(),
+        nonce_endpoint: issuer
+            .nonce_endpoint
+            .clone()
+            .ok_or(ProfileSelectionError::NonceEndpointMissing)?,
+        deferred_credential_endpoint: issuer.deferred_credential_endpoint.clone(),
+        authorization_endpoint: server
+            .authorization_endpoint
+            .clone()
+            .ok_or(ProfileSelectionError::AuthorizationEndpointMissing)?,
+        token_endpoint: server
+            .token_endpoint
+            .clone()
+            .ok_or(ProfileSelectionError::TokenEndpointMissing)?,
+        pushed_authorization_request_endpoint: server
+            .pushed_authorization_request_endpoint
+            .clone()
+            .ok_or(ProfileSelectionError::ParUnsupported)?,
+        assurance: policy.assurance,
+        pid_prerequisite: policy.pid_prerequisite,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileSelectionError {
     OfferIssuerMismatch,
     AuthorizationCodeRequired,

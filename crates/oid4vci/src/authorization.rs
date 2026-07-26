@@ -10,7 +10,9 @@
 
 use crate::bounded_json::{self, JsonBoundaryError, JsonLimits};
 use crate::foundation::{
-    CredentialOffer, GermanPidIssuancePlan, HttpsEndpoint, HttpsIdentifier, OpaqueValue,
+    CredentialOffer, CredentialSigningAlgorithm, GenericCredentialIssuancePlan, GermanPidFormat,
+    GermanPidIssuancePlan, HolderBindingMethod, HttpsEndpoint, HttpsIdentifier, OpaqueValue,
+    PidProviderTrust,
 };
 use base64ct::{Base64UrlUnpadded, Encoding};
 use crypto_traits::{Alg, Digest, KeyRef, Random};
@@ -306,6 +308,53 @@ impl fmt::Debug for AuthorizationFlowConfig {
 }
 
 impl AuthorizationFlowConfig {
+    pub fn from_generic_plan(
+        plan: &GenericCredentialIssuancePlan,
+        offer: &CredentialOffer,
+        client_id: &str,
+        redirect_uri: &str,
+        dpop_key: DpopKeyBinding,
+    ) -> Result<Self, AuthorizationError> {
+        if offer.credential_issuer != plan.credential_issuer
+            || !offer.authorization_code_eligible()
+            || !offer
+                .credential_configuration_ids
+                .iter()
+                .any(|id| id == &plan.configuration_id)
+        {
+            return Err(AuthorizationError::OfferPlanMismatch);
+        }
+        let transport_plan = GermanPidIssuancePlan {
+            credential_issuer: plan.credential_issuer.clone(),
+            authorization_server: plan.authorization_server.clone(),
+            configuration_id: plan.configuration_id.clone(),
+            format: GermanPidFormat::DcSdJwt,
+            scope: plan.scope.clone(),
+            holder_binding: HolderBindingMethod::Jwk,
+            credential_signing_algorithm: CredentialSigningAlgorithm::JoseEs256,
+            proof_signing_algorithm: "ES256".into(),
+            credential_endpoint: plan.credential_endpoint.clone(),
+            nonce_endpoint: plan.nonce_endpoint.clone(),
+            deferred_credential_endpoint: plan.deferred_credential_endpoint.clone(),
+            authorization_endpoint: plan.authorization_endpoint.clone(),
+            token_endpoint: plan.token_endpoint.clone(),
+            pushed_authorization_request_endpoint: plan
+                .pushed_authorization_request_endpoint
+                .clone(),
+            pid_provider_trust: PidProviderTrust::Unresolved,
+        };
+        Self::new(
+            &transport_plan,
+            offer
+                .authorization_code
+                .as_ref()
+                .and_then(|grant| grant.issuer_state.as_ref()),
+            client_id,
+            redirect_uri,
+            dpop_key,
+        )
+    }
+
     pub fn from_plan_and_offer(
         plan: &GermanPidIssuancePlan,
         offer: &CredentialOffer,

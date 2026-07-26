@@ -4,12 +4,13 @@ use oid4vci::bounded_json::{
 };
 use oid4vci::foundation::{
     parse_authorization_server_metadata, parse_credential_issuer_metadata, parse_credential_offer,
-    select_authorization_server, select_german_first_enrolment, CredentialSigningAlgorithm,
-    GermanPidFormat, HolderBindingMethod, HttpsEndpoint, HttpsIdentifier, MetadataError,
-    OfferError, OfferGrantSource, PidProviderTrust, ProfileSelectionError,
-    TransactionCodeInputMode, UrlSyntaxError, MAX_AUTHORIZATION_SERVERS, MAX_CONFIGURATIONS,
-    MAX_CONFIGURATION_IDS, MAX_CONFIGURATION_ID_BYTES, MAX_ENDPOINT_BYTES, MAX_OPAQUE_VALUE_BYTES,
-    MAX_SCOPE_BYTES, MDOC_PID_DOCTYPE, SD_JWT_PID_VCT,
+    select_authorization_server, select_german_first_enrolment, select_policy_registered_sd_jwt,
+    CredentialAssuranceClass, CredentialSigningAlgorithm, GermanPidFormat, HolderBindingMethod,
+    HttpsEndpoint, HttpsIdentifier, MetadataError, OfferError, OfferGrantSource, PidPrerequisite,
+    PidProviderTrust, ProfileSelectionError, SdJwtCredentialPolicy, TransactionCodeInputMode,
+    UrlSyntaxError, MAX_AUTHORIZATION_SERVERS, MAX_CONFIGURATIONS, MAX_CONFIGURATION_IDS,
+    MAX_CONFIGURATION_ID_BYTES, MAX_ENDPOINT_BYTES, MAX_OPAQUE_VALUE_BYTES, MAX_SCOPE_BYTES,
+    MDOC_PID_DOCTYPE, SD_JWT_PID_VCT,
 };
 use serde_json::{json, Value};
 
@@ -466,11 +467,7 @@ fn tlsnotary_development_evidence_is_parsed_but_never_promoted_to_pid() {
         "credential_signing_alg_values_supported": ["ES256"],
         "proof_types_supported": {
             "jwt": {
-                "proof_signing_alg_values_supported": ["ES256"],
-                "key_attestations_required": {
-                    "key_storage": ["iso_18045_high"],
-                    "user_authentication": ["iso_18045_high"]
-                }
+                "proof_signing_alg_values_supported": ["ES256"]
             }
         }
     });
@@ -481,9 +478,24 @@ fn tlsnotary_development_evidence_is_parsed_but_never_promoted_to_pid() {
     let server = parse_as(&server, AS_ONE);
 
     assert_eq!(
-        select_german_first_enrolment(&offer, &issuer, &[server], TLSN_ID),
-        Err(ProfileSelectionError::UnsupportedPidConfiguration)
+        select_german_first_enrolment(&offer, &issuer, std::slice::from_ref(&server), TLSN_ID),
+        Err(ProfileSelectionError::KeyAttestationMissing)
     );
+
+    let policy = SdJwtCredentialPolicy {
+        configuration_id: TLSN_ID.into(),
+        vct: "dev.advatar.tlsn.evidence.1".into(),
+        assurance: CredentialAssuranceClass::DevelopmentUnregulated,
+        pid_prerequisite: PidPrerequisite::None,
+    };
+    let plan = select_policy_registered_sd_jwt(&offer, &issuer, &[server], &policy)
+        .expect("registered development policy");
+    assert_eq!(plan.expected_vct, policy.vct);
+    assert_eq!(
+        plan.assurance,
+        CredentialAssuranceClass::DevelopmentUnregulated
+    );
+    assert_eq!(plan.pid_prerequisite, PidPrerequisite::None);
 }
 
 #[test]
