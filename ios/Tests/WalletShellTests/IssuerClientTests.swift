@@ -31,6 +31,9 @@ private class IssuerTransportMock: IssuerRequesting, @unchecked Sendable {
                     "format": "dc+sd-jwt",
                     "vct": LiveIssuerClient.tlsnotaryVct,
                     "scope": LiveIssuerClient.tlsnotaryConfiguration,
+                    "credential_signing_certificate_endpoint": issuer
+                        + "/credential-signing-certificates/"
+                        + LiveIssuerClient.tlsnotaryConfiguration,
                 ],
             ],
         ])
@@ -41,6 +44,14 @@ private class IssuerTransportMock: IssuerRequesting, @unchecked Sendable {
         maximumResponseBytes: Int
     ) async throws -> HttpResponse {
         requests.append(Request(url: url, method: method, body: body, headers: headers))
+        if url.contains("/credential-signing-certificates/") {
+            return json([
+                "credential_configuration_id": LiveIssuerClient.tlsnotaryConfiguration,
+                "x5c": [Data([1, 2, 3]).base64EncodedString(),
+                        Data([4, 5, 6]).base64EncodedString()],
+                "development_only": true,
+            ])
+        }
         if url.hasSuffix("oauth-authorization-server") {
             return json([
                 "issuer": "https://issuer.example",
@@ -127,6 +138,8 @@ final class IssuerClientTests: XCTestCase {
             authorizer: IssuerAuthorizerMock(transport: transport))
 
         let pushed = try await client.pushAuthorizationRequest()
+        XCTAssertEqual(client.context().signingLeaf, Data([1, 2, 3]))
+        XCTAssertEqual(client.context().signingRoot, Data([4, 5, 6]))
         XCTAssertTrue(pushed)
         let code = try await client.authorize()
         XCTAssertEqual(code, Data("authorization-code".utf8))

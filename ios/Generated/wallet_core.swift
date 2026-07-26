@@ -521,6 +521,17 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol DemoWalletProtocol : AnyObject {
 
     /**
+     * Development provisioning only: add an exact issuer and its independent credential-signing
+     * CA to the attestation trust service. HTTPS server certificates are never accepted here.
+     */
+    func developmentTrustList(issuerId: String, issuerRootDer: Data)  -> Data
+
+    /**
+     * Development provisioning only: sign a WUA for a native device/Secure Enclave public key.
+     */
+    func developmentWuaJwt(devicePublicKey: Data)  -> Data
+
+    /**
      * The full issuance setup + the issuer-signed credentials the stub endpoint returns per type.
      * Everything the shell needs to run a REAL OpenID4VCI issuance through the core (see
      * [`IssuanceScenario`]).
@@ -624,6 +635,30 @@ public convenience init() {
 
 
 
+
+    /**
+     * Development provisioning only: add an exact issuer and its independent credential-signing
+     * CA to the attestation trust service. HTTPS server certificates are never accepted here.
+     */
+open func developmentTrustList(issuerId: String, issuerRootDer: Data) -> Data {
+    return try!  FfiConverterData.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_demowallet_development_trust_list(self.uniffiClonePointer(),
+        FfiConverterString.lower(issuerId),
+        FfiConverterData.lower(issuerRootDer),$0
+    )
+})
+}
+
+    /**
+     * Development provisioning only: sign a WUA for a native device/Secure Enclave public key.
+     */
+open func developmentWuaJwt(devicePublicKey: Data) -> Data {
+    return try!  FfiConverterData.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_demowallet_development_wua_jwt(self.uniffiClonePointer(),
+        FfiConverterData.lower(devicePublicKey),$0
+    )
+})
+}
 
     /**
      * The full issuance setup + the issuer-signed credentials the stub endpoint returns per type.
@@ -1943,6 +1978,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if (uniffi_wallet_core_checksum_func_verify_wallet_export() != 147) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_demowallet_development_trust_list() != 46229) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_demowallet_development_wua_jwt() != 5371) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_demowallet_issuance_scenario() != 49616) {

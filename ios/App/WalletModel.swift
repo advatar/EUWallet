@@ -1,4 +1,6 @@
 import Foundation
+import AuthenticationServices
+import UIKit
 
 /// `EffectExecutor` is deliberately UI-agnostic and may invoke render callbacks on its current
 /// executor. Keep the synchronous correlation values behind a lock; SwiftUI publication is
@@ -113,7 +115,9 @@ final class WalletModel: ObservableObject {
     private let demo = DemoWallet()
     /// The one controlled runtime for the whole session. Core mutations are available only through
     /// its durable lifecycle; read-only projections remain available for rendering wallet state.
-    private let runtime: FfiWalletRuntime?
+    private var runtime: FfiWalletRuntime?
+    private let deviceSigner = SecureEnclaveSigner()
+    private var flowSigner: any Signer
     private let issuance: IssuanceScenario
     /// RP trust material for presentation (static demo chain), captured once.
     private let rpCertChain: [Data]
@@ -132,6 +136,7 @@ final class WalletModel: ObservableObject {
     init() {
         let issuance = demo.issuanceScenario()
         let scenario = demo.scenario()
+        self.flowSigner = DemoSigner(demo: demo)
         self.issuance = issuance
         self.rpCertChain = scenario.rpCertChain
         self.redirectUris = scenario.registeredRedirectUris
@@ -177,7 +182,7 @@ final class WalletModel: ObservableObject {
         }
         return EffectExecutor(
             lifecycle: runtime.lifecycle,
-            signer: DemoSigner(demo: demo),
+            signer: flowSigner,
             http: StubHttpClient(),
             storage: InMemoryStorage(),
             trust: DemoTrustResolver(certChain: rpCertChain, redirectUris: redirectUris),
@@ -748,12 +753,82 @@ final class WalletModel: ObservableObject {
             lastScan = "✅ Credential offer from \(issuer)\n"
                 + "\(ids.count) type(s): \(ids.joined(separator: ", "))"
         case let .credentialOfferByReference(uri):
-            lastScan = "✅ Credential offer (by reference)\n\(uri)"
+            lastScan = "Contacting credential issuer…"
+            startLiveIssuance(offerUri: uri)
         case let .presentation(requestUri, clientId):
             lastScan = "✅ Presentation request\nclient: \(clientId ?? "—")\n"
                 + "request_uri: \(requestUri ?? "—")"
         case let .unknown(s):
             lastScan = "⚠️ Not a recognised wallet link:\n\(s.prefix(80))"
+        }
+    }
+
+    private func startLiveIssuance(offerUri: String) {
+        guard !isIssuing else { return }
+        isIssuing = true
+        Task {
+            do {
+                let keyReference = "wallet-device-key"
+                let publicKey = try deviceSigner.publicKeyRaw(keyRef: keyReference)
+                let authorizer = SystemIssuerAuthorizationPresenter(anchor: {
+                    UIApplication.shared.connectedScenes
+                        .compactMap { $0 as? UIWindowScene }
+                        .flatMap(\.windows)
+                        .first(where: \.isKeyWindow) ?? ASPresentationAnchor()
+                })
+                let transport = URLSessionHttpClient()
+                let client = try await LiveIssuerClient.discover(
+                    offerUri: offerUri,
+                    clientId: "wallet.example",
+                    redirectUri: "eu.advatar.wallet:/oauth2redirect",
+                    keyReference: keyReference,
+                    publicKey: publicKey,
+                    signer: deviceSigner,
+                    transport: transport,
+                    authorizer: authorizer)
+                let context = client.context()
+                let environment = CoreDurableEnvironment(
+                    clockEpoch: Int64(Date().timeIntervalSince1970),
+                    signedTrustList: demo.developmentTrustList(
+                        issuerId: context.issuer, issuerRootDer: context.signingRoot),
+                    operatorPublicKey: issuance.operatorPublicKey,
+                    devicePublicKey: publicKey,
+                    wuaJwt: demo.developmentWuaJwt(devicePublicKey: publicKey),
+                    wuaProviderPublicKey: issuance.walletProviderPublicKey)
+                runtime = try FfiWalletRuntime.ephemeralDemo(
+                    applicationIdentifier: "eu.advatar.wallet.development-live",
+                    walletClientId: "wallet.example",
+                    deviceKeyReference: keyReference,
+                    environment: environment)
+                flowSigner = deviceSigner
+                let review = IssuanceReviewCapture()
+                guard let ex = makeExecutor(issuer: client, render: {
+                    [weak self] operationId, authorizationHash, screen in
+                    review.record(operationId: operationId, authorizationHash: authorizationHash)
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.decisionOperationId = operationId
+                        self.decisionAuthorizationHash = authorizationHash
+                        self.decisionKind = WalletDecisionKind(screen: screen)
+                        self.phase = .screen(screen)
+                    }
+                }) else { throw IssuerClientError.invalidState }
+                executor = ex
+                showConnectSheet = false
+                lastScan = "Credential offer verified. Review it before continuing."
+                guard await run(
+                    ex,
+                    eventJson: WalletEventJSON.credentialOfferReceived(
+                        offer: context.offer,
+                        issuerCertChain: [context.signingLeaf],
+                        issuerId: context.issuer),
+                    requiring: .awaitingInput
+                ) else { return }
+            } catch {
+                isIssuing = false
+                lastScan = "Could not start issuance: \(error.localizedDescription)"
+                phase = .failed("The credential issuer could not be verified or reached.")
+            }
         }
     }
 
