@@ -156,6 +156,11 @@ operational solution needed to enter those processes.
 
 ## Next phase — production clients and provider platform
 
+- [ ] [#75](https://github.com/advatar/EUWallet/issues/75): maintain a durable delivery checkpoint
+      with the exact `main` revision, branch disposition, current CI failures, completed slices and
+      ordered resume point. Close after the checkpoint is committed, pushed, and the final branch
+      audit confirms that no commits remain outside `main`.
+
 - [ ] [#69](https://github.com/advatar/EUWallet/issues/69): generalize acquisition and custody
       from PID-specific journeys to every authenticated, policy-registered credential supported
       by the wallet's standard formats.
