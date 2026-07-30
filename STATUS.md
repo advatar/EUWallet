@@ -361,6 +361,8 @@ operational solution needed to enter those processes.
       and prevent holder/self-issued evidence from entering PID namespaces or regulated assurance.
 - [ ] Add shared positive/malformed conformance vectors plus lifecycle and adversarial ingestion
       tests, then run normal affected Rust tests and strict affected-target linting.
+  - [x] Consume the byte-identical 17-case portable-evidence TSV shared with TLSNotary and
+        ActiveChain and qualify its closed decision table with normal targeted tests and Clippy.
   - [x] Add authenticated-ingestion tests for valid self-issued evidence and rejected assurance
         promotion; 18 wallet ingestion tests, 3 catalogue tests, and strict affected-target Clippy
         pass locally on 2026-07-30.

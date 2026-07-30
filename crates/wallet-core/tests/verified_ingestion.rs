@@ -346,6 +346,43 @@ fn tlsnotary_assurance_cannot_be_promoted_without_issuer_authorization() {
 }
 
 #[test]
+fn portable_evidence_conformance_matrix_is_closed_and_consistent() {
+    let vector = include_str!("../../../testing/vectors/tls-portable-evidence-v1.tsv");
+    let mut lines = vector.lines();
+    assert_eq!(
+        lines.next(),
+        Some("case\tversion\tcommitments\tobserved\tfresh_until\tassurance\tissuer_authorization\texpected\treason")
+    );
+    let mut cases = 0;
+    for line in lines {
+        let columns = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(columns.len(), 9, "malformed vector row: {line}");
+        let assurance_valid = matches!(
+            columns[5],
+            "tls_notarized_evidence"
+                | "holder_self_issued"
+                | "issuer_upgraded"
+                | "regulated_attestation"
+        );
+        let elevated = matches!(columns[5], "issuer_upgraded" | "regulated_attestation");
+        let authorization_valid = if elevated {
+            columns[6] == "nonzero_digest384"
+        } else {
+            columns[6] == "absent"
+        };
+        let accepted = columns[1] == "1"
+            && columns[2] == "nonzero_digest384"
+            && columns[3] == "past"
+            && columns[4] == "future"
+            && assurance_valid
+            && authorization_valid;
+        assert_eq!(accepted, columns[7] == "accept", "case {}", columns[0]);
+        cases += 1;
+    }
+    assert_eq!(cases, 17);
+}
+
+#[test]
 fn authenticated_sdjwt_and_mdoc_cross_the_storage_boundary() {
     let wallet = DemoWallet::new();
     let scenario = wallet.issuance_scenario();
