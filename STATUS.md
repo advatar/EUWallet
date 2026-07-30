@@ -354,6 +354,14 @@ operational solution needed to enter those processes.
 
 ## Assurance and launch phase
 
+- [ ] [ActiveChain #169](https://github.com/advatar/ActiveChain/issues/169): import the versioned
+      TLSNotary portable evidence envelope under a dedicated non-PID credential type; validate
+      trust, holder/schema binding, freshness/status, and any issuer authorization before storage.
+- [ ] Preserve and display the exact TLS evidence assurance class, require explicit wallet consent,
+      and prevent holder/self-issued evidence from entering PID namespaces or regulated assurance.
+- [ ] Add shared positive/malformed conformance vectors plus lifecycle and adversarial ingestion
+      tests, then run normal affected Rust tests and strict affected-target linting.
+
 - [ ] Replace keyword traceability with reviewed applicability and behavior-level evidence.
 - [ ] Bind formal oracle tests to production state machines.
 - [ ] Complete the TOE, threat model, DPIA, key lifecycle, algorithm profile and KAT evidence.
