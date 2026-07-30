@@ -216,17 +216,34 @@ fn remove_sd_jwt_disclosure(compact: &str, claim: &str) -> String {
 }
 
 fn tlsnotary_evidence_credential(scenario: &IssuanceScenario) -> Vec<u8> {
+    tlsnotary_evidence_credential_with_assurance(scenario, "holderSelfIssued", json!(null))
+}
+
+fn tlsnotary_evidence_credential_with_assurance(
+    scenario: &IssuanceScenario,
+    assurance: &str,
+    issuer_authorization: serde_json::Value,
+) -> Vec<u8> {
     let issuer = SoftwareSigner::from_pkcs8_der(ISSUER_PKCS8).expect("issuer key");
     let point = &scenario.device_public_key;
-    let claims = [
-        ("tlsn_session_id", json!("tlsn-session-1")),
-        ("tlsn_issued_at", json!(scenario.epoch)),
-        (
-            "tlsn_verifier_output",
-            json!({"serverName":"example.com","status":200}),
-        ),
-        ("assurance", json!("development-unregulated")),
-    ];
+    let digest = "11".repeat(48);
+    let claims = [(
+        "tlsn_evidence",
+        json!({
+            "version": 1,
+            "notary_identity_commitment": digest,
+            "server_identity_commitment": "22".repeat(48),
+            "transcript_commitment": "33".repeat(48),
+            "disclosed_fields_commitment": "44".repeat(48),
+            "holder_binding_commitment": "55".repeat(48),
+            "schema_commitment": "66".repeat(48),
+            "observed_at": scenario.epoch,
+            "fresh_until": scenario.epoch + 300,
+            "status_commitment": "77".repeat(48),
+            "assurance": assurance,
+            "issuer_authorization_commitment": issuer_authorization,
+        }),
+    )];
     let mut disclosures = Vec::new();
     let mut digests = Vec::new();
     for (index, (name, value)) in claims.into_iter().enumerate() {
@@ -295,7 +312,7 @@ fn tlsnotary_development_evidence_enters_authenticated_custody_without_pid_promo
 
     let missing_claim = remove_sd_jwt_disclosure(
         std::str::from_utf8(&credential).expect("credential UTF-8"),
-        "assurance",
+        "tlsn_evidence",
     );
     let mut rejected = ready_core(&scenario);
     assert_eq!(
@@ -305,9 +322,27 @@ fn tlsnotary_development_evidence_enters_authenticated_custody_without_pid_promo
             &scenario.issuer_cert_chain,
             &scenario.issuer_id,
         ),
-        Err(CredentialIngestionError::MandatoryClaimsMissing)
+        Err(CredentialIngestionError::MalformedCredential)
     );
     assert_eq!(rejected.held_credentials_json(), "[]");
+}
+
+#[test]
+fn tlsnotary_assurance_cannot_be_promoted_without_issuer_authorization() {
+    let scenario = DemoWallet::new().issuance_scenario();
+    let credential =
+        tlsnotary_evidence_credential_with_assurance(&scenario, "issuerUpgraded", json!(null));
+    let mut core = ready_core(&scenario);
+    assert_eq!(
+        core.ingest_credential(
+            "dc+sd-jwt",
+            &credential,
+            &scenario.issuer_cert_chain,
+            &scenario.issuer_id,
+        ),
+        Err(CredentialIngestionError::TlsEvidenceInvalid)
+    );
+    assert_eq!(core.held_credentials_json(), "[]");
 }
 
 #[test]

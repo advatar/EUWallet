@@ -1047,6 +1047,7 @@ pub enum CredentialIngestionError {
     CredentialTypeFormatMismatch,
     IssuerNotAllowedForType,
     MandatoryClaimsMissing,
+    TlsEvidenceInvalid,
     PidPortraitInvalid,
     CredentialNotYetValid,
     CredentialExpired,
@@ -3348,6 +3349,8 @@ impl Core {
         if vct == PID_SD_JWT_VCT {
             validate_sd_jwt_pid_portrait(claims)
                 .map_err(|_| CredentialIngestionError::PidPortraitInvalid)?;
+        } else if vct == oid4vci::foundation::TLSNOTARY_EVIDENCE_VCT {
+            Self::validate_tlsnotary_evidence_claim(claims, self.now_epoch)?;
         }
         let authenticated_issuer = self.issuer_for_type(issuers, vct)?;
         if issuer.is_empty()
@@ -3383,6 +3386,75 @@ impl Core {
             },
             authenticated_issuer.clone(),
         ))
+    }
+
+    fn validate_tlsnotary_evidence_claim(
+        claims: &serde_json::Map<String, serde_json::Value>,
+        now_epoch: i64,
+    ) -> Result<(), CredentialIngestionError> {
+        let evidence = claims
+            .get("tlsn_evidence")
+            .and_then(serde_json::Value::as_object)
+            .ok_or(CredentialIngestionError::TlsEvidenceInvalid)?;
+        let commitment_fields = [
+            "notary_identity_commitment",
+            "server_identity_commitment",
+            "transcript_commitment",
+            "disclosed_fields_commitment",
+            "holder_binding_commitment",
+            "schema_commitment",
+            "status_commitment",
+        ];
+        let valid_digest = |field: &str| {
+            evidence
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| {
+                    value.len() == 96
+                        && value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                        && value.bytes().any(|byte| byte != b'0')
+                })
+        };
+        if evidence.len() != 12
+            || evidence.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+            || !commitment_fields.into_iter().all(valid_digest)
+        {
+            return Err(CredentialIngestionError::TlsEvidenceInvalid);
+        }
+        let observed_at = evidence
+            .get("observed_at")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or(CredentialIngestionError::TlsEvidenceInvalid)?;
+        let fresh_until = evidence
+            .get("fresh_until")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or(CredentialIngestionError::TlsEvidenceInvalid)?;
+        if observed_at <= 0 || observed_at > now_epoch || now_epoch >= fresh_until {
+            return Err(CredentialIngestionError::TlsEvidenceInvalid);
+        }
+        let assurance = evidence
+            .get("assurance")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(CredentialIngestionError::TlsEvidenceInvalid)?;
+        let authorization = evidence.get("issuer_authorization_commitment");
+        let authorization_is_digest = authorization
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| {
+                value.len() == 96
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    && value.bytes().any(|byte| byte != b'0')
+            });
+        match assurance {
+            "tlsNotarizedEvidence" | "holderSelfIssued"
+                if authorization.is_some_and(serde_json::Value::is_null) => {}
+            "issuerUpgraded" | "regulatedAttestation" if authorization_is_digest => {}
+            _ => return Err(CredentialIngestionError::TlsEvidenceInvalid),
+        }
+        Ok(())
     }
 
     fn verify_mdoc_credential(
