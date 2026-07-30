@@ -1,0 +1,18 @@
+case	version	commitments	observed	fresh_until	assurance	issuer_authorization	expected	reason
+self_issued_valid	1	nonzero_digest384	past	future	holder_self_issued	absent	accept	self-issued provenance is retained
+notarized_valid	1	nonzero_digest384	past	future	tls_notarized_evidence	absent	accept	TLS evidence is not promoted
+issuer_upgraded_valid	1	nonzero_digest384	past	future	issuer_upgraded	nonzero_digest384	accept	exact issuer authorization permits upgrade
+regulated_valid	1	nonzero_digest384	past	future	regulated_attestation	nonzero_digest384	accept	regulated class carries authorization
+unknown_version	2	nonzero_digest384	past	future	holder_self_issued	absent	reject	version dispatch is closed
+zero_commitment	1	zero_digest384	past	future	holder_self_issued	absent	reject	all seven commitments are nonzero
+short_commitment	1	short_digest	past	future	holder_self_issued	absent	reject	commitments are exactly 48 bytes
+future_observation	1	nonzero_digest384	future	future	holder_self_issued	absent	reject	evidence cannot originate in the future
+zero_observation	1	nonzero_digest384	zero	future	holder_self_issued	absent	reject	observation is mandatory
+expired	1	nonzero_digest384	past	past	holder_self_issued	absent	reject	freshness interval is half open
+empty_interval	1	nonzero_digest384	past	equal_observed	holder_self_issued	absent	reject	freshness must follow observation
+upgrade_without_issuer	1	nonzero_digest384	past	future	issuer_upgraded	absent	reject	upgrade requires issuer authorization
+regulated_without_issuer	1	nonzero_digest384	past	future	regulated_attestation	absent	reject	regulated class requires issuer authorization
+self_issued_with_issuer	1	nonzero_digest384	past	future	holder_self_issued	nonzero_digest384	reject	lower assurance cannot carry upgrade authorization
+notarized_with_issuer	1	nonzero_digest384	past	future	tls_notarized_evidence	nonzero_digest384	reject	lower assurance cannot carry upgrade authorization
+zero_issuer_authorization	1	nonzero_digest384	past	future	issuer_upgraded	zero_digest384	reject	issuer authorization is nonzero
+unknown_assurance	1	nonzero_digest384	past	future	unknown	absent	reject	assurance dispatch is closed
