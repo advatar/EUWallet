@@ -973,6 +973,65 @@ mod tests {
     }
 
     #[test]
+    fn atomic_verifier_covers_the_complete_two_by_two_validity_matrix() {
+        for (classical_valid, post_quantum_valid, accepted) in [
+            (true, true, true),
+            (false, true, false),
+            (true, false, false),
+            (false, false, false),
+        ] {
+            let mut fixture = verification_fixture();
+            let envelope = decode_signature(&fixture.signature_envelope).unwrap();
+            let mut classical = envelope.signature().classical().to_vec();
+            let mut post_quantum = envelope.signature().post_quantum().to_vec();
+            if !classical_valid {
+                classical[0] ^= 1;
+            }
+            if !post_quantum_valid {
+                post_quantum[0] ^= 1;
+            }
+            fixture.signature_envelope = encode_signature(&HybridSignatureEnvelope::new(
+                envelope.purpose(),
+                HybridSignature::try_new(
+                    HybridSignatureProfile::Es256MlDsa65V1,
+                    classical,
+                    post_quantum,
+                )
+                .unwrap(),
+            ));
+            assert_eq!(
+                verify_hybrid_signature_atomic(&fixture.input()).is_ok(),
+                accepted,
+                "classical_valid={classical_valid}, post_quantum_valid={post_quantum_valid}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_bearing_debug_output_is_redacted() {
+        let dsa = MlDsa65SecretKey::generate().unwrap();
+        let kem = MlKem768SecretKey::generate().unwrap();
+        let (_, shared) = encapsulate_ml_kem_768(&kem.public_key()).unwrap();
+        let recipient = HybridRecipientKey::generate(
+            HybridKeyRef::try_new("redaction-audit".into(), 1).unwrap(),
+        )
+        .unwrap();
+        let (encapsulation, traffic) = encapsulate_hybrid_key(
+            "redaction-sender",
+            recipient.reference(),
+            &recipient.public_key().unwrap(),
+            b"redaction-context",
+        )
+        .unwrap();
+
+        let debug = format!("{dsa:?} {kem:?} {shared:?} {traffic:?}");
+        assert_eq!(debug.matches("[REDACTED]").count(), 4);
+        assert!(!debug.contains(&bytes_hex(shared.as_bytes())));
+        assert!(!debug.contains(&bytes_hex(traffic.as_bytes())));
+        assert!(!debug.contains(&bytes_hex(&encapsulation.post_quantum_ciphertext)));
+    }
+
+    #[test]
     fn atomic_verifier_rejects_mixed_identity_generation_replay_time_and_downgrade() {
         let mut mixed_identity = verification_fixture();
         mixed_identity.expected = HybridKeyRef::try_new("other-wallet".into(), 7).unwrap();
