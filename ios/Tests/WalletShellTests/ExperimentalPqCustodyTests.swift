@@ -3,9 +3,12 @@ import Security
 import XCTest
 @testable import WalletShell
 
+private enum PqExpectedFailure: Error { case failure }
+
 private final class PqTestSigner: HybridClassicalKeyProviding {
     private(set) var references: [String] = []
     private var publicKeys: [String: Data] = [:]
+    var signError: Error?
 
     func publicKeyRaw(keyRef: String) throws -> Data {
         references.append(keyRef)
@@ -15,6 +18,11 @@ private final class PqTestSigner: HybridClassicalKeyProviding {
         return value
     }
 
+    func sign(keyRef _: String, payload _: Data) throws -> Data {
+        if let signError { throw signError }
+        return Data(repeating: 0x51, count: 64)
+    }
+
     func replacePublicKey(for reference: String, with value: Data) {
         publicKeys[reference] = value
     }
@@ -22,7 +30,9 @@ private final class PqTestSigner: HybridClassicalKeyProviding {
 
 private final class PqTestBackend: ExperimentalPqGenerating {
     var malformed = false
+    var signError: Error?
     private(set) var observedKeyLengths: [Int] = []
+    private(set) var signCalls = 0
 
     func generateWrappedMaterial(
         wrappingKey: inout Data
@@ -33,6 +43,17 @@ private final class PqTestBackend: ExperimentalPqGenerating {
             encryptedPrivateKey: Data(repeating: 0x20, count: 132),
             mlDsa65PublicKey: Data(repeating: 0x30, count: 1_952),
             mlKem768PublicKey: Data(repeating: 0x40, count: 1_184))
+    }
+
+    func signWrappedMaterial(
+        wrappingKey _: inout Data,
+        nonce _: Data,
+        encryptedPrivateKey _: Data,
+        payload _: Data
+    ) throws -> Data {
+        signCalls += 1
+        if let signError { throw signError }
+        return Data(repeating: 0x61, count: 3_309)
     }
 }
 
@@ -202,6 +223,32 @@ final class ExperimentalPqCustodyTests: XCTestCase {
         ) {
             XCTAssertEqual($0 as? ExperimentalPqCustodyError, .mixedGeneration)
         }
+    }
+
+    func testHybridSignReturnsBothComponentsOrNoResult() throws {
+        let reference = try custody.rotate(logicalKeyID: "wallet-key", prompt: "Create")
+        let signature = try custody.sign(
+            reference: reference,
+            payload: Data([1, 2, 3]),
+            prompt: "Sign")
+        XCTAssertEqual(signature.classicalSignature.count, 64)
+        XCTAssertEqual(signature.postQuantumSignature.count, 3_309)
+        XCTAssertEqual(backend.signCalls, 1)
+
+        backend.signError = PqExpectedFailure.failure
+        XCTAssertThrowsError(try custody.sign(
+            reference: reference,
+            payload: Data([4]),
+            prompt: "Sign"))
+        XCTAssertEqual(backend.signCalls, 2)
+
+        backend.signError = nil
+        signer.signError = PqExpectedFailure.failure
+        XCTAssertThrowsError(try custody.sign(
+            reference: reference,
+            payload: Data([5]),
+            prompt: "Sign"))
+        XCTAssertEqual(backend.signCalls, 2, "PQ signing must not run after classical failure")
     }
 
     func testMalformedBackendMaterialIsNeverCommittedAndCandidateKeyIsDeleted() {

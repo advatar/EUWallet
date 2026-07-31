@@ -2,9 +2,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.3",
   "version": 1,
-  "serialNumber": "urn:uuid:a157defc-79b0-479d-adbc-b23d36d251bc",
+  "serialNumber": "urn:uuid:3b041f57-2bc5-4007-8bf5-6207ae41a881",
   "metadata": {
-    "timestamp": "2026-07-31T10:47:46.651748000Z",
+    "timestamp": "2026-07-31T11:08:12.932059000Z",
     "tools": [
       {
         "vendor": "CycloneDX",
@@ -4089,6 +4089,7 @@
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/cose#0.0.1",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-backend#0.0.1",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1",
+        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/hybrid-pq#0.0.1",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/iso18013-5#0.0.1",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/jwe#0.0.1",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/mdoc#0.0.1",
