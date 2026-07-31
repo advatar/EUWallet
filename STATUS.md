@@ -13,6 +13,11 @@ Government provision, mandate or recognition; accredited certification; and Comm
 notification remain external launch gates. Engineering must produce the complete evidence and
 operational solution needed to enter those processes.
 
+## CI integrity
+
+- [x] [#108](https://github.com/advatar/EUWallet/issues/108): restore the full Rust gate after the
+      `oid4vci::Env` device-public-key expansion.
+
 ## Planned milestone — pre-launch security review
 
 - [ ] Run documented Claude/Codex adversarial review for each release candidate.

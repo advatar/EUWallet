@@ -63,6 +63,7 @@ fn full_issuance_with_real_proof_of_possession() {
         proof_key_attested: true,
         seen_c_nonces: &seen,
         device_key_ref: "device-key",
+        device_public_key: device.public_key_raw(),
         issuer_id: "https://issuer.example",
         now_epoch: 1_790_000_000,
     };
@@ -142,6 +143,7 @@ fn issuer_rejects_proof_signed_by_wrong_key() {
         proof_key_attested: true,
         seen_c_nonces: &seen,
         device_key_ref: "device-key",
+        device_public_key: device.public_key_raw(),
         issuer_id: "https://issuer.example",
         now_epoch: 1,
     };
