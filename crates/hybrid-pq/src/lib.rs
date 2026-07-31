@@ -364,11 +364,28 @@ impl HybridKeyAgreementPublicKey {
 
 /// Atomic result of hybrid key establishment. Implementations must not publish this until both
 /// components and the reviewed combiner have succeeded.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct HybridKeyAgreementResult {
     classical_public_share: Vec<u8>,
     post_quantum_ciphertext: Vec<u8>,
     shared_secret: Vec<u8>,
+}
+
+impl core::fmt::Debug for HybridKeyAgreementResult {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("HybridKeyAgreementResult")
+            .field("classical_public_share", &self.classical_public_share)
+            .field("post_quantum_ciphertext", &self.post_quantum_ciphertext)
+            .field("shared_secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for HybridKeyAgreementResult {
+    fn drop(&mut self) {
+        self.shared_secret.fill(0);
+    }
 }
 
 impl HybridKeyAgreementResult {

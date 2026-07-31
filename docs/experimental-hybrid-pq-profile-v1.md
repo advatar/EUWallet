@@ -19,7 +19,7 @@ SD-JWT VC, mdoc, COSE, JOSE, X.509, OpenID4VCI, OpenID4VP, WUA/WIA, trust lists 
 | Post-quantum signature | ML-DSA-65 | FIPS 204 ML-DSA-65; 1,952-byte public key; 4,032-byte private key; 3,309-byte signature |
 | Classical key establishment | ECDH over NIST P-256 | 65-byte SEC 1 uncompressed public share; reject infinity, non-curve points and non-canonical encodings |
 | Post-quantum key establishment | ML-KEM-768 | FIPS 203 ML-KEM-768; 1,184-byte encapsulation key; 2,400-byte decapsulation key; 1,088-byte ciphertext; 32-byte shared secret |
-| Extract-and-expand KDF | HKDF-SHA-256 | 32-byte output; exact hybrid combiner inputs and labels remain blocked on issue #89 |
+| Extract-and-expand KDF | HKDF-SHA-256 | 32-byte output; exact private combiner inputs, labels, and transcript encoding are pinned in `experimental-pq-key-establishment.md` |
 | Content encryption | AES-256-GCM | 32-byte key; 12-byte nonce; 16-byte authentication tag |
 | Hash | SHA-256 | 32-byte digest |
 
@@ -27,10 +27,9 @@ Implementations MUST use the exact FIPS 203 and FIPS 204 final standards, not ea
 Dilithium or draft encodings. Secret-key encodings are backend-internal and MUST NOT appear in an
 artifact. Strict parsing and standardized ML-KEM implicit rejection are required.
 
-The key-establishment row freezes the component algorithms and sizes only. It does not authorize an
-ad-hoc combiner. Key establishment MUST remain unavailable until issue #89 pins a reviewed combiner,
-transcript and test vectors without changing this profile ID. If that work requires changing a
-choice frozen here, a new profile ID is required.
+The key-establishment row is implemented only by the reviewed, private construction pinned in
+`experimental-pq-key-establishment.md`. Other combiners remain unavailable. Changing its combiner,
+transcript, or test vectors requires a new profile ID.
 
 ## Frozen identifiers
 
