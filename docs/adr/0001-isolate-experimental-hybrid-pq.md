@@ -49,6 +49,10 @@ production exclusion boundary are frozen in
 [`experimental-hybrid-pq-profile-v1.md`](../experimental-hybrid-pq-profile-v1.md). Any incompatible
 change requires a new profile ID.
 
+The adversaries, mandatory security properties, evidence obligations, non-claims and residual risks
+are maintained in
+[`experimental-hybrid-pq-threat-model.md`](../experimental-hybrid-pq-threat-model.md).
+
 ## Key custody consequence
 
 The P-256 signing component remains a non-exportable Secure Enclave key. Current Apple hardware

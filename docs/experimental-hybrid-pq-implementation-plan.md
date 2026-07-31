@@ -87,6 +87,9 @@ Cover:
 Every threat must map to a test, formal property or explicit residual-risk statement. Do not claim
 Secure-Enclave-native PQ execution or reviewed side-channel resistance.
 
+The normative adversaries, properties, evidence mappings, non-claims and residual risks are in
+[`docs/experimental-hybrid-pq-threat-model.md`](experimental-hybrid-pq-threat-model.md).
+
 ### 4. Add isolated hybrid cryptographic interfaces
 
 Issue: [#81](https://github.com/advatar/EUWallet/issues/81)
