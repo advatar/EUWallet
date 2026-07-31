@@ -33,6 +33,7 @@
 use std::fmt;
 
 pub mod envelope;
+pub mod rollout;
 pub mod tbs;
 pub mod use_cases;
 

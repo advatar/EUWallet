@@ -128,8 +128,17 @@ algorithm/profile and certification approval.
       and downgrade resistance.
 - [ ] [#93](https://github.com/advatar/EUWallet/issues/93): establish performance and resource
       budgets.
-- [ ] [#94](https://github.com/advatar/EUWallet/issues/94): add compile-time and runtime rollout
+- [x] [#94](https://github.com/advatar/EUWallet/issues/94): add compile-time and runtime rollout
       controls.
+  - [x] Add the default-off `experimental-hybrid-pq` feature; feature-off builds force the
+        effective mode to Disabled regardless of configuration.
+  - [x] Add ordered runtime modes Disabled/ExperimentalLocalOnly/PrivateProfileAllowed/
+        HybridRequired with provenance-checked configuration: remote origins can only restrict.
+  - [x] Make HybridRequired downgrade a typed hard failure with no silent classical fallback,
+        including under an active kill switch.
+  - [x] Restrict telemetry structurally to profile/version, bounded outcome class and latency
+        bucket; add a restrict-only kill switch that preserves existing-artifact access.
+  - [x] Add explicit versioned read plans and policy-gated, never-implicit legacy migration.
 - [ ] [#95](https://github.com/advatar/EUWallet/issues/95): close qualification, evidence and
       integration gates.
 
