@@ -26,7 +26,7 @@ use ml_kem::{
     kem::{Ciphertext, Decapsulate, Encapsulate, Key, KeyExport},
     DecapsulationKey, EncapsulationKey, MlKem768, Seed,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Public, non-secret failures with no backend diagnostic details.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,6 +79,13 @@ impl MlDsa65SecretKey {
             .try_sign(message)
             .map_err(|_| ExperimentalPqError::InvalidSignature)?;
         Ok(signature.to_bytes().as_slice().to_vec())
+    }
+
+    /// Copy the preferred seed into an owned zeroizing buffer for an immediate custody transfer.
+    /// Callers must never persist or log the plaintext result.
+    #[must_use]
+    pub fn export_seed_for_custody(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(self.0.to_seed().as_slice().to_vec())
     }
 }
 
@@ -142,6 +149,19 @@ impl MlKem768SecretKey {
         Ok(SharedSecret::new(
             self.0.decapsulate(&ciphertext).as_slice(),
         ))
+    }
+
+    /// Copy the preferred seed into an owned zeroizing buffer for an immediate custody transfer.
+    /// Callers must never persist or log the plaintext result.
+    #[must_use]
+    pub fn export_seed_for_custody(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(
+            self.0
+                .to_seed()
+                .expect("generated/imported ML-KEM keys always retain their seed")
+                .as_slice()
+                .to_vec(),
+        )
     }
 }
 

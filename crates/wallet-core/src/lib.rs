@@ -5001,6 +5001,124 @@ impl Core {
 const MAX_DURABLE_TRUST_LIST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DURABLE_WUA_BYTES: usize = 64 * 1024;
 
+/// Wrapped PQ material returned to the native shell. Private seeds never cross FFI in plaintext.
+#[cfg(feature = "experimental-pq")]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FfiExperimentalPqWrappedKeyMaterial {
+    pub nonce: Vec<u8>,
+    pub encrypted_private_key: Vec<u8>,
+    pub ml_dsa_65_public_key: Vec<u8>,
+    pub ml_kem_768_public_key: Vec<u8>,
+}
+
+#[cfg(feature = "experimental-pq")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]
+pub enum ExperimentalPqFfiError {
+    InvalidWrappingKey,
+    GenerationFailed,
+    EncryptionFailed,
+}
+
+#[cfg(feature = "experimental-pq")]
+impl core::fmt::Display for ExperimentalPqFfiError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidWrappingKey => "experimental_pq_invalid_wrapping_key",
+            Self::GenerationFailed => "experimental_pq_generation_failed",
+            Self::EncryptionFailed => "experimental_pq_encryption_failed",
+        })
+    }
+}
+
+#[cfg(feature = "experimental-pq")]
+impl std::error::Error for ExperimentalPqFfiError {}
+
+/// Generate both PQ components and immediately wrap their FIPS seed representations using
+/// AES-256-GCM. Only ciphertext and public keys cross FFI; errors contain no secret detail.
+#[cfg(feature = "experimental-pq")]
+#[uniffi::export]
+pub fn generate_experimental_pq_wrapped_key_material(
+    wrapping_key: Vec<u8>,
+) -> Result<FfiExperimentalPqWrappedKeyMaterial, ExperimentalPqFfiError> {
+    use crypto_backend::experimental_pq::{MlDsa65SecretKey, MlKem768SecretKey};
+    use crypto_backend::AwsLc;
+    use crypto_traits::{Aead, Random};
+    use zeroize::Zeroizing;
+
+    let wrapping_key = Zeroizing::new(wrapping_key);
+    if wrapping_key.len() != 32 {
+        return Err(ExperimentalPqFfiError::InvalidWrappingKey);
+    }
+
+    let dsa = MlDsa65SecretKey::generate().map_err(|_| ExperimentalPqFfiError::GenerationFailed)?;
+    let kem =
+        MlKem768SecretKey::generate().map_err(|_| ExperimentalPqFfiError::GenerationFailed)?;
+    let dsa_seed = dsa.export_seed_for_custody();
+    let kem_seed = kem.export_seed_for_custody();
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(116));
+    plaintext.extend_from_slice(b"EUWALLET-PQ-SEEDS-V1");
+    plaintext.extend_from_slice(dsa_seed.as_slice());
+    plaintext.extend_from_slice(kem_seed.as_slice());
+    let mut nonce = vec![0_u8; 12];
+    AwsLc.fill(&mut nonce);
+    let encrypted_private_key = AwsLc
+        .seal(
+            wrapping_key.as_slice(),
+            &nonce,
+            b"euwallet-experimental-pq-custody-v1",
+            plaintext.as_slice(),
+        )
+        .map_err(|_| ExperimentalPqFfiError::EncryptionFailed)?;
+    Ok(FfiExperimentalPqWrappedKeyMaterial {
+        nonce,
+        encrypted_private_key,
+        ml_dsa_65_public_key: dsa.public_key(),
+        ml_kem_768_public_key: kem.public_key(),
+    })
+}
+
+#[cfg(all(test, feature = "experimental-pq"))]
+mod experimental_pq_ffi_tests {
+    use super::*;
+    use crypto_backend::{
+        experimental_pq::{MlDsa65SecretKey, MlKem768SecretKey},
+        AwsLc,
+    };
+    use crypto_traits::Aead;
+
+    #[test]
+    fn generated_private_material_crosses_the_boundary_only_as_authenticated_ciphertext() {
+        let wrapping_key = vec![0x42; 32];
+        let material = generate_experimental_pq_wrapped_key_material(wrapping_key.clone()).unwrap();
+        assert_eq!(material.nonce.len(), 12);
+        assert_eq!(material.encrypted_private_key.len(), 132);
+        assert_eq!(material.ml_dsa_65_public_key.len(), 1_952);
+        assert_eq!(material.ml_kem_768_public_key.len(), 1_184);
+
+        let plaintext = AwsLc
+            .open(
+                &wrapping_key,
+                &material.nonce,
+                b"euwallet-experimental-pq-custody-v1",
+                &material.encrypted_private_key,
+            )
+            .unwrap();
+        assert_eq!(&plaintext[..20], b"EUWALLET-PQ-SEEDS-V1");
+        let dsa = MlDsa65SecretKey::from_seed(&plaintext[20..52]).unwrap();
+        let kem = MlKem768SecretKey::from_seed(&plaintext[52..116]).unwrap();
+        assert_eq!(dsa.public_key(), material.ml_dsa_65_public_key);
+        assert_eq!(kem.public_key(), material.ml_kem_768_public_key);
+    }
+
+    #[test]
+    fn wrapping_key_length_is_strict() {
+        assert_eq!(
+            generate_experimental_pq_wrapped_key_material(vec![0; 31]).unwrap_err(),
+            ExperimentalPqFfiError::InvalidWrappingKey
+        );
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct FfiDurableCheckpoint {
     pub generation: u64,

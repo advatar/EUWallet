@@ -9,6 +9,39 @@ import Foundation
 #if canImport(wallet_coreFFI)
     import wallet_coreFFI
 
+    /// Generated Rust adapter. Rust generates both PQ keys and returns only AES-GCM-wrapped seeds.
+    final class FfiExperimentalPqBackend: ExperimentalPqGenerating {
+        func generateWrappedMaterial(
+            wrappingKey: inout Data
+        ) throws -> ExperimentalPqWrappedMaterial {
+            var transfer = wrappingKey
+            defer { transfer.clearSensitiveBytes() }
+            let generated = try generateExperimentalPqWrappedKeyMaterial(
+                wrappingKey: transfer)
+            return ExperimentalPqWrappedMaterial(
+                nonce: generated.nonce,
+                encryptedPrivateKey: generated.encryptedPrivateKey,
+                mlDsa65PublicKey: generated.mlDsa65PublicKey,
+                mlKem768PublicKey: generated.mlKem768PublicKey)
+        }
+    }
+
+    /// Production composition for one application-scoped hybrid-key custody domain.
+    /// PQ material remains software-generated and wrapped; only P-256 uses Secure Enclave.
+    enum FfiExperimentalPqCustodyFactory {
+        static func make(applicationIdentifier: String) throws -> ExperimentalHybridKeyCustody {
+            let serviceRoot = "\(applicationIdentifier).experimental-pq"
+            return ExperimentalHybridKeyCustody(
+                signer: SecureEnclaveSigner(),
+                backend: FfiExperimentalPqBackend(),
+                wrappingKeys: AppleExperimentalPqWrappingKeyStore(
+                    service: "\(serviceRoot).wrapping"),
+                records: try AppleExperimentalPqRecordStore(),
+                anchors: AppleExperimentalPqGenerationAnchorStore(
+                    service: "\(serviceRoot).generation"))
+        }
+    }
+
     extension FfiDurableCheckpoint: CustomStringConvertible, CustomDebugStringConvertible {
         public var description: String { "FfiDurableCheckpoint(redacted)" }
         public var debugDescription: String { description }
