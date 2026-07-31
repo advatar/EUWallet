@@ -16,7 +16,8 @@ operational solution needed to enter those processes.
 ## CI integrity
 
 - [x] [#108](https://github.com/advatar/EUWallet/issues/108): restore the full Rust gate after the
-      `oid4vci::Env` device-public-key expansion.
+      `oid4vci::Env` device-public-key expansion, refresh the Android UniFFI contract, and run the
+      iOS 26 provider target on an Xcode 26 runner.
 
 ## Planned milestone — pre-launch security review
 
