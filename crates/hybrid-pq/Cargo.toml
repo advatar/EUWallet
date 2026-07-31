@@ -9,6 +9,9 @@ publish.workspace = true
 
 [features]
 default = []
+# Compile-time opt-in for experimental hybrid-PQ runtime enablement (plan section 17, issue #94).
+# Release builds omit this feature, so the effective rollout mode is always Disabled.
+experimental-hybrid-pq = []
 
 [dev-dependencies]
 ciborium = { workspace = true }
