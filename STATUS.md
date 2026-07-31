@@ -54,8 +54,11 @@ algorithm/profile and certification approval.
   - [x] Pin an injective binary context and TBS construction with purpose-specific requirements.
   - [x] Implement one construction API shared by both signature components.
   - [x] Publish stable positive, cross-purpose and cross-profile vectors.
-- [ ] [#83](https://github.com/advatar/EUWallet/issues/83): implement the canonical hybrid envelope
+- [x] [#83](https://github.com/advatar/EUWallet/issues/83): implement the canonical hybrid envelope
       codec.
+  - [x] Add deterministic, magic-prefixed CBOR public-key and signature envelopes.
+  - [x] Enforce exact schemas, canonical encoding, mandatory components and resource limits.
+  - [x] Add malformed/property/cross-implementation tests and fuzz every decoder entry point.
 - [ ] [#84](https://github.com/advatar/EUWallet/issues/84): select and qualify ML-DSA/ML-KEM
       dependencies.
 - [ ] [#85](https://github.com/advatar/EUWallet/issues/85): implement ML-DSA and ML-KEM backend

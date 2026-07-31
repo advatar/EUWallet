@@ -163,6 +163,10 @@ duplicate keys, indefinite values, noncanonical integers, trailing bytes, unknow
 unsupported versions and oversized inputs. Add property tests, an independent CBOR cross-check and
 parser fuzz targets.
 
+Implemented by the strict, magic-prefixed schemas in
+[`docs/experimental-hybrid-pq-envelope-v1.md`](experimental-hybrid-pq-envelope-v1.md) and
+`crates/hybrid-pq/src/envelope.rs`.
+
 ### 7. Select and qualify ML-DSA/ML-KEM dependencies
 
 Issue: [#84](https://github.com/advatar/EUWallet/issues/84)

@@ -10,7 +10,9 @@ publish.workspace = true
 [dependencies]
 
 [dev-dependencies]
+ciborium = { workspace = true }
 crypto-traits = { path = "../crypto-traits" }
+proptest = { workspace = true }
 
 [lints]
 workspace = true
