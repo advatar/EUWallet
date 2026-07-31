@@ -1469,6 +1469,91 @@ public func FfiConverterTypeFfiDurableCheckpoint_lower(_ value: FfiDurableCheckp
 
 
 /**
+ * Wrapped PQ material returned to the native shell. Private seeds never cross FFI in plaintext.
+ */
+public struct FfiExperimentalPqWrappedKeyMaterial {
+    public var nonce: Data
+    public var encryptedPrivateKey: Data
+    public var mlDsa65PublicKey: Data
+    public var mlKem768PublicKey: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(nonce: Data, encryptedPrivateKey: Data, mlDsa65PublicKey: Data, mlKem768PublicKey: Data) {
+        self.nonce = nonce
+        self.encryptedPrivateKey = encryptedPrivateKey
+        self.mlDsa65PublicKey = mlDsa65PublicKey
+        self.mlKem768PublicKey = mlKem768PublicKey
+    }
+}
+
+
+
+extension FfiExperimentalPqWrappedKeyMaterial: Equatable, Hashable {
+    public static func ==(lhs: FfiExperimentalPqWrappedKeyMaterial, rhs: FfiExperimentalPqWrappedKeyMaterial) -> Bool {
+        if lhs.nonce != rhs.nonce {
+            return false
+        }
+        if lhs.encryptedPrivateKey != rhs.encryptedPrivateKey {
+            return false
+        }
+        if lhs.mlDsa65PublicKey != rhs.mlDsa65PublicKey {
+            return false
+        }
+        if lhs.mlKem768PublicKey != rhs.mlKem768PublicKey {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(nonce)
+        hasher.combine(encryptedPrivateKey)
+        hasher.combine(mlDsa65PublicKey)
+        hasher.combine(mlKem768PublicKey)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiExperimentalPqWrappedKeyMaterial: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiExperimentalPqWrappedKeyMaterial {
+        return
+            try FfiExperimentalPqWrappedKeyMaterial(
+                nonce: FfiConverterData.read(from: &buf),
+                encryptedPrivateKey: FfiConverterData.read(from: &buf),
+                mlDsa65PublicKey: FfiConverterData.read(from: &buf),
+                mlKem768PublicKey: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiExperimentalPqWrappedKeyMaterial, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.nonce, into: &buf)
+        FfiConverterData.write(value.encryptedPrivateKey, into: &buf)
+        FfiConverterData.write(value.mlDsa65PublicKey, into: &buf)
+        FfiConverterData.write(value.mlKem768PublicKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalPqWrappedKeyMaterial_lift(_ buf: RustBuffer) throws -> FfiExperimentalPqWrappedKeyMaterial {
+    return try FfiConverterTypeFfiExperimentalPqWrappedKeyMaterial.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalPqWrappedKeyMaterial_lower(_ value: FfiExperimentalPqWrappedKeyMaterial) -> RustBuffer {
+    return FfiConverterTypeFfiExperimentalPqWrappedKeyMaterial.lower(value)
+}
+
+
+/**
  * Everything the shell must load/feed to drive a REAL OpenID4VCI issuance against the core: the
  * trusted list (anchoring the issuer), the device key + Wallet Unit Attestation (so the in-core
  * key-attestation gate passes), the pre-authorized offer, the issuer's certificate chain, and the
@@ -1878,6 +1963,69 @@ extension DurableFfiError: Foundation.LocalizedError {
     }
 }
 
+
+public enum ExperimentalPqFfiError {
+
+
+
+    case InvalidWrappingKey
+    case GenerationFailed
+    case EncryptionFailed
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeExperimentalPqFfiError: FfiConverterRustBuffer {
+    typealias SwiftType = ExperimentalPqFfiError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExperimentalPqFfiError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .InvalidWrappingKey
+        case 2: return .GenerationFailed
+        case 3: return .EncryptionFailed
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ExperimentalPqFfiError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .InvalidWrappingKey:
+            writeInt(&buf, Int32(1))
+
+
+        case .GenerationFailed:
+            writeInt(&buf, Int32(2))
+
+
+        case .EncryptionFailed:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+extension ExperimentalPqFfiError: Equatable, Hashable {}
+
+extension ExperimentalPqFfiError: Foundation.LocalizedError {
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -1952,6 +2100,17 @@ fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
     }
 }
 /**
+ * Generate both PQ components and immediately wrap their FIPS seed representations using
+ * AES-256-GCM. Only ciphertext and public keys cross FFI; errors contain no secret detail.
+ */
+public func generateExperimentalPqWrappedKeyMaterial(wrappingKey: Data)throws  -> FfiExperimentalPqWrappedKeyMaterial {
+    return try  FfiConverterTypeFfiExperimentalPqWrappedKeyMaterial.lift(try rustCallWithError(FfiConverterTypeExperimentalPqFfiError.lift) {
+    uniffi_wallet_core_fn_func_generate_experimental_pq_wrapped_key_material(
+        FfiConverterData.lower(wrappingKey),$0
+    )
+})
+}
+/**
  * Verify a wallet export bundle's integrity hash (TS10). Callable from the shell before re-import.
  */
 public func verifyWalletExport(json: String) -> Bool {
@@ -1976,6 +2135,9 @@ private var initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_wallet_core_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_wallet_core_checksum_func_generate_experimental_pq_wrapped_key_material() != 22854) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_func_verify_wallet_export() != 147) {
         return InitializationResult.apiChecksumMismatch

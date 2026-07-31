@@ -43,5 +43,9 @@ serde_json = { workspace = true }
 base64ct = { workspace = true }
 zeroize = { workspace = true }
 
+[features]
+default = []
+experimental-pq = ["crypto-backend/experimental-pq-primitives"]
+
 [dev-dependencies]
 miniz_oxide = "0.8"

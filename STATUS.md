@@ -71,6 +71,12 @@ algorithm/profile and certification approval.
   - [x] Make secret values non-cloneable, zeroizing and redacted from debug/error output.
   - [x] Verify deterministic anchors, upstream NIST/cross-implementation vectors and malformed inputs.
 - [ ] [#86](https://github.com/advatar/EUWallet/issues/86): implement iOS post-quantum key custody.
+  - [x] Generate and immediately wrap PQ seeds in Rust so plaintext private material never crosses FFI.
+  - [x] Encrypt PQ seeds with AES-256-GCM and biometric-gated `ThisDeviceOnly` Keychain wrapping keys.
+  - [x] Bind Secure Enclave and PQ references, profile, generation and public-key hashes atomically.
+  - [x] Reject missing/mixed/rolled-back generations and clear transient wrapping keys after use.
+  - [x] Add injectable policy tests plus a documented physical-device validation matrix.
+  - [ ] Execute and record the matrix on a connected passcode/biometric-enabled iPhone.
 - [ ] [#87](https://github.com/advatar/EUWallet/issues/87): add atomic hybrid sign effects across
       Rust and Swift.
 - [ ] [#88](https://github.com/advatar/EUWallet/issues/88): enforce atomic hybrid verification.
