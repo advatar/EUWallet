@@ -53,6 +53,14 @@ fn validate_openid4vp_direct_post_response(response: &http::HttpResponse) -> Res
     Ok(())
 }
 
+fn reject_unsupported_hybrid_sign(outcome: &mut Outcome) -> Option<Event> {
+    outcome.errors.push(
+        "experimental hybrid signing requires an atomic platform signer; shell-io cannot downgrade"
+            .into(),
+    );
+    None
+}
+
 /// Signs with the device key — the Secure Enclave on hardware, a software key in tests/simulator.
 pub trait DeviceSigner {
     fn sign(&self, key_ref: &str, payload: &[u8]) -> Vec<u8>;
@@ -202,6 +210,7 @@ impl<S: DeviceSigner, T: TrustFetcher, F: StatusFetcher> ShellRunner<S, T, F> {
                 let signature = self.signer.sign(&key_ref, &payload);
                 Some(Event::DeviceSignatureProduced { signature })
             }
+            Effect::HybridSign { .. } => reject_unsupported_hybrid_sign(outcome),
             Effect::Http { profile, url, body } => {
                 if profile != HttpDeliveryProfile::Openid4vpDirectPost {
                     outcome
@@ -389,5 +398,13 @@ mod typed_delivery_tests {
                 + 1
         ]))
         .is_err());
+    }
+
+    #[test]
+    fn unsupported_hybrid_signing_fails_closed_without_a_classical_fallback() {
+        let mut outcome = Outcome::default();
+        assert!(reject_unsupported_hybrid_sign(&mut outcome).is_none());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(outcome.errors[0].contains("cannot downgrade"));
     }
 }

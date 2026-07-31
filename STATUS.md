@@ -18,6 +18,8 @@ operational solution needed to enter those processes.
 - [x] [#108](https://github.com/advatar/EUWallet/issues/108): restore the full Rust gate after the
       `oid4vci::Env` device-public-key expansion, refresh the Android UniFFI contract, and run the
       iOS 26 provider target on an Xcode 26 runner.
+- [x] [#113](https://github.com/advatar/EUWallet/issues/113): handle atomic `HybridSign` effects in
+      the Rust reference shell without permitting a classical-only fallback.
 
 ## Planned milestone — pre-launch security review
 
@@ -101,12 +103,27 @@ algorithm/profile and certification approval.
   - [x] Verify ES256 and ML-DSA-65 before applying nonce, audience, expiry, replay and downgrade policy.
   - [x] Return only generic external rejection while retaining bounded local failure classes.
   - [x] Cover malformed, mixed-component, invalid-signature and policy failures with unit/property tests.
-- [ ] [#89](https://github.com/advatar/EUWallet/issues/89): implement downgrade-resistant hybrid
+- [x] [#89](https://github.com/advatar/EUWallet/issues/89): implement downgrade-resistant hybrid
       key establishment.
-- [ ] [#90](https://github.com/advatar/EUWallet/issues/90): integrate experimental use cases in
+  - [x] Freeze one negotiation/transcript encoding that binds profile, identities, shares and context.
+  - [x] Combine P-256 ECDH and ML-KEM-768 outputs through the pinned hybrid KDF construction.
+  - [x] Expose no shared secret until both components and transcript authentication succeed.
+  - [x] Reject classical-only fallback whenever hybrid-required policy is active.
+  - [x] Qualify implicit rejection, interoperability vectors and malformed/mismatch negatives.
+- [x] [#90](https://github.com/advatar/EUWallet/issues/90): integrate experimental use cases in
       increasing-risk order.
+  - [x] Add independent enablement and rollback gates for every experimental delivery slice.
+  - [x] Version hybrid export and recovery artifacts without reinterpreting legacy exports.
+  - [x] Restrict provider links to an explicit allow-list and hybrid-required negotiation.
+  - [x] Isolate experimental credential wrappers from the production catalogue namespace.
+  - [x] Keep production adoption blocked pending standards, CAB/profile and conformance approval.
 - [ ] [#91](https://github.com/advatar/EUWallet/issues/91): build the complete adversarial test
       matrix.
+  - [x] Cover the complete 2x2 validity, missing-component, profile, downgrade and mismatch matrix.
+  - [x] Add canonicality, substitution, replay, rotation, rollback and resource-limit regressions.
+  - [ ] Run deterministic/cross-implementation vectors, fuzz targets and Swift/simulator suites.
+  - [x] Audit test artifacts and diagnostics for secret leakage.
+  - [ ] Retain physical-device memory/latency evidence as an explicit #86-dependent closure gate.
 - [ ] [#92](https://github.com/advatar/EUWallet/issues/92): extend formal models for AND verification
       and downgrade resistance.
 - [ ] [#93](https://github.com/advatar/EUWallet/issues/93): establish performance and resource
