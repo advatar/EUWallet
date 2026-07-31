@@ -30,16 +30,9 @@ reviewed combiner. The negotiated profile and both shares are authenticated by t
 
 ## Initial profile
 
-```text
-Profile ID:       euwallet-hybrid-pq-v1
-Signature:        ES256 + ML-DSA-65
-Key establishment: secp256r1 + ML-KEM-768
-KDF:              reviewed ECDHE-MLKEM combiner with HKDF-SHA-256
-Content cipher:   AES-256-GCM
-Container:        deterministic canonical CBOR
-Enablement:       compile-time experimental feature plus local runtime policy
-Certification:    non-EUDI, non-production
-```
+The frozen algorithms, parameters, encodings, identifiers, purposes and exclusion rules are
+normatively defined in
+[`docs/experimental-hybrid-pq-profile-v1.md`](experimental-hybrid-pq-profile-v1.md).
 
 The first release may protect local export/recovery artifacts, explicitly configured private
 provider links and test-only credential wrappers. It must not modify standard SD-JWT VC, mdoc,
@@ -60,7 +53,8 @@ Issue: [#78](https://github.com/advatar/EUWallet/issues/78)
 - Make experimental artifacts structurally incapable of satisfying production requests.
 
 Done when the profile is unambiguous, versioned, non-production and reflected in the ADR and
-certification boundary.
+certification boundary. Completed by the frozen
+[`euwallet-hybrid-pq-v1`](experimental-hybrid-pq-profile-v1.md) specification.
 
 ### 2. Establish governance, ADR and delivery tracking
 
