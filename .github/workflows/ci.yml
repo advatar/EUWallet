@@ -86,7 +86,7 @@ jobs:
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - name: Build every Lean model
         working-directory: formal/lean
-        run: lake build WalletModel PaymentModel ProximityModel IssuanceModel QesModel W2wModel NavigationModel
+        run: lake build WalletModel PaymentModel ProximityModel IssuanceModel QesModel W2wModel NavigationModel HybridPqModel
       - name: Regenerate every oracle trace
         working-directory: formal/lean
         run: |

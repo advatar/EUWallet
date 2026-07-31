@@ -25,6 +25,11 @@ name = "QesModel"
 [[lean_lib]]
 name = "W2wModel"
 
+# Experimental hybrid-PQ AND-verification and downgrade-resistance model
+# (plan Section 15, issue #92). Companion to formal/tamarin/hybrid_pq_and_verification.spthy.
+[[lean_lib]]
+name = "HybridPqModel"
+
 # App-shell navigation statechart (ios/Sources/WalletShell/Navigation.swift). Flow-safety only —
 # NOT security (that lives in the core models above). Bound to the Swift machine by an exhaustive
 # (state × event) conformance test.

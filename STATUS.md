@@ -124,8 +124,15 @@ algorithm/profile and certification approval.
   - [ ] Run deterministic/cross-implementation vectors, fuzz targets and Swift/simulator suites.
   - [x] Audit test artifacts and diagnostics for secret leakage.
   - [ ] Retain physical-device memory/latency evidence as an explicit #86-dependent closure gate.
-- [ ] [#92](https://github.com/advatar/EUWallet/issues/92): extend formal models for AND verification
+- [x] [#92](https://github.com/advatar/EUWallet/issues/92): extend formal models for AND verification
       and downgrade resistance.
+  - [x] Add the Tier-3 `hybrid_pq_and_verification.spthy` theory: six lemmas verified with no
+        wellformedness warnings, including insufficiency of one valid component under classical
+        compromise, atomic single-identity/generation binding, hybrid-required downgrade
+        rejection and cross-purpose replay exclusion.
+  - [x] Add the Tier-2 `HybridPqModel.lean` verifier machine with machine-checked AND
+        verification, identity/generation binding, profile/purpose binding and
+        downgrade-resistance theorems; registered in the lakefile and Tier-2 CI build.
 - [ ] [#93](https://github.com/advatar/EUWallet/issues/93): establish performance and resource
       budgets.
 - [x] [#94](https://github.com/advatar/EUWallet/issues/94): add compile-time and runtime rollout
