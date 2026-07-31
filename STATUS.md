@@ -21,6 +21,47 @@ operational solution needed to enter those processes.
 - [ ] Remediate critical/high findings with regression tests.
 - [ ] Obtain independent re-review and publish a sanitized report.
 
+## Planned programme — experimental hybrid post-quantum profile
+
+Implementation plan:
+[`docs/experimental-hybrid-pq-implementation-plan.md`](docs/experimental-hybrid-pq-implementation-plan.md).
+This programme is opt-in research and is excluded from certified EUDI behavior until external
+algorithm/profile and certification approval.
+
+- [ ] [#78](https://github.com/advatar/EUWallet/issues/78): freeze the experimental profile scope.
+- [ ] [#79](https://github.com/advatar/EUWallet/issues/79): establish governance, ADR and delivery
+      tracking.
+- [ ] [#80](https://github.com/advatar/EUWallet/issues/80): define the threat model and security
+      properties.
+- [ ] [#81](https://github.com/advatar/EUWallet/issues/81): add isolated hybrid cryptographic
+      interfaces.
+- [ ] [#82](https://github.com/advatar/EUWallet/issues/82): specify common domain-separated signed
+      bytes.
+- [ ] [#83](https://github.com/advatar/EUWallet/issues/83): implement the canonical hybrid envelope
+      codec.
+- [ ] [#84](https://github.com/advatar/EUWallet/issues/84): select and qualify ML-DSA/ML-KEM
+      dependencies.
+- [ ] [#85](https://github.com/advatar/EUWallet/issues/85): implement ML-DSA and ML-KEM backend
+      primitives.
+- [ ] [#86](https://github.com/advatar/EUWallet/issues/86): implement iOS post-quantum key custody.
+- [ ] [#87](https://github.com/advatar/EUWallet/issues/87): add atomic hybrid sign effects across
+      Rust and Swift.
+- [ ] [#88](https://github.com/advatar/EUWallet/issues/88): enforce atomic hybrid verification.
+- [ ] [#89](https://github.com/advatar/EUWallet/issues/89): implement downgrade-resistant hybrid
+      key establishment.
+- [ ] [#90](https://github.com/advatar/EUWallet/issues/90): integrate experimental use cases in
+      increasing-risk order.
+- [ ] [#91](https://github.com/advatar/EUWallet/issues/91): build the complete adversarial test
+      matrix.
+- [ ] [#92](https://github.com/advatar/EUWallet/issues/92): extend formal models for AND verification
+      and downgrade resistance.
+- [ ] [#93](https://github.com/advatar/EUWallet/issues/93): establish performance and resource
+      budgets.
+- [ ] [#94](https://github.com/advatar/EUWallet/issues/94): add compile-time and runtime rollout
+      controls.
+- [ ] [#95](https://github.com/advatar/EUWallet/issues/95): close qualification, evidence and
+      integration gates.
+
 ## Active phase — P0 trustworthy foundation
 
 - [x] Repair CI paths and make every claimed assurance gate fail closed.
