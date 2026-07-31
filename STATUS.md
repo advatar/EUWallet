@@ -112,6 +112,11 @@ algorithm/profile and certification approval.
   - [x] Keep production adoption blocked pending standards, CAB/profile and conformance approval.
 - [ ] [#91](https://github.com/advatar/EUWallet/issues/91): build the complete adversarial test
       matrix.
+  - [ ] Cover the complete 2x2 validity, missing-component, profile, downgrade and mismatch matrix.
+  - [ ] Add canonicality, substitution, replay, rotation, rollback and resource-limit regressions.
+  - [ ] Run deterministic/cross-implementation vectors, fuzz targets and Swift/simulator suites.
+  - [ ] Audit test artifacts and diagnostics for secret leakage.
+  - [ ] Retain physical-device memory/latency evidence as an explicit #86-dependent closure gate.
 - [ ] [#92](https://github.com/advatar/EUWallet/issues/92): extend formal models for AND verification
       and downgrade resistance.
 - [ ] [#93](https://github.com/advatar/EUWallet/issues/93): establish performance and resource
