@@ -18,6 +18,8 @@ operational solution needed to enter those processes.
 - [x] [#108](https://github.com/advatar/EUWallet/issues/108): restore the full Rust gate after the
       `oid4vci::Env` device-public-key expansion, refresh the Android UniFFI contract, and run the
       iOS 26 provider target on an Xcode 26 runner.
+- [x] [#113](https://github.com/advatar/EUWallet/issues/113): handle atomic `HybridSign` effects in
+      the Rust reference shell without permitting a classical-only fallback.
 
 ## Planned milestone — pre-launch security review
 
