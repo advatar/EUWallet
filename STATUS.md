@@ -105,6 +105,11 @@ algorithm/profile and certification approval.
   - [x] Qualify implicit rejection, interoperability vectors and malformed/mismatch negatives.
 - [ ] [#90](https://github.com/advatar/EUWallet/issues/90): integrate experimental use cases in
       increasing-risk order.
+  - [ ] Add independent enablement and rollback gates for every experimental delivery slice.
+  - [ ] Version hybrid export and recovery artifacts without reinterpreting legacy exports.
+  - [ ] Restrict provider links to an explicit allow-list and hybrid-required negotiation.
+  - [ ] Isolate experimental credential wrappers from the production catalogue namespace.
+  - [ ] Keep production adoption blocked pending standards, CAB/profile and conformance approval.
 - [ ] [#91](https://github.com/advatar/EUWallet/issues/91): build the complete adversarial test
       matrix.
 - [ ] [#92](https://github.com/advatar/EUWallet/issues/92): extend formal models for AND verification
