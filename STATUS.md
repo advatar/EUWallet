@@ -44,8 +44,11 @@ algorithm/profile and certification approval.
   - [x] Add a zero-dependency experimental crate with atomic hybrid key/signature types.
   - [x] Add separate signer, verifier and key-agreement traits with typed failures.
   - [x] Prove certified algorithm/type isolation and cover every error class with unit tests.
-- [ ] [#82](https://github.com/advatar/EUWallet/issues/82): specify common domain-separated signed
+- [x] [#82](https://github.com/advatar/EUWallet/issues/82): specify common domain-separated signed
       bytes.
+  - [x] Pin an injective binary context and TBS construction with purpose-specific requirements.
+  - [x] Implement one construction API shared by both signature components.
+  - [x] Publish stable positive, cross-purpose and cross-profile vectors.
 - [ ] [#83](https://github.com/advatar/EUWallet/issues/83): implement the canonical hybrid envelope
       codec.
 - [ ] [#84](https://github.com/advatar/EUWallet/issues/84): select and qualify ML-DSA/ML-KEM

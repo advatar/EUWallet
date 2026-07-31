@@ -32,6 +32,8 @@
 
 use std::fmt;
 
+pub mod tbs;
+
 /// Exact public component sizes frozen by `euwallet-hybrid-pq-v1`.
 pub const ES256_PUBLIC_KEY_BYTES: usize = 65;
 pub const ES256_SIGNATURE_BYTES: usize = 64;
@@ -420,7 +422,7 @@ pub trait HybridSigner {
         &self,
         key: &HybridKeyRef,
         profile: HybridSignatureProfile,
-        hybrid_tbs: &[u8],
+        hybrid_tbs: &tbs::HybridTbs,
     ) -> Result<HybridSignature, HybridCryptoError>;
 }
 
@@ -429,7 +431,7 @@ pub trait HybridVerifier {
     fn verify_hybrid(
         &self,
         key: &HybridPublicKey,
-        hybrid_tbs: &[u8],
+        hybrid_tbs: &tbs::HybridTbs,
         signature: &HybridSignature,
     ) -> Result<(), HybridCryptoError>;
 }

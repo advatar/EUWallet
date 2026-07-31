@@ -142,6 +142,10 @@ wrapper and experimental mdoc wrapper. Context rules must bind applicable wallet
 logical key generation, transaction/session ID, audience, nonce, creation/expiry and transcript
 hash. Publish stable positive and cross-purpose/cross-profile negative vectors.
 
+The normative construction, binding rules and published vectors are in
+[`docs/experimental-hybrid-pq-tbs-v1.md`](experimental-hybrid-pq-tbs-v1.md) and implemented by the
+single-construction API in `crates/hybrid-pq`.
+
 ### 6. Implement the canonical hybrid envelope codec
 
 Issue: [#83](https://github.com/advatar/EUWallet/issues/83)
