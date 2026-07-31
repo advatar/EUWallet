@@ -69,7 +69,7 @@ class CiEvidenceConfigurationTests(unittest.TestCase):
 
     def test_swift_runner_and_tamarin_trust_are_scoped(self):
         ios_job = WORKFLOW.split("  ios-shell:", 1)[1].split("  traceability:", 1)[0]
-        self.assertIn("runs-on: macos-15", ios_job)
+        self.assertIn("runs-on: macos-26", ios_job)
         self.assertIn("Verify Swift 6 toolchain", ios_job)
         self.assertIn("grep -Eq 'Swift version", ios_job)
 
