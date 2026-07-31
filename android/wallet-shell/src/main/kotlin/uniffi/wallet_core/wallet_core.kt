@@ -772,6 +772,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -797,6 +801,10 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_wallet_core_fn_constructor_demowallet_new(uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
+    fun uniffi_wallet_core_fn_method_demowallet_development_trust_list(`ptr`: Pointer,`issuerId`: RustBuffer.ByValue,`issuerRootDer`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_wallet_core_fn_method_demowallet_development_wua_jwt(`ptr`: Pointer,`devicePublicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_wallet_core_fn_method_demowallet_issuance_scenario(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_wallet_core_fn_method_demowallet_mdoc_presentation_request(`ptr`: Pointer,`nonce`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -967,6 +975,10 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_wallet_core_checksum_func_verify_wallet_export(
     ): Short
+    fun uniffi_wallet_core_checksum_method_demowallet_development_trust_list(
+    ): Short
+    fun uniffi_wallet_core_checksum_method_demowallet_development_wua_jwt(
+    ): Short
     fun uniffi_wallet_core_checksum_method_demowallet_issuance_scenario(
     ): Short
     fun uniffi_wallet_core_checksum_method_demowallet_mdoc_presentation_request(
@@ -1037,6 +1049,12 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_wallet_core_checksum_func_verify_wallet_export() != 147.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_wallet_core_checksum_method_demowallet_development_trust_list() != 46229.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_wallet_core_checksum_method_demowallet_development_wua_jwt() != 5371.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_wallet_core_checksum_method_demowallet_issuance_scenario() != 49616.toShort()) {
@@ -1478,6 +1496,17 @@ private class AndroidSystemCleanable(
 public interface DemoWalletInterface {
     
     /**
+     * Development provisioning only: add an exact issuer and its independent credential-signing
+     * CA to the attestation trust service. HTTPS server certificates are never accepted here.
+     */
+    fun `developmentTrustList`(`issuerId`: kotlin.String, `issuerRootDer`: kotlin.ByteArray): kotlin.ByteArray
+    
+    /**
+     * Development provisioning only: sign a WUA for a native device/Secure Enclave public key.
+     */
+    fun `developmentWuaJwt`(`devicePublicKey`: kotlin.ByteArray): kotlin.ByteArray
+    
+    /**
      * The full issuance setup + the issuer-signed credentials the stub endpoint returns per type.
      * Everything the shell needs to run a REAL OpenID4VCI issuance through the core (see
      * [`IssuanceScenario`]).
@@ -1613,6 +1642,37 @@ open class DemoWallet: Disposable, AutoCloseable, DemoWalletInterface {
             UniffiLib.INSTANCE.uniffi_wallet_core_fn_clone_demowallet(pointer!!, status)
         }
     }
+
+    
+    /**
+     * Development provisioning only: add an exact issuer and its independent credential-signing
+     * CA to the attestation trust service. HTTPS server certificates are never accepted here.
+     */override fun `developmentTrustList`(`issuerId`: kotlin.String, `issuerRootDer`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_wallet_core_fn_method_demowallet_development_trust_list(
+        it, FfiConverterString.lower(`issuerId`),FfiConverterByteArray.lower(`issuerRootDer`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Development provisioning only: sign a WUA for a native device/Secure Enclave public key.
+     */override fun `developmentWuaJwt`(`devicePublicKey`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_wallet_core_fn_method_demowallet_development_wua_jwt(
+        it, FfiConverterByteArray.lower(`devicePublicKey`),_status)
+}
+    }
+    )
+    }
+    
 
     
     /**
