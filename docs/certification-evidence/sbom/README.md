@@ -14,7 +14,7 @@ Published CycloneDX SBOMs for the wallet's Rust workspace, one per crate.
 
 ```
 tools/evidence/sbom.sh        # or:
-cargo cyclonedx --format json --all
+cargo cyclonedx --format json --all --all-features
 mv crates/*/*.cdx.json docs/certification-evidence/sbom/
 ```
 
@@ -27,3 +27,7 @@ This is the dependency inventory of the **Rust core workspace**. The iOS shell's
 dependencies (the generated UniFFI bindings and Apple frameworks) are not enumerated here; the
 shell contains no third-party Swift packages beyond the SDK. Signed provenance / attestation of
 release binaries is a separate, not-yet-published step (see the operational-assurance notes).
+
+`--all-features` deliberately includes the default-off `experimental-pq-primitives` graph in the
+`hybrid-pq` SBOM. Inclusion in the inventory is not production approval; qualification limits are
+recorded in `docs/experimental-pq-dependency-qualification.md`.

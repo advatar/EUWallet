@@ -1,0 +1,19 @@
+# Machine-readable allow-list for the private `euwallet-hybrid-pq-v1` feature.
+# Versions and checksums are pinned by the workspace Cargo.lock.
+profile = "euwallet-hybrid-pq-v1"
+feature = "experimental-pq-primitives"
+production_approved = false
+
+[[package]]
+name = "ml-kem"
+version = "0.3.2"
+checksum = "5e15f3e5b957493873e396a66914e83e616b6afe335cdef7efe5c6e1216aba66"
+algorithm = "ML-KEM-768"
+features = ["getrandom", "zeroize"]
+
+[[package]]
+name = "ml-dsa"
+version = "0.1.1"
+checksum = "add6b9d92e496f16f4526d68ff29da1483aba4b119baeab8bed3b9e3544a6f3d"
+algorithm = "ML-DSA-65"
+features = ["getrandom", "zeroize"]

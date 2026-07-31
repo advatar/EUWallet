@@ -59,8 +59,11 @@ algorithm/profile and certification approval.
   - [x] Add deterministic, magic-prefixed CBOR public-key and signature envelopes.
   - [x] Enforce exact schemas, canonical encoding, mandatory components and resource limits.
   - [x] Add malformed/property/cross-implementation tests and fuzz every decoder entry point.
-- [ ] [#84](https://github.com/advatar/EUWallet/issues/84): select and qualify ML-DSA/ML-KEM
+- [x] [#84](https://github.com/advatar/EUWallet/issues/84): select and qualify ML-DSA/ML-KEM
       dependencies.
+  - [x] Compare current FIPS 203/204 candidates, maintenance, audit and constant-time evidence.
+  - [x] Verify chosen crates on Rust 1.97 and the aarch64 iOS static-library target.
+  - [x] Update the dependency budget, deny policy, SBOM inputs and experimental allow-list.
 - [ ] [#85](https://github.com/advatar/EUWallet/issues/85): implement ML-DSA and ML-KEM backend
       primitives.
 - [ ] [#86](https://github.com/advatar/EUWallet/issues/86): implement iOS post-quantum key custody.

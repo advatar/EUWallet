@@ -63,6 +63,10 @@ zeroize    = { version = "1", default-features = false, features = ["alloc"] }
 thiserror  = { version = "1" }
 # Cryptography — ONLY behind crypto-traits; never called directly by protocol crates.
 aws-lc-rs  = { version = "1" }            # FIPS-capable; satisfies "never roll your own crypto"
+# Experimental hybrid-PQ primitives. These remain feature-gated inside `hybrid-pq`; they are not
+# admitted to certified JOSE/COSE protocol enums or the default production dependency graph.
+ml-kem     = { version = "0.3.2", default-features = false, features = ["getrandom", "zeroize"] }
+ml-dsa     = { version = "0.1.1", default-features = false, features = ["getrandom", "zeroize"] }
 # Property testing (dev-dependency only)
 proptest   = { version = "1" }
 # FFI

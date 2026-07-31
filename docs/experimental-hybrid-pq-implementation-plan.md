@@ -184,6 +184,10 @@ Record the decision in the dependency budget, deny policy, SBOM, ADR and experim
 allow-list. If no candidate passes, stop primitive implementation at the traits/codec boundary.
 Never implement ML-DSA or ML-KEM in-tree.
 
+RustCrypto `ml-kem` 0.3.2 and `ml-dsa` 0.1.1 are qualified for the default-off experimental feature
+in [`docs/experimental-pq-dependency-qualification.md`](experimental-pq-dependency-qualification.md).
+Their lack of independent audit remains a production blocker.
+
 ### 8. Implement ML-DSA and ML-KEM backend primitives
 
 Issue: [#85](https://github.com/advatar/EUWallet/issues/85)
