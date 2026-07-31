@@ -70,6 +70,11 @@ algorithm/profile and certification approval.
   - [x] Add strict ML-DSA-65 signing/verification and ML-KEM-768 encapsulation/decapsulation APIs.
   - [x] Make secret values non-cloneable, zeroizing and redacted from debug/error output.
   - [x] Verify deterministic anchors, upstream NIST/cross-implementation vectors and malformed inputs.
+- [x] [#105](https://github.com/advatar/EUWallet/issues/105): publish the shared VCIssuer
+      real-signature component corpus.
+  - [x] Consume the identical canonical TBS, public-key envelope, and atomic dual-signature envelope.
+  - [x] Cross-verify both ES256 and ML-DSA-65 signatures with the independent wallet backends.
+  - [x] Apply and reject every shared structural mutation; pin the corpus SHA-256.
 - [ ] [#86](https://github.com/advatar/EUWallet/issues/86): implement iOS post-quantum key custody.
 - [ ] [#87](https://github.com/advatar/EUWallet/issues/87): add atomic hybrid sign effects across
       Rust and Swift.
