@@ -402,13 +402,17 @@ dependencies = [
  "base64ct",
  "cose",
  "crypto-traits",
+ "hybrid-pq",
  "mdoc",
+ "ml-dsa",
+ "ml-kem",
  "oid4vci",
  "oid4vp",
  "payment",
  "sdjwt",
  "serde_json",
  "x509",
+ "zeroize",
 ]
 
 [[package]]
@@ -661,8 +665,6 @@ version = "0.0.1"
 dependencies = [
  "ciborium",
  "crypto-traits",
- "ml-dsa",
- "ml-kem",
  "proptest",
 ]
 

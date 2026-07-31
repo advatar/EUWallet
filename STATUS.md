@@ -64,8 +64,12 @@ algorithm/profile and certification approval.
   - [x] Compare current FIPS 203/204 candidates, maintenance, audit and constant-time evidence.
   - [x] Verify chosen crates on Rust 1.97 and the aarch64 iOS static-library target.
   - [x] Update the dependency budget, deny policy, SBOM inputs and experimental allow-list.
-- [ ] [#85](https://github.com/advatar/EUWallet/issues/85): implement ML-DSA and ML-KEM backend
+- [x] [#85](https://github.com/advatar/EUWallet/issues/85): implement ML-DSA and ML-KEM backend
       primitives.
+  - [x] Keep all PQ implementation dependencies behind a default-off `crypto-backend` feature.
+  - [x] Add strict ML-DSA-65 signing/verification and ML-KEM-768 encapsulation/decapsulation APIs.
+  - [x] Make secret values non-cloneable, zeroizing and redacted from debug/error output.
+  - [x] Verify deterministic anchors, upstream NIST/cross-implementation vectors and malformed inputs.
 - [ ] [#86](https://github.com/advatar/EUWallet/issues/86): implement iOS post-quantum key custody.
 - [ ] [#87](https://github.com/advatar/EUWallet/issues/87): add atomic hybrid sign effects across
       Rust and Swift.

@@ -11,7 +11,7 @@ Tracking: [#84](https://github.com/advatar/EUWallet/issues/84)
 Pin RustCrypto [`ml-kem` 0.3.2](https://crates.io/crates/ml-kem/0.3.2) and
 [`ml-dsa` 0.1.1](https://crates.io/crates/ml-dsa/0.1.1), with default features disabled and only
 `getrandom` plus `zeroize` enabled. They are optional dependencies admitted solely by the
-`hybrid-pq/experimental-pq-primitives` feature. The default and certified protocol graphs do not
+`crypto-backend/experimental-pq-primitives` feature. The default and certified protocol graphs do not
 enable them.
 
 The authoritative package/version/checksum list is
