@@ -28,8 +28,11 @@ Implementation plan:
 This programme is opt-in research and is excluded from certified EUDI behavior until external
 algorithm/profile and certification approval.
 
-- [ ] [#78](https://github.com/advatar/EUWallet/issues/78): freeze the experimental profile scope.
-- [ ] [#79](https://github.com/advatar/EUWallet/issues/79): establish governance, ADR and delivery
+- [x] [#78](https://github.com/advatar/EUWallet/issues/78): freeze the experimental profile scope.
+  - [x] Pin algorithm parameters, wire encoding, identifiers and purpose registry.
+  - [x] Enumerate unchanged production surfaces and structural rejection rules.
+  - [x] Align the profile specification, ADR and implementation plan.
+- [x] [#79](https://github.com/advatar/EUWallet/issues/79): establish governance, ADR and delivery
       tracking.
 - [ ] [#80](https://github.com/advatar/EUWallet/issues/80): define the threat model and security
       properties.
