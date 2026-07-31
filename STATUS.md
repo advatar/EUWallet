@@ -98,8 +98,13 @@ algorithm/profile and certification approval.
   - [x] Verify ES256 and ML-DSA-65 before applying nonce, audience, expiry, replay and downgrade policy.
   - [x] Return only generic external rejection while retaining bounded local failure classes.
   - [x] Cover malformed, mixed-component, invalid-signature and policy failures with unit/property tests.
-- [ ] [#89](https://github.com/advatar/EUWallet/issues/89): implement downgrade-resistant hybrid
+- [x] [#89](https://github.com/advatar/EUWallet/issues/89): implement downgrade-resistant hybrid
       key establishment.
+  - [x] Freeze one negotiation/transcript encoding that binds profile, identities, shares and context.
+  - [x] Combine P-256 ECDH and ML-KEM-768 outputs through the pinned hybrid KDF construction.
+  - [x] Expose no shared secret until both components and transcript authentication succeed.
+  - [x] Reject classical-only fallback whenever hybrid-required policy is active.
+  - [x] Qualify implicit rejection, interoperability vectors and malformed/mismatch negatives.
 - [ ] [#90](https://github.com/advatar/EUWallet/issues/90): integrate experimental use cases in
       increasing-risk order.
 - [ ] [#91](https://github.com/advatar/EUWallet/issues/91): build the complete adversarial test
