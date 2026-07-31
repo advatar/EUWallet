@@ -2,9 +2,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.3",
   "version": 1,
-  "serialNumber": "urn:uuid:d7150523-3630-4786-8f03-6e904d58b541",
+  "serialNumber": "urn:uuid:a6e4ce50-83bf-4a61-9f51-bd7e432d137c",
   "metadata": {
-    "timestamp": "2026-07-19T11:44:01.005962000Z",
+    "timestamp": "2026-07-31T09:58:28.874819000Z",
     "tools": [
       {
         "vendor": "CycloneDX",
@@ -112,6 +112,20 @@
         }
       ],
       "purl": "pkg:cargo/iso18013-5@0.0.1?download_url=file://../iso18013-5"
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/jwe#0.0.1",
+      "name": "jwe",
+      "version": "0.0.1",
+      "description": "JWE compact (ECDH-ES + A256GCM) for OpenID4VP direct_post.jwt response encryption — pure assembly over the crypto-traits boundary.",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/jwe@0.0.1?download_url=file://../jwe"
     },
     {
       "type": "library",
@@ -1906,6 +1920,33 @@
     },
     {
       "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#pkcs1@0.7.5",
+      "author": "RustCrypto Developers",
+      "name": "pkcs1",
+      "version": "0.7.5",
+      "description": "Pure Rust implementation of Public-Key Cryptography Standards (PKCS) #1: RSA Cryptography Specifications Version 2.2 (RFC 8017) ",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "purl": "pkg:cargo/pkcs1@0.7.5",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/RustCrypto/formats/tree/master/pkcs1"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#pkg-config@0.3.33",
       "author": "Alex Crichton <alex@alexcrichton.com>",
       "name": "pkg-config",
@@ -3255,6 +3296,14 @@
       ]
     },
     {
+      "ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/jwe#0.0.1",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#base64ct@1.8.3",
+        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1",
+        "registry+https://github.com/rust-lang/crates.io-index#serde_json@1.0.150"
+      ]
+    },
+    {
       "ref": "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/mdoc#0.0.1",
       "dependsOn": [
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/cose#0.0.1",
@@ -3369,6 +3418,7 @@
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-backend#0.0.1",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/iso18013-5#0.0.1",
+        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/jwe#0.0.1",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/mdoc#0.0.1",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/oid4vci#0.0.1",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/oid4vp#0.0.1",
@@ -3384,7 +3434,8 @@
         "registry+https://github.com/rust-lang/crates.io-index#uniffi@0.28.3",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/w2w#0.0.1",
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/wua#0.0.1",
-        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/x509#0.0.1"
+        "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/x509#0.0.1",
+        "registry+https://github.com/rust-lang/crates.io-index#zeroize@1.9.0"
       ]
     },
     {
@@ -3402,6 +3453,7 @@
       "dependsOn": [
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1",
         "registry+https://github.com/rust-lang/crates.io-index#der@0.7.10",
+        "registry+https://github.com/rust-lang/crates.io-index#pkcs1@0.7.5",
         "registry+https://github.com/rust-lang/crates.io-index#x509-cert@0.2.5"
       ]
     },
@@ -3681,6 +3733,13 @@
       "ref": "registry+https://github.com/rust-lang/crates.io-index#pem-rfc7468@0.7.0",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#base64ct@1.8.3"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#pkcs1@0.7.5",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#der@0.7.10",
+        "registry+https://github.com/rust-lang/crates.io-index#spki@0.7.3"
       ]
     },
     {

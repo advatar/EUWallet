@@ -11,6 +11,7 @@ directly by a protocol/codec crate — they are reached only through `crypto-tra
 |---|---|---|
 | `crypto-traits` | — | Pure trait definitions; the crypto boundary. |
 | `crypto-backend` | `aws-lc-rs` | The real (FIPS-capable) implementation of `crypto-traits`: verify/digest/HKDF/AES-GCM/random + a software ECDSA signer for tests/issuers. The ONLY crate that links a crypto primitive. Codecs never depend on it. |
+| `hybrid-pq` | optional `ml-kem`, `ml-dsa` | Private FIPS 203 ML-KEM-768 and FIPS 204 ML-DSA-65 experiment only. Disabled by default; admitted solely by `experimental-pq-primitives`, with zeroization and OS randomness. Qualification and audit limitations: `docs/experimental-pq-dependency-qualification.md`. |
 | `cose` | — | Canonical CBOR + COSE_Sign1 are hand-written; crypto via `crypto-traits`. |
 | `mdoc` | `cose` (path) | mdoc structures over the shared CBOR/COSE codec. |
 | `sdjwt` | `serde_json`, `base64ct` | Strict JSON parsing and base64url are not worth hand-rolling; both are small, vetted, and in the budget. Signatures via `crypto-traits`. |
@@ -27,6 +28,9 @@ directly by a protocol/codec crate — they are reached only through `crypto-tra
 - `ciborium` — reserved as an independent CBOR cross-check in tests only (our own canonical encoder is authoritative).
 - `hex`, `thiserror` — small ergonomics.
 - `aws-lc-rs` — the FIPS-capable backend that will implement `crypto-traits` at the platform-crypto step. Never called directly by protocol/codec crates.
+- `ml-kem`, `ml-dsa` — pinned RustCrypto final-FIPS implementations for the isolated, default-off
+  hybrid-PQ experiment. Never admitted to certified JOSE/COSE enums or protocol crates; both remain
+  blocked from production pending independent review.
 - `uniffi` — FFI bindings (Section 3).
 - `zeroize` — compiler-resistant clearing for bounded secret-bearing Core buffers; it does not
   provide cryptography or replace platform memory/process isolation.

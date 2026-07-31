@@ -53,6 +53,9 @@ The adversaries, mandatory security properties, evidence obligations, non-claims
 are maintained in
 [`experimental-hybrid-pq-threat-model.md`](../experimental-hybrid-pq-threat-model.md).
 
+The initial primitive dependency decision and its independent-audit blocker are recorded in
+[`experimental-pq-dependency-qualification.md`](../experimental-pq-dependency-qualification.md).
+
 ## Key custody consequence
 
 The P-256 signing component remains a non-exportable Secure Enclave key. Current Apple hardware

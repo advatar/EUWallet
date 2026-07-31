@@ -2,9 +2,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.3",
   "version": 1,
-  "serialNumber": "urn:uuid:12ab49fa-14d4-4880-8253-56aa7357b7eb",
+  "serialNumber": "urn:uuid:6f808fb4-c872-433d-aeb4-c28986ea7a5f",
   "metadata": {
-    "timestamp": "2026-07-19T11:44:01.021132000Z",
+    "timestamp": "2026-07-31T09:58:28.948820000Z",
     "tools": [
       {
         "vendor": "CycloneDX",
@@ -334,6 +334,33 @@
         {
           "type": "vcs",
           "url": "https://github.com/RustCrypto/formats/tree/master/pem-rfc7468"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#pkcs1@0.7.5",
+      "author": "RustCrypto Developers",
+      "name": "pkcs1",
+      "version": "0.7.5",
+      "description": "Pure Rust implementation of Public-Key Cryptography Standards (PKCS) #1: RSA Cryptography Specifications Version 2.2 (RFC 8017) ",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "purl": "pkg:cargo/pkcs1@0.7.5",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/RustCrypto/formats/tree/master/pkcs1"
         }
       ]
     },
@@ -770,6 +797,7 @@
       "dependsOn": [
         "path+file:///Users/johansellstrom/dev/advatar/EUWallet/crates/crypto-traits#0.0.1",
         "registry+https://github.com/rust-lang/crates.io-index#der@0.7.10",
+        "registry+https://github.com/rust-lang/crates.io-index#pkcs1@0.7.5",
         "registry+https://github.com/rust-lang/crates.io-index#x509-cert@0.2.5"
       ]
     },
@@ -810,6 +838,13 @@
       "ref": "registry+https://github.com/rust-lang/crates.io-index#pem-rfc7468@0.7.0",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#base64ct@1.8.3"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#pkcs1@0.7.5",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#der@0.7.10",
+        "registry+https://github.com/rust-lang/crates.io-index#spki@0.7.3"
       ]
     },
     {

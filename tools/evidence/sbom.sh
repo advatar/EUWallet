@@ -11,7 +11,9 @@ if ! cargo cyclonedx --version 2>/dev/null | grep -q " $CARGO_CYCLONEDX_VERSION$
   cargo install cargo-cyclonedx --version "$CARGO_CYCLONEDX_VERSION" --locked --force
 fi
 
-cargo cyclonedx --format json --all
+# Include the default-off experimental PQ graph so the published inventory does not hide optional
+# cryptographic code that can be compiled into research builds.
+cargo cyclonedx --format json --all --all-features
 mkdir -p docs/certification-evidence/sbom
 # shellcheck disable=SC2038
 find crates -maxdepth 2 -name '*.cdx.json' -exec mv {} docs/certification-evidence/sbom/ \;

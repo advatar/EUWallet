@@ -24,6 +24,13 @@ wildcards = "deny"             # no `*` version requirements on crates.io deps
 allow-wildcard-paths = true    # ...but intra-workspace `path = "..."` deps are fine
 # Deny heavyweight/unwanted crates sneaking into the core here as they appear, e.g.:
 # deny = [{ name = "openssl" }]  # crypto must go through crypto-traits, not openssl
+# Competing PQ implementations are not permitted to enter transitively. The only experimental
+# packages admitted are pinned in docs/experimental-pq-dependency-allow-list.toml.
+deny = [
+    { name = "fips203" },
+    { name = "fips204" },
+    { name = "libcrux-ml-kem" },
+]
 
 [licenses]
 version = 2
