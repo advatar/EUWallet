@@ -17,6 +17,9 @@
 //! * ECDSA signatures may be either JOSE/COSE **fixed** `r||s` or X.509 **ASN.1 DER**; the
 //!   verifier accepts both (it tries DER, then fixed).
 
+#[cfg(feature = "experimental-pq-primitives")]
+pub mod experimental_pq;
+
 use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use aws_lc_rs::agreement::{agree, PrivateKey, UnparsedPublicKey as AgreementPublicKey, ECDH_P256};
 use aws_lc_rs::hkdf::{Salt, HKDF_SHA256};
