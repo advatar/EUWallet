@@ -84,7 +84,12 @@ algorithm/profile and certification approval.
   - [x] Execute both signatures behind one authenticated custody unlock and emit no partial success.
   - [x] Cover component failure, cancellation, process-death and contract mismatch paths.
   - [x] Regenerate and verify UniFFI bindings and the iOS XCFramework.
-- [ ] [#88](https://github.com/advatar/EUWallet/issues/88): enforce atomic hybrid verification.
+- [x] [#88](https://github.com/advatar/EUWallet/issues/88): enforce atomic hybrid verification.
+  - [x] Expose one fail-closed verifier that parses canonical envelopes and reconstructs the TBS internally.
+  - [x] Resolve one exact logical identity/generation and require the supported hybrid profile.
+  - [x] Verify ES256 and ML-DSA-65 before applying nonce, audience, expiry, replay and downgrade policy.
+  - [x] Return only generic external rejection while retaining bounded local failure classes.
+  - [x] Cover malformed, mixed-component, invalid-signature and policy failures with unit/property tests.
 - [ ] [#89](https://github.com/advatar/EUWallet/issues/89): implement downgrade-resistant hybrid
       key establishment.
 - [ ] [#90](https://github.com/advatar/EUWallet/issues/90): integrate experimental use cases in
