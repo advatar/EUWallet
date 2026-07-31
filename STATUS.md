@@ -34,8 +34,11 @@ algorithm/profile and certification approval.
   - [x] Align the profile specification, ADR and implementation plan.
 - [x] [#79](https://github.com/advatar/EUWallet/issues/79): establish governance, ADR and delivery
       tracking.
-- [ ] [#80](https://github.com/advatar/EUWallet/issues/80): define the threat model and security
+- [x] [#80](https://github.com/advatar/EUWallet/issues/80): define the threat model and security
       properties.
+  - [x] Define adversaries, assets, trust boundaries and mandatory hybrid invariants.
+  - [x] Map each threat to planned tests, formal properties or explicit residual risk.
+  - [x] Record exclusions, non-claims and review triggers.
 - [ ] [#81](https://github.com/advatar/EUWallet/issues/81): add isolated hybrid cryptographic
       interfaces.
 - [ ] [#82](https://github.com/advatar/EUWallet/issues/82): specify common domain-separated signed
