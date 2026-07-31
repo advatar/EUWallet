@@ -24,6 +24,21 @@ import Foundation
                 mlDsa65PublicKey: generated.mlDsa65PublicKey,
                 mlKem768PublicKey: generated.mlKem768PublicKey)
         }
+
+        func signWrappedMaterial(
+            wrappingKey: inout Data,
+            nonce: Data,
+            encryptedPrivateKey: Data,
+            payload: Data
+        ) throws -> Data {
+            var transfer = wrappingKey
+            defer { transfer.clearSensitiveBytes() }
+            return try signExperimentalPqWrappedKeyMaterial(
+                wrappingKey: transfer,
+                nonce: nonce,
+                encryptedPrivateKey: encryptedPrivateKey,
+                payload: payload)
+        }
     }
 
     /// Production composition for one application-scoped hybrid-key custody domain.

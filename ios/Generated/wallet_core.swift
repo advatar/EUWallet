@@ -1969,8 +1969,10 @@ public enum ExperimentalPqFfiError {
 
 
     case InvalidWrappingKey
+    case InvalidWrappedMaterial
     case GenerationFailed
     case EncryptionFailed
+    case SigningFailed
 }
 
 
@@ -1988,8 +1990,10 @@ public struct FfiConverterTypeExperimentalPqFfiError: FfiConverterRustBuffer {
 
 
         case 1: return .InvalidWrappingKey
-        case 2: return .GenerationFailed
-        case 3: return .EncryptionFailed
+        case 2: return .InvalidWrappedMaterial
+        case 3: return .GenerationFailed
+        case 4: return .EncryptionFailed
+        case 5: return .SigningFailed
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2006,12 +2010,20 @@ public struct FfiConverterTypeExperimentalPqFfiError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
 
 
-        case .GenerationFailed:
+        case .InvalidWrappedMaterial:
             writeInt(&buf, Int32(2))
 
 
-        case .EncryptionFailed:
+        case .GenerationFailed:
             writeInt(&buf, Int32(3))
+
+
+        case .EncryptionFailed:
+            writeInt(&buf, Int32(4))
+
+
+        case .SigningFailed:
+            writeInt(&buf, Int32(5))
 
         }
     }
@@ -2111,6 +2123,20 @@ public func generateExperimentalPqWrappedKeyMaterial(wrappingKey: Data)throws  -
 })
 }
 /**
+ * Authenticate and decrypt one custody record, sign one already-domain-separated hybrid TBS,
+ * then zeroize the recovered seed buffer before returning only the ML-DSA signature.
+ */
+public func signExperimentalPqWrappedKeyMaterial(wrappingKey: Data, nonce: Data, encryptedPrivateKey: Data, payload: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeExperimentalPqFfiError.lift) {
+    uniffi_wallet_core_fn_func_sign_experimental_pq_wrapped_key_material(
+        FfiConverterData.lower(wrappingKey),
+        FfiConverterData.lower(nonce),
+        FfiConverterData.lower(encryptedPrivateKey),
+        FfiConverterData.lower(payload),$0
+    )
+})
+}
+/**
  * Verify a wallet export bundle's integrity hash (TS10). Callable from the shell before re-import.
  */
 public func verifyWalletExport(json: String) -> Bool {
@@ -2137,6 +2163,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if (uniffi_wallet_core_checksum_func_generate_experimental_pq_wrapped_key_material() != 22854) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_func_sign_experimental_pq_wrapped_key_material() != 24508) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_func_verify_wallet_export() != 147) {

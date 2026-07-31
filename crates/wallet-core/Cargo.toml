@@ -20,6 +20,7 @@ path = "src/bin/uniffi_bindgen.rs"
 uniffi = { workspace = true }
 crypto-traits = { path = "../crypto-traits" }
 crypto-backend = { path = "../crypto-backend" }
+hybrid-pq = { path = "../hybrid-pq" }
 cose = { path = "../cose" }
 mdoc = { path = "../mdoc" }
 sdjwt = { path = "../sdjwt" }

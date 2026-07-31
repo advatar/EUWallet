@@ -102,6 +102,25 @@ private final class CancellingSigner: Signer {
     func sign(keyRef: String, payload: Data) throws -> Data { throw CancellationError() }
 }
 
+private final class HybridSignerMock: ExperimentalHybridSigning {
+    var error: Error?
+    private(set) var calls = 0
+
+    func sign(
+        logicalKeyID _: String,
+        profile _: ExperimentalHybridSignatureProfile,
+        purpose _: ExperimentalHybridSignPurpose,
+        payload _: Data,
+        prompt _: String
+    ) throws -> ExperimentalHybridSignature {
+        calls += 1
+        if let error { throw error }
+        return ExperimentalHybridSignature(
+            classicalSignature: Data(repeating: 0x31, count: 64),
+            postQuantumSignature: Data(repeating: 0x32, count: 3_309))
+    }
+}
+
 private final class FailingStorage: SecureStorage {
     func put(key: String, value: Data) throws { throw ExpectedFailure.failure }
     func get(key: String) throws -> Data? { throw ExpectedFailure.failure }
@@ -200,6 +219,7 @@ final class EffectExecutorTests: XCTestCase {
         engine: MockEngine = MockEngine(),
         durableStore: ExecutorTestDurableStore = ExecutorTestDurableStore(),
         signer: Signer = StubSigner(),
+        hybridSigner: ExperimentalHybridSigning? = nil,
         http: HttpClient = StubHttpClient(),
         storage: SecureStorage = InMemoryStorage(),
         statusLists: StatusListResolver? = nil,
@@ -226,6 +246,7 @@ final class EffectExecutorTests: XCTestCase {
         return EffectExecutor(
             lifecycle: lifecycle,
             signer: signer,
+            hybridSigner: hybridSigner,
             http: http,
             storage: storage,
             trust: StubTrustResolver(certChain: [Data([1, 2, 3])]),
@@ -715,6 +736,54 @@ final class EffectExecutorTests: XCTestCase {
                 && $0.contains("\"operationId\":4")
         })
         assertNoSemanticSuccessOrDecline(engine.receivedEvents)
+    }
+
+    func testHybridSigningEmitsBothComponentsInOneCorrelatedEvent() async throws {
+        let engine = MockEngine { event in
+            if event.contains("\"setClock\"") {
+                return #"[{"type":"hybridSign","operationId":44,"resultType":"hybridSignatureProduced","profile":"euwallet-hybrid-pq-v1","keyRef":"wallet-key","purpose":"presentation","payload":[1,2,3]}]"#
+            }
+            return "[]"
+        }
+        let hybrid = HybridSignerMock()
+        let executor = makeExecutor(engine: engine, hybridSigner: hybrid)
+
+        let outcome = try await executor.send(eventJson: WalletEventJSON.setClock(epoch: 1))
+        XCTAssertEqual(outcome, .idle)
+        XCTAssertEqual(hybrid.calls, 1)
+        let callback = try XCTUnwrap(engine.receivedEvents.last)
+        XCTAssertTrue(callback.contains("\"type\":\"hybridSignatureProduced\""))
+        XCTAssertTrue(callback.contains("\"operationId\":44"))
+        XCTAssertTrue(callback.contains("\"profile\":\"euwallet-hybrid-pq-v1\""))
+        XCTAssertTrue(callback.contains("\"classicalSignature\""))
+        XCTAssertTrue(callback.contains("\"postQuantumSignature\""))
+    }
+
+    func testHybridComponentFailureEmitsNoPartialSignature() async throws {
+        let engine = MockEngine { event in
+            if event.contains("\"setClock\"") {
+                return #"[{"type":"hybridSign","operationId":45,"resultType":"hybridSignatureProduced","profile":"euwallet-hybrid-pq-v1","keyRef":"wallet-key","purpose":"credentialBinding","payload":[9]}]"#
+            }
+            if event.contains("\"operationFailed\"") {
+                return #"[{"type":"render","screen":{"screen":"error","code":"operation_failed","message":"Operation failed"}},{"type":"close"}]"#
+            }
+            return "[]"
+        }
+        let hybrid = HybridSignerMock()
+        hybrid.error = ExpectedFailure.failure
+        let executor = makeExecutor(engine: engine, hybridSigner: hybrid)
+
+        _ = try await executor.send(eventJson: WalletEventJSON.setClock(epoch: 1))
+        XCTAssertTrue(engine.receivedEvents.contains {
+            $0.contains("\"type\":\"operationFailed\"")
+                && $0.contains("\"operationId\":45")
+                && $0.contains("\"failure\":\"signing\"")
+        })
+        XCTAssertFalse(engine.receivedEvents.dropFirst().contains {
+            $0.contains("\"type\":\"hybridSignatureProduced\"")
+                || $0.contains("classicalSignature")
+                || $0.contains("postQuantumSignature")
+        })
     }
 
     func testNon2xxResponseDoesNotBecomePresentationDelivered() async throws {

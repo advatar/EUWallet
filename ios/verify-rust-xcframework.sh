@@ -20,6 +20,7 @@ swift_contract=(
   'public struct FfiDurableCheckpoint'
   'public struct FfiExperimentalPqWrappedKeyMaterial'
   'public func generateExperimentalPqWrappedKeyMaterial('
+  'public func signExperimentalPqWrappedKeyMaterial('
   'func prepareDurableEnvironment('
   'func exportDurableCheckpoint('
   'func restoreDurableCheckpoint('
@@ -47,6 +48,8 @@ done
 durable_symbols=(
   uniffi_wallet_core_fn_func_generate_experimental_pq_wrapped_key_material
   uniffi_wallet_core_checksum_func_generate_experimental_pq_wrapped_key_material
+  uniffi_wallet_core_fn_func_sign_experimental_pq_wrapped_key_material
+  uniffi_wallet_core_checksum_func_sign_experimental_pq_wrapped_key_material
   uniffi_wallet_core_fn_method_walletengine_export_durable_checkpoint
   uniffi_wallet_core_fn_method_walletengine_prepare_durable_environment
   uniffi_wallet_core_fn_method_walletengine_restore_durable_checkpoint

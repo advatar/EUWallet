@@ -29,9 +29,15 @@ public struct ExperimentalPqWrappedMaterial: Equatable {
 public protocol ExperimentalPqGenerating: AnyObject {
     func generateWrappedMaterial(wrappingKey: inout Data) throws
         -> ExperimentalPqWrappedMaterial
+    func signWrappedMaterial(
+        wrappingKey: inout Data,
+        nonce: Data,
+        encryptedPrivateKey: Data,
+        payload: Data
+    ) throws -> Data
 }
 
-public protocol HybridClassicalKeyProviding: AnyObject {
+public protocol HybridClassicalKeyProviding: Signer, AnyObject {
     func publicKeyRaw(keyRef: String) throws -> Data
 }
 
@@ -67,6 +73,21 @@ public struct ExperimentalPqCustodyRecord: Codable, Equatable, CustomDebugString
     public var debugDescription: String {
         "ExperimentalPqCustodyRecord(reference: \(reference.debugDescription), ciphertext: [REDACTED])"
     }
+}
+
+public struct ExperimentalHybridSignature: Equatable {
+    public let classicalSignature: Data
+    public let postQuantumSignature: Data
+}
+
+public protocol ExperimentalHybridSigning: AnyObject {
+    func sign(
+        logicalKeyID: String,
+        profile: ExperimentalHybridSignatureProfile,
+        purpose: ExperimentalHybridSignPurpose,
+        payload: Data,
+        prompt: String
+    ) throws -> ExperimentalHybridSignature
 }
 
 public struct ExperimentalPqGenerationAnchor: Codable, Equatable {
@@ -126,7 +147,7 @@ extension ExperimentalPqCustodyError: LocalizedError {
 }
 
 /// Coordinates one logical rotation across Secure Enclave P-256 and Rust-generated PQ components.
-public final class ExperimentalHybridKeyCustody {
+public final class ExperimentalHybridKeyCustody: ExperimentalHybridSigning {
     private let signer: any HybridClassicalKeyProviding
     private let backend: any ExperimentalPqGenerating
     private let wrappingKeys: any ExperimentalPqWrappingKeyStoring
@@ -241,6 +262,47 @@ public final class ExperimentalHybridKeyCustody {
         }
         defer { wrappingKey.clearSensitiveBytes() }
         return try operation(record, &wrappingKey)
+    }
+
+    /// Produce both components after one custody unlock. A component error throws before the
+    /// caller receives any result, so no partial signature can cross the effect boundary.
+    public func sign(
+        reference: HybridKeyGeneration,
+        payload: Data,
+        prompt: String
+    ) throws -> ExperimentalHybridSignature {
+        try withUnlockedGeneration(reference: reference, prompt: prompt) { record, wrappingKey in
+            let classical = try signer.sign(
+                keyRef: reference.classicalKeyReference,
+                payload: payload)
+            let postQuantum = try backend.signWrappedMaterial(
+                wrappingKey: &wrappingKey,
+                nonce: record.nonce,
+                encryptedPrivateKey: record.encryptedPrivateKey,
+                payload: payload)
+            guard classical.count == 64, postQuantum.count == 3_309 else {
+                throw ExperimentalPqCustodyError.malformedMaterial
+            }
+            return ExperimentalHybridSignature(
+                classicalSignature: classical,
+                postQuantumSignature: postQuantum)
+        }
+    }
+
+    public func sign(
+        logicalKeyID: String,
+        profile: ExperimentalHybridSignatureProfile,
+        purpose: ExperimentalHybridSignPurpose,
+        payload: Data,
+        prompt: String
+    ) throws -> ExperimentalHybridSignature {
+        guard profile == .es256MlDsa65V1,
+              let reference = try records.load(logicalKeyID: logicalKeyID)?.reference
+        else { throw ExperimentalPqCustodyError.missingGeneration }
+        // Purpose is already committed into the core-constructed payload; retaining the closed
+        // discriminator here prevents a generic signing entry point from entering this path.
+        _ = purpose
+        return try sign(reference: reference, payload: payload, prompt: prompt)
     }
 
     static func validate(

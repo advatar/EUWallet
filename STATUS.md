@@ -77,8 +77,13 @@ algorithm/profile and certification approval.
   - [x] Reject missing/mixed/rolled-back generations and clear transient wrapping keys after use.
   - [x] Add injectable policy tests plus a documented physical-device validation matrix.
   - [ ] Execute and record the matrix on a connected passcode/biometric-enabled iPhone.
-- [ ] [#87](https://github.com/advatar/EUWallet/issues/87): add atomic hybrid sign effects across
+- [x] [#87](https://github.com/advatar/EUWallet/issues/87): add atomic hybrid sign effects across
       Rust and Swift.
+  - [x] Add isolated hybrid-sign effect/event DTOs with explicit profile, purpose and logical key reference.
+  - [x] Correlate the callback to exactly one live operation and reject stale, duplicate or mismatched results.
+  - [x] Execute both signatures behind one authenticated custody unlock and emit no partial success.
+  - [x] Cover component failure, cancellation, process-death and contract mismatch paths.
+  - [x] Regenerate and verify UniFFI bindings and the iOS XCFramework.
 - [ ] [#88](https://github.com/advatar/EUWallet/issues/88): enforce atomic hybrid verification.
 - [ ] [#89](https://github.com/advatar/EUWallet/issues/89): implement downgrade-resistant hybrid
       key establishment.
