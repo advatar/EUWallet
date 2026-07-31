@@ -39,8 +39,11 @@ algorithm/profile and certification approval.
   - [x] Define adversaries, assets, trust boundaries and mandatory hybrid invariants.
   - [x] Map each threat to planned tests, formal properties or explicit residual risk.
   - [x] Record exclusions, non-claims and review triggers.
-- [ ] [#81](https://github.com/advatar/EUWallet/issues/81): add isolated hybrid cryptographic
+- [x] [#81](https://github.com/advatar/EUWallet/issues/81): add isolated hybrid cryptographic
       interfaces.
+  - [x] Add a zero-dependency experimental crate with atomic hybrid key/signature types.
+  - [x] Add separate signer, verifier and key-agreement traits with typed failures.
+  - [x] Prove certified algorithm/type isolation and cover every error class with unit tests.
 - [ ] [#82](https://github.com/advatar/EUWallet/issues/82): specify common domain-separated signed
       bytes.
 - [ ] [#83](https://github.com/advatar/EUWallet/issues/83): implement the canonical hybrid envelope

@@ -119,6 +119,9 @@ Use typed errors for unsupported profiles, malformed components, component failu
 generation mismatch, noncanonical input, resource limits and downgrade detection. Add compile-fail
 or equivalent tests proving the experimental types cannot enter certified JOSE/COSE APIs.
 
+Implemented in the isolated, zero-dependency `crates/hybrid-pq` crate. Codec and primitive behavior
+remain gated on the following issues.
+
 ### 5. Specify common domain-separated signed bytes
 
 Issue: [#82](https://github.com/advatar/EUWallet/issues/82)

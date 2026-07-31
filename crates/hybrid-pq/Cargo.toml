@@ -1,0 +1,16 @@
+[package]
+name = "hybrid-pq"
+description = "Isolated experimental hybrid post-quantum types and cryptographic trait boundaries."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+crypto-traits = { path = "../crypto-traits" }
+
+[lints]
+workspace = true
