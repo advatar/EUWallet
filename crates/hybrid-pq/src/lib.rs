@@ -32,6 +32,7 @@
 
 use std::fmt;
 
+pub mod envelope;
 pub mod tbs;
 
 /// Exact public component sizes frozen by `euwallet-hybrid-pq-v1`.
