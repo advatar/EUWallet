@@ -28,6 +28,11 @@ Implementation plan:
 This programme is opt-in research and is excluded from certified EUDI behavior until external
 algorithm/profile and certification approval.
 
+- [x] [#101](https://github.com/advatar/EUWallet/issues/101): advertise the quantum-safe EU Wallet
+      and complete Advatar issuer/verifier ecosystem on the landing page.
+  - [x] Add a prominent first quantum-safe EU Wallet implementation claim with experimental scope.
+  - [x] Link the Advatar credential issuer and verifier as the complete ecosystem.
+  - [x] Verify landing-page formatting, type checking, changed-file lint and production build.
 - [x] [#78](https://github.com/advatar/EUWallet/issues/78): freeze the experimental profile scope.
   - [x] Pin algorithm parameters, wire encoding, identifiers and purpose registry.
   - [x] Enumerate unchanged production surfaces and structural rejection rules.
