@@ -28,6 +28,16 @@ use ml_kem::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::AwsLc;
+use crypto_traits::{Alg, Verifier as CryptoVerifier};
+use hybrid_pq::{
+    envelope::{
+        decode_public_key, decode_signature, encode_public_key, encode_signature, EnvelopeError,
+    },
+    tbs::{HybridContext, HybridPurpose, HybridTbs},
+    HybridErrorClass, HybridKeyRef, HybridMismatch, HybridSignatureProfile,
+};
+
 /// Public, non-secret failures with no backend diagnostic details.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExperimentalPqError {
@@ -37,6 +47,136 @@ pub enum ExperimentalPqError {
     InvalidCiphertext,
     VerificationFailed,
     RandomnessUnavailable,
+}
+
+/// Generic external rejection with only a bounded, secret-free diagnostic class for local tests
+/// and telemetry. No component-success state or backend detail is exposed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HybridVerificationRejected(HybridErrorClass);
+
+impl HybridVerificationRejected {
+    #[must_use]
+    pub fn diagnostic_class(self) -> HybridErrorClass {
+        self.0
+    }
+}
+
+impl fmt::Display for HybridVerificationRejected {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("hybrid signature rejected")
+    }
+}
+
+impl std::error::Error for HybridVerificationRejected {}
+
+/// Complete inputs for the one atomic verification entry point. `resolved_key_ref` identifies the
+/// trusted logical key that supplied the complete public-key envelope; `expected_key_ref` is the
+/// identity/generation authorized by the protocol transaction.
+pub struct HybridVerificationInput<'a> {
+    pub signature_envelope: &'a [u8],
+    pub public_key_envelope: &'a [u8],
+    pub resolved_key_ref: &'a HybridKeyRef,
+    pub expected_key_ref: &'a HybridKeyRef,
+    pub expected_profile: HybridSignatureProfile,
+    pub expected_purpose: HybridPurpose,
+    pub context: &'a HybridContext,
+    pub payload: &'a [u8],
+    pub expected_audience: Option<&'a [u8]>,
+    pub expected_nonce: &'a [u8],
+    pub seen_nonces: &'a [Vec<u8>],
+    pub now_epoch_seconds: u64,
+    pub downgrade_attempted: bool,
+}
+
+/// Parse, bind, reconstruct, verify and apply policy without exposing partial component results.
+pub fn verify_hybrid_signature_atomic(
+    input: &HybridVerificationInput<'_>,
+) -> Result<(), HybridVerificationRejected> {
+    let fail = |class| HybridVerificationRejected(class);
+    let signature_envelope = decode_signature(input.signature_envelope)
+        .map_err(|error| fail(envelope_diagnostic(error)))?;
+    let public_key = decode_public_key(input.public_key_envelope)
+        .map_err(|error| fail(envelope_diagnostic(error)))?;
+
+    // Re-encoding is a second, explicit canonicality invariant at the orchestration boundary.
+    if encode_signature(&signature_envelope) != input.signature_envelope
+        || encode_public_key(&public_key) != input.public_key_envelope
+    {
+        return Err(fail(HybridErrorClass::NonCanonicalInput));
+    }
+    let signature = signature_envelope.signature();
+    if input.expected_profile != HybridSignatureProfile::Es256MlDsa65V1
+        || public_key.profile() != input.expected_profile
+        || signature.profile() != input.expected_profile
+        || signature_envelope.purpose() != input.expected_purpose
+    {
+        return Err(fail(HybridErrorClass::Mismatch));
+    }
+    if input.resolved_key_ref.identity() != input.expected_key_ref.identity() {
+        return Err(fail(
+            hybrid_pq::HybridCryptoError::Mismatch {
+                field: HybridMismatch::Identity,
+            }
+            .class(),
+        ));
+    }
+    if input.resolved_key_ref.generation() != input.expected_key_ref.generation()
+        || input.context.key_generation != input.expected_key_ref.generation()
+    {
+        return Err(fail(
+            hybrid_pq::HybridCryptoError::Mismatch {
+                field: HybridMismatch::Generation,
+            }
+            .class(),
+        ));
+    }
+    if input.context.wallet_identity != input.expected_key_ref.identity().as_bytes()
+        || input.context.audience.as_deref() != input.expected_audience
+        || input.context.nonce != input.expected_nonce
+        || input
+            .seen_nonces
+            .iter()
+            .any(|nonce| nonce == input.expected_nonce)
+        || input.context.created_at_epoch_seconds > input.now_epoch_seconds
+        || input.context.expires_at_epoch_seconds <= input.now_epoch_seconds
+    {
+        return Err(fail(HybridErrorClass::PolicyDenied));
+    }
+    if input.downgrade_attempted {
+        return Err(fail(HybridErrorClass::DowngradeDetected));
+    }
+
+    let tbs = HybridTbs::build(
+        input.expected_profile,
+        input.expected_purpose,
+        input.context,
+        input.payload,
+    )
+    .map_err(|error| fail(error.class()))?;
+    AwsLc
+        .verify(
+            Alg::Es256,
+            public_key.classical(),
+            tbs.as_bytes(),
+            signature.classical(),
+        )
+        .map_err(|_| fail(HybridErrorClass::VerificationFailure))?;
+    verify_ml_dsa_65(
+        public_key.post_quantum(),
+        tbs.as_bytes(),
+        signature.post_quantum(),
+    )
+    .map_err(|_| fail(HybridErrorClass::VerificationFailure))?;
+    Ok(())
+}
+
+fn envelope_diagnostic(error: EnvelopeError) -> HybridErrorClass {
+    match error {
+        EnvelopeError::UnsupportedProfile => HybridErrorClass::UnsupportedProfile,
+        EnvelopeError::MalformedComponent => HybridErrorClass::MalformedComponent,
+        EnvelopeError::TooLarge => HybridErrorClass::ResourceLimitExceeded,
+        _ => HybridErrorClass::NonCanonicalInput,
+    }
 }
 
 /// Non-cloneable ML-DSA-65 signing capability.
@@ -214,6 +354,87 @@ impl Drop for SharedSecret {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SoftwareSigner;
+    use crypto_traits::{KeyRef, Signer};
+    use hybrid_pq::{
+        envelope::{
+            decode_signature, encode_public_key, encode_signature, HybridSignatureEnvelope,
+        },
+        tbs::{HybridContext, HybridPurpose, HybridTbs},
+        HybridKeyRef, HybridPublicKey, HybridSignature, HybridSignatureProfile,
+    };
+
+    struct VerificationFixture {
+        signature_envelope: Vec<u8>,
+        public_key_envelope: Vec<u8>,
+        resolved: HybridKeyRef,
+        expected: HybridKeyRef,
+        context: HybridContext,
+        payload: Vec<u8>,
+    }
+
+    impl VerificationFixture {
+        fn input(&self) -> HybridVerificationInput<'_> {
+            HybridVerificationInput {
+                signature_envelope: &self.signature_envelope,
+                public_key_envelope: &self.public_key_envelope,
+                resolved_key_ref: &self.resolved,
+                expected_key_ref: &self.expected,
+                expected_profile: HybridSignatureProfile::Es256MlDsa65V1,
+                expected_purpose: HybridPurpose::WalletExportV1,
+                context: &self.context,
+                payload: &self.payload,
+                expected_audience: None,
+                expected_nonce: &self.context.nonce,
+                seen_nonces: &[],
+                now_epoch_seconds: 1_700_000_010,
+                downgrade_attempted: false,
+            }
+        }
+    }
+
+    fn verification_fixture() -> VerificationFixture {
+        let profile = HybridSignatureProfile::Es256MlDsa65V1;
+        let purpose = HybridPurpose::WalletExportV1;
+        let context = HybridContext {
+            wallet_identity: b"wallet-key".to_vec(),
+            issuer_identity: None,
+            key_generation: 7,
+            transaction_id: None,
+            session_id: None,
+            audience: None,
+            nonce: (0_u8..16).collect(),
+            created_at_epoch_seconds: 1_700_000_000,
+            expires_at_epoch_seconds: 1_700_000_100,
+            transcript_hash: None,
+        };
+        let payload = b"export-payload".to_vec();
+        let tbs = HybridTbs::build(profile, purpose, &context, &payload).unwrap();
+        let classical = SoftwareSigner::generate_p256().unwrap();
+        let post_quantum = MlDsa65SecretKey::generate().unwrap();
+        let signature = HybridSignature::try_new(
+            profile,
+            classical
+                .sign(&KeyRef("test".into()), Alg::Es256, tbs.as_bytes())
+                .unwrap(),
+            post_quantum.sign(tbs.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        let public_key = HybridPublicKey::try_new(
+            profile,
+            classical.public_key_raw().to_vec(),
+            post_quantum.public_key(),
+        )
+        .unwrap();
+        VerificationFixture {
+            signature_envelope: encode_signature(&HybridSignatureEnvelope::new(purpose, signature)),
+            public_key_envelope: encode_public_key(&public_key),
+            resolved: HybridKeyRef::try_new("wallet-key".into(), 7).unwrap(),
+            expected: HybridKeyRef::try_new("wallet-key".into(), 7).unwrap(),
+            context,
+            payload,
+        }
+    }
 
     fn sha256_hex(value: &[u8]) -> String {
         let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, value);
@@ -293,5 +514,140 @@ mod tests {
         );
         assert_eq!(format!("{key:?}"), "MlKem768SecretKey([REDACTED])");
         assert_eq!(format!("{sender:?}"), "SharedSecret([REDACTED])");
+    }
+
+    #[test]
+    fn atomic_verifier_succeeds_only_for_both_valid_components() {
+        let fixture = verification_fixture();
+        verify_hybrid_signature_atomic(&fixture.input()).unwrap();
+
+        for offset in [100_usize, fixture.signature_envelope.len() - 1] {
+            let mut corrupted = verification_fixture();
+            corrupted.signature_envelope[offset] ^= 1;
+            let error = verify_hybrid_signature_atomic(&corrupted.input()).unwrap_err();
+            assert_eq!(error.to_string(), "hybrid signature rejected");
+            assert!(matches!(
+                error.diagnostic_class(),
+                HybridErrorClass::VerificationFailure | HybridErrorClass::NonCanonicalInput
+            ));
+        }
+    }
+
+    #[test]
+    fn atomic_verifier_rejects_mixed_identity_generation_replay_time_and_downgrade() {
+        let mut mixed_identity = verification_fixture();
+        mixed_identity.expected = HybridKeyRef::try_new("other-wallet".into(), 7).unwrap();
+        assert_eq!(
+            verify_hybrid_signature_atomic(&mixed_identity.input())
+                .unwrap_err()
+                .diagnostic_class(),
+            HybridErrorClass::Mismatch
+        );
+
+        let fixture = verification_fixture();
+        let wrong_generation = HybridKeyRef::try_new("wallet-key".into(), 8).unwrap();
+        let mut input = fixture.input();
+        input.expected_key_ref = &wrong_generation;
+        assert_eq!(
+            verify_hybrid_signature_atomic(&input)
+                .unwrap_err()
+                .diagnostic_class(),
+            HybridErrorClass::Mismatch
+        );
+
+        let seen = vec![fixture.context.nonce.clone()];
+        let mut input = fixture.input();
+        input.seen_nonces = &seen;
+        assert_eq!(
+            verify_hybrid_signature_atomic(&input)
+                .unwrap_err()
+                .diagnostic_class(),
+            HybridErrorClass::PolicyDenied
+        );
+
+        let wrong_nonce = vec![9; 16];
+        let mut input = fixture.input();
+        input.expected_nonce = &wrong_nonce;
+        assert_eq!(
+            verify_hybrid_signature_atomic(&input)
+                .unwrap_err()
+                .diagnostic_class(),
+            HybridErrorClass::PolicyDenied
+        );
+
+        let mut input = fixture.input();
+        input.expected_audience = Some(b"unexpected-audience");
+        assert_eq!(
+            verify_hybrid_signature_atomic(&input)
+                .unwrap_err()
+                .diagnostic_class(),
+            HybridErrorClass::PolicyDenied
+        );
+
+        let mut input = fixture.input();
+        input.now_epoch_seconds = fixture.context.expires_at_epoch_seconds;
+        assert_eq!(
+            verify_hybrid_signature_atomic(&input)
+                .unwrap_err()
+                .diagnostic_class(),
+            HybridErrorClass::PolicyDenied
+        );
+
+        let mut input = fixture.input();
+        input.downgrade_attempted = true;
+        assert_eq!(
+            verify_hybrid_signature_atomic(&input)
+                .unwrap_err()
+                .diagnostic_class(),
+            HybridErrorClass::DowngradeDetected
+        );
+    }
+
+    #[test]
+    fn atomic_verifier_rejects_missing_unsupported_and_cross_key_components() {
+        let mut truncated = verification_fixture();
+        truncated.signature_envelope.truncate(40);
+        assert_eq!(
+            verify_hybrid_signature_atomic(&truncated.input())
+                .unwrap_err()
+                .diagnostic_class(),
+            HybridErrorClass::NonCanonicalInput
+        );
+
+        let mut unsupported = verification_fixture();
+        let profile = b"euwallet-hybrid-pq-v1";
+        let offset = unsupported
+            .signature_envelope
+            .windows(profile.len())
+            .position(|window| window == profile)
+            .unwrap();
+        unsupported.signature_envelope[offset + profile.len() - 1] = b'2';
+        assert_eq!(
+            verify_hybrid_signature_atomic(&unsupported.input())
+                .unwrap_err()
+                .diagnostic_class(),
+            HybridErrorClass::UnsupportedProfile
+        );
+
+        let mut first = verification_fixture();
+        let second = verification_fixture();
+        let first_signature = decode_signature(&first.signature_envelope).unwrap();
+        let second_signature = decode_signature(&second.signature_envelope).unwrap();
+        let mixed = HybridSignature::try_new(
+            HybridSignatureProfile::Es256MlDsa65V1,
+            first_signature.signature().classical().to_vec(),
+            second_signature.signature().post_quantum().to_vec(),
+        )
+        .unwrap();
+        first.signature_envelope = encode_signature(&HybridSignatureEnvelope::new(
+            HybridPurpose::WalletExportV1,
+            mixed,
+        ));
+        assert_eq!(
+            verify_hybrid_signature_atomic(&first.input())
+                .unwrap_err()
+                .diagnostic_class(),
+            HybridErrorClass::VerificationFailure
+        );
     }
 }
