@@ -13,6 +13,12 @@ Government provision, mandate or recognition; accredited certification; and Comm
 notification remain external launch gates. Engineering must produce the complete evidence and
 operational solution needed to enter those processes.
 
+## CI integrity
+
+- [x] [#108](https://github.com/advatar/EUWallet/issues/108): restore the full Rust gate after the
+      `oid4vci::Env` device-public-key expansion, refresh the Android UniFFI contract, and run the
+      iOS 26 provider target on an Xcode 26 runner.
+
 ## Planned milestone — pre-launch security review
 
 - [ ] Run documented Claude/Codex adversarial review for each release candidate.
@@ -76,9 +82,25 @@ algorithm/profile and certification approval.
   - [x] Cross-verify both ES256 and ML-DSA-65 signatures with the independent wallet backends.
   - [x] Apply and reject every shared structural mutation; pin the corpus SHA-256.
 - [ ] [#86](https://github.com/advatar/EUWallet/issues/86): implement iOS post-quantum key custody.
-- [ ] [#87](https://github.com/advatar/EUWallet/issues/87): add atomic hybrid sign effects across
+  - [x] Generate and immediately wrap PQ seeds in Rust so plaintext private material never crosses FFI.
+  - [x] Encrypt PQ seeds with AES-256-GCM and biometric-gated `ThisDeviceOnly` Keychain wrapping keys.
+  - [x] Bind Secure Enclave and PQ references, profile, generation and public-key hashes atomically.
+  - [x] Reject missing/mixed/rolled-back generations and clear transient wrapping keys after use.
+  - [x] Add injectable policy tests plus a documented physical-device validation matrix.
+  - [ ] Execute and record the matrix on a connected passcode/biometric-enabled iPhone.
+- [x] [#87](https://github.com/advatar/EUWallet/issues/87): add atomic hybrid sign effects across
       Rust and Swift.
-- [ ] [#88](https://github.com/advatar/EUWallet/issues/88): enforce atomic hybrid verification.
+  - [x] Add isolated hybrid-sign effect/event DTOs with explicit profile, purpose and logical key reference.
+  - [x] Correlate the callback to exactly one live operation and reject stale, duplicate or mismatched results.
+  - [x] Execute both signatures behind one authenticated custody unlock and emit no partial success.
+  - [x] Cover component failure, cancellation, process-death and contract mismatch paths.
+  - [x] Regenerate and verify UniFFI bindings and the iOS XCFramework.
+- [x] [#88](https://github.com/advatar/EUWallet/issues/88): enforce atomic hybrid verification.
+  - [x] Expose one fail-closed verifier that parses canonical envelopes and reconstructs the TBS internally.
+  - [x] Resolve one exact logical identity/generation and require the supported hybrid profile.
+  - [x] Verify ES256 and ML-DSA-65 before applying nonce, audience, expiry, replay and downgrade policy.
+  - [x] Return only generic external rejection while retaining bounded local failure classes.
+  - [x] Cover malformed, mixed-component, invalid-signature and policy failures with unit/property tests.
 - [ ] [#89](https://github.com/advatar/EUWallet/issues/89): implement downgrade-resistant hybrid
       key establishment.
 - [ ] [#90](https://github.com/advatar/EUWallet/issues/90): integrate experimental use cases in

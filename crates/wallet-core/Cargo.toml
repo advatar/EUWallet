@@ -20,6 +20,7 @@ path = "src/bin/uniffi_bindgen.rs"
 uniffi = { workspace = true }
 crypto-traits = { path = "../crypto-traits" }
 crypto-backend = { path = "../crypto-backend" }
+hybrid-pq = { path = "../hybrid-pq" }
 cose = { path = "../cose" }
 mdoc = { path = "../mdoc" }
 sdjwt = { path = "../sdjwt" }
@@ -42,6 +43,10 @@ serde_json = { workspace = true }
 # Used by the `demo` module to build self-contained fixtures for the iOS simulator app.
 base64ct = { workspace = true }
 zeroize = { workspace = true }
+
+[features]
+default = []
+experimental-pq = ["crypto-backend/experimental-pq-primitives"]
 
 [dev-dependencies]
 miniz_oxide = "0.8"

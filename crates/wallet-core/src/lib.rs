@@ -63,6 +63,9 @@ enum OperationResultKind {
     RpCertChain,
     Persisted,
     Signature,
+    HybridSignature {
+        profile: ExperimentalHybridSignatureProfile,
+    },
     PresentationDelivery,
     PaymentDelivery,
     QesDelivery,
@@ -71,7 +74,9 @@ enum OperationResultKind {
     TransactionCode,
     Token,
     Credential,
-    StatusList { uri: String },
+    StatusList {
+        uri: String,
+    },
     TransferOfferPublished,
     PresentationDecision,
     PaymentDecision,
@@ -85,6 +90,7 @@ impl OperationResultKind {
             Self::RpCertChain => "rpCertChainResolved",
             Self::Persisted | Self::TransferOfferPublished => "operationSucceeded",
             Self::Signature => "deviceSignatureProduced",
+            Self::HybridSignature { .. } => "hybridSignatureProduced",
             Self::PresentationDelivery => "presentationDelivered",
             Self::PaymentDelivery => "paymentAuthorizationDelivered",
             Self::QesDelivery => "qesAuthorizationDelivered",
@@ -117,6 +123,22 @@ impl OperationResultKind {
             _ => self.result_type() == event_type,
         }
     }
+}
+
+/// Closed, default-off signature profile carried over the experimental shell boundary.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub enum ExperimentalHybridSignatureProfile {
+    #[serde(rename = "euwallet-hybrid-pq-v1")]
+    Es256MlDsa65V1,
+}
+
+/// Domain-purpose discriminator included in the TBS construction before this effect is emitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExperimentalHybridSignPurpose {
+    CredentialBinding,
+    Presentation,
+    WalletAuthentication,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1215,6 +1237,14 @@ pub enum Event {
     DeviceSignatureProduced {
         signature: Vec<u8>,
     },
+    /// Both components of one correlated experimental hybrid signing operation. The core accepts
+    /// the pair only when the operation and profile match and both encodings have exact lengths.
+    HybridSignatureProduced {
+        operation_id: u64,
+        profile: ExperimentalHybridSignatureProfile,
+        classical_signature: Vec<u8>,
+        post_quantum_signature: Vec<u8>,
+    },
     /// The shell confirmed the vp_token reached the response_uri.
     PresentationDelivered,
     /// The payment service acknowledged the dynamically linked authorization code.
@@ -1344,6 +1374,13 @@ pub enum Effect {
     Render { screen: ScreenDescription },
     /// Sign `payload` with the device key (Secure Enclave), then send back `DeviceSignatureProduced`.
     Sign { key_ref: String, payload: Vec<u8> },
+    /// Request both signature components for one logical hybrid key and one preconstructed TBS.
+    HybridSign {
+        profile: ExperimentalHybridSignatureProfile,
+        key_ref: String,
+        purpose: ExperimentalHybridSignPurpose,
+        payload: Vec<u8>,
+    },
     /// Deliver a protocol response through the profile-specific native adapter. The profile is
     /// checked against the active flow before this effect crosses the JSON boundary.
     Http {
@@ -2445,6 +2482,7 @@ impl Core {
                 }
                 _ => self.drive(Input::DeviceSignatureProduced(signature)),
             },
+            Event::HybridSignatureProduced { .. } => Vec::new(),
             Event::PresentationDelivered => {
                 let effects = self.drive(Input::PresentationDelivered);
                 if matches!(self.vp, State::Done) {
@@ -2758,6 +2796,29 @@ impl Core {
                     ));
                 }
             }
+            if let (
+                OperationResultKind::HybridSignature { profile: expected },
+                Event::HybridSignatureProduced {
+                    profile: actual,
+                    classical_signature,
+                    post_quantum_signature,
+                    ..
+                },
+            ) = (&pending.result, &event)
+            {
+                if expected != actual {
+                    return Err(format!(
+                        "operationId {operation_id} hybrid profile does not match"
+                    ));
+                }
+                if classical_signature.len() != hybrid_pq::ES256_SIGNATURE_BYTES
+                    || post_quantum_signature.len() != hybrid_pq::ML_DSA_65_SIGNATURE_BYTES
+                {
+                    return Err(format!(
+                        "operationId {operation_id} contains malformed hybrid signature components"
+                    ));
+                }
+            }
 
             // Generic terminal events remove/reset through `handle_event`; exact protocol results
             // are consumed here before the state transition so duplicates are immediately stale.
@@ -2794,6 +2855,7 @@ impl Core {
             event_type,
             "rpCertChainResolved"
                 | "deviceSignatureProduced"
+                | "hybridSignatureProduced"
                 | "presentationDelivered"
                 | "paymentAuthorizationDelivered"
                 | "qesAuthorizationDelivered"
@@ -2861,6 +2923,9 @@ impl Core {
             Effect::ResolveRpTrust { .. } => OperationResultKind::RpCertChain,
             Effect::PersistNonce { .. } => OperationResultKind::Persisted,
             Effect::Sign { .. } => OperationResultKind::Signature,
+            Effect::HybridSign { profile, .. } => {
+                OperationResultKind::HybridSignature { profile: *profile }
+            }
             Effect::Http { profile, .. } => {
                 let (expected_profile, result) = match self.active {
                     ActiveFlow::Presentation => (
@@ -5001,6 +5066,197 @@ impl Core {
 const MAX_DURABLE_TRUST_LIST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DURABLE_WUA_BYTES: usize = 64 * 1024;
 
+/// Wrapped PQ material returned to the native shell. Private seeds never cross FFI in plaintext.
+#[cfg(feature = "experimental-pq")]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FfiExperimentalPqWrappedKeyMaterial {
+    pub nonce: Vec<u8>,
+    pub encrypted_private_key: Vec<u8>,
+    pub ml_dsa_65_public_key: Vec<u8>,
+    pub ml_kem_768_public_key: Vec<u8>,
+}
+
+#[cfg(feature = "experimental-pq")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]
+pub enum ExperimentalPqFfiError {
+    InvalidWrappingKey,
+    InvalidWrappedMaterial,
+    GenerationFailed,
+    EncryptionFailed,
+    SigningFailed,
+}
+
+#[cfg(feature = "experimental-pq")]
+impl core::fmt::Display for ExperimentalPqFfiError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidWrappingKey => "experimental_pq_invalid_wrapping_key",
+            Self::InvalidWrappedMaterial => "experimental_pq_invalid_wrapped_material",
+            Self::GenerationFailed => "experimental_pq_generation_failed",
+            Self::EncryptionFailed => "experimental_pq_encryption_failed",
+            Self::SigningFailed => "experimental_pq_signing_failed",
+        })
+    }
+}
+
+/// Authenticate and decrypt one custody record, sign one already-domain-separated hybrid TBS,
+/// then zeroize the recovered seed buffer before returning only the ML-DSA signature.
+#[cfg(feature = "experimental-pq")]
+#[uniffi::export]
+pub fn sign_experimental_pq_wrapped_key_material(
+    wrapping_key: Vec<u8>,
+    nonce: Vec<u8>,
+    encrypted_private_key: Vec<u8>,
+    payload: Vec<u8>,
+) -> Result<Vec<u8>, ExperimentalPqFfiError> {
+    use crypto_backend::experimental_pq::MlDsa65SecretKey;
+    use crypto_backend::AwsLc;
+    use crypto_traits::Aead;
+    use zeroize::Zeroizing;
+
+    let wrapping_key = Zeroizing::new(wrapping_key);
+    if wrapping_key.len() != 32 {
+        return Err(ExperimentalPqFfiError::InvalidWrappingKey);
+    }
+    if nonce.len() != 12 || encrypted_private_key.len() != 132 {
+        return Err(ExperimentalPqFfiError::InvalidWrappedMaterial);
+    }
+    let plaintext = Zeroizing::new(
+        AwsLc
+            .open(
+                wrapping_key.as_slice(),
+                &nonce,
+                b"euwallet-experimental-pq-custody-v1",
+                &encrypted_private_key,
+            )
+            .map_err(|_| ExperimentalPqFfiError::InvalidWrappedMaterial)?,
+    );
+    if plaintext.len() != 116 || &plaintext[..20] != b"EUWALLET-PQ-SEEDS-V1" {
+        return Err(ExperimentalPqFfiError::InvalidWrappedMaterial);
+    }
+    MlDsa65SecretKey::from_seed(&plaintext[20..52])
+        .and_then(|key| key.sign(&payload))
+        .map_err(|_| ExperimentalPqFfiError::SigningFailed)
+}
+
+#[cfg(feature = "experimental-pq")]
+impl std::error::Error for ExperimentalPqFfiError {}
+
+/// Generate both PQ components and immediately wrap their FIPS seed representations using
+/// AES-256-GCM. Only ciphertext and public keys cross FFI; errors contain no secret detail.
+#[cfg(feature = "experimental-pq")]
+#[uniffi::export]
+pub fn generate_experimental_pq_wrapped_key_material(
+    wrapping_key: Vec<u8>,
+) -> Result<FfiExperimentalPqWrappedKeyMaterial, ExperimentalPqFfiError> {
+    use crypto_backend::experimental_pq::{MlDsa65SecretKey, MlKem768SecretKey};
+    use crypto_backend::AwsLc;
+    use crypto_traits::{Aead, Random};
+    use zeroize::Zeroizing;
+
+    let wrapping_key = Zeroizing::new(wrapping_key);
+    if wrapping_key.len() != 32 {
+        return Err(ExperimentalPqFfiError::InvalidWrappingKey);
+    }
+
+    let dsa = MlDsa65SecretKey::generate().map_err(|_| ExperimentalPqFfiError::GenerationFailed)?;
+    let kem =
+        MlKem768SecretKey::generate().map_err(|_| ExperimentalPqFfiError::GenerationFailed)?;
+    let dsa_seed = dsa.export_seed_for_custody();
+    let kem_seed = kem.export_seed_for_custody();
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(116));
+    plaintext.extend_from_slice(b"EUWALLET-PQ-SEEDS-V1");
+    plaintext.extend_from_slice(dsa_seed.as_slice());
+    plaintext.extend_from_slice(kem_seed.as_slice());
+    let mut nonce = vec![0_u8; 12];
+    AwsLc.fill(&mut nonce);
+    let encrypted_private_key = AwsLc
+        .seal(
+            wrapping_key.as_slice(),
+            &nonce,
+            b"euwallet-experimental-pq-custody-v1",
+            plaintext.as_slice(),
+        )
+        .map_err(|_| ExperimentalPqFfiError::EncryptionFailed)?;
+    Ok(FfiExperimentalPqWrappedKeyMaterial {
+        nonce,
+        encrypted_private_key,
+        ml_dsa_65_public_key: dsa.public_key(),
+        ml_kem_768_public_key: kem.public_key(),
+    })
+}
+
+#[cfg(all(test, feature = "experimental-pq"))]
+mod experimental_pq_ffi_tests {
+    use super::*;
+    use crypto_backend::{
+        experimental_pq::{MlDsa65SecretKey, MlKem768SecretKey},
+        AwsLc,
+    };
+    use crypto_traits::Aead;
+
+    #[test]
+    fn generated_private_material_crosses_the_boundary_only_as_authenticated_ciphertext() {
+        let wrapping_key = vec![0x42; 32];
+        let material = generate_experimental_pq_wrapped_key_material(wrapping_key.clone()).unwrap();
+        assert_eq!(material.nonce.len(), 12);
+        assert_eq!(material.encrypted_private_key.len(), 132);
+        assert_eq!(material.ml_dsa_65_public_key.len(), 1_952);
+        assert_eq!(material.ml_kem_768_public_key.len(), 1_184);
+
+        let plaintext = AwsLc
+            .open(
+                &wrapping_key,
+                &material.nonce,
+                b"euwallet-experimental-pq-custody-v1",
+                &material.encrypted_private_key,
+            )
+            .unwrap();
+        assert_eq!(&plaintext[..20], b"EUWALLET-PQ-SEEDS-V1");
+        let dsa = MlDsa65SecretKey::from_seed(&plaintext[20..52]).unwrap();
+        let kem = MlKem768SecretKey::from_seed(&plaintext[52..116]).unwrap();
+        assert_eq!(dsa.public_key(), material.ml_dsa_65_public_key);
+        assert_eq!(kem.public_key(), material.ml_kem_768_public_key);
+    }
+
+    #[test]
+    fn wrapping_key_length_is_strict() {
+        assert_eq!(
+            generate_experimental_pq_wrapped_key_material(vec![0; 31]).unwrap_err(),
+            ExperimentalPqFfiError::InvalidWrappingKey
+        );
+    }
+
+    #[test]
+    fn wrapped_signing_returns_only_a_valid_signature_and_rejects_tampering() {
+        use crypto_backend::experimental_pq::verify_ml_dsa_65;
+
+        let wrapping_key = vec![0x24; 32];
+        let material = generate_experimental_pq_wrapped_key_material(wrapping_key.clone()).unwrap();
+        let payload = b"domain-separated-hybrid-tbs".to_vec();
+        let signature = sign_experimental_pq_wrapped_key_material(
+            wrapping_key.clone(),
+            material.nonce.clone(),
+            material.encrypted_private_key.clone(),
+            payload.clone(),
+        )
+        .unwrap();
+        verify_ml_dsa_65(&material.ml_dsa_65_public_key, &payload, &signature).unwrap();
+
+        let mut tampered = material.encrypted_private_key;
+        tampered[0] ^= 1;
+        assert_eq!(
+            sign_experimental_pq_wrapped_key_material(
+                wrapping_key,
+                material.nonce,
+                tampered,
+                payload,
+            ),
+            Err(ExperimentalPqFfiError::InvalidWrappedMaterial)
+        );
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct FfiDurableCheckpoint {
     pub generation: u64,
@@ -6166,6 +6422,75 @@ mod structured_sdjwt_tests {
             ))
             .unwrap_err();
             assert!(cross_screen.contains("does not match the rendered screen"));
+        }
+
+        #[test]
+        fn hybrid_signature_callback_is_atomic_correlated_and_single_use() {
+            let mut core = Core::new("wallet.example", "device-key");
+            let effect = Effect::HybridSign {
+                profile: ExperimentalHybridSignatureProfile::Es256MlDsa65V1,
+                key_ref: "wallet-key".into(),
+                purpose: ExperimentalHybridSignPurpose::Presentation,
+                payload: vec![1, 2, 3],
+            };
+            let output = core.serialize_wire_effects(vec![effect.clone()]).unwrap();
+            let hybrid_operation_id = operation_id(&output);
+            assert!(output.contains(r#""type":"hybridSign""#));
+            assert!(output.contains(r#""profile":"euwallet-hybrid-pq-v1""#));
+            assert!(output.contains(r#""resultType":"hybridSignatureProduced""#));
+
+            assert!(core
+                .handle_event_json(&format!(
+                    r#"{{"type":"hybridSignatureProduced","operationId":{},"profile":"euwallet-hybrid-pq-v1","classicalSignature":[],"postQuantumSignature":[]}}"#,
+                    hybrid_operation_id + 1
+                ))
+                .unwrap_err()
+                .contains("stale or unknown operationId"));
+            assert!(core
+                .handle_event_json(&format!(
+                    r#"{{"type":"hybridSignatureProduced","operationId":{hybrid_operation_id},"profile":"classical-only","classicalSignature":[],"postQuantumSignature":[]}}"#
+                ))
+                .unwrap_err()
+                .contains("unknown variant"));
+            assert!(core.pending_operations.contains_key(&hybrid_operation_id));
+
+            let mut restarted = Core::new("wallet.example", "device-key");
+            assert!(restarted
+                .handle_event_json(&format!(
+                    r#"{{"type":"hybridSignatureProduced","operationId":{hybrid_operation_id},"profile":"euwallet-hybrid-pq-v1","classicalSignature":[],"postQuantumSignature":[]}}"#
+                ))
+                .unwrap_err()
+                .contains("stale or unknown operationId"));
+
+            let malformed = core
+                .handle_event_json(&format!(
+                    r#"{{"type":"hybridSignatureProduced","operationId":{hybrid_operation_id},"profile":"euwallet-hybrid-pq-v1","classicalSignature":[1],"postQuantumSignature":[2]}}"#
+                ))
+                .unwrap_err();
+            assert!(malformed.contains("malformed hybrid signature components"));
+            assert!(core.pending_operations.contains_key(&hybrid_operation_id));
+
+            let classical = serde_json::to_string(&vec![3u8; 64]).unwrap();
+            let post_quantum = serde_json::to_string(&vec![4u8; 3_309]).unwrap();
+            assert_eq!(
+                core.handle_event_json(&format!(
+                    r#"{{"type":"hybridSignatureProduced","operationId":{hybrid_operation_id},"profile":"euwallet-hybrid-pq-v1","classicalSignature":{classical},"postQuantumSignature":{post_quantum}}}"#
+                )),
+                Ok("[]".into())
+            );
+            assert!(!core.pending_operations.contains_key(&hybrid_operation_id));
+            assert!(core
+                .handle_event_json(&format!(
+                    r#"{{"type":"hybridSignatureProduced","operationId":{hybrid_operation_id},"profile":"euwallet-hybrid-pq-v1","classicalSignature":{classical},"postQuantumSignature":{post_quantum}}}"#
+                ))
+                .unwrap_err()
+                .contains("stale or unknown operationId"));
+
+            let cancelled_id = operation_id(&core.serialize_wire_effects(vec![effect]).unwrap());
+            let _ = core.handle_event_json(&format!(
+                r#"{{"type":"operationCancelled","operationId":{cancelled_id}}}"#
+            ));
+            assert!(!core.pending_operations.contains_key(&cancelled_id));
         }
 
         #[test]

@@ -292,6 +292,12 @@ public enum WalletEffect: Decodable {
     case persistNonce(operationId: UInt64, nonce: String)
     case render(operationId: UInt64?, authorizationHash: [UInt8]?, screen: ScreenDescription)
     case sign(operationId: UInt64, keyRef: String, payload: [UInt8])
+    case hybridSign(
+        operationId: UInt64,
+        profile: ExperimentalHybridSignatureProfile,
+        keyRef: String,
+        purpose: ExperimentalHybridSignPurpose,
+        payload: [UInt8])
     case http(
         operationId: UInt64,
         resultType: HttpResultType,
@@ -311,7 +317,7 @@ public enum WalletEffect: Decodable {
     case close
 
     private enum CodingKeys: String, CodingKey {
-        case type, clientId, nonce, screen, keyRef, payload, url, body, proofJwt, offeredKey
+        case type, clientId, nonce, screen, keyRef, purpose, payload, url, body, proofJwt, offeredKey
         case uri, operationId, resultType, profile, authorizationHash
     }
 
@@ -373,6 +379,14 @@ public enum WalletEffect: Decodable {
                 operationId: try c.decode(UInt64.self, forKey: .operationId),
                 keyRef: try c.decode(String.self, forKey: .keyRef),
                 payload: try c.decode([UInt8].self, forKey: .payload))
+        case "hybridSign":
+            self = .hybridSign(
+                operationId: try c.decode(UInt64.self, forKey: .operationId),
+                profile: try c.decode(
+                    ExperimentalHybridSignatureProfile.self, forKey: .profile),
+                keyRef: try c.decode(String.self, forKey: .keyRef),
+                purpose: try c.decode(ExperimentalHybridSignPurpose.self, forKey: .purpose),
+                payload: try c.decode([UInt8].self, forKey: .payload))
         case "http":
             let resultType = try c.decode(HttpResultType.self, forKey: .resultType)
             let profile = try c.decode(HttpDeliveryProfile.self, forKey: .profile)
@@ -416,6 +430,16 @@ public enum WalletEffect: Decodable {
                 debugDescription: "Unknown wallet effect type")
         }
     }
+}
+
+public enum ExperimentalHybridSignatureProfile: String, Decodable, Equatable {
+    case es256MlDsa65V1 = "euwallet-hybrid-pq-v1"
+}
+
+public enum ExperimentalHybridSignPurpose: String, Decodable, Equatable {
+    case credentialBinding
+    case presentation
+    case walletAuthentication
 }
 
 public enum HttpResultType: String, Decodable, Equatable {
@@ -476,6 +500,14 @@ public enum WalletEventJSON {
     }
     public static func deviceSignatureProduced(operationId: UInt64, signature: Data) -> String {
         #"{"type":"deviceSignatureProduced","operationId":\#(operationId),"signature":\#(byteArray(signature))}"#
+    }
+    public static func hybridSignatureProduced(
+        operationId: UInt64,
+        profile: ExperimentalHybridSignatureProfile,
+        classicalSignature: Data,
+        postQuantumSignature: Data
+    ) -> String {
+        #"{"type":"hybridSignatureProduced","operationId":\#(operationId),"profile":\#(jsonString(profile.rawValue)),"classicalSignature":\#(byteArray(classicalSignature)),"postQuantumSignature":\#(byteArray(postQuantumSignature))}"#
     }
     public static func presentationDelivered(operationId: UInt64) -> String {
         #"{"type":"presentationDelivered","operationId":\#(operationId)}"#

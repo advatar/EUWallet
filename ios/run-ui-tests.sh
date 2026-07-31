@@ -28,6 +28,8 @@ derived_data="${EUWALLET_UI_TEST_DERIVED_DATA:-/tmp/EUWallet-ui-tests}"
 xcodebuild test \
   -project EUWalletDemo.xcodeproj \
   -scheme EUWalletDemo \
+  -parallel-testing-enabled NO \
+  -maximum-concurrent-test-simulator-destinations 1 \
   -destination "platform=iOS Simulator,id=${simulator_id}" \
   -derivedDataPath "${derived_data}" \
   CODE_SIGNING_ALLOWED=NO \

@@ -357,6 +357,7 @@ public enum EffectCascadeOutcome: Equatable {
 public final class EffectExecutor {
     private let lifecycle: DurableLifecycleCoordinator
     private let signer: Signer
+    private let hybridSigner: ExperimentalHybridSigning?
     private let http: HttpClient
     private let storage: SecureStorage
     private let trust: TrustResolver
@@ -371,6 +372,7 @@ public final class EffectExecutor {
     public init(
         lifecycle: DurableLifecycleCoordinator,
         signer: Signer,
+        hybridSigner: ExperimentalHybridSigning? = nil,
         http: HttpClient,
         storage: SecureStorage,
         trust: TrustResolver,
@@ -382,6 +384,7 @@ public final class EffectExecutor {
     ) {
         self.lifecycle = lifecycle
         self.signer = signer
+        self.hybridSigner = hybridSigner
         self.http = http
         self.storage = storage
         self.trust = trust
@@ -597,6 +600,29 @@ public final class EffectExecutor {
                 let sig = try signer.sign(keyRef: keyRef, payload: Data(payload))
                 return WalletEventJSON.deviceSignatureProduced(
                     operationId: operationId, signature: sig)
+            } catch is CancellationError {
+                return WalletEventJSON.operationCancelled(operationId: operationId)
+            } catch {
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .signing)
+            }
+        case .hybridSign(let operationId, let profile, let keyRef, let purpose, let payload):
+            guard let hybridSigner else {
+                return WalletEventJSON.operationFailed(
+                    operationId: operationId, failure: .missingDependency)
+            }
+            do {
+                let signature = try hybridSigner.sign(
+                    logicalKeyID: keyRef,
+                    profile: profile,
+                    purpose: purpose,
+                    payload: Data(payload),
+                    prompt: "Authenticate hybrid signature")
+                return WalletEventJSON.hybridSignatureProduced(
+                    operationId: operationId,
+                    profile: profile,
+                    classicalSignature: signature.classicalSignature,
+                    postQuantumSignature: signature.postQuantumSignature)
             } catch is CancellationError {
                 return WalletEventJSON.operationCancelled(operationId: operationId)
             } catch {

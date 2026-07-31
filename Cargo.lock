@@ -1607,6 +1607,7 @@ dependencies = [
  "cose",
  "crypto-backend",
  "crypto-traits",
+ "hybrid-pq",
  "iso18013-5",
  "jwe",
  "mdoc",

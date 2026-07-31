@@ -17,7 +17,7 @@ OUT=ios/WalletCore.xcframework
 GEN=ios/Generated
 
 # 1) Regenerate Swift bindings from a host build of the cdylib.
-cargo build -p wallet-core
+cargo build -p wallet-core --features experimental-pq
 cargo run -p wallet-core --bin uniffi-bindgen -- generate \
   --no-format --library target/debug/libwallet_core.dylib --language swift --out-dir "$GEN"
 # UniFFI currently emits trailing horizontal whitespace. Normalize it here so regeneration is
@@ -31,8 +31,8 @@ perl -pi -e 's/[[:blank:]]+$//' "$GEN"/wallet_core.swift "$GEN"/wallet_coreFFI.h
 #    resolves at final app-link against the iOS SDK. Pin the deployment target so the aws-lc
 #    objects (built for a modern iOS) and the archive agree (silences the version-mismatch warns).
 export IPHONEOS_DEPLOYMENT_TARGET=16.0
-cargo rustc -p wallet-core --lib --release --target aarch64-apple-ios --crate-type staticlib
-cargo rustc -p wallet-core --lib --release --target aarch64-apple-ios-sim --crate-type staticlib
+cargo rustc -p wallet-core --features experimental-pq --lib --release --target aarch64-apple-ios --crate-type staticlib
+cargo rustc -p wallet-core --features experimental-pq --lib --release --target aarch64-apple-ios-sim --crate-type staticlib
 
 # 3) Assemble the modulemap headers directory expected by xcframework.
 HDR=target/uniffi-headers
