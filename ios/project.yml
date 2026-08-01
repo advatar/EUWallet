@@ -113,6 +113,7 @@ targets:
       - path: Generated/wallet_core.swift
       - path: App/DemoAdapters.swift
     dependencies:
+      - target: EUWalletDemo
       - framework: WalletCore.xcframework
         embed: false
         link: true
@@ -121,6 +122,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.tests
         GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: L2AF8KFX35
+        CODE_SIGN_STYLE: Automatic
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/EUWallet.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/EUWallet"
         OTHER_LDFLAGS: "-lc++"
 
   EUWalletDemoUITests:
@@ -134,6 +138,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.uitests
         GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: L2AF8KFX35
+        CODE_SIGN_STYLE: Automatic
         TEST_TARGET_NAME: EUWalletDemo
 
 schemes:
