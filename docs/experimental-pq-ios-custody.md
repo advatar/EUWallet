@@ -50,6 +50,12 @@ that unlock a generation must clear the returned wrapping-key `Data` with
   generation binding, component-secret failure and transcript tampering with no partial plaintext.
 - Rust/Swift export tests cover real durable-checkpoint export/restore, exact identity/generation
   and trusted-key binding, component signatures, expiry and checkpoint tampering.
+- The isolated live-provider coordinator uses the existing HTTPS/PAR/PKCE/DPoP authorization-code
+  transport for `dev.advatar.hybrid-pq.sd-jwt.v1`, pins the issuer profile and complete public-key
+  envelope, decodes the returned canonical-CBOR wrapper, and admits it only after Rust verifies
+  origin, configuration, payload semantics, disclosure hashes, unsigned key bindings, freshness,
+  and both signatures. The result has only the `urn:advatar:experimental:pq:` catalogue type and
+  is never passed to production Core holdings or request selection.
 - `ios/verify-rust-xcframework.sh` verifies the generated wrapped-key function and checksum in both
   physical-device and simulator static-library slices.
 

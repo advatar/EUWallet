@@ -1468,6 +1468,96 @@ public func FfiConverterTypeFfiDurableCheckpoint_lower(_ value: FfiDurableCheckp
 }
 
 
+public struct FfiExperimentalCredential {
+    public var namespacedType: String
+    public var payload: Data
+    public var disclosures: [Data]
+    public var issuerOrigin: String
+    public var keyGeneration: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(namespacedType: String, payload: Data, disclosures: [Data], issuerOrigin: String, keyGeneration: UInt64) {
+        self.namespacedType = namespacedType
+        self.payload = payload
+        self.disclosures = disclosures
+        self.issuerOrigin = issuerOrigin
+        self.keyGeneration = keyGeneration
+    }
+}
+
+
+
+extension FfiExperimentalCredential: Equatable, Hashable {
+    public static func ==(lhs: FfiExperimentalCredential, rhs: FfiExperimentalCredential) -> Bool {
+        if lhs.namespacedType != rhs.namespacedType {
+            return false
+        }
+        if lhs.payload != rhs.payload {
+            return false
+        }
+        if lhs.disclosures != rhs.disclosures {
+            return false
+        }
+        if lhs.issuerOrigin != rhs.issuerOrigin {
+            return false
+        }
+        if lhs.keyGeneration != rhs.keyGeneration {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(namespacedType)
+        hasher.combine(payload)
+        hasher.combine(disclosures)
+        hasher.combine(issuerOrigin)
+        hasher.combine(keyGeneration)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiExperimentalCredential: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiExperimentalCredential {
+        return
+            try FfiExperimentalCredential(
+                namespacedType: FfiConverterString.read(from: &buf),
+                payload: FfiConverterData.read(from: &buf),
+                disclosures: FfiConverterSequenceData.read(from: &buf),
+                issuerOrigin: FfiConverterString.read(from: &buf),
+                keyGeneration: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiExperimentalCredential, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.namespacedType, into: &buf)
+        FfiConverterData.write(value.payload, into: &buf)
+        FfiConverterSequenceData.write(value.disclosures, into: &buf)
+        FfiConverterString.write(value.issuerOrigin, into: &buf)
+        FfiConverterUInt64.write(value.keyGeneration, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalCredential_lift(_ buf: RustBuffer) throws -> FfiExperimentalCredential {
+    return try FfiConverterTypeFfiExperimentalCredential.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalCredential_lower(_ value: FfiExperimentalCredential) -> RustBuffer {
+    return FfiConverterTypeFfiExperimentalCredential.lower(value)
+}
+
+
 public struct FfiExperimentalHybridExportDraft {
     public var walletIdentity: String
     public var keyGeneration: UInt64
@@ -2072,6 +2162,184 @@ public func FfiConverterTypeFfiExperimentalPqWrappedKeyMaterial_lower(_ value: F
 }
 
 
+public struct FfiExperimentalProviderCredentialRequest {
+    public var origin: String
+    public var allowedOrigins: [String]
+    public var offeredKeyAgreementProfiles: [String]
+    public var credentialConfigurationId: String
+    public var credentialFormat: String
+    public var wrapper: Data
+    public var publicKeyEnvelope: Data
+    public var expectedClassicalKeyId: String
+    public var expectedPqKeyId: String
+    public var expectedGeneration: UInt64
+    public var walletIdentity: Data
+    public var issuerIdentity: String
+    public var transactionId: Data
+    public var audience: String
+    public var nonce: Data
+    public var nowEpochSeconds: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(origin: String, allowedOrigins: [String], offeredKeyAgreementProfiles: [String], credentialConfigurationId: String, credentialFormat: String, wrapper: Data, publicKeyEnvelope: Data, expectedClassicalKeyId: String, expectedPqKeyId: String, expectedGeneration: UInt64, walletIdentity: Data, issuerIdentity: String, transactionId: Data, audience: String, nonce: Data, nowEpochSeconds: UInt64) {
+        self.origin = origin
+        self.allowedOrigins = allowedOrigins
+        self.offeredKeyAgreementProfiles = offeredKeyAgreementProfiles
+        self.credentialConfigurationId = credentialConfigurationId
+        self.credentialFormat = credentialFormat
+        self.wrapper = wrapper
+        self.publicKeyEnvelope = publicKeyEnvelope
+        self.expectedClassicalKeyId = expectedClassicalKeyId
+        self.expectedPqKeyId = expectedPqKeyId
+        self.expectedGeneration = expectedGeneration
+        self.walletIdentity = walletIdentity
+        self.issuerIdentity = issuerIdentity
+        self.transactionId = transactionId
+        self.audience = audience
+        self.nonce = nonce
+        self.nowEpochSeconds = nowEpochSeconds
+    }
+}
+
+
+
+extension FfiExperimentalProviderCredentialRequest: Equatable, Hashable {
+    public static func ==(lhs: FfiExperimentalProviderCredentialRequest, rhs: FfiExperimentalProviderCredentialRequest) -> Bool {
+        if lhs.origin != rhs.origin {
+            return false
+        }
+        if lhs.allowedOrigins != rhs.allowedOrigins {
+            return false
+        }
+        if lhs.offeredKeyAgreementProfiles != rhs.offeredKeyAgreementProfiles {
+            return false
+        }
+        if lhs.credentialConfigurationId != rhs.credentialConfigurationId {
+            return false
+        }
+        if lhs.credentialFormat != rhs.credentialFormat {
+            return false
+        }
+        if lhs.wrapper != rhs.wrapper {
+            return false
+        }
+        if lhs.publicKeyEnvelope != rhs.publicKeyEnvelope {
+            return false
+        }
+        if lhs.expectedClassicalKeyId != rhs.expectedClassicalKeyId {
+            return false
+        }
+        if lhs.expectedPqKeyId != rhs.expectedPqKeyId {
+            return false
+        }
+        if lhs.expectedGeneration != rhs.expectedGeneration {
+            return false
+        }
+        if lhs.walletIdentity != rhs.walletIdentity {
+            return false
+        }
+        if lhs.issuerIdentity != rhs.issuerIdentity {
+            return false
+        }
+        if lhs.transactionId != rhs.transactionId {
+            return false
+        }
+        if lhs.audience != rhs.audience {
+            return false
+        }
+        if lhs.nonce != rhs.nonce {
+            return false
+        }
+        if lhs.nowEpochSeconds != rhs.nowEpochSeconds {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(origin)
+        hasher.combine(allowedOrigins)
+        hasher.combine(offeredKeyAgreementProfiles)
+        hasher.combine(credentialConfigurationId)
+        hasher.combine(credentialFormat)
+        hasher.combine(wrapper)
+        hasher.combine(publicKeyEnvelope)
+        hasher.combine(expectedClassicalKeyId)
+        hasher.combine(expectedPqKeyId)
+        hasher.combine(expectedGeneration)
+        hasher.combine(walletIdentity)
+        hasher.combine(issuerIdentity)
+        hasher.combine(transactionId)
+        hasher.combine(audience)
+        hasher.combine(nonce)
+        hasher.combine(nowEpochSeconds)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiExperimentalProviderCredentialRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiExperimentalProviderCredentialRequest {
+        return
+            try FfiExperimentalProviderCredentialRequest(
+                origin: FfiConverterString.read(from: &buf),
+                allowedOrigins: FfiConverterSequenceString.read(from: &buf),
+                offeredKeyAgreementProfiles: FfiConverterSequenceString.read(from: &buf),
+                credentialConfigurationId: FfiConverterString.read(from: &buf),
+                credentialFormat: FfiConverterString.read(from: &buf),
+                wrapper: FfiConverterData.read(from: &buf),
+                publicKeyEnvelope: FfiConverterData.read(from: &buf),
+                expectedClassicalKeyId: FfiConverterString.read(from: &buf),
+                expectedPqKeyId: FfiConverterString.read(from: &buf),
+                expectedGeneration: FfiConverterUInt64.read(from: &buf),
+                walletIdentity: FfiConverterData.read(from: &buf),
+                issuerIdentity: FfiConverterString.read(from: &buf),
+                transactionId: FfiConverterData.read(from: &buf),
+                audience: FfiConverterString.read(from: &buf),
+                nonce: FfiConverterData.read(from: &buf),
+                nowEpochSeconds: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiExperimentalProviderCredentialRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.origin, into: &buf)
+        FfiConverterSequenceString.write(value.allowedOrigins, into: &buf)
+        FfiConverterSequenceString.write(value.offeredKeyAgreementProfiles, into: &buf)
+        FfiConverterString.write(value.credentialConfigurationId, into: &buf)
+        FfiConverterString.write(value.credentialFormat, into: &buf)
+        FfiConverterData.write(value.wrapper, into: &buf)
+        FfiConverterData.write(value.publicKeyEnvelope, into: &buf)
+        FfiConverterString.write(value.expectedClassicalKeyId, into: &buf)
+        FfiConverterString.write(value.expectedPqKeyId, into: &buf)
+        FfiConverterUInt64.write(value.expectedGeneration, into: &buf)
+        FfiConverterData.write(value.walletIdentity, into: &buf)
+        FfiConverterString.write(value.issuerIdentity, into: &buf)
+        FfiConverterData.write(value.transactionId, into: &buf)
+        FfiConverterString.write(value.audience, into: &buf)
+        FfiConverterData.write(value.nonce, into: &buf)
+        FfiConverterUInt64.write(value.nowEpochSeconds, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalProviderCredentialRequest_lift(_ buf: RustBuffer) throws -> FfiExperimentalProviderCredentialRequest {
+    return try FfiConverterTypeFfiExperimentalProviderCredentialRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalProviderCredentialRequest_lower(_ value: FfiExperimentalProviderCredentialRequest) -> RustBuffer {
+    return FfiConverterTypeFfiExperimentalProviderCredentialRequest.lower(value)
+}
+
+
 /**
  * Everything the shell must load/feed to drive a REAL OpenID4VCI issuance against the core: the
  * trusted list (anchoring the issuer), the device key + Wallet Unit Attestation (so the in-core
@@ -2494,6 +2762,7 @@ public enum ExperimentalPqFfiError {
     case SigningFailed
     case RecoveryFailed
     case ExportFailed
+    case ProviderCredentialFailed
 }
 
 
@@ -2517,6 +2786,7 @@ public struct FfiConverterTypeExperimentalPqFfiError: FfiConverterRustBuffer {
         case 5: return .SigningFailed
         case 6: return .RecoveryFailed
         case 7: return .ExportFailed
+        case 8: return .ProviderCredentialFailed
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2555,6 +2825,10 @@ public struct FfiConverterTypeExperimentalPqFfiError: FfiConverterRustBuffer {
 
         case .ExportFailed:
             writeInt(&buf, Int32(7))
+
+
+        case .ProviderCredentialFailed:
+            writeInt(&buf, Int32(8))
 
         }
     }
@@ -2727,6 +3001,17 @@ public func signExperimentalPqWrappedKeyMaterial(wrappingKey: Data, nonce: Data,
 })
 }
 /**
+ * Verify one allow-listed private-provider response and classify it into the structurally
+ * separate experimental catalogue namespace. This path cannot create a production holding.
+ */
+public func verifyExperimentalProviderCredential(request: FfiExperimentalProviderCredentialRequest)throws  -> FfiExperimentalCredential {
+    return try  FfiConverterTypeFfiExperimentalCredential.lift(try rustCallWithError(FfiConverterTypeExperimentalPqFfiError.lift) {
+    uniffi_wallet_core_fn_func_verify_experimental_provider_credential(
+        FfiConverterTypeFfiExperimentalProviderCredentialRequest.lower(request),$0
+    )
+})
+}
+/**
  * Verify a wallet export bundle's integrity hash (TS10). Callable from the shell before re-import.
  */
 public func verifyWalletExport(json: String) -> Bool {
@@ -2771,6 +3056,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_func_sign_experimental_pq_wrapped_key_material() != 24508) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_func_verify_experimental_provider_credential() != 12363) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_func_verify_wallet_export() != 147) {

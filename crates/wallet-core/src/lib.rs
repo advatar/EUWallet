@@ -5139,6 +5139,37 @@ pub struct FfiExperimentalHybridExportOpenRequest {
 }
 
 #[cfg(feature = "experimental-pq")]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FfiExperimentalProviderCredentialRequest {
+    pub origin: String,
+    pub allowed_origins: Vec<String>,
+    pub offered_key_agreement_profiles: Vec<String>,
+    pub credential_configuration_id: String,
+    pub credential_format: String,
+    pub wrapper: Vec<u8>,
+    pub public_key_envelope: Vec<u8>,
+    pub expected_classical_key_id: String,
+    pub expected_pq_key_id: String,
+    pub expected_generation: u64,
+    pub wallet_identity: Vec<u8>,
+    pub issuer_identity: String,
+    pub transaction_id: Vec<u8>,
+    pub audience: String,
+    pub nonce: Vec<u8>,
+    pub now_epoch_seconds: u64,
+}
+
+#[cfg(feature = "experimental-pq")]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FfiExperimentalCredential {
+    pub namespaced_type: String,
+    pub payload: Vec<u8>,
+    pub disclosures: Vec<Vec<u8>>,
+    pub issuer_origin: String,
+    pub key_generation: u64,
+}
+
+#[cfg(feature = "experimental-pq")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]
 pub enum ExperimentalPqFfiError {
     InvalidWrappingKey,
@@ -5148,6 +5179,7 @@ pub enum ExperimentalPqFfiError {
     SigningFailed,
     RecoveryFailed,
     ExportFailed,
+    ProviderCredentialFailed,
 }
 
 #[cfg(feature = "experimental-pq")]
@@ -5161,6 +5193,7 @@ impl core::fmt::Display for ExperimentalPqFfiError {
             Self::SigningFailed => "experimental_pq_signing_failed",
             Self::RecoveryFailed => "experimental_pq_recovery_failed",
             Self::ExportFailed => "experimental_pq_export_failed",
+            Self::ProviderCredentialFailed => "experimental_pq_provider_credential_failed",
         })
     }
 }
@@ -5338,6 +5371,178 @@ pub fn open_experimental_hybrid_wallet_export(
     Ok(FfiDurableCheckpoint {
         generation: export.checkpoint_generation,
         bytes: export.checkpoint,
+    })
+}
+
+/// Verify one allow-listed private-provider response and classify it into the structurally
+/// separate experimental catalogue namespace. This path cannot create a production holding.
+#[cfg(feature = "experimental-pq")]
+#[uniffi::export]
+pub fn verify_experimental_provider_credential(
+    request: FfiExperimentalProviderCredentialRequest,
+) -> Result<FfiExperimentalCredential, ExperimentalPqFfiError> {
+    use crypto_backend::experimental_pq::verify_ml_dsa_65;
+    use crypto_traits::{Alg, Digest, Verifier};
+    use hybrid_pq::envelope::{decode_public_key, encode_public_key};
+    use hybrid_pq::tbs::{HybridContext, HybridPurpose};
+    use hybrid_pq::use_cases::{ExperimentalCredentialWrapper, PrivateProviderPolicy};
+    use hybrid_pq::wrapper::{
+        decode_credential_wrapper, encode_credential_wrapper, verify_credential_wrapper,
+        WrapperBinding, CREDENTIAL_FORMAT,
+    };
+    use hybrid_pq::{
+        HybridComponent, HybridCryptoError, HybridPublicKey, HybridSignature, HybridVerifier,
+    };
+
+    const CONFIGURATION_ID: &str = "dev.advatar.hybrid-pq.sd-jwt.v1";
+    const LOCAL_TYPE: &str = "vcissuer-hybrid-credential-v1";
+
+    struct Backend;
+    impl HybridVerifier for Backend {
+        fn verify_hybrid(
+            &self,
+            key: &HybridPublicKey,
+            hybrid_tbs: &hybrid_pq::tbs::HybridTbs,
+            signature: &HybridSignature,
+        ) -> Result<(), HybridCryptoError> {
+            AwsLc
+                .verify(
+                    Alg::Es256,
+                    key.classical(),
+                    hybrid_tbs.as_bytes(),
+                    signature.classical(),
+                )
+                .map_err(|_| HybridCryptoError::VerificationFailure {
+                    component: HybridComponent::Classical,
+                })?;
+            verify_ml_dsa_65(
+                key.post_quantum(),
+                hybrid_tbs.as_bytes(),
+                signature.post_quantum(),
+            )
+            .map_err(|_| HybridCryptoError::VerificationFailure {
+                component: HybridComponent::PostQuantum,
+            })
+        }
+    }
+
+    fn reject<T>(_: T) -> ExperimentalPqFfiError {
+        ExperimentalPqFfiError::ProviderCredentialFailed
+    }
+    let offered: Vec<&str> = request
+        .offered_key_agreement_profiles
+        .iter()
+        .map(String::as_str)
+        .collect();
+    PrivateProviderPolicy::try_new(request.allowed_origins)
+        .and_then(|policy| policy.authorize(&request.origin, &offered))
+        .map_err(reject)?;
+    if request.credential_configuration_id != CONFIGURATION_ID
+        || request.credential_format != CREDENTIAL_FORMAT
+        || request.issuer_identity != request.origin
+        || request.audience != request.origin
+        || request.transaction_id.is_empty()
+    {
+        return Err(ExperimentalPqFfiError::ProviderCredentialFailed);
+    }
+    let wrapper = decode_credential_wrapper(&request.wrapper).map_err(reject)?;
+    if encode_credential_wrapper(&wrapper) != request.wrapper {
+        return Err(ExperimentalPqFfiError::ProviderCredentialFailed);
+    }
+    let public_key = decode_public_key(&request.public_key_envelope).map_err(reject)?;
+    if encode_public_key(&public_key) != request.public_key_envelope {
+        return Err(ExperimentalPqFfiError::ProviderCredentialFailed);
+    }
+    let payload: ciborium::Value = ciborium::from_reader(wrapper.payload()).map_err(reject)?;
+    let ciborium::Value::Map(payload) = payload else {
+        return Err(ExperimentalPqFfiError::ProviderCredentialFailed);
+    };
+    let field = |key: u64| {
+        payload
+            .iter()
+            .find_map(|(candidate, value)| match candidate {
+                ciborium::Value::Integer(integer) if u64::try_from(*integer).ok() == Some(key) => {
+                    Some(value)
+                }
+                _ => None,
+            })
+    };
+    let issuer = match field(1) {
+        Some(ciborium::Value::Text(value)) => value,
+        _ => return Err(ExperimentalPqFfiError::ProviderCredentialFailed),
+    };
+    let created_at_epoch_seconds = match field(2) {
+        Some(ciborium::Value::Integer(value)) => u64::try_from(*value).map_err(reject)?,
+        _ => return Err(ExperimentalPqFfiError::ProviderCredentialFailed),
+    };
+    let expires_at_epoch_seconds = match field(3) {
+        Some(ciborium::Value::Integer(value)) => u64::try_from(*value).map_err(reject)?,
+        _ => return Err(ExperimentalPqFfiError::ProviderCredentialFailed),
+    };
+    let vct = match field(4) {
+        Some(ciborium::Value::Text(value)) => value,
+        _ => return Err(ExperimentalPqFfiError::ProviderCredentialFailed),
+    };
+    let holder_jwk = match field(5) {
+        Some(ciborium::Value::Bytes(value)) if !value.is_empty() => value,
+        _ => return Err(ExperimentalPqFfiError::ProviderCredentialFailed),
+    };
+    let disclosure_hashes = match field(6) {
+        Some(ciborium::Value::Array(value)) => value,
+        _ => return Err(ExperimentalPqFfiError::ProviderCredentialFailed),
+    };
+    let development_only = matches!(field(7), Some(ciborium::Value::Bool(true)));
+    let disclosure_hashes_are_exact = disclosure_hashes.len() == wrapper.disclosures().len()
+        && disclosure_hashes
+            .iter()
+            .zip(wrapper.disclosures())
+            .all(|(expected, disclosure)| {
+                matches!(expected, ciborium::Value::Bytes(value) if value.as_slice() == AwsLc.sha256(disclosure))
+            });
+    if issuer != &request.origin
+        || vct != "dev.advatar.hybrid-pq.credential.v1"
+        || !development_only
+        || !disclosure_hashes_are_exact
+        || serde_json::from_slice::<serde_json::Value>(holder_jwk).is_err()
+        || request.now_epoch_seconds < created_at_epoch_seconds
+        || request.now_epoch_seconds >= expires_at_epoch_seconds
+    {
+        return Err(ExperimentalPqFfiError::ProviderCredentialFailed);
+    }
+    let context = HybridContext {
+        wallet_identity: request.wallet_identity,
+        issuer_identity: Some(request.issuer_identity.as_bytes().to_vec()),
+        key_generation: request.expected_generation,
+        transaction_id: Some(request.transaction_id),
+        session_id: None,
+        audience: Some(request.audience.as_bytes().to_vec()),
+        nonce: request.nonce,
+        created_at_epoch_seconds,
+        expires_at_epoch_seconds,
+        transcript_hash: None,
+    };
+    verify_credential_wrapper(
+        &wrapper,
+        HybridPurpose::TestSdJwtWrapperV1,
+        &WrapperBinding {
+            classical_key_id: request.expected_classical_key_id,
+            pq_key_id: request.expected_pq_key_id,
+            generation: request.expected_generation,
+        },
+        &context,
+        &public_key,
+        &Backend,
+    )
+    .map_err(reject)?;
+    let classified = ExperimentalCredentialWrapper::try_new(LOCAL_TYPE, wrapper.payload().to_vec())
+        .map_err(reject)?;
+    debug_assert!(!classified.satisfies_production_request("eu.europa.ec.eudi.pid.1"));
+    Ok(FfiExperimentalCredential {
+        namespaced_type: classified.namespaced_type().to_owned(),
+        payload: wrapper.payload().to_vec(),
+        disclosures: wrapper.disclosures().to_vec(),
+        issuer_origin: request.origin,
+        key_generation: wrapper.generation(),
     })
 }
 
@@ -5811,6 +6016,150 @@ mod experimental_pq_ffi_tests {
             }),
             Err(ExperimentalPqFfiError::ExportFailed)
         );
+    }
+
+    #[test]
+    fn private_provider_wrapper_enters_only_the_experimental_catalogue() {
+        use crypto_backend::{experimental_pq::MlDsa65SecretKey, SoftwareSigner};
+        use crypto_traits::{Alg, KeyRef, Signer};
+        use hybrid_pq::envelope::encode_public_key;
+        use hybrid_pq::tbs::{HybridContext, HybridPurpose};
+        use hybrid_pq::wrapper::{encode_credential_wrapper, HybridCredentialWrapper};
+        use hybrid_pq::{HybridPublicKey, HybridSignature, HybridSignatureProfile};
+
+        let classical = SoftwareSigner::generate_p256().unwrap();
+        let post_quantum = MlDsa65SecretKey::from_seed(&[0x29; 32]).unwrap();
+        let disclosure = b"credential-name-disclosure".to_vec();
+        let mut payload = Vec::new();
+        ciborium::into_writer(
+            &ciborium::Value::Map(vec![
+                (
+                    1_u64.into(),
+                    ciborium::Value::Text("https://issuer.example".into()),
+                ),
+                (
+                    2_u64.into(),
+                    ciborium::Value::Integer(1_700_000_000_u64.into()),
+                ),
+                (
+                    3_u64.into(),
+                    ciborium::Value::Integer(1_700_003_600_u64.into()),
+                ),
+                (
+                    4_u64.into(),
+                    ciborium::Value::Text("dev.advatar.hybrid-pq.credential.v1".into()),
+                ),
+                (
+                    5_u64.into(),
+                    ciborium::Value::Bytes(br#"{"kty":"EC"}"#.to_vec()),
+                ),
+                (
+                    6_u64.into(),
+                    ciborium::Value::Array(vec![ciborium::Value::Bytes(
+                        AwsLc.sha256(&disclosure).to_vec(),
+                    )]),
+                ),
+                (7_u64.into(), ciborium::Value::Bool(true)),
+            ]),
+            &mut payload,
+        )
+        .unwrap();
+        let context = HybridContext {
+            wallet_identity: b"wallet-holder-thumbprint".to_vec(),
+            issuer_identity: Some(b"https://issuer.example".to_vec()),
+            key_generation: 9,
+            transaction_id: Some(b"transaction-123".to_vec()),
+            session_id: None,
+            audience: Some(b"https://issuer.example".to_vec()),
+            nonce: (0_u8..32).collect(),
+            created_at_epoch_seconds: 1_700_000_000,
+            expires_at_epoch_seconds: 1_700_003_600,
+            transcript_hash: None,
+        };
+        let draft = HybridCredentialWrapper::try_new(
+            HybridPurpose::TestSdJwtWrapperV1,
+            payload.clone(),
+            vec![disclosure.clone()],
+            "issuer-es256".into(),
+            "issuer-ml-dsa-65".into(),
+            9,
+            HybridSignature::try_new(
+                HybridSignatureProfile::Es256MlDsa65V1,
+                vec![0; 64],
+                vec![0; 3_309],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let tbs = draft.tbs(&context).unwrap();
+        let wrapper = HybridCredentialWrapper::try_new(
+            HybridPurpose::TestSdJwtWrapperV1,
+            payload,
+            vec![disclosure],
+            "issuer-es256".into(),
+            "issuer-ml-dsa-65".into(),
+            9,
+            HybridSignature::try_new(
+                HybridSignatureProfile::Es256MlDsa65V1,
+                classical
+                    .sign(&KeyRef("issuer-es256".into()), Alg::Es256, tbs.as_bytes())
+                    .unwrap(),
+                post_quantum.sign(tbs.as_bytes()).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let request = FfiExperimentalProviderCredentialRequest {
+            origin: "https://issuer.example".into(),
+            allowed_origins: vec!["https://issuer.example".into()],
+            offered_key_agreement_profiles: vec!["euwallet-hybrid-pq-v1".into()],
+            credential_configuration_id: "dev.advatar.hybrid-pq.sd-jwt.v1".into(),
+            credential_format: "dev-hybrid-pq+cbor".into(),
+            wrapper: encode_credential_wrapper(&wrapper),
+            public_key_envelope: encode_public_key(
+                &HybridPublicKey::try_new(
+                    HybridSignatureProfile::Es256MlDsa65V1,
+                    classical.public_key_raw().to_vec(),
+                    post_quantum.public_key(),
+                )
+                .unwrap(),
+            ),
+            expected_classical_key_id: "issuer-es256".into(),
+            expected_pq_key_id: "issuer-ml-dsa-65".into(),
+            expected_generation: 9,
+            wallet_identity: b"wallet-holder-thumbprint".to_vec(),
+            issuer_identity: "https://issuer.example".into(),
+            transaction_id: b"transaction-123".to_vec(),
+            audience: "https://issuer.example".into(),
+            nonce: (0_u8..32).collect(),
+            now_epoch_seconds: 1_700_000_100,
+        };
+        let accepted = verify_experimental_provider_credential(request.clone()).unwrap();
+        assert_eq!(
+            accepted.namespaced_type,
+            "urn:advatar:experimental:pq:vcissuer-hybrid-credential-v1"
+        );
+        assert_eq!(accepted.issuer_origin, "https://issuer.example");
+        assert_eq!(accepted.key_generation, 9);
+
+        for mutate in [
+            |candidate: &mut FfiExperimentalProviderCredentialRequest| {
+                candidate.offered_key_agreement_profiles = vec!["classical-only".into()];
+            },
+            |candidate: &mut FfiExperimentalProviderCredentialRequest| {
+                candidate.origin = "https://attacker.example".into();
+            },
+            |candidate: &mut FfiExperimentalProviderCredentialRequest| {
+                candidate.wrapper[100] ^= 1;
+            },
+        ] {
+            let mut candidate = request.clone();
+            mutate(&mut candidate);
+            assert_eq!(
+                verify_experimental_provider_credential(candidate),
+                Err(ExperimentalPqFfiError::ProviderCredentialFailed)
+            );
+        }
     }
 }
 

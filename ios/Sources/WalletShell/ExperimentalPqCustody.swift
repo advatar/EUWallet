@@ -162,6 +162,123 @@ public protocol ExperimentalHybridExportCryptography: AnyObject {
     ) throws -> CoreDurableCheckpoint
 }
 
+public struct ExperimentalProviderCredentialResponse: Equatable {
+    public let offeredKeyAgreementProfiles: [String]
+    public let credentialConfigurationID: String
+    public let credentialFormat: String
+    public let wrapper: Data
+    public let publicKeyEnvelope: Data
+    public let classicalKeyID: String
+    public let postQuantumKeyID: String
+    public let keyGeneration: UInt64
+    public let transactionID: Data
+    public let nonce: Data
+}
+
+public struct ExperimentalProviderCredentialVerification: Equatable {
+    public let origin: String
+    public let allowedOrigins: [String]
+    public let walletIdentity: Data
+    public let nowEpochSeconds: UInt64
+    public let response: ExperimentalProviderCredentialResponse
+}
+
+public struct ExperimentalCatalogueCredential: Equatable {
+    public let namespacedType: String
+    public let payload: Data
+    public let disclosures: [Data]
+    public let issuerOrigin: String
+    public let keyGeneration: UInt64
+
+    /// Experimental credentials are deliberately invisible to certified request selection.
+    public func satisfiesProductionRequest(_: String) -> Bool { false }
+}
+
+public protocol ExperimentalProviderCredentialVerifying: AnyObject {
+    func verifyProviderCredential(
+        _ verification: ExperimentalProviderCredentialVerification
+    ) throws -> ExperimentalCatalogueCredential
+}
+
+public protocol ExperimentalPrivateProviderTransporting: AnyObject {
+    func fetchHybridCredential(
+        origin: String,
+        credentialConfigurationID: String
+    ) async throws -> ExperimentalProviderCredentialResponse
+}
+
+public final class ExperimentalCredentialCatalogue {
+    private let lock = NSLock()
+    private var credentials: [ExperimentalCatalogueCredential] = []
+
+    public init() {}
+
+    public func insert(_ credential: ExperimentalCatalogueCredential) {
+        lock.withLock { credentials.append(credential) }
+    }
+
+    public func all() -> [ExperimentalCatalogueCredential] {
+        lock.withLock { credentials }
+    }
+}
+
+/// Composes the allow-listed provider transport, Rust atomic wrapper verification, and the
+/// experimental-only catalogue. No value from this coordinator is passed to the production Core
+/// holdings or presentation selector.
+public final class ExperimentalHybridCredentialAcquisition {
+    public static let configurationID = "dev.advatar.hybrid-pq.sd-jwt.v1"
+
+    private let allowedOrigins: [String]
+    private let transport: any ExperimentalPrivateProviderTransporting
+    private let verifier: any ExperimentalProviderCredentialVerifying
+    private let catalogue: ExperimentalCredentialCatalogue
+
+    public init(
+        allowedOrigins: [String],
+        transport: any ExperimentalPrivateProviderTransporting,
+        verifier: any ExperimentalProviderCredentialVerifying,
+        catalogue: ExperimentalCredentialCatalogue
+    ) {
+        self.allowedOrigins = allowedOrigins
+        self.transport = transport
+        self.verifier = verifier
+        self.catalogue = catalogue
+    }
+
+    @discardableResult
+    public func acquire(
+        origin: String,
+        walletIdentity: Data,
+        nowEpochSeconds: UInt64
+    ) async throws -> ExperimentalCatalogueCredential {
+        guard allowedOrigins.contains(origin),
+              let components = URLComponents(string: origin),
+              components.scheme == "https",
+              components.host != nil,
+              components.user == nil,
+              components.password == nil,
+              components.path.isEmpty,
+              components.query == nil,
+              components.fragment == nil
+        else { throw ExperimentalPqCustodyError.malformedMaterial }
+        let response = try await transport.fetchHybridCredential(
+            origin: origin,
+            credentialConfigurationID: Self.configurationID)
+        let credential = try verifier.verifyProviderCredential(
+            ExperimentalProviderCredentialVerification(
+                origin: origin,
+                allowedOrigins: allowedOrigins,
+                walletIdentity: walletIdentity,
+                nowEpochSeconds: nowEpochSeconds,
+                response: response))
+        guard credential.namespacedType.hasPrefix("urn:advatar:experimental:pq:"),
+              !credential.satisfiesProductionRequest("eu.europa.ec.eudi.pid.1")
+        else { throw ExperimentalPqCustodyError.malformedMaterial }
+        catalogue.insert(credential)
+        return credential
+    }
+}
+
 public protocol ExperimentalHybridSigning: AnyObject {
     func sign(
         logicalKeyID: String,

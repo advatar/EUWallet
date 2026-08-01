@@ -112,7 +112,7 @@ algorithm/profile and certification approval.
   - [x] Expose no shared secret until both components and transcript authentication succeed.
   - [x] Reject classical-only fallback whenever hybrid-required policy is active.
   - [x] Qualify implicit rejection, interoperability vectors and malformed/mismatch negatives.
-- [ ] [#90](https://github.com/advatar/EUWallet/issues/90): integrate experimental use cases in
+- [x] [#90](https://github.com/advatar/EUWallet/issues/90): integrate experimental use cases in
       increasing-risk order.
   - [x] Add independent enablement and rollback gates for every experimental delivery slice.
   - [x] Version hybrid export and recovery artifacts without reinterpreting legacy exports.
@@ -122,7 +122,7 @@ algorithm/profile and certification approval.
   - [x] Wire the versioned hybrid export to actual durable wallet state and atomic shell signing.
   - [x] Implement recovery encryption/decryption through the reviewed hybrid key agreement and
         generation-bound AEAD rather than metadata-only artifact helpers.
-  - [ ] Compose allow-listed provider transport negotiation and experimental credential catalogue
+  - [x] Compose allow-listed provider transport negotiation and experimental credential catalogue
         flows end to end, retaining structural exclusion from certified requests.
 - [x] [#119](https://github.com/advatar/EUWallet/issues/119): freeze `HybridCredentialWrapperV1`
       and publish the shared credential-wrapper corpus.

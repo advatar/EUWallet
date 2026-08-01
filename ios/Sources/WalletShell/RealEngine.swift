@@ -11,7 +11,7 @@ import Foundation
 
     /// Generated Rust adapter. Rust generates both PQ keys and returns only AES-GCM-wrapped seeds.
     final class FfiExperimentalPqBackend: ExperimentalPqGenerating,
-        ExperimentalHybridExportCryptography
+        ExperimentalHybridExportCryptography, ExperimentalProviderCredentialVerifying
     {
         func generateWrappedMaterial(
             wrappingKey: inout Data
@@ -155,6 +155,36 @@ import Foundation
                 createdAtEpochSeconds: draft.createdAtEpochSeconds,
                 expiresAtEpochSeconds: draft.expiresAtEpochSeconds,
                 checkpoint: draft.checkpoint)
+        }
+
+        func verifyProviderCredential(
+            _ verification: ExperimentalProviderCredentialVerification
+        ) throws -> ExperimentalCatalogueCredential {
+            let response = verification.response
+            let credential = try verifyExperimentalProviderCredential(
+                request: FfiExperimentalProviderCredentialRequest(
+                    origin: verification.origin,
+                    allowedOrigins: verification.allowedOrigins,
+                    offeredKeyAgreementProfiles: response.offeredKeyAgreementProfiles,
+                    credentialConfigurationId: response.credentialConfigurationID,
+                    credentialFormat: response.credentialFormat,
+                    wrapper: response.wrapper,
+                    publicKeyEnvelope: response.publicKeyEnvelope,
+                    expectedClassicalKeyId: response.classicalKeyID,
+                    expectedPqKeyId: response.postQuantumKeyID,
+                    expectedGeneration: response.keyGeneration,
+                    walletIdentity: verification.walletIdentity,
+                    issuerIdentity: verification.origin,
+                    transactionId: response.transactionID,
+                    audience: verification.origin,
+                    nonce: response.nonce,
+                    nowEpochSeconds: verification.nowEpochSeconds))
+            return ExperimentalCatalogueCredential(
+                namespacedType: credential.namespacedType,
+                payload: credential.payload,
+                disclosures: credential.disclosures,
+                issuerOrigin: credential.issuerOrigin,
+                keyGeneration: credential.keyGeneration)
         }
     }
 

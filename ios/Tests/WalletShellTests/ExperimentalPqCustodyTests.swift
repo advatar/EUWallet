@@ -32,7 +32,9 @@ private final class PqTestSigner: HybridClassicalKeyProviding {
     }
 }
 
-private final class PqTestBackend: ExperimentalPqGenerating, ExperimentalHybridExportCryptography {
+private final class PqTestBackend: ExperimentalPqGenerating, ExperimentalHybridExportCryptography,
+    ExperimentalProviderCredentialVerifying
+{
     var malformed = false
     var signError: Error?
     private(set) var observedKeyLengths: [Int] = []
@@ -124,6 +126,47 @@ private final class PqTestBackend: ExperimentalPqGenerating, ExperimentalHybridE
         nowEpochSeconds _: UInt64
     ) throws -> CoreDurableCheckpoint {
         CoreDurableCheckpoint(generation: 8, bytes: Data("imported-checkpoint".utf8))
+    }
+
+    func verifyProviderCredential(
+        _ verification: ExperimentalProviderCredentialVerification
+    ) throws -> ExperimentalCatalogueCredential {
+        guard verification.origin == "https://issuer.example",
+              verification.allowedOrigins == ["https://issuer.example"],
+              verification.response.offeredKeyAgreementProfiles == ["euwallet-hybrid-pq-v1"],
+              verification.response.credentialConfigurationID
+                == ExperimentalHybridCredentialAcquisition.configurationID
+        else { throw PqExpectedFailure.failure }
+        return ExperimentalCatalogueCredential(
+            namespacedType: "urn:advatar:experimental:pq:vcissuer-hybrid-credential-v1",
+            payload: verification.response.wrapper,
+            disclosures: [],
+            issuerOrigin: verification.origin,
+            keyGeneration: verification.response.keyGeneration)
+    }
+}
+
+private final class PqProviderTransport: ExperimentalPrivateProviderTransporting {
+    private(set) var requestedConfigurationID: String?
+    private(set) var requestCount = 0
+
+    func fetchHybridCredential(
+        origin _: String,
+        credentialConfigurationID: String
+    ) async throws -> ExperimentalProviderCredentialResponse {
+        requestCount += 1
+        requestedConfigurationID = credentialConfigurationID
+        return ExperimentalProviderCredentialResponse(
+            offeredKeyAgreementProfiles: ["euwallet-hybrid-pq-v1"],
+            credentialConfigurationID: credentialConfigurationID,
+            credentialFormat: "dev-hybrid-pq+cbor",
+            wrapper: Data("verified-wrapper".utf8),
+            publicKeyEnvelope: Data("trusted-key".utf8),
+            classicalKeyID: "issuer-es256",
+            postQuantumKeyID: "issuer-ml-dsa-65",
+            keyGeneration: 7,
+            transactionID: Data("transaction".utf8),
+            nonce: Data(repeating: 5, count: 32))
     }
 }
 
@@ -441,6 +484,44 @@ final class ExperimentalPqCustodyTests: XCTestCase {
             CoreDurableCheckpoint(
                 generation: 8,
                 bytes: Data("imported-checkpoint".utf8)))
+    }
+
+    func testPrivateProviderAcquisitionStoresOnlyInExperimentalCatalogue() async throws {
+        let transport = PqProviderTransport()
+        let catalogue = ExperimentalCredentialCatalogue()
+        let acquisition = ExperimentalHybridCredentialAcquisition(
+            allowedOrigins: ["https://issuer.example"],
+            transport: transport,
+            verifier: backend,
+            catalogue: catalogue)
+        let credential = try await acquisition.acquire(
+            origin: "https://issuer.example",
+            walletIdentity: Data("wallet-holder".utf8),
+            nowEpochSeconds: 1_500)
+
+        XCTAssertEqual(
+            transport.requestedConfigurationID,
+            ExperimentalHybridCredentialAcquisition.configurationID)
+        XCTAssertEqual(catalogue.all(), [credential])
+        XCTAssertFalse(credential.satisfiesProductionRequest("eu.europa.ec.eudi.pid.1"))
+        XCTAssertTrue(credential.namespacedType.hasPrefix("urn:advatar:experimental:pq:"))
+
+        do {
+            _ = try await ExperimentalHybridCredentialAcquisition(
+                allowedOrigins: ["https://other.example"],
+                transport: transport,
+                verifier: backend,
+                catalogue: catalogue)
+                .acquire(
+                    origin: "https://issuer.example",
+                    walletIdentity: Data("wallet-holder".utf8),
+                    nowEpochSeconds: 1_500)
+            XCTFail("expected disallowed origin to fail before transport")
+        } catch {
+            XCTAssertEqual(error as? ExperimentalPqCustodyError, .malformedMaterial)
+        }
+        XCTAssertEqual(transport.requestCount, 1)
+        XCTAssertEqual(catalogue.all(), [credential])
     }
 
     func testMalformedBackendMaterialIsNeverCommittedAndCandidateKeyIsDeleted() {

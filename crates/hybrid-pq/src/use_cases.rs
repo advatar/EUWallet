@@ -72,6 +72,7 @@ pub struct HybridWalletExport {
 }
 
 impl HybridWalletExport {
+    #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         wallet_identity: String,
         key_generation: u64,
@@ -309,6 +310,9 @@ impl PrivateProviderPolicy {
                 || authority.contains('/')
                 || authority.contains('?')
                 || authority.contains('#')
+                || authority.contains('@')
+                || authority.contains('\\')
+                || authority.chars().any(char::is_whitespace)
         }) {
             return Err(HybridCryptoError::NonCanonicalInput);
         }
@@ -467,6 +471,9 @@ mod tests {
             "https://provider.example/path",
             "https://provider.example?query",
             "https://provider.example#fragment",
+            "https://user@provider.example",
+            "https://provider.example\\attacker.example",
+            "https://provider.example evil",
         ] {
             assert_eq!(
                 PrivateProviderPolicy::try_new(vec![invalid.into()]),
