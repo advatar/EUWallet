@@ -440,6 +440,7 @@ public enum ExperimentalHybridSignPurpose: String, Decodable, Equatable {
     case credentialBinding
     case presentation
     case walletAuthentication
+    case walletExport
 }
 
 public enum HttpResultType: String, Decodable, Equatable {

@@ -119,6 +119,11 @@ algorithm/profile and certification approval.
   - [x] Restrict provider links to an explicit allow-list and hybrid-required negotiation.
   - [x] Isolate experimental credential wrappers from the production catalogue namespace.
   - [x] Keep production adoption blocked pending standards, CAB/profile and conformance approval.
+  - [x] Wire the versioned hybrid export to actual durable wallet state and atomic shell signing.
+  - [x] Implement recovery encryption/decryption through the reviewed hybrid key agreement and
+        generation-bound AEAD rather than metadata-only artifact helpers.
+  - [x] Compose allow-listed provider transport negotiation and experimental credential catalogue
+        flows end to end, retaining structural exclusion from certified requests.
 - [x] [#119](https://github.com/advatar/EUWallet/issues/119): freeze `HybridCredentialWrapperV1`
       and publish the shared credential-wrapper corpus.
   - [x] Implement strict encode/decode/verify for the eleven-key wrapper with frozen bounds.

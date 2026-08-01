@@ -10,7 +10,9 @@ import Foundation
     import wallet_coreFFI
 
     /// Generated Rust adapter. Rust generates both PQ keys and returns only AES-GCM-wrapped seeds.
-    final class FfiExperimentalPqBackend: ExperimentalPqGenerating {
+    final class FfiExperimentalPqBackend: ExperimentalPqGenerating,
+        ExperimentalHybridExportCryptography, ExperimentalProviderCredentialVerifying
+    {
         func generateWrappedMaterial(
             wrappingKey: inout Data
         ) throws -> ExperimentalPqWrappedMaterial {
@@ -38,6 +40,151 @@ import Foundation
                 nonce: nonce,
                 encryptedPrivateKey: encryptedPrivateKey,
                 payload: payload)
+        }
+
+
+        func openWrappedRecovery(
+            wrappingKey: inout Data,
+            custodyNonce: Data,
+            encryptedPrivateKey: Data,
+            recipientClassicalPublicKey: Data,
+            recipientMlKem768PublicKey: Data,
+            classicalSharedSecret: inout Data,
+            context: Data,
+            envelope: ExperimentalHybridRecoveryEnvelope
+        ) throws -> Data {
+            var keyTransfer = wrappingKey
+            var secretTransfer = classicalSharedSecret
+            defer {
+                keyTransfer.clearSensitiveBytes()
+                secretTransfer.clearSensitiveBytes()
+            }
+            return try openExperimentalHybridRecovery(
+                request: FfiExperimentalHybridRecoveryOpenRequest(
+                    wrappingKey: keyTransfer,
+                    custodyNonce: custodyNonce,
+                    encryptedPrivateKey: encryptedPrivateKey,
+                    recipientClassicalPublicKey: recipientClassicalPublicKey,
+                    recipientMlKem768PublicKey: recipientMlKem768PublicKey,
+                    classicalSharedSecret: secretTransfer,
+                    context: context,
+                    envelope: FfiExperimentalHybridRecoveryEnvelope(
+                        senderIdentity: envelope.senderIdentity,
+                        recipientIdentity: envelope.recipientIdentity,
+                        keyGeneration: envelope.keyGeneration,
+                        classicalEphemeralPublicKey: envelope.classicalEphemeralPublicKey,
+                        mlKem768Ciphertext: envelope.mlKem768Ciphertext,
+                        transcriptHash: envelope.transcriptHash,
+                        nonce: envelope.nonce,
+                        ciphertext: envelope.ciphertext)))
+        }
+
+        func sealRecovery(
+            senderIdentity: String,
+            recipientIdentity: String,
+            keyGeneration: UInt64,
+            recipientClassicalPublicKey: Data,
+            recipientMlKem768PublicKey: Data,
+            context: Data,
+            plaintext: Data
+        ) throws -> ExperimentalHybridRecoveryEnvelope {
+            let envelope = try sealExperimentalHybridRecovery(
+                senderIdentity: senderIdentity,
+                recipientIdentity: recipientIdentity,
+                keyGeneration: keyGeneration,
+                recipientClassicalPublicKey: recipientClassicalPublicKey,
+                recipientMlKem768PublicKey: recipientMlKem768PublicKey,
+                context: context,
+                plaintext: plaintext)
+            return ExperimentalHybridRecoveryEnvelope(
+                senderIdentity: envelope.senderIdentity,
+                recipientIdentity: envelope.recipientIdentity,
+                keyGeneration: envelope.keyGeneration,
+                classicalEphemeralPublicKey: envelope.classicalEphemeralPublicKey,
+                mlKem768Ciphertext: envelope.mlKem768Ciphertext,
+                transcriptHash: envelope.transcriptHash,
+                nonce: envelope.nonce,
+                ciphertext: envelope.ciphertext)
+        }
+
+        func prepareExport(draft: ExperimentalHybridExportDraft) throws -> Data {
+            try prepareExperimentalHybridWalletExport(draft: ffiExportDraft(draft))
+        }
+
+        func finalizeExport(
+            draft: ExperimentalHybridExportDraft,
+            signingMaterial: ExperimentalHybridSigningMaterial,
+            signature: ExperimentalHybridSignature
+        ) throws -> Data {
+            try finalizeExperimentalHybridWalletExport(
+                request: FfiExperimentalHybridExportFinalizeRequest(
+                    draft: ffiExportDraft(draft),
+                    classicalPublicKey: signingMaterial.classicalPublicKey,
+                    mlDsa65PublicKey: signingMaterial.mlDsa65PublicKey,
+                    classicalSignature: signature.classicalSignature,
+                    mlDsa65Signature: signature.postQuantumSignature))
+        }
+
+        func openExport(
+            artifact: Data,
+            expectedWalletIdentity: String,
+            expectedKeyGeneration: UInt64,
+            expectedPublicKeyEnvelope: Data,
+            nowEpochSeconds: UInt64
+        ) throws -> CoreDurableCheckpoint {
+            let checkpoint = try openExperimentalHybridWalletExport(
+                request: FfiExperimentalHybridExportOpenRequest(
+                    artifact: artifact,
+                    expectedWalletIdentity: expectedWalletIdentity,
+                    expectedKeyGeneration: expectedKeyGeneration,
+                    expectedPublicKeyEnvelope: expectedPublicKeyEnvelope,
+                    nowEpochSeconds: nowEpochSeconds))
+            return CoreDurableCheckpoint(
+                generation: checkpoint.generation,
+                bytes: checkpoint.bytes)
+        }
+
+        private func ffiExportDraft(
+            _ draft: ExperimentalHybridExportDraft
+        ) -> FfiExperimentalHybridExportDraft {
+            FfiExperimentalHybridExportDraft(
+                walletIdentity: draft.walletIdentity,
+                keyGeneration: draft.keyGeneration,
+                checkpointGeneration: draft.checkpointGeneration,
+                nonce: draft.nonce,
+                createdAtEpochSeconds: draft.createdAtEpochSeconds,
+                expiresAtEpochSeconds: draft.expiresAtEpochSeconds,
+                checkpoint: draft.checkpoint)
+        }
+
+        func verifyProviderCredential(
+            _ verification: ExperimentalProviderCredentialVerification
+        ) throws -> ExperimentalCatalogueCredential {
+            let response = verification.response
+            let credential = try verifyExperimentalProviderCredential(
+                request: FfiExperimentalProviderCredentialRequest(
+                    origin: verification.origin,
+                    allowedOrigins: verification.allowedOrigins,
+                    offeredKeyAgreementProfiles: response.offeredKeyAgreementProfiles,
+                    credentialConfigurationId: response.credentialConfigurationID,
+                    credentialFormat: response.credentialFormat,
+                    wrapper: response.wrapper,
+                    publicKeyEnvelope: response.publicKeyEnvelope,
+                    expectedClassicalKeyId: response.classicalKeyID,
+                    expectedPqKeyId: response.postQuantumKeyID,
+                    expectedGeneration: response.keyGeneration,
+                    walletIdentity: verification.walletIdentity,
+                    issuerIdentity: verification.origin,
+                    transactionId: response.transactionID,
+                    audience: verification.origin,
+                    nonce: response.nonce,
+                    nowEpochSeconds: verification.nowEpochSeconds))
+            return ExperimentalCatalogueCredential(
+                namespacedType: credential.namespacedType,
+                payload: credential.payload,
+                disclosures: credential.disclosures,
+                issuerOrigin: credential.issuerOrigin,
+                keyGeneration: credential.keyGeneration)
         }
     }
 

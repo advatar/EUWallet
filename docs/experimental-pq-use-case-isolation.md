@@ -15,8 +15,14 @@ or reinterpreting an existing artifact.
 
 ## Artifact migration rules
 
-Hybrid-signed exports use version 2. The hybrid codec rejects version 1 rather than reinterpreting
-it; the existing production export reader retains ownership of legacy artifacts. Recovery AAD
+Hybrid-signed exports use a strict, canonical version-2 binary artifact. It carries the actual
+durable Core checkpoint, logical key identity/generation, checkpoint generation, validity window,
+nonce, public-key envelope and atomic signature envelope. Both algorithms sign the same bounded
+commitment containing the checkpoint generation, exact byte length and SHA-256 digest. Import
+recomputes the digest, requires an independently trusted public-key envelope, applies freshness,
+and restores Core only after atomic verification. Embedded keys never self-authorize. The hybrid
+codec rejects version 1 rather than reinterpreting it; the existing production export reader
+retains ownership of legacy artifacts. Recovery AAD
 length-prefixes and authenticates the key-agreement profile, exact schema identifier, and key
 generation. A generation or schema change therefore cannot decrypt under old AAD.
 

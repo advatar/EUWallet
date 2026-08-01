@@ -23,16 +23,25 @@ private final class PqTestSigner: HybridClassicalKeyProviding {
         return Data(repeating: 0x51, count: 64)
     }
 
+    func keyAgreement(keyRef _: String, peerPublicKey _: Data) throws -> Data {
+        Data(repeating: 0x71, count: 32)
+    }
+
     func replacePublicKey(for reference: String, with value: Data) {
         publicKeys[reference] = value
     }
 }
 
-private final class PqTestBackend: ExperimentalPqGenerating {
+private final class PqTestBackend: ExperimentalPqGenerating, ExperimentalHybridExportCryptography,
+    ExperimentalProviderCredentialVerifying
+{
     var malformed = false
     var signError: Error?
     private(set) var observedKeyLengths: [Int] = []
     private(set) var signCalls = 0
+    private(set) var lastSealedPlaintext: Data?
+    private(set) var lastRecoveryContext: Data?
+    private(set) var lastExportDraft: ExperimentalHybridExportDraft?
 
     func generateWrappedMaterial(
         wrappingKey: inout Data
@@ -54,6 +63,122 @@ private final class PqTestBackend: ExperimentalPqGenerating {
         signCalls += 1
         if let signError { throw signError }
         return Data(repeating: 0x61, count: 3_309)
+    }
+
+    func openWrappedRecovery(
+        wrappingKey _: inout Data,
+        custodyNonce _: Data,
+        encryptedPrivateKey _: Data,
+        recipientClassicalPublicKey _: Data,
+        recipientMlKem768PublicKey _: Data,
+        classicalSharedSecret _: inout Data,
+        context: Data,
+        envelope _: ExperimentalHybridRecoveryEnvelope
+    ) throws -> Data {
+        lastRecoveryContext = context
+        return Data("recovered".utf8)
+    }
+
+    func sealRecovery(
+        senderIdentity: String,
+        recipientIdentity: String,
+        keyGeneration: UInt64,
+        recipientClassicalPublicKey _: Data,
+        recipientMlKem768PublicKey _: Data,
+        context: Data,
+        plaintext: Data
+    ) throws -> ExperimentalHybridRecoveryEnvelope {
+        lastRecoveryContext = context
+        lastSealedPlaintext = plaintext
+        return ExperimentalHybridRecoveryEnvelope(
+            senderIdentity: senderIdentity,
+            recipientIdentity: recipientIdentity,
+            keyGeneration: keyGeneration,
+            classicalEphemeralPublicKey: Data([0x04] + [UInt8](repeating: 1, count: 64)),
+            mlKem768Ciphertext: Data(repeating: 2, count: 1_088),
+            transcriptHash: Data(repeating: 3, count: 32),
+            nonce: Data(repeating: 4, count: 12),
+            ciphertext: Data(repeating: 5, count: 32))
+    }
+
+    func prepareExport(draft: ExperimentalHybridExportDraft) throws -> Data {
+        lastExportDraft = draft
+        return Data("canonical-export-tbs".utf8)
+    }
+
+    func finalizeExport(
+        draft: ExperimentalHybridExportDraft,
+        signingMaterial _: ExperimentalHybridSigningMaterial,
+        signature: ExperimentalHybridSignature
+    ) throws -> Data {
+        lastExportDraft = draft
+        guard signature.classicalSignature.count == 64,
+              signature.postQuantumSignature.count == 3_309
+        else { throw PqExpectedFailure.failure }
+        return Data("hybrid-export-v2".utf8)
+    }
+
+    func openExport(
+        artifact _: Data,
+        expectedWalletIdentity _: String,
+        expectedKeyGeneration _: UInt64,
+        expectedPublicKeyEnvelope _: Data,
+        nowEpochSeconds _: UInt64
+    ) throws -> CoreDurableCheckpoint {
+        CoreDurableCheckpoint(generation: 8, bytes: Data("imported-checkpoint".utf8))
+    }
+
+    func verifyProviderCredential(
+        _ verification: ExperimentalProviderCredentialVerification
+    ) throws -> ExperimentalCatalogueCredential {
+        guard verification.origin == "https://issuer.example",
+              verification.allowedOrigins == ["https://issuer.example"],
+              verification.response.offeredKeyAgreementProfiles == ["euwallet-hybrid-pq-v1"],
+              verification.response.credentialConfigurationID
+                == ExperimentalHybridCredentialAcquisition.configurationID
+        else { throw PqExpectedFailure.failure }
+        return ExperimentalCatalogueCredential(
+            namespacedType: "urn:advatar:experimental:pq:vcissuer-hybrid-credential-v1",
+            payload: verification.response.wrapper,
+            disclosures: [],
+            issuerOrigin: verification.origin,
+            keyGeneration: verification.response.keyGeneration)
+    }
+}
+
+private final class PqProviderTransport: ExperimentalPrivateProviderTransporting {
+    private(set) var requestedConfigurationID: String?
+    private(set) var requestCount = 0
+
+    func fetchHybridCredential(
+        origin _: String,
+        credentialConfigurationID: String
+    ) async throws -> ExperimentalProviderCredentialResponse {
+        requestCount += 1
+        requestedConfigurationID = credentialConfigurationID
+        return ExperimentalProviderCredentialResponse(
+            offeredKeyAgreementProfiles: ["euwallet-hybrid-pq-v1"],
+            credentialConfigurationID: credentialConfigurationID,
+            credentialFormat: "dev-hybrid-pq+cbor",
+            wrapper: Data("verified-wrapper".utf8),
+            publicKeyEnvelope: Data("trusted-key".utf8),
+            classicalKeyID: "issuer-es256",
+            postQuantumKeyID: "issuer-ml-dsa-65",
+            keyGeneration: 7,
+            transactionID: Data("transaction".utf8),
+            nonce: Data(repeating: 5, count: 32))
+    }
+}
+
+private final class PqRecoveryEngine: DurableWalletEngineDriving {
+    var exported = CoreDurableCheckpoint(generation: 8, bytes: Data("checkpoint".utf8))
+    private(set) var restored: CoreDurableCheckpoint?
+
+    func handleEventJson(eventJson _: String) throws -> String { "[]" }
+    func prepareForDurableRestore(environment _: CoreDurableEnvironment) throws {}
+    func makeDurableCheckpoint(generation _: UInt64) throws -> CoreDurableCheckpoint { exported }
+    func restoreDurableCheckpointRecord(_ checkpoint: CoreDurableCheckpoint) throws {
+        restored = checkpoint
     }
 }
 
@@ -249,6 +374,154 @@ final class ExperimentalPqCustodyTests: XCTestCase {
             payload: Data([5]),
             prompt: "Sign"))
         XCTAssertEqual(backend.signCalls, 2, "PQ signing must not run after classical failure")
+    }
+
+    func testRecoveryBindsTheCurrentLogicalGenerationAndReturnsOnlyAtomicPlaintext() throws {
+        let reference = try custody.rotate(logicalKeyID: "wallet-key", prompt: "Create")
+        let envelope = ExperimentalHybridRecoveryEnvelope(
+            senderIdentity: "recovery-provider.example",
+            recipientIdentity: reference.logicalKeyID,
+            keyGeneration: reference.generation,
+            classicalEphemeralPublicKey: Data([0x04] + [UInt8](repeating: 1, count: 64)),
+            mlKem768Ciphertext: Data(repeating: 2, count: 1_088),
+            transcriptHash: Data(repeating: 3, count: 32),
+            nonce: Data(repeating: 4, count: 12),
+            ciphertext: Data(repeating: 5, count: 32))
+        XCTAssertEqual(
+            try custody.openRecovery(
+                logicalKeyID: "wallet-key",
+                context: Data("session".utf8),
+                envelope: envelope,
+                prompt: "Recover"),
+            Data("recovered".utf8))
+
+        let stale = ExperimentalHybridRecoveryEnvelope(
+            senderIdentity: envelope.senderIdentity,
+            recipientIdentity: envelope.recipientIdentity,
+            keyGeneration: reference.generation + 1,
+            classicalEphemeralPublicKey: envelope.classicalEphemeralPublicKey,
+            mlKem768Ciphertext: envelope.mlKem768Ciphertext,
+            transcriptHash: envelope.transcriptHash,
+            nonce: envelope.nonce,
+            ciphertext: envelope.ciphertext)
+        XCTAssertThrowsError(try custody.openRecovery(
+            logicalKeyID: "wallet-key",
+            context: Data("session".utf8),
+            envelope: stale,
+            prompt: "Recover")) {
+                XCTAssertEqual($0 as? ExperimentalPqCustodyError, .mixedGeneration)
+            }
+    }
+
+    func testCheckpointRecoverySealsAndRestoresActualDurableCoreState() throws {
+        let reference = try custody.rotate(logicalKeyID: "wallet-key", prompt: "Create")
+        let engine = PqRecoveryEngine()
+        let recovery = ExperimentalHybridCheckpointRecovery(
+            engine: engine,
+            backend: backend,
+            custody: custody)
+        let session = Data("session-8".utf8)
+        let envelope = try recovery.sealCheckpoint(
+            checkpointGeneration: 8,
+            senderIdentity: "recovery-provider.example",
+            recipient: ExperimentalHybridRecoveryRecipient(
+                logicalKeyID: reference.logicalKeyID,
+                keyGeneration: reference.generation,
+                classicalPublicKey: Data([0x04] + [UInt8](repeating: 1, count: 64)),
+                mlKem768PublicKey: records.values["wallet-key"]!.mlKem768PublicKey),
+            sessionContext: session)
+        XCTAssertEqual(backend.lastSealedPlaintext, engine.exported.bytes)
+
+        try recovery.restoreCheckpoint(
+            checkpointGeneration: 8,
+            logicalKeyID: "wallet-key",
+            sessionContext: session,
+            envelope: envelope,
+            prompt: "Recover")
+        XCTAssertEqual(
+            engine.restored,
+            CoreDurableCheckpoint(generation: 8, bytes: Data("recovered".utf8)))
+
+        let sealedContext = backend.lastRecoveryContext
+        XCTAssertThrowsError(try recovery.sealCheckpoint(
+            checkpointGeneration: 0,
+            senderIdentity: "recovery-provider.example",
+            recipient: ExperimentalHybridRecoveryRecipient(
+                logicalKeyID: reference.logicalKeyID,
+                keyGeneration: reference.generation,
+                classicalPublicKey: Data(repeating: 1, count: 65),
+                mlKem768PublicKey: Data(repeating: 2, count: 1_184)),
+            sessionContext: session))
+        XCTAssertEqual(backend.lastRecoveryContext, sealedContext)
+    }
+
+    func testHybridExportSignsAndRestoresActualDurableCoreState() throws {
+        let reference = try custody.rotate(logicalKeyID: "wallet-key", prompt: "Create")
+        let engine = PqRecoveryEngine()
+        let exporter = ExperimentalHybridCheckpointExport(
+            engine: engine,
+            custody: custody,
+            crypto: backend)
+        let artifact = try exporter.create(
+            logicalKeyID: "wallet-key",
+            checkpointGeneration: 8,
+            nonce: Data(repeating: 7, count: 16),
+            createdAtEpochSeconds: 1_000,
+            expiresAtEpochSeconds: 2_000,
+            prompt: "Export")
+        XCTAssertEqual(artifact, Data("hybrid-export-v2".utf8))
+        XCTAssertEqual(backend.lastExportDraft?.checkpoint, engine.exported.bytes)
+        XCTAssertEqual(backend.lastExportDraft?.keyGeneration, reference.generation)
+
+        try exporter.restore(
+            artifact: artifact,
+            expectedWalletIdentity: "wallet-key",
+            expectedKeyGeneration: reference.generation,
+            expectedPublicKeyEnvelope: Data("trusted-key".utf8),
+            nowEpochSeconds: 1_500)
+        XCTAssertEqual(
+            engine.restored,
+            CoreDurableCheckpoint(
+                generation: 8,
+                bytes: Data("imported-checkpoint".utf8)))
+    }
+
+    func testPrivateProviderAcquisitionStoresOnlyInExperimentalCatalogue() async throws {
+        let transport = PqProviderTransport()
+        let catalogue = ExperimentalCredentialCatalogue()
+        let acquisition = ExperimentalHybridCredentialAcquisition(
+            allowedOrigins: ["https://issuer.example"],
+            transport: transport,
+            verifier: backend,
+            catalogue: catalogue)
+        let credential = try await acquisition.acquire(
+            origin: "https://issuer.example",
+            walletIdentity: Data("wallet-holder".utf8),
+            nowEpochSeconds: 1_500)
+
+        XCTAssertEqual(
+            transport.requestedConfigurationID,
+            ExperimentalHybridCredentialAcquisition.configurationID)
+        XCTAssertEqual(catalogue.all(), [credential])
+        XCTAssertFalse(credential.satisfiesProductionRequest("eu.europa.ec.eudi.pid.1"))
+        XCTAssertTrue(credential.namespacedType.hasPrefix("urn:advatar:experimental:pq:"))
+
+        do {
+            _ = try await ExperimentalHybridCredentialAcquisition(
+                allowedOrigins: ["https://other.example"],
+                transport: transport,
+                verifier: backend,
+                catalogue: catalogue)
+                .acquire(
+                    origin: "https://issuer.example",
+                    walletIdentity: Data("wallet-holder".utf8),
+                    nowEpochSeconds: 1_500)
+            XCTFail("expected disallowed origin to fail before transport")
+        } catch {
+            XCTAssertEqual(error as? ExperimentalPqCustodyError, .malformedMaterial)
+        }
+        XCTAssertEqual(transport.requestCount, 1)
+        XCTAssertEqual(catalogue.all(), [credential])
     }
 
     func testMalformedBackendMaterialIsNeverCommittedAndCandidateKeyIsDeleted() {

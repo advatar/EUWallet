@@ -25,6 +25,17 @@ public struct ExperimentalPqWrappedMaterial: Equatable {
     }
 }
 
+public struct ExperimentalHybridRecoveryEnvelope: Equatable {
+    public let senderIdentity: String
+    public let recipientIdentity: String
+    public let keyGeneration: UInt64
+    public let classicalEphemeralPublicKey: Data
+    public let mlKem768Ciphertext: Data
+    public let transcriptHash: Data
+    public let nonce: Data
+    public let ciphertext: Data
+}
+
 /// Implemented by the generated UniFFI adapter. The supplied key must be cleared by both sides.
 public protocol ExperimentalPqGenerating: AnyObject {
     func generateWrappedMaterial(wrappingKey: inout Data) throws
@@ -35,13 +46,52 @@ public protocol ExperimentalPqGenerating: AnyObject {
         encryptedPrivateKey: Data,
         payload: Data
     ) throws -> Data
+    func openWrappedRecovery(
+        wrappingKey: inout Data,
+        custodyNonce: Data,
+        encryptedPrivateKey: Data,
+        recipientClassicalPublicKey: Data,
+        recipientMlKem768PublicKey: Data,
+        classicalSharedSecret: inout Data,
+        context: Data,
+        envelope: ExperimentalHybridRecoveryEnvelope
+    ) throws -> Data
+    func sealRecovery(
+        senderIdentity: String,
+        recipientIdentity: String,
+        keyGeneration: UInt64,
+        recipientClassicalPublicKey: Data,
+        recipientMlKem768PublicKey: Data,
+        context: Data,
+        plaintext: Data
+    ) throws -> ExperimentalHybridRecoveryEnvelope
 }
 
 public protocol HybridClassicalKeyProviding: Signer, AnyObject {
     func publicKeyRaw(keyRef: String) throws -> Data
+    func keyAgreement(keyRef: String, peerPublicKey: Data) throws -> Data
 }
 
 extension SecureEnclaveSigner: HybridClassicalKeyProviding {}
+
+public struct ExperimentalHybridRecoveryRecipient: Equatable {
+    public let logicalKeyID: String
+    public let keyGeneration: UInt64
+    public let classicalPublicKey: Data
+    public let mlKem768PublicKey: Data
+
+    public init(
+        logicalKeyID: String,
+        keyGeneration: UInt64,
+        classicalPublicKey: Data,
+        mlKem768PublicKey: Data
+    ) {
+        self.logicalKeyID = logicalKeyID
+        self.keyGeneration = keyGeneration
+        self.classicalPublicKey = classicalPublicKey
+        self.mlKem768PublicKey = mlKem768PublicKey
+    }
+}
 
 public enum ExperimentalPqProfile: String, Codable, Equatable {
     case hybridP256MlDsa65MlKem768V1 = "euwallet-hybrid-pq-v1"
@@ -78,6 +128,155 @@ public struct ExperimentalPqCustodyRecord: Codable, Equatable, CustomDebugString
 public struct ExperimentalHybridSignature: Equatable {
     public let classicalSignature: Data
     public let postQuantumSignature: Data
+}
+
+public struct ExperimentalHybridSigningMaterial: Equatable {
+    public let reference: HybridKeyGeneration
+    public let classicalPublicKey: Data
+    public let mlDsa65PublicKey: Data
+}
+
+public struct ExperimentalHybridExportDraft: Equatable {
+    public let walletIdentity: String
+    public let keyGeneration: UInt64
+    public let checkpointGeneration: UInt64
+    public let nonce: Data
+    public let createdAtEpochSeconds: UInt64
+    public let expiresAtEpochSeconds: UInt64
+    public let checkpoint: Data
+}
+
+public protocol ExperimentalHybridExportCryptography: AnyObject {
+    func prepareExport(draft: ExperimentalHybridExportDraft) throws -> Data
+    func finalizeExport(
+        draft: ExperimentalHybridExportDraft,
+        signingMaterial: ExperimentalHybridSigningMaterial,
+        signature: ExperimentalHybridSignature
+    ) throws -> Data
+    func openExport(
+        artifact: Data,
+        expectedWalletIdentity: String,
+        expectedKeyGeneration: UInt64,
+        expectedPublicKeyEnvelope: Data,
+        nowEpochSeconds: UInt64
+    ) throws -> CoreDurableCheckpoint
+}
+
+public struct ExperimentalProviderCredentialResponse: Equatable {
+    public let offeredKeyAgreementProfiles: [String]
+    public let credentialConfigurationID: String
+    public let credentialFormat: String
+    public let wrapper: Data
+    public let publicKeyEnvelope: Data
+    public let classicalKeyID: String
+    public let postQuantumKeyID: String
+    public let keyGeneration: UInt64
+    public let transactionID: Data
+    public let nonce: Data
+}
+
+public struct ExperimentalProviderCredentialVerification: Equatable {
+    public let origin: String
+    public let allowedOrigins: [String]
+    public let walletIdentity: Data
+    public let nowEpochSeconds: UInt64
+    public let response: ExperimentalProviderCredentialResponse
+}
+
+public struct ExperimentalCatalogueCredential: Equatable {
+    public let namespacedType: String
+    public let payload: Data
+    public let disclosures: [Data]
+    public let issuerOrigin: String
+    public let keyGeneration: UInt64
+
+    /// Experimental credentials are deliberately invisible to certified request selection.
+    public func satisfiesProductionRequest(_: String) -> Bool { false }
+}
+
+public protocol ExperimentalProviderCredentialVerifying: AnyObject {
+    func verifyProviderCredential(
+        _ verification: ExperimentalProviderCredentialVerification
+    ) throws -> ExperimentalCatalogueCredential
+}
+
+public protocol ExperimentalPrivateProviderTransporting: AnyObject {
+    func fetchHybridCredential(
+        origin: String,
+        credentialConfigurationID: String
+    ) async throws -> ExperimentalProviderCredentialResponse
+}
+
+public final class ExperimentalCredentialCatalogue {
+    private let lock = NSLock()
+    private var credentials: [ExperimentalCatalogueCredential] = []
+
+    public init() {}
+
+    public func insert(_ credential: ExperimentalCatalogueCredential) {
+        lock.withLock { credentials.append(credential) }
+    }
+
+    public func all() -> [ExperimentalCatalogueCredential] {
+        lock.withLock { credentials }
+    }
+}
+
+/// Composes the allow-listed provider transport, Rust atomic wrapper verification, and the
+/// experimental-only catalogue. No value from this coordinator is passed to the production Core
+/// holdings or presentation selector.
+public final class ExperimentalHybridCredentialAcquisition {
+    public static let configurationID = "dev.advatar.hybrid-pq.sd-jwt.v1"
+
+    private let allowedOrigins: [String]
+    private let transport: any ExperimentalPrivateProviderTransporting
+    private let verifier: any ExperimentalProviderCredentialVerifying
+    private let catalogue: ExperimentalCredentialCatalogue
+
+    public init(
+        allowedOrigins: [String],
+        transport: any ExperimentalPrivateProviderTransporting,
+        verifier: any ExperimentalProviderCredentialVerifying,
+        catalogue: ExperimentalCredentialCatalogue
+    ) {
+        self.allowedOrigins = allowedOrigins
+        self.transport = transport
+        self.verifier = verifier
+        self.catalogue = catalogue
+    }
+
+    @discardableResult
+    public func acquire(
+        origin: String,
+        walletIdentity: Data,
+        nowEpochSeconds: UInt64
+    ) async throws -> ExperimentalCatalogueCredential {
+        guard allowedOrigins.contains(origin),
+              let components = URLComponents(string: origin),
+              components.scheme == "https",
+              components.host != nil,
+              components.user == nil,
+              components.password == nil,
+              components.path.isEmpty,
+              components.query == nil,
+              components.fragment == nil
+        else { throw ExperimentalPqCustodyError.malformedMaterial }
+        let response = try await transport.fetchHybridCredential(
+            origin: origin,
+            credentialConfigurationID: Self.configurationID)
+        let credential = try verifier.verifyProviderCredential(
+            ExperimentalProviderCredentialVerification(
+                origin: origin,
+                allowedOrigins: allowedOrigins,
+                walletIdentity: walletIdentity,
+                nowEpochSeconds: nowEpochSeconds,
+                response: response))
+        guard credential.namespacedType.hasPrefix("urn:advatar:experimental:pq:"),
+              !credential.satisfiesProductionRequest("eu.europa.ec.eudi.pid.1")
+        else { throw ExperimentalPqCustodyError.malformedMaterial }
+        catalogue.insert(credential)
+        return credential
+    }
 }
 
 public protocol ExperimentalHybridSigning: AnyObject {
@@ -289,6 +488,22 @@ public final class ExperimentalHybridKeyCustody: ExperimentalHybridSigning {
         }
     }
 
+    public func signingMaterial(logicalKeyID: String) throws -> ExperimentalHybridSigningMaterial {
+        guard let record = try records.load(logicalKeyID: logicalKeyID),
+              let anchor = try anchors.load(logicalKeyID: logicalKeyID)
+        else { throw ExperimentalPqCustodyError.missingGeneration }
+        try Self.validate(record: record, anchor: anchor)
+        let classicalPublic = try signer.publicKeyRaw(
+            keyRef: record.reference.classicalKeyReference)
+        guard Self.sha256(classicalPublic) == record.reference.classicalPublicKeyHash else {
+            throw ExperimentalPqCustodyError.mixedGeneration
+        }
+        return ExperimentalHybridSigningMaterial(
+            reference: record.reference,
+            classicalPublicKey: classicalPublic,
+            mlDsa65PublicKey: record.mlDsa65PublicKey)
+    }
+
     public func sign(
         logicalKeyID: String,
         profile: ExperimentalHybridSignatureProfile,
@@ -303,6 +518,38 @@ public final class ExperimentalHybridKeyCustody: ExperimentalHybridSigning {
         // discriminator here prevents a generic signing entry point from entering this path.
         _ = purpose
         return try sign(reference: reference, payload: payload, prompt: prompt)
+    }
+
+    /// Open one recovery artifact only after a single biometric custody unlock, Secure Enclave
+    /// P-256 ECDH, wrapped ML-KEM decapsulation, transcript authentication and AEAD verification.
+    public func openRecovery(
+        logicalKeyID: String,
+        context: Data,
+        envelope: ExperimentalHybridRecoveryEnvelope,
+        prompt: String
+    ) throws -> Data {
+        guard let reference = try records.load(logicalKeyID: logicalKeyID)?.reference,
+              envelope.recipientIdentity == reference.logicalKeyID,
+              envelope.keyGeneration == reference.generation
+        else { throw ExperimentalPqCustodyError.mixedGeneration }
+        return try withUnlockedGeneration(reference: reference, prompt: prompt) {
+            record, wrappingKey in
+            var classicalSecret = try signer.keyAgreement(
+                keyRef: reference.classicalKeyReference,
+                peerPublicKey: envelope.classicalEphemeralPublicKey)
+            defer { classicalSecret.clearSensitiveBytes() }
+            let classicalPublic = try signer.publicKeyRaw(
+                keyRef: reference.classicalKeyReference)
+            return try backend.openWrappedRecovery(
+                wrappingKey: &wrappingKey,
+                custodyNonce: record.nonce,
+                encryptedPrivateKey: record.encryptedPrivateKey,
+                recipientClassicalPublicKey: classicalPublic,
+                recipientMlKem768PublicKey: record.mlKem768PublicKey,
+                classicalSharedSecret: &classicalSecret,
+                context: context,
+                envelope: envelope)
+        }
     }
 
     static func validate(
@@ -342,6 +589,154 @@ public final class ExperimentalHybridKeyCustody: ExperimentalHybridSigning {
         !value.isEmpty && value.count <= 128 && value.unicodeScalars.allSatisfy {
             CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-")).contains($0)
         }
+    }
+}
+
+/// End-to-end bridge between the real durable Core checkpoint and the experimental hybrid
+/// recovery cryptography. Checkpoint generation and the caller's bounded session context are
+/// committed into the authenticated KEM transcript and AEAD associated data.
+public final class ExperimentalHybridCheckpointRecovery {
+    private static let contextDomain = Data("EUWALLET-HYBRID-CHECKPOINT-RECOVERY-V1".utf8)
+    private static let maximumSessionContextBytes = 4_096
+
+    private let engine: any DurableWalletEngineDriving
+    private let backend: any ExperimentalPqGenerating
+    private let custody: ExperimentalHybridKeyCustody
+
+    public init(
+        engine: any DurableWalletEngineDriving,
+        backend: any ExperimentalPqGenerating,
+        custody: ExperimentalHybridKeyCustody
+    ) {
+        self.engine = engine
+        self.backend = backend
+        self.custody = custody
+    }
+
+    public func sealCheckpoint(
+        checkpointGeneration: UInt64,
+        senderIdentity: String,
+        recipient: ExperimentalHybridRecoveryRecipient,
+        sessionContext: Data
+    ) throws -> ExperimentalHybridRecoveryEnvelope {
+        let context = try Self.context(
+            checkpointGeneration: checkpointGeneration,
+            sessionContext: sessionContext)
+        let checkpoint = try engine.makeDurableCheckpoint(generation: checkpointGeneration)
+        guard checkpoint.generation == checkpointGeneration, !checkpoint.bytes.isEmpty else {
+            throw ExperimentalPqCustodyError.malformedMaterial
+        }
+        return try backend.sealRecovery(
+            senderIdentity: senderIdentity,
+            recipientIdentity: recipient.logicalKeyID,
+            keyGeneration: recipient.keyGeneration,
+            recipientClassicalPublicKey: recipient.classicalPublicKey,
+            recipientMlKem768PublicKey: recipient.mlKem768PublicKey,
+            context: context,
+            plaintext: checkpoint.bytes)
+    }
+
+    public func restoreCheckpoint(
+        checkpointGeneration: UInt64,
+        logicalKeyID: String,
+        sessionContext: Data,
+        envelope: ExperimentalHybridRecoveryEnvelope,
+        prompt: String
+    ) throws {
+        let context = try Self.context(
+            checkpointGeneration: checkpointGeneration,
+            sessionContext: sessionContext)
+        let checkpoint = try custody.openRecovery(
+            logicalKeyID: logicalKeyID,
+            context: context,
+            envelope: envelope,
+            prompt: prompt)
+        guard !checkpoint.isEmpty,
+              checkpoint.count <= DurableLifecycleCoordinator.maximumCheckpointBytes
+        else { throw ExperimentalPqCustodyError.malformedMaterial }
+        try engine.restoreDurableCheckpointRecord(
+            CoreDurableCheckpoint(generation: checkpointGeneration, bytes: checkpoint))
+    }
+
+    private static func context(
+        checkpointGeneration: UInt64,
+        sessionContext: Data
+    ) throws -> Data {
+        guard checkpointGeneration > 0,
+              !sessionContext.isEmpty,
+              sessionContext.count <= maximumSessionContextBytes
+        else { throw ExperimentalPqCustodyError.malformedMaterial }
+        var output = contextDomain
+        var generation = checkpointGeneration.bigEndian
+        Swift.withUnsafeBytes(of: &generation) { output.append(contentsOf: $0) }
+        var length = UInt32(sessionContext.count).bigEndian
+        Swift.withUnsafeBytes(of: &length) { output.append(contentsOf: $0) }
+        output.append(sessionContext)
+        return output
+    }
+}
+
+public final class ExperimentalHybridCheckpointExport {
+    private let engine: any DurableWalletEngineDriving
+    private let custody: ExperimentalHybridKeyCustody
+    private let crypto: any ExperimentalHybridExportCryptography
+
+    public init(
+        engine: any DurableWalletEngineDriving,
+        custody: ExperimentalHybridKeyCustody,
+        crypto: any ExperimentalHybridExportCryptography
+    ) {
+        self.engine = engine
+        self.custody = custody
+        self.crypto = crypto
+    }
+
+    public func create(
+        logicalKeyID: String,
+        checkpointGeneration: UInt64,
+        nonce: Data,
+        createdAtEpochSeconds: UInt64,
+        expiresAtEpochSeconds: UInt64,
+        prompt: String
+    ) throws -> Data {
+        let checkpoint = try engine.makeDurableCheckpoint(generation: checkpointGeneration)
+        guard checkpoint.generation == checkpointGeneration, !checkpoint.bytes.isEmpty else {
+            throw ExperimentalPqCustodyError.malformedMaterial
+        }
+        let material = try custody.signingMaterial(logicalKeyID: logicalKeyID)
+        let draft = ExperimentalHybridExportDraft(
+            walletIdentity: material.reference.logicalKeyID,
+            keyGeneration: material.reference.generation,
+            checkpointGeneration: checkpoint.generation,
+            nonce: nonce,
+            createdAtEpochSeconds: createdAtEpochSeconds,
+            expiresAtEpochSeconds: expiresAtEpochSeconds,
+            checkpoint: checkpoint.bytes)
+        let tbs = try crypto.prepareExport(draft: draft)
+        let signature = try custody.sign(
+            reference: material.reference,
+            payload: tbs,
+            prompt: prompt)
+        return try crypto.finalizeExport(
+            draft: draft,
+            signingMaterial: material,
+            signature: signature)
+    }
+
+    public func restore(
+        artifact: Data,
+        expectedWalletIdentity: String,
+        expectedKeyGeneration: UInt64,
+        expectedPublicKeyEnvelope: Data,
+        nowEpochSeconds: UInt64
+    ) throws {
+        let checkpoint = try crypto.openExport(
+            artifact: artifact,
+            expectedWalletIdentity: expectedWalletIdentity,
+            expectedKeyGeneration: expectedKeyGeneration,
+            expectedPublicKeyEnvelope: expectedPublicKeyEnvelope,
+            nowEpochSeconds: nowEpochSeconds)
+        try engine.restoreDurableCheckpointRecord(checkpoint)
     }
 }
 

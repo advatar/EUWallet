@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import WalletShell
@@ -123,6 +124,80 @@ private final class IssuerSignerMock: Signer {
     }
 }
 
+private final class HybridIssuerTransportMock: IssuerTransportMock, @unchecked Sendable {
+    override func fetchCredentialOffer(uri _: String) async throws -> HttpResponse {
+        response([
+            "credential_issuer": "https://issuer.example",
+            "credential_configuration_ids": [LiveIssuerClient.hybridConfiguration],
+            "grants": ["authorization_code": ["issuer_state": "issuer-state"]],
+        ])
+    }
+
+    override func fetchIssuerMetadata(issuer: String) async throws -> HttpResponse {
+        response([
+            "credential_issuer": issuer,
+            "credential_endpoint": issuer + "/credential",
+            "nonce_endpoint": issuer + "/nonce",
+            "credential_configurations_supported": [
+                LiveIssuerClient.hybridConfiguration: [
+                    "format": LiveIssuerClient.hybridFormat,
+                    "vct": "dev.advatar.hybrid-pq.credential.v1",
+                    "scope": LiveIssuerClient.hybridConfiguration,
+                    "development_only": true,
+                    "eudi_conformant": false,
+                    "credential_wrapper_schema": "HybridCredentialWrapperV1",
+                    "experimental_profile_document": issuer + "/experimental/hybrid-pq/profile",
+                ],
+            ],
+        ])
+    }
+
+    override func issuerRequest(
+        url: String, method: String, body: Data?, headers: [String: String],
+        maximumResponseBytes: Int
+    ) async throws -> HttpResponse {
+        if url.hasSuffix("/experimental/hybrid-pq/profile") {
+            return response([
+                "configuration_id": LiveIssuerClient.hybridConfiguration,
+                "profile": "euwallet-hybrid-pq-v1",
+                "credential_format": LiveIssuerClient.hybridFormat,
+                "credential_wrapper_schema": "HybridCredentialWrapperV1",
+                "development_only": true,
+                "eudi_conformant": false,
+                "acceptance_rule": "ES256 valid AND ML-DSA-65 valid",
+                "public_key_envelope": Data([1, 2, 3]).base64EncodedString()
+                    .replacingOccurrences(of: "=", with: ""),
+                "classical": ["kid": "issuer-es256"],
+                "post_quantum": ["kid": "issuer-ml-dsa-65"],
+                "logical_key_generation": 7,
+            ])
+        }
+        if url.hasSuffix("/credential") {
+            XCTAssertEqual(headers["Authorization"], "DPoP access-token")
+            let object = try JSONSerialization.jsonObject(with: body ?? Data()) as? [String: Any]
+            let proofs = object?["proofs"] as? [String: Any]
+            XCTAssertEqual((proofs?["jwt"] as? [String])?.count, 1)
+            let wrapper = Data("hybrid-wrapper".utf8).base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+            return response(["credentials": [[
+                "credential": wrapper, "format": LiveIssuerClient.hybridFormat,
+            ]]])
+        }
+        return try await super.issuerRequest(
+            url: url, method: method, body: body, headers: headers,
+            maximumResponseBytes: maximumResponseBytes)
+    }
+
+    private func response(_ object: [String: Any]) -> HttpResponse {
+        HttpResponse(
+            statusCode: 200,
+            body: try! JSONSerialization.data(withJSONObject: object),
+            contentType: "application/json")
+    }
+}
+
 final class IssuerClientTests: XCTestCase {
     func testTLSNotaryAuthorizationCodeFlowUsesPARPKCEDPoPNonceAndFinalProofArray() async throws {
         let transport = IssuerTransportMock()
@@ -182,5 +257,33 @@ final class IssuerClientTests: XCTestCase {
         } catch let error as IssuerClientError {
             XCTAssertEqual(error, .invalidConfiguration)
         }
+    }
+
+    func testHybridProviderRunsFullFlowAndReturnsAtomicVerificationContext() async throws {
+        let transport = HybridIssuerTransportMock()
+        let signer = IssuerSignerMock()
+        let authorizer = await MainActor.run { IssuerAuthorizerMock(transport: transport) }
+        let provider = LiveExperimentalHybridProviderTransport(
+            offerURI: "https://issuer.example/credential-offer/hybrid",
+            clientID: "wallet.example",
+            redirectURI: "euwallet://credential-callback",
+            keyReference: "device-key",
+            publicKey: Data([4] + Array(repeating: 3, count: 64)),
+            signer: signer,
+            transport: transport,
+            authorizer: authorizer)
+
+        let response = try await provider.fetchHybridCredential(
+            origin: "https://issuer.example",
+            credentialConfigurationID: LiveIssuerClient.hybridConfiguration)
+        XCTAssertEqual(response.credentialFormat, LiveIssuerClient.hybridFormat)
+        XCTAssertEqual(response.wrapper, Data("hybrid-wrapper".utf8))
+        XCTAssertEqual(response.publicKeyEnvelope, Data([1, 2, 3]))
+        XCTAssertEqual(response.classicalKeyID, "issuer-es256")
+        XCTAssertEqual(response.postQuantumKeyID, "issuer-ml-dsa-65")
+        XCTAssertEqual(response.keyGeneration, 7)
+        XCTAssertEqual(response.transactionID, Data("42".utf8))
+        XCTAssertEqual(response.nonce, Data(SHA256.hash(data: Data("42".utf8))))
+        XCTAssertEqual(signer.inputs.count, 3)
     }
 }

@@ -67,6 +67,38 @@ public final class SecureEnclaveSigner: Signer {
         return data
     }
 
+    /// Raw 32-byte P-256 ECDH shared secret. On physical devices the private key operation stays
+    /// inside Secure Enclave; only the shared secret is handed to the Rust hybrid combiner.
+    public func keyAgreement(keyRef: String, peerPublicKey: Data) throws -> Data {
+        guard peerPublicKey.count == 65, peerPublicKey.first == 0x04 else {
+            throw SignerError.signFailed("invalid P-256 peer public key")
+        }
+        let privateKey = try loadOrCreateKey(tag: keyRef)
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPublic,
+            kSecAttrKeySizeInBits as String: 256,
+        ]
+        var error: Unmanaged<CFError>?
+        guard let peer = SecKeyCreateWithData(
+            peerPublicKey as CFData, attributes as CFDictionary, &error)
+        else {
+            throw SignerError.signFailed(String(describing: error?.takeRetainedValue()))
+        }
+        guard SecKeyIsAlgorithmSupported(privateKey, .keyExchange, .ecdhKeyExchangeStandard),
+              let secret = SecKeyCopyKeyExchangeResult(
+                  privateKey,
+                  .ecdhKeyExchangeStandard,
+                  peer,
+                  [:] as CFDictionary,
+                  &error) as Data?,
+              secret.count == 32
+        else {
+            throw SignerError.signFailed(String(describing: error?.takeRetainedValue()))
+        }
+        return secret
+    }
+
     private func loadOrCreateKey(tag: String) throws -> SecKey {
         let tagData = Data(tag.utf8)
 

@@ -1,9 +1,13 @@
 //! Policy and artifact boundaries for progressively enabling experimental hybrid-PQ use cases.
 
-use crate::{HybridCryptoError, HybridKeyAgreementProfile, HybridSignatureProfile};
+use crate::envelope::MAX_ENVELOPE_BYTES;
+use crate::{HybridCryptoError, HybridKeyAgreementProfile, HybridKeyRef, HybridSignatureProfile};
 
 pub const LEGACY_EXPORT_VERSION: u16 = 1;
 pub const HYBRID_EXPORT_VERSION: u16 = 2;
+pub const HYBRID_EXPORT_MAGIC: &[u8] = b"EUWALLET-HYBRID-EXPORT-V2\0";
+pub const MAX_HYBRID_EXPORT_CHECKPOINT_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_HYBRID_EXPORT_BYTES: usize = MAX_HYBRID_EXPORT_CHECKPOINT_BYTES + 32 * 1024;
 pub const HYBRID_RECOVERY_SCHEMA: &str = "euwallet-hybrid-recovery-v1";
 pub const EXPERIMENTAL_CATALOGUE_PREFIX: &str = "urn:advatar:experimental:pq:";
 const EXPERIMENTAL_PROFILE_PRODUCTION_APPROVED: bool = false;
@@ -55,22 +59,59 @@ impl ExperimentalRolloutGates {
 pub struct HybridWalletExport {
     pub version: u16,
     pub profile: HybridSignatureProfile,
-    pub payload: Vec<u8>,
+    pub wallet_identity: String,
+    pub key_generation: u64,
+    pub checkpoint_generation: u64,
+    pub nonce: Vec<u8>,
+    pub created_at_epoch_seconds: u64,
+    pub expires_at_epoch_seconds: u64,
+    pub checkpoint: Vec<u8>,
+    pub checkpoint_digest: [u8; 32],
+    pub public_key_envelope: Vec<u8>,
     pub signature_envelope: Vec<u8>,
 }
 
 impl HybridWalletExport {
+    #[allow(clippy::too_many_arguments)]
     pub fn try_new(
-        payload: Vec<u8>,
+        wallet_identity: String,
+        key_generation: u64,
+        checkpoint_generation: u64,
+        nonce: Vec<u8>,
+        created_at_epoch_seconds: u64,
+        expires_at_epoch_seconds: u64,
+        checkpoint: Vec<u8>,
+        checkpoint_digest: [u8; 32],
+        public_key_envelope: Vec<u8>,
         signature_envelope: Vec<u8>,
     ) -> Result<Self, HybridCryptoError> {
-        if payload.is_empty() || signature_envelope.is_empty() {
+        if wallet_identity.is_empty()
+            || wallet_identity.len() > HybridKeyRef::MAX_IDENTITY_BYTES
+            || key_generation == 0
+            || checkpoint_generation == 0
+            || !(16..=64).contains(&nonce.len())
+            || created_at_epoch_seconds >= expires_at_epoch_seconds
+            || checkpoint.is_empty()
+            || checkpoint.len() > MAX_HYBRID_EXPORT_CHECKPOINT_BYTES
+            || public_key_envelope.is_empty()
+            || public_key_envelope.len() > MAX_ENVELOPE_BYTES
+            || signature_envelope.is_empty()
+            || signature_envelope.len() > MAX_ENVELOPE_BYTES
+        {
             return Err(HybridCryptoError::NonCanonicalInput);
         }
         Ok(Self {
             version: HYBRID_EXPORT_VERSION,
             profile: HybridSignatureProfile::Es256MlDsa65V1,
-            payload,
+            wallet_identity,
+            key_generation,
+            checkpoint_generation,
+            nonce,
+            created_at_epoch_seconds,
+            expires_at_epoch_seconds,
+            checkpoint,
+            checkpoint_digest,
+            public_key_envelope,
             signature_envelope,
         })
     }
@@ -83,6 +124,139 @@ impl HybridWalletExport {
         } else {
             Err(HybridCryptoError::UnsupportedProfile)
         }
+    }
+
+    /// Small canonical payload signed by both algorithms. The complete checkpoint stays in the
+    /// artifact and is bound by its length and SHA-256 digest, avoiding a second component-specific
+    /// prehash while respecting the frozen 4 KiB TBS payload bound.
+    #[must_use]
+    pub fn signed_commitment(&self) -> Vec<u8> {
+        let mut output = b"EUWALLET-HYBRID-EXPORT-COMMITMENT-V1".to_vec();
+        output.extend_from_slice(&self.checkpoint_generation.to_be_bytes());
+        output.extend_from_slice(&(self.checkpoint.len() as u64).to_be_bytes());
+        output.extend_from_slice(&self.checkpoint_digest);
+        output
+    }
+}
+
+pub fn encode_hybrid_wallet_export(export: &HybridWalletExport) -> Vec<u8> {
+    let mut output = Vec::with_capacity(HYBRID_EXPORT_MAGIC.len() + export.checkpoint.len() + 5000);
+    output.extend_from_slice(HYBRID_EXPORT_MAGIC);
+    output.extend_from_slice(&export.version.to_be_bytes());
+    write_export_field(&mut output, export.profile.id().as_bytes());
+    write_export_field(&mut output, export.wallet_identity.as_bytes());
+    output.extend_from_slice(&export.key_generation.to_be_bytes());
+    output.extend_from_slice(&export.checkpoint_generation.to_be_bytes());
+    write_export_field(&mut output, &export.nonce);
+    output.extend_from_slice(&export.created_at_epoch_seconds.to_be_bytes());
+    output.extend_from_slice(&export.expires_at_epoch_seconds.to_be_bytes());
+    write_export_field(&mut output, &export.checkpoint);
+    output.extend_from_slice(&export.checkpoint_digest);
+    write_export_field(&mut output, &export.public_key_envelope);
+    write_export_field(&mut output, &export.signature_envelope);
+    output
+}
+
+pub fn decode_hybrid_wallet_export(input: &[u8]) -> Result<HybridWalletExport, HybridCryptoError> {
+    if input.len() > MAX_HYBRID_EXPORT_BYTES || !input.starts_with(HYBRID_EXPORT_MAGIC) {
+        return Err(HybridCryptoError::NonCanonicalInput);
+    }
+    let mut cursor = ExportCursor::new(&input[HYBRID_EXPORT_MAGIC.len()..]);
+    let version = cursor.u16()?;
+    HybridWalletExport::require_hybrid_version(version)?;
+    let profile = core::str::from_utf8(cursor.field(64)?)
+        .ok()
+        .and_then(|value| HybridSignatureProfile::try_from(value).ok())
+        .ok_or(HybridCryptoError::UnsupportedProfile)?;
+    let wallet_identity = core::str::from_utf8(cursor.field(HybridKeyRef::MAX_IDENTITY_BYTES)?)
+        .map_err(|_| HybridCryptoError::NonCanonicalInput)?
+        .to_owned();
+    let key_generation = cursor.u64()?;
+    let checkpoint_generation = cursor.u64()?;
+    let nonce = cursor.field(64)?.to_vec();
+    let created_at_epoch_seconds = cursor.u64()?;
+    let expires_at_epoch_seconds = cursor.u64()?;
+    let checkpoint = cursor.field(MAX_HYBRID_EXPORT_CHECKPOINT_BYTES)?.to_vec();
+    let checkpoint_digest: [u8; 32] = cursor
+        .fixed(32)?
+        .try_into()
+        .map_err(|_| HybridCryptoError::NonCanonicalInput)?;
+    let public_key_envelope = cursor.field(MAX_ENVELOPE_BYTES)?.to_vec();
+    let signature_envelope = cursor.field(MAX_ENVELOPE_BYTES)?.to_vec();
+    if !cursor.done() {
+        return Err(HybridCryptoError::NonCanonicalInput);
+    }
+    let export = HybridWalletExport::try_new(
+        wallet_identity,
+        key_generation,
+        checkpoint_generation,
+        nonce,
+        created_at_epoch_seconds,
+        expires_at_epoch_seconds,
+        checkpoint,
+        checkpoint_digest,
+        public_key_envelope,
+        signature_envelope,
+    )?;
+    if export.profile != profile || encode_hybrid_wallet_export(&export) != input {
+        return Err(HybridCryptoError::NonCanonicalInput);
+    }
+    Ok(export)
+}
+
+fn write_export_field(output: &mut Vec<u8>, value: &[u8]) {
+    output.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    output.extend_from_slice(value);
+}
+
+struct ExportCursor<'a> {
+    input: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ExportCursor<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input, offset: 0 }
+    }
+    fn fixed(&mut self, length: usize) -> Result<&'a [u8], HybridCryptoError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(HybridCryptoError::ResourceLimitExceeded)?;
+        let value = self
+            .input
+            .get(self.offset..end)
+            .ok_or(HybridCryptoError::NonCanonicalInput)?;
+        self.offset = end;
+        Ok(value)
+    }
+    fn u16(&mut self) -> Result<u16, HybridCryptoError> {
+        Ok(u16::from_be_bytes(
+            self.fixed(2)?
+                .try_into()
+                .map_err(|_| HybridCryptoError::NonCanonicalInput)?,
+        ))
+    }
+    fn u64(&mut self) -> Result<u64, HybridCryptoError> {
+        Ok(u64::from_be_bytes(
+            self.fixed(8)?
+                .try_into()
+                .map_err(|_| HybridCryptoError::NonCanonicalInput)?,
+        ))
+    }
+    fn field(&mut self, maximum: usize) -> Result<&'a [u8], HybridCryptoError> {
+        let length = u32::from_be_bytes(
+            self.fixed(4)?
+                .try_into()
+                .map_err(|_| HybridCryptoError::NonCanonicalInput)?,
+        ) as usize;
+        if length == 0 || length > maximum {
+            return Err(HybridCryptoError::ResourceLimitExceeded);
+        }
+        self.fixed(length)
+    }
+    fn done(&self) -> bool {
+        self.offset == self.input.len()
     }
 }
 
@@ -136,6 +310,9 @@ impl PrivateProviderPolicy {
                 || authority.contains('/')
                 || authority.contains('?')
                 || authority.contains('#')
+                || authority.contains('@')
+                || authority.contains('\\')
+                || authority.chars().any(char::is_whitespace)
         }) {
             return Err(HybridCryptoError::NonCanonicalInput);
         }
@@ -239,8 +416,31 @@ mod tests {
 
     #[test]
     fn hybrid_export_has_a_new_exact_version() {
-        let export = HybridWalletExport::try_new(vec![1], vec![2]).unwrap();
+        let export = HybridWalletExport::try_new(
+            "wallet-1".into(),
+            2,
+            7,
+            vec![1; 16],
+            100,
+            200,
+            vec![9, 8, 7],
+            [3; 32],
+            vec![4],
+            vec![5],
+        )
+        .unwrap();
         assert_eq!(export.version, HYBRID_EXPORT_VERSION);
+        let encoded = encode_hybrid_wallet_export(&export);
+        assert_eq!(decode_hybrid_wallet_export(&encoded), Ok(export.clone()));
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(
+            decode_hybrid_wallet_export(&trailing),
+            Err(HybridCryptoError::NonCanonicalInput)
+        );
+        assert!(export
+            .signed_commitment()
+            .ends_with(&export.checkpoint_digest));
         HybridWalletExport::require_hybrid_version(HYBRID_EXPORT_VERSION).unwrap();
         assert_eq!(
             HybridWalletExport::require_hybrid_version(LEGACY_EXPORT_VERSION),
@@ -271,6 +471,9 @@ mod tests {
             "https://provider.example/path",
             "https://provider.example?query",
             "https://provider.example#fragment",
+            "https://user@provider.example",
+            "https://provider.example\\attacker.example",
+            "https://provider.example evil",
         ] {
             assert_eq!(
                 PrivateProviderPolicy::try_new(vec![invalid.into()]),
