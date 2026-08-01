@@ -8,6 +8,12 @@ This document specifies the one byte string supplied without alteration to both 
 ML-DSA-65. A signer or verifier MUST build it once and pass the same immutable bytes to both
 component operations. Component-specific messages, prehashes or context encodings are forbidden.
 
+For a wallet export larger than the 4 KiB payload bound, the common payload is the canonical
+`EUWALLET-HYBRID-EXPORT-COMMITMENT-V1` manifest: checkpoint generation (`u64`), exact checkpoint
+length (`u64`) and SHA-256 digest (32 bytes). This is one shared application-level commitment—not
+a component-specific prehash. Both algorithms sign its identical bytes, and the version-2 import
+path recomputes the length and digest over the complete carried checkpoint before accepting it.
+
 ## Primitive encoding
 
 `u32be(n)` and `u64be(n)` are unsigned big-endian fixed-width integers. `len32(value)` is:
