@@ -39,6 +39,7 @@ fn consent(claims: &[&str]) -> ScreenDescription {
         trust_mark: Some(presenter::VerifierTrustMark::EudiWallet),
         retention: presenter::RetentionDisclosure::NotStored,
         over_ask: presenter::OverAskResult::WithinRegisteredScope,
+        activechain: None,
     })
 }
 
@@ -68,8 +69,8 @@ fn canonical_bytes_are_valid_cbor_and_deterministic() {
     // It is valid canonical CBOR: decoding then re-encoding is a fixed point.
     let decoded = from_canonical_slice(&a).expect("valid canonical CBOR");
     assert_eq!(decoded.to_canonical(), a);
-    // Shape: array(9) whose first element is the text tag "consent".
-    assert_eq!(a[0], 0x89);
+    // Shape: array(10) whose first element is the text tag "consent".
+    assert_eq!(a[0], 0x8a);
     assert_eq!(&a[1..9], &[0x67, b'c', b'o', b'n', b's', b'e', b'n', b't']);
 }
 

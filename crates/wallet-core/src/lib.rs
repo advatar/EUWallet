@@ -4820,6 +4820,7 @@ impl Core {
                 trust_mark: None,
                 retention: RetentionDisclosure::Unspecified,
                 over_ask: OverAskResult::RegistrationScopeUnavailable,
+                activechain: None,
             });
         };
         let mut held_claims = Vec::new();
@@ -4923,6 +4924,7 @@ impl Core {
             trust_mark,
             retention,
             over_ask,
+            activechain: None,
         })
     }
 

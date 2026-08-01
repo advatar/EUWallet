@@ -582,6 +582,10 @@ algorithm/profile and certification approval.
 
 ## Completed
 
+- [x] [#128](https://github.com/advatar/EUWallet/issues/128): bind ActiveChain principal,
+      network/resource/action, purpose/audience, policy, expiry, linkability, value/fees and
+      capability consequences into the wallet-owned OpenID4VP consent hash.
+
 - [x] Extensive architecture, security, compliance, interoperability, mobile, assurance and
       operational readiness review completed on 2026-07-20.
 - [x] Full-wallet engineering epic opened as GitHub issue #1.
