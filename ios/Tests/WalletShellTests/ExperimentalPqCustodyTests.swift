@@ -32,13 +32,14 @@ private final class PqTestSigner: HybridClassicalKeyProviding {
     }
 }
 
-private final class PqTestBackend: ExperimentalPqGenerating {
+private final class PqTestBackend: ExperimentalPqGenerating, ExperimentalHybridExportCryptography {
     var malformed = false
     var signError: Error?
     private(set) var observedKeyLengths: [Int] = []
     private(set) var signCalls = 0
     private(set) var lastSealedPlaintext: Data?
     private(set) var lastRecoveryContext: Data?
+    private(set) var lastExportDraft: ExperimentalHybridExportDraft?
 
     func generateWrappedMaterial(
         wrappingKey: inout Data
@@ -96,6 +97,33 @@ private final class PqTestBackend: ExperimentalPqGenerating {
             transcriptHash: Data(repeating: 3, count: 32),
             nonce: Data(repeating: 4, count: 12),
             ciphertext: Data(repeating: 5, count: 32))
+    }
+
+    func prepareExport(draft: ExperimentalHybridExportDraft) throws -> Data {
+        lastExportDraft = draft
+        return Data("canonical-export-tbs".utf8)
+    }
+
+    func finalizeExport(
+        draft: ExperimentalHybridExportDraft,
+        signingMaterial _: ExperimentalHybridSigningMaterial,
+        signature: ExperimentalHybridSignature
+    ) throws -> Data {
+        lastExportDraft = draft
+        guard signature.classicalSignature.count == 64,
+              signature.postQuantumSignature.count == 3_309
+        else { throw PqExpectedFailure.failure }
+        return Data("hybrid-export-v2".utf8)
+    }
+
+    func openExport(
+        artifact _: Data,
+        expectedWalletIdentity _: String,
+        expectedKeyGeneration _: UInt64,
+        expectedPublicKeyEnvelope _: Data,
+        nowEpochSeconds _: UInt64
+    ) throws -> CoreDurableCheckpoint {
+        CoreDurableCheckpoint(generation: 8, bytes: Data("imported-checkpoint".utf8))
     }
 }
 
@@ -382,6 +410,37 @@ final class ExperimentalPqCustodyTests: XCTestCase {
                 mlKem768PublicKey: Data(repeating: 2, count: 1_184)),
             sessionContext: session))
         XCTAssertEqual(backend.lastRecoveryContext, sealedContext)
+    }
+
+    func testHybridExportSignsAndRestoresActualDurableCoreState() throws {
+        let reference = try custody.rotate(logicalKeyID: "wallet-key", prompt: "Create")
+        let engine = PqRecoveryEngine()
+        let exporter = ExperimentalHybridCheckpointExport(
+            engine: engine,
+            custody: custody,
+            crypto: backend)
+        let artifact = try exporter.create(
+            logicalKeyID: "wallet-key",
+            checkpointGeneration: 8,
+            nonce: Data(repeating: 7, count: 16),
+            createdAtEpochSeconds: 1_000,
+            expiresAtEpochSeconds: 2_000,
+            prompt: "Export")
+        XCTAssertEqual(artifact, Data("hybrid-export-v2".utf8))
+        XCTAssertEqual(backend.lastExportDraft?.checkpoint, engine.exported.bytes)
+        XCTAssertEqual(backend.lastExportDraft?.keyGeneration, reference.generation)
+
+        try exporter.restore(
+            artifact: artifact,
+            expectedWalletIdentity: "wallet-key",
+            expectedKeyGeneration: reference.generation,
+            expectedPublicKeyEnvelope: Data("trusted-key".utf8),
+            nowEpochSeconds: 1_500)
+        XCTAssertEqual(
+            engine.restored,
+            CoreDurableCheckpoint(
+                generation: 8,
+                bytes: Data("imported-checkpoint".utf8)))
     }
 
     func testMalformedBackendMaterialIsNeverCommittedAndCandidateKeyIsDeleted() {

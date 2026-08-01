@@ -139,6 +139,7 @@ pub enum ExperimentalHybridSignPurpose {
     CredentialBinding,
     Presentation,
     WalletAuthentication,
+    WalletExport,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5106,6 +5107,38 @@ pub struct FfiExperimentalHybridRecoveryOpenRequest {
 }
 
 #[cfg(feature = "experimental-pq")]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FfiExperimentalHybridExportDraft {
+    pub wallet_identity: String,
+    pub key_generation: u64,
+    pub checkpoint_generation: u64,
+    pub nonce: Vec<u8>,
+    pub created_at_epoch_seconds: u64,
+    pub expires_at_epoch_seconds: u64,
+    pub checkpoint: Vec<u8>,
+}
+
+#[cfg(feature = "experimental-pq")]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FfiExperimentalHybridExportFinalizeRequest {
+    pub draft: FfiExperimentalHybridExportDraft,
+    pub classical_public_key: Vec<u8>,
+    pub ml_dsa_65_public_key: Vec<u8>,
+    pub classical_signature: Vec<u8>,
+    pub ml_dsa_65_signature: Vec<u8>,
+}
+
+#[cfg(feature = "experimental-pq")]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FfiExperimentalHybridExportOpenRequest {
+    pub artifact: Vec<u8>,
+    pub expected_wallet_identity: String,
+    pub expected_key_generation: u64,
+    pub expected_public_key_envelope: Vec<u8>,
+    pub now_epoch_seconds: u64,
+}
+
+#[cfg(feature = "experimental-pq")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]
 pub enum ExperimentalPqFfiError {
     InvalidWrappingKey,
@@ -5114,6 +5147,7 @@ pub enum ExperimentalPqFfiError {
     EncryptionFailed,
     SigningFailed,
     RecoveryFailed,
+    ExportFailed,
 }
 
 #[cfg(feature = "experimental-pq")]
@@ -5126,8 +5160,185 @@ impl core::fmt::Display for ExperimentalPqFfiError {
             Self::EncryptionFailed => "experimental_pq_encryption_failed",
             Self::SigningFailed => "experimental_pq_signing_failed",
             Self::RecoveryFailed => "experimental_pq_recovery_failed",
+            Self::ExportFailed => "experimental_pq_export_failed",
         })
     }
+}
+
+#[cfg(feature = "experimental-pq")]
+fn experimental_hybrid_export_parts(
+    draft: &FfiExperimentalHybridExportDraft,
+) -> Result<
+    (
+        hybrid_pq::use_cases::HybridWalletExport,
+        hybrid_pq::tbs::HybridContext,
+        Vec<u8>,
+    ),
+    ExperimentalPqFfiError,
+> {
+    use crypto_backend::AwsLc;
+    use crypto_traits::Digest;
+    use hybrid_pq::tbs::{HybridContext, HybridPurpose, HybridTbs};
+    use hybrid_pq::use_cases::HybridWalletExport;
+    use hybrid_pq::HybridSignatureProfile;
+
+    let digest = AwsLc.sha256(&draft.checkpoint);
+    let export = HybridWalletExport::try_new(
+        draft.wallet_identity.clone(),
+        draft.key_generation,
+        draft.checkpoint_generation,
+        draft.nonce.clone(),
+        draft.created_at_epoch_seconds,
+        draft.expires_at_epoch_seconds,
+        draft.checkpoint.clone(),
+        digest,
+        vec![1],
+        vec![1],
+    )
+    .map_err(|_| ExperimentalPqFfiError::ExportFailed)?;
+    let context = HybridContext {
+        wallet_identity: draft.wallet_identity.as_bytes().to_vec(),
+        issuer_identity: None,
+        key_generation: draft.key_generation,
+        transaction_id: None,
+        session_id: None,
+        audience: None,
+        nonce: draft.nonce.clone(),
+        created_at_epoch_seconds: draft.created_at_epoch_seconds,
+        expires_at_epoch_seconds: draft.expires_at_epoch_seconds,
+        transcript_hash: None,
+    };
+    let tbs = HybridTbs::build(
+        HybridSignatureProfile::Es256MlDsa65V1,
+        HybridPurpose::WalletExportV1,
+        &context,
+        &export.signed_commitment(),
+    )
+    .map_err(|_| ExperimentalPqFfiError::ExportFailed)?;
+    Ok((export, context, tbs.into_bytes()))
+}
+
+/// Construct the one canonical TBS that the Secure Enclave and ML-DSA component must both sign.
+#[cfg(feature = "experimental-pq")]
+#[uniffi::export]
+pub fn prepare_experimental_hybrid_wallet_export(
+    draft: FfiExperimentalHybridExportDraft,
+) -> Result<Vec<u8>, ExperimentalPqFfiError> {
+    experimental_hybrid_export_parts(&draft).map(|(_, _, tbs)| tbs)
+}
+
+/// Verify both freshly produced signatures before emitting the strict version-2 export artifact.
+#[cfg(feature = "experimental-pq")]
+#[uniffi::export]
+pub fn finalize_experimental_hybrid_wallet_export(
+    request: FfiExperimentalHybridExportFinalizeRequest,
+) -> Result<Vec<u8>, ExperimentalPqFfiError> {
+    use crypto_backend::experimental_pq::{
+        verify_hybrid_signature_atomic, HybridVerificationInput,
+    };
+    use hybrid_pq::envelope::{encode_public_key, encode_signature, HybridSignatureEnvelope};
+    use hybrid_pq::tbs::HybridPurpose;
+    use hybrid_pq::use_cases::encode_hybrid_wallet_export;
+    use hybrid_pq::{HybridKeyRef, HybridPublicKey, HybridSignature, HybridSignatureProfile};
+
+    let (mut export, context, _) = experimental_hybrid_export_parts(&request.draft)?;
+    let public_key = HybridPublicKey::try_new(
+        HybridSignatureProfile::Es256MlDsa65V1,
+        request.classical_public_key,
+        request.ml_dsa_65_public_key,
+    )
+    .map_err(|_| ExperimentalPqFfiError::ExportFailed)?;
+    let signature = HybridSignature::try_new(
+        HybridSignatureProfile::Es256MlDsa65V1,
+        request.classical_signature,
+        request.ml_dsa_65_signature,
+    )
+    .map_err(|_| ExperimentalPqFfiError::ExportFailed)?;
+    export.public_key_envelope = encode_public_key(&public_key);
+    export.signature_envelope = encode_signature(&HybridSignatureEnvelope::new(
+        HybridPurpose::WalletExportV1,
+        signature,
+    ));
+    let key_ref = HybridKeyRef::try_new(export.wallet_identity.clone(), export.key_generation)
+        .map_err(|_| ExperimentalPqFfiError::ExportFailed)?;
+    verify_hybrid_signature_atomic(&HybridVerificationInput {
+        signature_envelope: &export.signature_envelope,
+        public_key_envelope: &export.public_key_envelope,
+        resolved_key_ref: &key_ref,
+        expected_key_ref: &key_ref,
+        expected_profile: HybridSignatureProfile::Es256MlDsa65V1,
+        expected_purpose: HybridPurpose::WalletExportV1,
+        context: &context,
+        payload: &export.signed_commitment(),
+        expected_audience: None,
+        expected_nonce: &export.nonce,
+        seen_nonces: &[],
+        now_epoch_seconds: export.created_at_epoch_seconds,
+        downgrade_attempted: false,
+    })
+    .map_err(|_| ExperimentalPqFfiError::ExportFailed)?;
+    Ok(encode_hybrid_wallet_export(&export))
+}
+
+/// Strictly decode and verify a version-2 export against an independently trusted logical key.
+/// Embedded public keys are never self-authorizing.
+#[cfg(feature = "experimental-pq")]
+#[uniffi::export]
+pub fn open_experimental_hybrid_wallet_export(
+    request: FfiExperimentalHybridExportOpenRequest,
+) -> Result<FfiDurableCheckpoint, ExperimentalPqFfiError> {
+    use crypto_backend::experimental_pq::{
+        verify_hybrid_signature_atomic, HybridVerificationInput,
+    };
+    use crypto_backend::AwsLc;
+    use crypto_traits::Digest;
+    use hybrid_pq::tbs::{HybridContext, HybridPurpose};
+    use hybrid_pq::use_cases::decode_hybrid_wallet_export;
+    use hybrid_pq::{HybridKeyRef, HybridSignatureProfile};
+
+    let export = decode_hybrid_wallet_export(&request.artifact)
+        .map_err(|_| ExperimentalPqFfiError::ExportFailed)?;
+    if export.wallet_identity != request.expected_wallet_identity
+        || export.key_generation != request.expected_key_generation
+        || export.public_key_envelope != request.expected_public_key_envelope
+        || AwsLc.sha256(&export.checkpoint) != export.checkpoint_digest
+    {
+        return Err(ExperimentalPqFfiError::ExportFailed);
+    }
+    let context = HybridContext {
+        wallet_identity: export.wallet_identity.as_bytes().to_vec(),
+        issuer_identity: None,
+        key_generation: export.key_generation,
+        transaction_id: None,
+        session_id: None,
+        audience: None,
+        nonce: export.nonce.clone(),
+        created_at_epoch_seconds: export.created_at_epoch_seconds,
+        expires_at_epoch_seconds: export.expires_at_epoch_seconds,
+        transcript_hash: None,
+    };
+    let key_ref = HybridKeyRef::try_new(export.wallet_identity.clone(), export.key_generation)
+        .map_err(|_| ExperimentalPqFfiError::ExportFailed)?;
+    verify_hybrid_signature_atomic(&HybridVerificationInput {
+        signature_envelope: &export.signature_envelope,
+        public_key_envelope: &export.public_key_envelope,
+        resolved_key_ref: &key_ref,
+        expected_key_ref: &key_ref,
+        expected_profile: HybridSignatureProfile::Es256MlDsa65V1,
+        expected_purpose: HybridPurpose::WalletExportV1,
+        context: &context,
+        payload: &export.signed_commitment(),
+        expected_audience: None,
+        expected_nonce: &export.nonce,
+        seen_nonces: &[],
+        now_epoch_seconds: request.now_epoch_seconds,
+        downgrade_attempted: false,
+    })
+    .map_err(|_| ExperimentalPqFfiError::ExportFailed)?;
+    Ok(FfiDurableCheckpoint {
+        generation: export.checkpoint_generation,
+        bytes: export.checkpoint,
+    })
 }
 
 #[cfg(feature = "experimental-pq")]
@@ -5530,6 +5741,75 @@ mod experimental_pq_ffi_tests {
                 envelope: tampered,
             },),
             Err(ExperimentalPqFfiError::RecoveryFailed)
+        );
+    }
+
+    #[test]
+    fn hybrid_export_signs_and_verifies_the_actual_checkpoint_against_a_trusted_key() {
+        use crypto_backend::{experimental_pq::MlDsa65SecretKey, SoftwareSigner};
+        use crypto_traits::{Alg, KeyRef, Signer};
+        use hybrid_pq::envelope::encode_public_key;
+        use hybrid_pq::{HybridPublicKey, HybridSignatureProfile};
+
+        let classical = SoftwareSigner::generate_p256().unwrap();
+        let post_quantum = MlDsa65SecretKey::from_seed(&[0x19; 32]).unwrap();
+        let draft = FfiExperimentalHybridExportDraft {
+            wallet_identity: "wallet-export-key".into(),
+            key_generation: 4,
+            checkpoint_generation: 9,
+            nonce: vec![7; 16],
+            created_at_epoch_seconds: 1_000,
+            expires_at_epoch_seconds: 2_000,
+            checkpoint: b"real durable checkpoint bytes".to_vec(),
+        };
+        let tbs = prepare_experimental_hybrid_wallet_export(draft.clone()).unwrap();
+        let artifact = finalize_experimental_hybrid_wallet_export(
+            FfiExperimentalHybridExportFinalizeRequest {
+                draft,
+                classical_public_key: classical.public_key_raw().to_vec(),
+                ml_dsa_65_public_key: post_quantum.public_key(),
+                classical_signature: classical
+                    .sign(&KeyRef("wallet-export-key".into()), Alg::Es256, &tbs)
+                    .unwrap(),
+                ml_dsa_65_signature: post_quantum.sign(&tbs).unwrap(),
+            },
+        )
+        .unwrap();
+        let trusted = encode_public_key(
+            &HybridPublicKey::try_new(
+                HybridSignatureProfile::Es256MlDsa65V1,
+                classical.public_key_raw().to_vec(),
+                post_quantum.public_key(),
+            )
+            .unwrap(),
+        );
+        let opened =
+            open_experimental_hybrid_wallet_export(FfiExperimentalHybridExportOpenRequest {
+                artifact: artifact.clone(),
+                expected_wallet_identity: "wallet-export-key".into(),
+                expected_key_generation: 4,
+                expected_public_key_envelope: trusted.clone(),
+                now_epoch_seconds: 1_500,
+            })
+            .unwrap();
+        assert_eq!(opened.generation, 9);
+        assert_eq!(opened.bytes, b"real durable checkpoint bytes");
+
+        let mut tampered = artifact;
+        let checkpoint_byte = tampered
+            .windows(b"real durable checkpoint bytes".len())
+            .position(|window| window == b"real durable checkpoint bytes")
+            .unwrap();
+        tampered[checkpoint_byte] ^= 1;
+        assert_eq!(
+            open_experimental_hybrid_wallet_export(FfiExperimentalHybridExportOpenRequest {
+                artifact: tampered,
+                expected_wallet_identity: "wallet-export-key".into(),
+                expected_key_generation: 4,
+                expected_public_key_envelope: trusted,
+                now_epoch_seconds: 1_500,
+            }),
+            Err(ExperimentalPqFfiError::ExportFailed)
         );
     }
 }

@@ -27,6 +27,11 @@ execution in the qualified Rust backend and the following custody path:
    into both the KEM transcript and AES-256-GCM AAD. Opening uses Secure Enclave ECDH plus the
    wrapped ML-KEM seed; plaintext is restored to Core only after both components, the transcript,
    the logical generation and the AEAD tag validate.
+7. Hybrid wallet export signs the real authenticated checkpoint through one canonical TBS and the
+   same atomic ES256 + ML-DSA-65 custody operation. Import accepts only the strict version-2
+   artifact, pins the expected logical identity, generation and public-key envelope independently,
+   verifies the checkpoint digest and both signatures, and restores the exact checkpoint
+   generation. The legacy reader never reinterprets an older export as hybrid.
 
 PQ seed material is not part of Core state, durable checkpoints, wallet exports, diagnostics,
 analytics or crash text. Swift diagnostic representations redact ciphertext as well. Operations
@@ -43,6 +48,8 @@ that unlock a generation must clear the returned wrapping-key `Data` with
   redacted diagnostics, ciphertext-only disk storage and backup exclusion.
 - Rust/Swift recovery tests cover real durable-checkpoint export/restore, exact transcript and
   generation binding, component-secret failure and transcript tampering with no partial plaintext.
+- Rust/Swift export tests cover real durable-checkpoint export/restore, exact identity/generation
+  and trusted-key binding, component signatures, expiry and checkpoint tampering.
 - `ios/verify-rust-xcframework.sh` verifies the generated wrapped-key function and checksum in both
   physical-device and simulator static-library slices.
 

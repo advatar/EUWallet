@@ -1468,6 +1468,292 @@ public func FfiConverterTypeFfiDurableCheckpoint_lower(_ value: FfiDurableCheckp
 }
 
 
+public struct FfiExperimentalHybridExportDraft {
+    public var walletIdentity: String
+    public var keyGeneration: UInt64
+    public var checkpointGeneration: UInt64
+    public var nonce: Data
+    public var createdAtEpochSeconds: UInt64
+    public var expiresAtEpochSeconds: UInt64
+    public var checkpoint: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(walletIdentity: String, keyGeneration: UInt64, checkpointGeneration: UInt64, nonce: Data, createdAtEpochSeconds: UInt64, expiresAtEpochSeconds: UInt64, checkpoint: Data) {
+        self.walletIdentity = walletIdentity
+        self.keyGeneration = keyGeneration
+        self.checkpointGeneration = checkpointGeneration
+        self.nonce = nonce
+        self.createdAtEpochSeconds = createdAtEpochSeconds
+        self.expiresAtEpochSeconds = expiresAtEpochSeconds
+        self.checkpoint = checkpoint
+    }
+}
+
+
+
+extension FfiExperimentalHybridExportDraft: Equatable, Hashable {
+    public static func ==(lhs: FfiExperimentalHybridExportDraft, rhs: FfiExperimentalHybridExportDraft) -> Bool {
+        if lhs.walletIdentity != rhs.walletIdentity {
+            return false
+        }
+        if lhs.keyGeneration != rhs.keyGeneration {
+            return false
+        }
+        if lhs.checkpointGeneration != rhs.checkpointGeneration {
+            return false
+        }
+        if lhs.nonce != rhs.nonce {
+            return false
+        }
+        if lhs.createdAtEpochSeconds != rhs.createdAtEpochSeconds {
+            return false
+        }
+        if lhs.expiresAtEpochSeconds != rhs.expiresAtEpochSeconds {
+            return false
+        }
+        if lhs.checkpoint != rhs.checkpoint {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(walletIdentity)
+        hasher.combine(keyGeneration)
+        hasher.combine(checkpointGeneration)
+        hasher.combine(nonce)
+        hasher.combine(createdAtEpochSeconds)
+        hasher.combine(expiresAtEpochSeconds)
+        hasher.combine(checkpoint)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiExperimentalHybridExportDraft: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiExperimentalHybridExportDraft {
+        return
+            try FfiExperimentalHybridExportDraft(
+                walletIdentity: FfiConverterString.read(from: &buf),
+                keyGeneration: FfiConverterUInt64.read(from: &buf),
+                checkpointGeneration: FfiConverterUInt64.read(from: &buf),
+                nonce: FfiConverterData.read(from: &buf),
+                createdAtEpochSeconds: FfiConverterUInt64.read(from: &buf),
+                expiresAtEpochSeconds: FfiConverterUInt64.read(from: &buf),
+                checkpoint: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiExperimentalHybridExportDraft, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.walletIdentity, into: &buf)
+        FfiConverterUInt64.write(value.keyGeneration, into: &buf)
+        FfiConverterUInt64.write(value.checkpointGeneration, into: &buf)
+        FfiConverterData.write(value.nonce, into: &buf)
+        FfiConverterUInt64.write(value.createdAtEpochSeconds, into: &buf)
+        FfiConverterUInt64.write(value.expiresAtEpochSeconds, into: &buf)
+        FfiConverterData.write(value.checkpoint, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalHybridExportDraft_lift(_ buf: RustBuffer) throws -> FfiExperimentalHybridExportDraft {
+    return try FfiConverterTypeFfiExperimentalHybridExportDraft.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalHybridExportDraft_lower(_ value: FfiExperimentalHybridExportDraft) -> RustBuffer {
+    return FfiConverterTypeFfiExperimentalHybridExportDraft.lower(value)
+}
+
+
+public struct FfiExperimentalHybridExportFinalizeRequest {
+    public var draft: FfiExperimentalHybridExportDraft
+    public var classicalPublicKey: Data
+    public var mlDsa65PublicKey: Data
+    public var classicalSignature: Data
+    public var mlDsa65Signature: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(draft: FfiExperimentalHybridExportDraft, classicalPublicKey: Data, mlDsa65PublicKey: Data, classicalSignature: Data, mlDsa65Signature: Data) {
+        self.draft = draft
+        self.classicalPublicKey = classicalPublicKey
+        self.mlDsa65PublicKey = mlDsa65PublicKey
+        self.classicalSignature = classicalSignature
+        self.mlDsa65Signature = mlDsa65Signature
+    }
+}
+
+
+
+extension FfiExperimentalHybridExportFinalizeRequest: Equatable, Hashable {
+    public static func ==(lhs: FfiExperimentalHybridExportFinalizeRequest, rhs: FfiExperimentalHybridExportFinalizeRequest) -> Bool {
+        if lhs.draft != rhs.draft {
+            return false
+        }
+        if lhs.classicalPublicKey != rhs.classicalPublicKey {
+            return false
+        }
+        if lhs.mlDsa65PublicKey != rhs.mlDsa65PublicKey {
+            return false
+        }
+        if lhs.classicalSignature != rhs.classicalSignature {
+            return false
+        }
+        if lhs.mlDsa65Signature != rhs.mlDsa65Signature {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(draft)
+        hasher.combine(classicalPublicKey)
+        hasher.combine(mlDsa65PublicKey)
+        hasher.combine(classicalSignature)
+        hasher.combine(mlDsa65Signature)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiExperimentalHybridExportFinalizeRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiExperimentalHybridExportFinalizeRequest {
+        return
+            try FfiExperimentalHybridExportFinalizeRequest(
+                draft: FfiConverterTypeFfiExperimentalHybridExportDraft.read(from: &buf),
+                classicalPublicKey: FfiConverterData.read(from: &buf),
+                mlDsa65PublicKey: FfiConverterData.read(from: &buf),
+                classicalSignature: FfiConverterData.read(from: &buf),
+                mlDsa65Signature: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiExperimentalHybridExportFinalizeRequest, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiExperimentalHybridExportDraft.write(value.draft, into: &buf)
+        FfiConverterData.write(value.classicalPublicKey, into: &buf)
+        FfiConverterData.write(value.mlDsa65PublicKey, into: &buf)
+        FfiConverterData.write(value.classicalSignature, into: &buf)
+        FfiConverterData.write(value.mlDsa65Signature, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalHybridExportFinalizeRequest_lift(_ buf: RustBuffer) throws -> FfiExperimentalHybridExportFinalizeRequest {
+    return try FfiConverterTypeFfiExperimentalHybridExportFinalizeRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalHybridExportFinalizeRequest_lower(_ value: FfiExperimentalHybridExportFinalizeRequest) -> RustBuffer {
+    return FfiConverterTypeFfiExperimentalHybridExportFinalizeRequest.lower(value)
+}
+
+
+public struct FfiExperimentalHybridExportOpenRequest {
+    public var artifact: Data
+    public var expectedWalletIdentity: String
+    public var expectedKeyGeneration: UInt64
+    public var expectedPublicKeyEnvelope: Data
+    public var nowEpochSeconds: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(artifact: Data, expectedWalletIdentity: String, expectedKeyGeneration: UInt64, expectedPublicKeyEnvelope: Data, nowEpochSeconds: UInt64) {
+        self.artifact = artifact
+        self.expectedWalletIdentity = expectedWalletIdentity
+        self.expectedKeyGeneration = expectedKeyGeneration
+        self.expectedPublicKeyEnvelope = expectedPublicKeyEnvelope
+        self.nowEpochSeconds = nowEpochSeconds
+    }
+}
+
+
+
+extension FfiExperimentalHybridExportOpenRequest: Equatable, Hashable {
+    public static func ==(lhs: FfiExperimentalHybridExportOpenRequest, rhs: FfiExperimentalHybridExportOpenRequest) -> Bool {
+        if lhs.artifact != rhs.artifact {
+            return false
+        }
+        if lhs.expectedWalletIdentity != rhs.expectedWalletIdentity {
+            return false
+        }
+        if lhs.expectedKeyGeneration != rhs.expectedKeyGeneration {
+            return false
+        }
+        if lhs.expectedPublicKeyEnvelope != rhs.expectedPublicKeyEnvelope {
+            return false
+        }
+        if lhs.nowEpochSeconds != rhs.nowEpochSeconds {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(artifact)
+        hasher.combine(expectedWalletIdentity)
+        hasher.combine(expectedKeyGeneration)
+        hasher.combine(expectedPublicKeyEnvelope)
+        hasher.combine(nowEpochSeconds)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiExperimentalHybridExportOpenRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiExperimentalHybridExportOpenRequest {
+        return
+            try FfiExperimentalHybridExportOpenRequest(
+                artifact: FfiConverterData.read(from: &buf),
+                expectedWalletIdentity: FfiConverterString.read(from: &buf),
+                expectedKeyGeneration: FfiConverterUInt64.read(from: &buf),
+                expectedPublicKeyEnvelope: FfiConverterData.read(from: &buf),
+                nowEpochSeconds: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiExperimentalHybridExportOpenRequest, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.artifact, into: &buf)
+        FfiConverterString.write(value.expectedWalletIdentity, into: &buf)
+        FfiConverterUInt64.write(value.expectedKeyGeneration, into: &buf)
+        FfiConverterData.write(value.expectedPublicKeyEnvelope, into: &buf)
+        FfiConverterUInt64.write(value.nowEpochSeconds, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalHybridExportOpenRequest_lift(_ buf: RustBuffer) throws -> FfiExperimentalHybridExportOpenRequest {
+    return try FfiConverterTypeFfiExperimentalHybridExportOpenRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalHybridExportOpenRequest_lower(_ value: FfiExperimentalHybridExportOpenRequest) -> RustBuffer {
+    return FfiConverterTypeFfiExperimentalHybridExportOpenRequest.lower(value)
+}
+
+
 /**
  * Complete public recovery artifact. The P-256 and ML-KEM shares, identities, generation and
  * caller-supplied context are authenticated by `transcript_hash`; AES-GCM authenticates that
@@ -2207,6 +2493,7 @@ public enum ExperimentalPqFfiError {
     case EncryptionFailed
     case SigningFailed
     case RecoveryFailed
+    case ExportFailed
 }
 
 
@@ -2229,6 +2516,7 @@ public struct FfiConverterTypeExperimentalPqFfiError: FfiConverterRustBuffer {
         case 4: return .EncryptionFailed
         case 5: return .SigningFailed
         case 6: return .RecoveryFailed
+        case 7: return .ExportFailed
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2263,6 +2551,10 @@ public struct FfiConverterTypeExperimentalPqFfiError: FfiConverterRustBuffer {
 
         case .RecoveryFailed:
             writeInt(&buf, Int32(6))
+
+
+        case .ExportFailed:
+            writeInt(&buf, Int32(7))
 
         }
     }
@@ -2351,6 +2643,16 @@ fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
     }
 }
 /**
+ * Verify both freshly produced signatures before emitting the strict version-2 export artifact.
+ */
+public func finalizeExperimentalHybridWalletExport(request: FfiExperimentalHybridExportFinalizeRequest)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeExperimentalPqFfiError.lift) {
+    uniffi_wallet_core_fn_func_finalize_experimental_hybrid_wallet_export(
+        FfiConverterTypeFfiExperimentalHybridExportFinalizeRequest.lower(request),$0
+    )
+})
+}
+/**
  * Generate both PQ components and immediately wrap their FIPS seed representations using
  * AES-256-GCM. Only ciphertext and public keys cross FFI; errors contain no secret detail.
  */
@@ -2369,6 +2671,27 @@ public func openExperimentalHybridRecovery(request: FfiExperimentalHybridRecover
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeExperimentalPqFfiError.lift) {
     uniffi_wallet_core_fn_func_open_experimental_hybrid_recovery(
         FfiConverterTypeFfiExperimentalHybridRecoveryOpenRequest.lower(request),$0
+    )
+})
+}
+/**
+ * Strictly decode and verify a version-2 export against an independently trusted logical key.
+ * Embedded public keys are never self-authorizing.
+ */
+public func openExperimentalHybridWalletExport(request: FfiExperimentalHybridExportOpenRequest)throws  -> FfiDurableCheckpoint {
+    return try  FfiConverterTypeFfiDurableCheckpoint.lift(try rustCallWithError(FfiConverterTypeExperimentalPqFfiError.lift) {
+    uniffi_wallet_core_fn_func_open_experimental_hybrid_wallet_export(
+        FfiConverterTypeFfiExperimentalHybridExportOpenRequest.lower(request),$0
+    )
+})
+}
+/**
+ * Construct the one canonical TBS that the Secure Enclave and ML-DSA component must both sign.
+ */
+public func prepareExperimentalHybridWalletExport(draft: FfiExperimentalHybridExportDraft)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeExperimentalPqFfiError.lift) {
+    uniffi_wallet_core_fn_func_prepare_experimental_hybrid_wallet_export(
+        FfiConverterTypeFfiExperimentalHybridExportDraft.lower(draft),$0
     )
 })
 }
@@ -2429,10 +2752,19 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_wallet_core_checksum_func_finalize_experimental_hybrid_wallet_export() != 59142) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_wallet_core_checksum_func_generate_experimental_pq_wrapped_key_material() != 22854) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_func_open_experimental_hybrid_recovery() != 55827) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_func_open_experimental_hybrid_wallet_export() != 18311) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_func_prepare_experimental_hybrid_wallet_export() != 26924) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_func_seal_experimental_hybrid_recovery() != 3227) {

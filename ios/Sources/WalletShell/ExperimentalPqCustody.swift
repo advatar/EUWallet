@@ -130,6 +130,38 @@ public struct ExperimentalHybridSignature: Equatable {
     public let postQuantumSignature: Data
 }
 
+public struct ExperimentalHybridSigningMaterial: Equatable {
+    public let reference: HybridKeyGeneration
+    public let classicalPublicKey: Data
+    public let mlDsa65PublicKey: Data
+}
+
+public struct ExperimentalHybridExportDraft: Equatable {
+    public let walletIdentity: String
+    public let keyGeneration: UInt64
+    public let checkpointGeneration: UInt64
+    public let nonce: Data
+    public let createdAtEpochSeconds: UInt64
+    public let expiresAtEpochSeconds: UInt64
+    public let checkpoint: Data
+}
+
+public protocol ExperimentalHybridExportCryptography: AnyObject {
+    func prepareExport(draft: ExperimentalHybridExportDraft) throws -> Data
+    func finalizeExport(
+        draft: ExperimentalHybridExportDraft,
+        signingMaterial: ExperimentalHybridSigningMaterial,
+        signature: ExperimentalHybridSignature
+    ) throws -> Data
+    func openExport(
+        artifact: Data,
+        expectedWalletIdentity: String,
+        expectedKeyGeneration: UInt64,
+        expectedPublicKeyEnvelope: Data,
+        nowEpochSeconds: UInt64
+    ) throws -> CoreDurableCheckpoint
+}
+
 public protocol ExperimentalHybridSigning: AnyObject {
     func sign(
         logicalKeyID: String,
@@ -339,6 +371,22 @@ public final class ExperimentalHybridKeyCustody: ExperimentalHybridSigning {
         }
     }
 
+    public func signingMaterial(logicalKeyID: String) throws -> ExperimentalHybridSigningMaterial {
+        guard let record = try records.load(logicalKeyID: logicalKeyID),
+              let anchor = try anchors.load(logicalKeyID: logicalKeyID)
+        else { throw ExperimentalPqCustodyError.missingGeneration }
+        try Self.validate(record: record, anchor: anchor)
+        let classicalPublic = try signer.publicKeyRaw(
+            keyRef: record.reference.classicalKeyReference)
+        guard Self.sha256(classicalPublic) == record.reference.classicalPublicKeyHash else {
+            throw ExperimentalPqCustodyError.mixedGeneration
+        }
+        return ExperimentalHybridSigningMaterial(
+            reference: record.reference,
+            classicalPublicKey: classicalPublic,
+            mlDsa65PublicKey: record.mlDsa65PublicKey)
+    }
+
     public func sign(
         logicalKeyID: String,
         profile: ExperimentalHybridSignatureProfile,
@@ -508,6 +556,70 @@ public final class ExperimentalHybridCheckpointRecovery {
         Swift.withUnsafeBytes(of: &length) { output.append(contentsOf: $0) }
         output.append(sessionContext)
         return output
+    }
+}
+
+public final class ExperimentalHybridCheckpointExport {
+    private let engine: any DurableWalletEngineDriving
+    private let custody: ExperimentalHybridKeyCustody
+    private let crypto: any ExperimentalHybridExportCryptography
+
+    public init(
+        engine: any DurableWalletEngineDriving,
+        custody: ExperimentalHybridKeyCustody,
+        crypto: any ExperimentalHybridExportCryptography
+    ) {
+        self.engine = engine
+        self.custody = custody
+        self.crypto = crypto
+    }
+
+    public func create(
+        logicalKeyID: String,
+        checkpointGeneration: UInt64,
+        nonce: Data,
+        createdAtEpochSeconds: UInt64,
+        expiresAtEpochSeconds: UInt64,
+        prompt: String
+    ) throws -> Data {
+        let checkpoint = try engine.makeDurableCheckpoint(generation: checkpointGeneration)
+        guard checkpoint.generation == checkpointGeneration, !checkpoint.bytes.isEmpty else {
+            throw ExperimentalPqCustodyError.malformedMaterial
+        }
+        let material = try custody.signingMaterial(logicalKeyID: logicalKeyID)
+        let draft = ExperimentalHybridExportDraft(
+            walletIdentity: material.reference.logicalKeyID,
+            keyGeneration: material.reference.generation,
+            checkpointGeneration: checkpoint.generation,
+            nonce: nonce,
+            createdAtEpochSeconds: createdAtEpochSeconds,
+            expiresAtEpochSeconds: expiresAtEpochSeconds,
+            checkpoint: checkpoint.bytes)
+        let tbs = try crypto.prepareExport(draft: draft)
+        let signature = try custody.sign(
+            reference: material.reference,
+            payload: tbs,
+            prompt: prompt)
+        return try crypto.finalizeExport(
+            draft: draft,
+            signingMaterial: material,
+            signature: signature)
+    }
+
+    public func restore(
+        artifact: Data,
+        expectedWalletIdentity: String,
+        expectedKeyGeneration: UInt64,
+        expectedPublicKeyEnvelope: Data,
+        nowEpochSeconds: UInt64
+    ) throws {
+        let checkpoint = try crypto.openExport(
+            artifact: artifact,
+            expectedWalletIdentity: expectedWalletIdentity,
+            expectedKeyGeneration: expectedKeyGeneration,
+            expectedPublicKeyEnvelope: expectedPublicKeyEnvelope,
+            nowEpochSeconds: nowEpochSeconds)
+        try engine.restoreDurableCheckpointRecord(checkpoint)
     }
 }
 

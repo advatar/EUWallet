@@ -21,10 +21,16 @@ swift_contract=(
   'public struct FfiExperimentalPqWrappedKeyMaterial'
   'public struct FfiExperimentalHybridRecoveryEnvelope'
   'public struct FfiExperimentalHybridRecoveryOpenRequest'
+  'public struct FfiExperimentalHybridExportDraft'
+  'public struct FfiExperimentalHybridExportFinalizeRequest'
+  'public struct FfiExperimentalHybridExportOpenRequest'
   'public func generateExperimentalPqWrappedKeyMaterial('
   'public func signExperimentalPqWrappedKeyMaterial('
   'public func sealExperimentalHybridRecovery('
   'public func openExperimentalHybridRecovery('
+  'public func prepareExperimentalHybridWalletExport('
+  'public func finalizeExperimentalHybridWalletExport('
+  'public func openExperimentalHybridWalletExport('
   'func prepareDurableEnvironment('
   'func exportDurableCheckpoint('
   'func restoreDurableCheckpoint('
@@ -58,6 +64,12 @@ durable_symbols=(
   uniffi_wallet_core_checksum_func_seal_experimental_hybrid_recovery
   uniffi_wallet_core_fn_func_open_experimental_hybrid_recovery
   uniffi_wallet_core_checksum_func_open_experimental_hybrid_recovery
+  uniffi_wallet_core_fn_func_prepare_experimental_hybrid_wallet_export
+  uniffi_wallet_core_checksum_func_prepare_experimental_hybrid_wallet_export
+  uniffi_wallet_core_fn_func_finalize_experimental_hybrid_wallet_export
+  uniffi_wallet_core_checksum_func_finalize_experimental_hybrid_wallet_export
+  uniffi_wallet_core_fn_func_open_experimental_hybrid_wallet_export
+  uniffi_wallet_core_checksum_func_open_experimental_hybrid_wallet_export
   uniffi_wallet_core_fn_method_walletengine_export_durable_checkpoint
   uniffi_wallet_core_fn_method_walletengine_prepare_durable_environment
   uniffi_wallet_core_fn_method_walletengine_restore_durable_checkpoint

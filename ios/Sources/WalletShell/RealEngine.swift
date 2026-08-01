@@ -10,7 +10,9 @@ import Foundation
     import wallet_coreFFI
 
     /// Generated Rust adapter. Rust generates both PQ keys and returns only AES-GCM-wrapped seeds.
-    final class FfiExperimentalPqBackend: ExperimentalPqGenerating {
+    final class FfiExperimentalPqBackend: ExperimentalPqGenerating,
+        ExperimentalHybridExportCryptography
+    {
         func generateWrappedMaterial(
             wrappingKey: inout Data
         ) throws -> ExperimentalPqWrappedMaterial {
@@ -103,6 +105,56 @@ import Foundation
                 transcriptHash: envelope.transcriptHash,
                 nonce: envelope.nonce,
                 ciphertext: envelope.ciphertext)
+        }
+
+        func prepareExport(draft: ExperimentalHybridExportDraft) throws -> Data {
+            try prepareExperimentalHybridWalletExport(draft: ffiExportDraft(draft))
+        }
+
+        func finalizeExport(
+            draft: ExperimentalHybridExportDraft,
+            signingMaterial: ExperimentalHybridSigningMaterial,
+            signature: ExperimentalHybridSignature
+        ) throws -> Data {
+            try finalizeExperimentalHybridWalletExport(
+                request: FfiExperimentalHybridExportFinalizeRequest(
+                    draft: ffiExportDraft(draft),
+                    classicalPublicKey: signingMaterial.classicalPublicKey,
+                    mlDsa65PublicKey: signingMaterial.mlDsa65PublicKey,
+                    classicalSignature: signature.classicalSignature,
+                    mlDsa65Signature: signature.postQuantumSignature))
+        }
+
+        func openExport(
+            artifact: Data,
+            expectedWalletIdentity: String,
+            expectedKeyGeneration: UInt64,
+            expectedPublicKeyEnvelope: Data,
+            nowEpochSeconds: UInt64
+        ) throws -> CoreDurableCheckpoint {
+            let checkpoint = try openExperimentalHybridWalletExport(
+                request: FfiExperimentalHybridExportOpenRequest(
+                    artifact: artifact,
+                    expectedWalletIdentity: expectedWalletIdentity,
+                    expectedKeyGeneration: expectedKeyGeneration,
+                    expectedPublicKeyEnvelope: expectedPublicKeyEnvelope,
+                    nowEpochSeconds: nowEpochSeconds))
+            return CoreDurableCheckpoint(
+                generation: checkpoint.generation,
+                bytes: checkpoint.bytes)
+        }
+
+        private func ffiExportDraft(
+            _ draft: ExperimentalHybridExportDraft
+        ) -> FfiExperimentalHybridExportDraft {
+            FfiExperimentalHybridExportDraft(
+                walletIdentity: draft.walletIdentity,
+                keyGeneration: draft.keyGeneration,
+                checkpointGeneration: draft.checkpointGeneration,
+                nonce: draft.nonce,
+                createdAtEpochSeconds: draft.createdAtEpochSeconds,
+                expiresAtEpochSeconds: draft.expiresAtEpochSeconds,
+                checkpoint: draft.checkpoint)
         }
     }
 
