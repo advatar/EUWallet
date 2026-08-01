@@ -14,6 +14,12 @@ crypto-traits = { path = "../crypto-traits" }
 crypto-backend = { path = "../crypto-backend" }
 cose = { path = "../cose" }
 sdjwt = { path = "../sdjwt" }
+hybrid-pq = { path = "../hybrid-pq" }
+
+# Experimental hybrid-PQ budgets (plan section 16, issue #93). Off by default so the
+# certified bench surface is unchanged; run with `--features experimental-pq`.
+[features]
+experimental-pq = ["crypto-backend/experimental-pq-primitives"]
 
 [lints]
 workspace = true

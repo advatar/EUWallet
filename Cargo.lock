@@ -157,6 +157,7 @@ dependencies = [
  "cose",
  "crypto-backend",
  "crypto-traits",
+ "hybrid-pq",
  "sdjwt",
 ]
 
