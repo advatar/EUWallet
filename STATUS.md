@@ -117,6 +117,12 @@ algorithm/profile and certification approval.
   - [x] Restrict provider links to an explicit allow-list and hybrid-required negotiation.
   - [x] Isolate experimental credential wrappers from the production catalogue namespace.
   - [x] Keep production adoption blocked pending standards, CAB/profile and conformance approval.
+- [x] [#119](https://github.com/advatar/EUWallet/issues/119): freeze `HybridCredentialWrapperV1`
+      and publish the shared credential-wrapper corpus.
+  - [x] Implement strict encode/decode/verify for the eleven-key wrapper with frozen bounds.
+  - [x] Record the byte layout, signed committed payload, and unsigned binding rule in a freeze document.
+  - [x] Publish the positive wrapper vector and twenty-one rejection mutations, byte-identical in VCIssuer.
+  - [x] Verify the corpus with independent aws-lc ES256 and RustCrypto ML-DSA-65 backends.
 - [ ] [#91](https://github.com/advatar/EUWallet/issues/91): build the complete adversarial test
       matrix.
   - [x] Cover the complete 2x2 validity, missing-component, profile, downgrade and mismatch matrix.
