@@ -41,6 +41,8 @@ algorithm/profile and certification approval.
   - [x] Add a prominent first quantum-safe EU Wallet implementation claim with experimental scope.
   - [x] Link the Advatar credential issuer and verifier as the complete ecosystem.
   - [x] Verify landing-page formatting, type checking, changed-file lint and production build.
+- [x] [Landing page #4](https://github.com/advatar/euro-wallet-echo/issues/4): refresh the advertised
+      experimental hybrid-PQ functionality and current verification evidence.
 - [x] [#78](https://github.com/advatar/EUWallet/issues/78): freeze the experimental profile scope.
   - [x] Pin algorithm parameters, wire encoding, identifiers and purpose registry.
   - [x] Enumerate unchanged production surfaces and structural rejection rules.
