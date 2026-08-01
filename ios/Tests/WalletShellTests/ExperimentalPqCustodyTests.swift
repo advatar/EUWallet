@@ -37,6 +37,8 @@ private final class PqTestBackend: ExperimentalPqGenerating {
     var signError: Error?
     private(set) var observedKeyLengths: [Int] = []
     private(set) var signCalls = 0
+    private(set) var lastSealedPlaintext: Data?
+    private(set) var lastRecoveryContext: Data?
 
     func generateWrappedMaterial(
         wrappingKey: inout Data
@@ -67,10 +69,45 @@ private final class PqTestBackend: ExperimentalPqGenerating {
         recipientClassicalPublicKey _: Data,
         recipientMlKem768PublicKey _: Data,
         classicalSharedSecret _: inout Data,
-        context _: Data,
+        context: Data,
         envelope _: ExperimentalHybridRecoveryEnvelope
     ) throws -> Data {
-        Data("recovered".utf8)
+        lastRecoveryContext = context
+        return Data("recovered".utf8)
+    }
+
+    func sealRecovery(
+        senderIdentity: String,
+        recipientIdentity: String,
+        keyGeneration: UInt64,
+        recipientClassicalPublicKey _: Data,
+        recipientMlKem768PublicKey _: Data,
+        context: Data,
+        plaintext: Data
+    ) throws -> ExperimentalHybridRecoveryEnvelope {
+        lastRecoveryContext = context
+        lastSealedPlaintext = plaintext
+        return ExperimentalHybridRecoveryEnvelope(
+            senderIdentity: senderIdentity,
+            recipientIdentity: recipientIdentity,
+            keyGeneration: keyGeneration,
+            classicalEphemeralPublicKey: Data([0x04] + [UInt8](repeating: 1, count: 64)),
+            mlKem768Ciphertext: Data(repeating: 2, count: 1_088),
+            transcriptHash: Data(repeating: 3, count: 32),
+            nonce: Data(repeating: 4, count: 12),
+            ciphertext: Data(repeating: 5, count: 32))
+    }
+}
+
+private final class PqRecoveryEngine: DurableWalletEngineDriving {
+    var exported = CoreDurableCheckpoint(generation: 8, bytes: Data("checkpoint".utf8))
+    private(set) var restored: CoreDurableCheckpoint?
+
+    func handleEventJson(eventJson _: String) throws -> String { "[]" }
+    func prepareForDurableRestore(environment _: CoreDurableEnvironment) throws {}
+    func makeDurableCheckpoint(generation _: UInt64) throws -> CoreDurableCheckpoint { exported }
+    func restoreDurableCheckpointRecord(_ checkpoint: CoreDurableCheckpoint) throws {
+        restored = checkpoint
     }
 }
 
@@ -303,6 +340,48 @@ final class ExperimentalPqCustodyTests: XCTestCase {
             prompt: "Recover")) {
                 XCTAssertEqual($0 as? ExperimentalPqCustodyError, .mixedGeneration)
             }
+    }
+
+    func testCheckpointRecoverySealsAndRestoresActualDurableCoreState() throws {
+        let reference = try custody.rotate(logicalKeyID: "wallet-key", prompt: "Create")
+        let engine = PqRecoveryEngine()
+        let recovery = ExperimentalHybridCheckpointRecovery(
+            engine: engine,
+            backend: backend,
+            custody: custody)
+        let session = Data("session-8".utf8)
+        let envelope = try recovery.sealCheckpoint(
+            checkpointGeneration: 8,
+            senderIdentity: "recovery-provider.example",
+            recipient: ExperimentalHybridRecoveryRecipient(
+                logicalKeyID: reference.logicalKeyID,
+                keyGeneration: reference.generation,
+                classicalPublicKey: Data([0x04] + [UInt8](repeating: 1, count: 64)),
+                mlKem768PublicKey: records.values["wallet-key"]!.mlKem768PublicKey),
+            sessionContext: session)
+        XCTAssertEqual(backend.lastSealedPlaintext, engine.exported.bytes)
+
+        try recovery.restoreCheckpoint(
+            checkpointGeneration: 8,
+            logicalKeyID: "wallet-key",
+            sessionContext: session,
+            envelope: envelope,
+            prompt: "Recover")
+        XCTAssertEqual(
+            engine.restored,
+            CoreDurableCheckpoint(generation: 8, bytes: Data("recovered".utf8)))
+
+        let sealedContext = backend.lastRecoveryContext
+        XCTAssertThrowsError(try recovery.sealCheckpoint(
+            checkpointGeneration: 0,
+            senderIdentity: "recovery-provider.example",
+            recipient: ExperimentalHybridRecoveryRecipient(
+                logicalKeyID: reference.logicalKeyID,
+                keyGeneration: reference.generation,
+                classicalPublicKey: Data(repeating: 1, count: 65),
+                mlKem768PublicKey: Data(repeating: 2, count: 1_184)),
+            sessionContext: session))
+        XCTAssertEqual(backend.lastRecoveryContext, sealedContext)
     }
 
     func testMalformedBackendMaterialIsNeverCommittedAndCandidateKeyIsDeleted() {

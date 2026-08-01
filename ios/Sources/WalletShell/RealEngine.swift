@@ -76,6 +76,34 @@ import Foundation
                         nonce: envelope.nonce,
                         ciphertext: envelope.ciphertext)))
         }
+
+        func sealRecovery(
+            senderIdentity: String,
+            recipientIdentity: String,
+            keyGeneration: UInt64,
+            recipientClassicalPublicKey: Data,
+            recipientMlKem768PublicKey: Data,
+            context: Data,
+            plaintext: Data
+        ) throws -> ExperimentalHybridRecoveryEnvelope {
+            let envelope = try sealExperimentalHybridRecovery(
+                senderIdentity: senderIdentity,
+                recipientIdentity: recipientIdentity,
+                keyGeneration: keyGeneration,
+                recipientClassicalPublicKey: recipientClassicalPublicKey,
+                recipientMlKem768PublicKey: recipientMlKem768PublicKey,
+                context: context,
+                plaintext: plaintext)
+            return ExperimentalHybridRecoveryEnvelope(
+                senderIdentity: envelope.senderIdentity,
+                recipientIdentity: envelope.recipientIdentity,
+                keyGeneration: envelope.keyGeneration,
+                classicalEphemeralPublicKey: envelope.classicalEphemeralPublicKey,
+                mlKem768Ciphertext: envelope.mlKem768Ciphertext,
+                transcriptHash: envelope.transcriptHash,
+                nonce: envelope.nonce,
+                ciphertext: envelope.ciphertext)
+        }
     }
 
     /// Production composition for one application-scoped hybrid-key custody domain.

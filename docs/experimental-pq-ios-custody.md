@@ -22,6 +22,11 @@ execution in the qualified Rust backend and the following custody path:
 5. Rotation creates new classical and PQ components. The prior record stays authoritative until
    ciphertext and Keychain-anchor commits both succeed; mixed, missing or rolled-back generations
    fail closed.
+6. Experimental checkpoint recovery exports the real Core durable checkpoint, performs sender-side
+   P-256 + ML-KEM-768 encapsulation in Rust, and binds the checkpoint generation and session context
+   into both the KEM transcript and AES-256-GCM AAD. Opening uses Secure Enclave ECDH plus the
+   wrapped ML-KEM seed; plaintext is restored to Core only after both components, the transcript,
+   the logical generation and the AEAD tag validate.
 
 PQ seed material is not part of Core state, durable checkpoints, wallet exports, diagnostics,
 analytics or crash text. Swift diagnostic representations redact ciphertext as well. Operations
@@ -36,6 +41,8 @@ that unlock a generation must clear the returned wrapping-key `Data` with
   stale-record rollback, missing wrapping key, biometric cancellation (`errSecUserCanceled`),
   locked/ineligible interaction (`errSecInteractionNotAllowed`), malformed backend material,
   redacted diagnostics, ciphertext-only disk storage and backup exclusion.
+- Rust/Swift recovery tests cover real durable-checkpoint export/restore, exact transcript and
+  generation binding, component-secret failure and transcript tampering with no partial plaintext.
 - `ios/verify-rust-xcframework.sh` verifies the generated wrapped-key function and checksum in both
   physical-device and simulator static-library slices.
 

@@ -56,6 +56,15 @@ public protocol ExperimentalPqGenerating: AnyObject {
         context: Data,
         envelope: ExperimentalHybridRecoveryEnvelope
     ) throws -> Data
+    func sealRecovery(
+        senderIdentity: String,
+        recipientIdentity: String,
+        keyGeneration: UInt64,
+        recipientClassicalPublicKey: Data,
+        recipientMlKem768PublicKey: Data,
+        context: Data,
+        plaintext: Data
+    ) throws -> ExperimentalHybridRecoveryEnvelope
 }
 
 public protocol HybridClassicalKeyProviding: Signer, AnyObject {
@@ -64,6 +73,25 @@ public protocol HybridClassicalKeyProviding: Signer, AnyObject {
 }
 
 extension SecureEnclaveSigner: HybridClassicalKeyProviding {}
+
+public struct ExperimentalHybridRecoveryRecipient: Equatable {
+    public let logicalKeyID: String
+    public let keyGeneration: UInt64
+    public let classicalPublicKey: Data
+    public let mlKem768PublicKey: Data
+
+    public init(
+        logicalKeyID: String,
+        keyGeneration: UInt64,
+        classicalPublicKey: Data,
+        mlKem768PublicKey: Data
+    ) {
+        self.logicalKeyID = logicalKeyID
+        self.keyGeneration = keyGeneration
+        self.classicalPublicKey = classicalPublicKey
+        self.mlKem768PublicKey = mlKem768PublicKey
+    }
+}
 
 public enum ExperimentalPqProfile: String, Codable, Equatable {
     case hybridP256MlDsa65MlKem768V1 = "euwallet-hybrid-pq-v1"
@@ -396,6 +424,90 @@ public final class ExperimentalHybridKeyCustody: ExperimentalHybridSigning {
         !value.isEmpty && value.count <= 128 && value.unicodeScalars.allSatisfy {
             CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-")).contains($0)
         }
+    }
+}
+
+/// End-to-end bridge between the real durable Core checkpoint and the experimental hybrid
+/// recovery cryptography. Checkpoint generation and the caller's bounded session context are
+/// committed into the authenticated KEM transcript and AEAD associated data.
+public final class ExperimentalHybridCheckpointRecovery {
+    private static let contextDomain = Data("EUWALLET-HYBRID-CHECKPOINT-RECOVERY-V1".utf8)
+    private static let maximumSessionContextBytes = 4_096
+
+    private let engine: any DurableWalletEngineDriving
+    private let backend: any ExperimentalPqGenerating
+    private let custody: ExperimentalHybridKeyCustody
+
+    public init(
+        engine: any DurableWalletEngineDriving,
+        backend: any ExperimentalPqGenerating,
+        custody: ExperimentalHybridKeyCustody
+    ) {
+        self.engine = engine
+        self.backend = backend
+        self.custody = custody
+    }
+
+    public func sealCheckpoint(
+        checkpointGeneration: UInt64,
+        senderIdentity: String,
+        recipient: ExperimentalHybridRecoveryRecipient,
+        sessionContext: Data
+    ) throws -> ExperimentalHybridRecoveryEnvelope {
+        let context = try Self.context(
+            checkpointGeneration: checkpointGeneration,
+            sessionContext: sessionContext)
+        let checkpoint = try engine.makeDurableCheckpoint(generation: checkpointGeneration)
+        guard checkpoint.generation == checkpointGeneration, !checkpoint.bytes.isEmpty else {
+            throw ExperimentalPqCustodyError.malformedMaterial
+        }
+        return try backend.sealRecovery(
+            senderIdentity: senderIdentity,
+            recipientIdentity: recipient.logicalKeyID,
+            keyGeneration: recipient.keyGeneration,
+            recipientClassicalPublicKey: recipient.classicalPublicKey,
+            recipientMlKem768PublicKey: recipient.mlKem768PublicKey,
+            context: context,
+            plaintext: checkpoint.bytes)
+    }
+
+    public func restoreCheckpoint(
+        checkpointGeneration: UInt64,
+        logicalKeyID: String,
+        sessionContext: Data,
+        envelope: ExperimentalHybridRecoveryEnvelope,
+        prompt: String
+    ) throws {
+        let context = try Self.context(
+            checkpointGeneration: checkpointGeneration,
+            sessionContext: sessionContext)
+        let checkpoint = try custody.openRecovery(
+            logicalKeyID: logicalKeyID,
+            context: context,
+            envelope: envelope,
+            prompt: prompt)
+        guard !checkpoint.isEmpty,
+              checkpoint.count <= DurableLifecycleCoordinator.maximumCheckpointBytes
+        else { throw ExperimentalPqCustodyError.malformedMaterial }
+        try engine.restoreDurableCheckpointRecord(
+            CoreDurableCheckpoint(generation: checkpointGeneration, bytes: checkpoint))
+    }
+
+    private static func context(
+        checkpointGeneration: UInt64,
+        sessionContext: Data
+    ) throws -> Data {
+        guard checkpointGeneration > 0,
+              !sessionContext.isEmpty,
+              sessionContext.count <= maximumSessionContextBytes
+        else { throw ExperimentalPqCustodyError.malformedMaterial }
+        var output = contextDomain
+        var generation = checkpointGeneration.bigEndian
+        Swift.withUnsafeBytes(of: &generation) { output.append(contentsOf: $0) }
+        var length = UInt32(sessionContext.count).bigEndian
+        Swift.withUnsafeBytes(of: &length) { output.append(contentsOf: $0) }
+        output.append(sessionContext)
+        return output
     }
 }
 

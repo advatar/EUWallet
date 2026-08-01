@@ -120,7 +120,7 @@ algorithm/profile and certification approval.
   - [x] Isolate experimental credential wrappers from the production catalogue namespace.
   - [x] Keep production adoption blocked pending standards, CAB/profile and conformance approval.
   - [ ] Wire the versioned hybrid export to actual durable wallet state and atomic shell signing.
-  - [ ] Implement recovery encryption/decryption through the reviewed hybrid key agreement and
+  - [x] Implement recovery encryption/decryption through the reviewed hybrid key agreement and
         generation-bound AEAD rather than metadata-only artifact helpers.
   - [ ] Compose allow-listed provider transport negotiation and experimental credential catalogue
         flows end to end, retaining structural exclusion from certified requests.
