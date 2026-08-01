@@ -183,6 +183,31 @@ pub struct ConsentScreen {
     pub trust_mark: Option<VerifierTrustMark>,
     pub retention: RetentionDisclosure,
     pub over_ask: OverAskResult,
+    /// ActiveChain action context. Commitments are canonical protocol hex, while localized display
+    /// labels remain unsigned presentation aids. `None` preserves ordinary EUDI presentations.
+    #[serde(default)]
+    pub activechain: Option<ActiveChainConsentContext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveChainConsentContext {
+    pub principal_id: String,
+    pub chain_id: String,
+    pub resource_commitment: String,
+    pub action_id: String,
+    pub purpose_commitment: String,
+    pub audience_id: String,
+    pub issuer_binding_commitment: String,
+    pub credential_profile_commitment: String,
+    pub assurance: String,
+    pub policy_revision: u64,
+    pub nonce_commitment: String,
+    pub expires_at: u64,
+    pub linkability: String,
+    pub value_minor: u64,
+    pub fee_minor: u64,
+    pub capability_action_commitment: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -335,6 +360,9 @@ fn to_value(screen: &ScreenDescription) -> Value {
                     Value::Array(vec![Value::Text("registrationScopeUnavailable".into())])
                 }
             },
+            c.activechain
+                .as_ref()
+                .map_or(Value::Null, activechain_consent_value),
         ]),
         ScreenDescription::PaymentConfirmation(p) => Value::Array(vec![
             tag("paymentConfirmation"),
@@ -421,6 +449,94 @@ fn to_value(screen: &ScreenDescription) -> Value {
         ScreenDescription::ScanQr => Value::Array(vec![tag("scanQr")]),
         ScreenDescription::AuthPrompt => Value::Array(vec![tag("authPrompt")]),
         ScreenDescription::TransactionHistory => Value::Array(vec![tag("transactionHistory")]),
+    }
+}
+
+fn activechain_consent_value(context: &ActiveChainConsentContext) -> Value {
+    Value::Array(vec![
+        Value::Text("activechain-v1".into()),
+        Value::Text(context.principal_id.clone()),
+        Value::Text(context.chain_id.clone()),
+        Value::Text(context.resource_commitment.clone()),
+        Value::Text(context.action_id.clone()),
+        Value::Text(context.purpose_commitment.clone()),
+        Value::Text(context.audience_id.clone()),
+        Value::Text(context.issuer_binding_commitment.clone()),
+        Value::Text(context.credential_profile_commitment.clone()),
+        Value::Text(context.assurance.clone()),
+        Value::Uint(context.policy_revision),
+        Value::Text(context.nonce_commitment.clone()),
+        Value::Uint(context.expires_at),
+        Value::Text(context.linkability.clone()),
+        Value::Uint(context.value_minor),
+        Value::Uint(context.fee_minor),
+        Value::Text(context.capability_action_commitment.clone()),
+    ])
+}
+
+#[cfg(test)]
+mod activechain_tests {
+    use super::*;
+    struct TestDigest;
+    impl crypto_traits::Digest for TestDigest {
+        fn sha256(&self, data: &[u8]) -> [u8; 32] {
+            use sha2::{Digest as _, Sha256};
+            Sha256::digest(data).into()
+        }
+    }
+
+    fn context() -> ActiveChainConsentContext {
+        ActiveChainConsentContext {
+            principal_id: "principal-01".into(),
+            chain_id: "chain-01".into(),
+            resource_commitment: "resource-01".into(),
+            action_id: "action-01".into(),
+            purpose_commitment: "purpose-01".into(),
+            audience_id: "audience-01".into(),
+            issuer_binding_commitment: "issuer-01".into(),
+            credential_profile_commitment: "profile-01".into(),
+            assurance: "issuerUpgraded".into(),
+            policy_revision: 1,
+            nonce_commitment: "nonce-01".into(),
+            expires_at: 20,
+            linkability: "pairwise".into(),
+            value_minor: 100,
+            fee_minor: 2,
+            capability_action_commitment: "capability-01".into(),
+        }
+    }
+    fn screen(activechain: Option<ActiveChainConsentContext>) -> ScreenDescription {
+        ScreenDescription::Consent(ConsentScreen {
+            rp_display_name: "Verified Merchant".into(),
+            purpose: "Age check".into(),
+            requested_claims: vec!["age_over_18".into()],
+            not_shared_claims: vec!["family_name".into()],
+            verifier_registration: VerifierRegistration::Registered,
+            trust_mark: Some(VerifierTrustMark::EudiWallet),
+            retention: RetentionDisclosure::NotStored,
+            over_ask: OverAskResult::WithinRegisteredScope,
+            activechain,
+        })
+    }
+    #[test]
+    fn every_activechain_action_field_is_what_you_see_is_what_you_sign() {
+        let base = consent_hash(&TestDigest, &screen(Some(context())));
+        let mut changed = context();
+        changed.action_id = "action-02".into();
+        assert_ne!(base, consent_hash(&TestDigest, &screen(Some(changed))));
+        let mut changed = context();
+        changed.fee_minor = 3;
+        assert_ne!(base, consent_hash(&TestDigest, &screen(Some(changed))));
+        let mut changed = context();
+        changed.nonce_commitment = "nonce-02".into();
+        assert_ne!(base, consent_hash(&TestDigest, &screen(Some(changed))));
+    }
+    #[test]
+    fn ordinary_eudi_consent_remains_a_separate_profile() {
+        assert_ne!(
+            consent_hash(&TestDigest, &screen(None)),
+            consent_hash(&TestDigest, &screen(Some(context())))
+        );
     }
 }
 
