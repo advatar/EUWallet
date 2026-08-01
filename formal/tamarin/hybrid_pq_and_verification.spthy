@@ -1,0 +1,156 @@
+/*
+  Tier-3 symbolic analysis of the experimental hybrid-PQ AND verification and
+  downgrade-resistant negotiation (plan Section 15, issue #92). Companion to the
+  Tier-2 `HybridPqModel.lean`.
+
+  Models the euwallet-hybrid-pq-v1 design against a Dolev-Yao attacker who may
+  additionally BREAK THE CLASSICAL COMPONENT (RevealClassical models a
+  cryptographically relevant quantum computer). The properties:
+
+    1. acceptance requires BOTH component signatures over the SAME
+       domain-separated TBS — one valid component is insufficient, and forging
+       an acceptance requires compromising BOTH long-term keys;
+    2. both keys belong to ONE atomically registered hybrid identity and
+       generation — mixed identities/generations cannot be combined;
+    3. a session that negotiated the hybrid profile can never be completed by a
+       classical-only acceptance (no downgrade);
+    4. domain separation binds purpose into the TBS — a signature produced for
+       one purpose is never accepted for another (no cross-protocol replay).
+
+  Run:
+    tamarin-prover --prove hybrid_pq_and_verification.spthy
+  All lemmas verify (checked with tamarin-prover 1.12.0).
+*/
+
+theory HybridPqAndVerification
+begin
+
+builtins: signing
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ #i ==> x = y"
+
+/* One hybrid identity registers BOTH component keys in a single atomic step and
+   binds them to one generation (the fresh ~gen). There is no rule that pairs a
+   classical key with a post-quantum key from a different registration, mirroring
+   the atomic custody binding of the implementation. */
+rule Register_Hybrid:
+    [ Fr(~ck), Fr(~qk), Fr(~gen) ]
+  --[ RegisterHybrid($A, ~gen) ]->
+    [ !HybridLtk($A, ~gen, ~ck, ~qk)
+    , !HybridPk($A, ~gen, pk(~ck), pk(~qk))
+    , Out(<pk(~ck), pk(~qk)>)
+    ]
+
+/* A quantum-capable attacker: the classical component alone can fall. */
+rule Reveal_Classical:
+    [ !HybridLtk($A, gen, ck, qk) ]
+  --[ RevealClassical($A, gen) ]->
+    [ Out(ck) ]
+
+rule Reveal_PostQuantum:
+    [ !HybridLtk($A, gen, ck, qk) ]
+  --[ RevealPostQuantum($A, gen) ]->
+    [ Out(qk) ]
+
+/* The verifier opens a session with a fresh context and a fixed profile
+   requirement: 'hybrid' (hybrid-required policy) or 'classical'. */
+rule Session_Open:
+    [ Fr(~ctx) ]
+  --[ SessionRequires($V, $profile, ~ctx) ]->
+    [ Out(~ctx), Session($V, $profile, ~ctx) ]
+
+/* The wallet signs ONE domain-separated TBS with BOTH components atomically.
+   The TBS binds the profile tag, purpose, session context and message. */
+rule Wallet_HybridSign:
+    [ !HybridLtk($A, gen, ck, qk), In(<ctx, m>) ]
+  --[ HybridSigns($A, gen, $purpose, ctx, m) ]->
+    [ Out( <sign(<'hybrid_v1', $purpose, ctx, m>, ck),
+            sign(<'hybrid_v1', $purpose, ctx, m>, qk)> ) ]
+
+/* A hybrid-required session accepts ONLY when both components verify against
+   the pks of ONE registered hybrid identity/generation over the SAME TBS. */
+rule Verifier_Accept_Hybrid:
+    [ Session($V, 'hybrid', ctx)
+    , In(<sigc, sigq, m>)
+    , !HybridPk($A, gen, pkc, pkq)
+    ]
+  --[ Eq(verify(sigc, <'hybrid_v1', $purpose, ctx, m>, pkc), true)
+    , Eq(verify(sigq, <'hybrid_v1', $purpose, ctx, m>, pkq), true)
+    , AcceptHybrid($V, $A, gen, $purpose, ctx, m)
+    ]->
+    [ ]
+
+/* A classical-profile session accepts a classical-only signature. This rule
+   exists so downgrade is REPRESENTABLE; the lemmas prove it can never complete
+   a session whose requirement was 'hybrid'. */
+rule Verifier_Accept_Classical:
+    [ Session($V, 'classical', ctx)
+    , In(<sigc, m>)
+    , !HybridPk($A, gen, pkc, pkq)
+    ]
+  --[ Eq(verify(sigc, <'classical_v1', $purpose, ctx, m>, pkc), true)
+    , AcceptClassical($V, $A, gen, $purpose, ctx, m)
+    ]->
+    [ ]
+
+/* ================================================================== */
+/* LEMMAS                                                             */
+/* ================================================================== */
+
+/* Sanity: an honest hybrid acceptance is reachable. */
+lemma executable:
+  exists-trace
+  "Ex V A gen p ctx m #i. AcceptHybrid(V, A, gen, p, ctx, m) @ #i"
+
+/* AND verification: acceptance implies the identity's atomic hybrid signing of
+   EXACTLY this purpose/context/message, unless BOTH long-term components were
+   compromised. Breaking the classical component alone (a quantum attacker)
+   cannot produce acceptance, so one valid component is formally insufficient
+   and component removal or substitution cannot produce acceptance. */
+lemma and_verification_both_components_required:
+  "All V A gen p ctx m #i.
+      AcceptHybrid(V, A, gen, p, ctx, m) @ #i
+    ==>
+      (Ex #j. HybridSigns(A, gen, p, ctx, m) @ #j & #j < #i)
+      | (Ex #r1 #r2. RevealClassical(A, gen) @ #r1
+                   & RevealPostQuantum(A, gen) @ #r2)"
+
+/* Classical compromise alone is insufficient. */
+lemma classical_break_alone_is_insufficient:
+  "not (Ex V A gen p ctx m #i.
+          AcceptHybrid(V, A, gen, p, ctx, m) @ #i
+        & not (Ex #j. HybridSigns(A, gen, p, ctx, m) @ #j)
+        & not (Ex #r. RevealPostQuantum(A, gen) @ #r))"
+
+/* One hybrid identity/generation: acceptance names a pair of keys registered
+   ATOMICALLY under one identity and one generation. */
+lemma no_mixed_identity_or_generation:
+  "All V A gen p ctx m #i.
+      AcceptHybrid(V, A, gen, p, ctx, m) @ #i
+    ==>
+      Ex #j. RegisterHybrid(A, gen) @ #j & #j < #i"
+
+/* Downgrade resistance: a session that required the hybrid profile is never
+   completed by a classical-only acceptance. */
+lemma hybrid_required_session_cannot_downgrade:
+  "not (Ex V A gen p ctx m #i #j.
+          SessionRequires(V, 'hybrid', ctx) @ #i
+        & AcceptClassical(V, A, gen, p, ctx, m) @ #j)"
+
+/* Domain separation: an honest signature is only ever accepted for the exact
+   purpose it was produced for. If an acceptance names purpose p2 while the
+   identity only ever signed a different purpose p1, the acceptance must be
+   backed by a genuine signing at p2 (or a full two-component compromise) —
+   cross-protocol/cross-purpose replay of the p1 signature is impossible. */
+lemma no_cross_purpose_replay:
+  "All V A gen p1 p2 ctx m #i #j.
+      AcceptHybrid(V, A, gen, p2, ctx, m) @ #i
+    & HybridSigns(A, gen, p1, ctx, m) @ #j
+    & not (p1 = p2)
+    & not (Ex #r1 #r2. RevealClassical(A, gen) @ #r1
+                     & RevealPostQuantum(A, gen) @ #r2)
+    ==>
+      Ex #j2. HybridSigns(A, gen, p2, ctx, m) @ #j2"
+
+end
