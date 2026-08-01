@@ -20,6 +20,21 @@ input artifact.
 | Secret leakage | Rust debug-redaction audit and Swift diagnostic/ciphertext audit |
 | Deterministic interoperability anchors | public-key, TBS and combiner vectors; component KAT/cross-library work in #105 |
 
+## Executed suite evidence (2026-08-01, local Apple Silicon, Rust 1.97.1)
+
+- Deterministic/cross-implementation vectors: `cargo test -p crypto-backend --features
+  experimental-pq-primitives` — all suites green, including `hybrid_component_vectors`
+  (byte-identical #105 corpus: real ES256 verified with AWS-LC, real ML-DSA-65 verified with
+  RustCrypto, all twelve structural mutations rejected).
+- Hybrid crate suites: `cargo test -p hybrid-pq --all-features` — 33 unit + 2 doc tests green.
+- Fuzz: `hybrid_pq_envelopes` seeded with the checked-in public-key and signature envelope
+  vectors, `-max_len=8300`; coverage rose from 40 to 203 edges, ≈ 22 M total executions across
+  runs, zero crashes/OOMs/timeouts (corpus retained locally; corpus directories are gitignored).
+- Swift: `swift test` in `ios/` — 158 tests, 0 failures, including `ExperimentalPqCustodyTests`.
+- Simulator and full-gate evidence: every PR runs the iOS shell (swift build + test + native UI
+  tests), Tier 1 (bounded fuzz + Kani), Tier 2 (Lean + oracle replay) and Tier 3 (Tamarin) CI
+  gates; hybrid-PQ merges #115–#120 are green on `origin/main`.
+
 The physical-device latency/memory matrix is not replaced by simulator evidence. It remains an
 explicit closure dependency on issue #86. Issue #91 must stay open until that evidence and the
-component-vector work are integrated.
+physical-device performance evidence are integrated.
