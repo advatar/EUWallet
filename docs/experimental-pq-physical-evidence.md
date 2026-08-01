@@ -33,6 +33,9 @@ bounded backend operation, not a claim about whole-app energy use.
 ## Remaining interactive gates
 
 This run does not close biometric approval, biometric cancellation, locked-device access, or the
-documented battery/thermal observation. Run the test twice with
+documented battery/thermal observation. The harness now includes an explicit locked-device
+fail-closed case and a five-second, four-worker sustained battery/thermal snapshot; neither is
+credited until its physical-device result bundle is retained. Run the biometric test twice with
 `EUWALLET_PQ_BIOMETRIC_ACTION=approve` and `EUWALLET_PQ_BIOMETRIC_ACTION=cancel`, then execute the
-locked-device and battery/thermal matrix before marking the hardware closure gate complete.
+locked-device case with `EUWALLET_PQ_DEVICE_STATE=locked` and the sustained case before marking the
+hardware closure gate complete.

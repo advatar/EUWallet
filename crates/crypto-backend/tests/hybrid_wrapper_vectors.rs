@@ -24,7 +24,7 @@ const EXPECTED_GENERATION: u64 = 9;
 
 fn corpus_context() -> HybridContext {
     HybridContext {
-        wallet_identity: b"wallet-holder-thumbprint".to_vec(),
+        wallet_identity: b"FNTotPeVek-MEChStrtHEZ9__f_R0R6CnaCg3QzzSQw".to_vec(),
         issuer_identity: Some(b"https://issuer.example".to_vec()),
         key_generation: EXPECTED_GENERATION,
         transaction_id: Some(b"transaction-123".to_vec()),
@@ -166,11 +166,11 @@ fn verifies_the_vcissuer_wrapper_corpus_with_independent_backends() {
 
     assert_eq!(
         sha256_hex(WRAPPER_ENVELOPE_HEX.as_bytes()),
-        "ab61da190318f05e7d659e1477c0694e3499d141a5c748f6b0b19fef908195cb"
+        "21e5e55352ac03cdf554704399173ec3a89f9870d4b84e257489f057e1b63a90"
     );
     assert_eq!(
         sha256_hex(MUTATIONS_JSON.as_bytes()),
-        "46926357600682028a5be30d3486eba3201a01ec8b65ba43d80287d5c710363f"
+        "e3677250fa44e3b5965c172ac00ec0e4a6de5e8373abe95533022751eedfd575"
     );
 }
 
