@@ -37,4 +37,4 @@ input artifact.
 
 The physical-device latency/memory matrix is not replaced by simulator evidence. It remains an
 explicit closure dependency on issue #86. Issue #91 must stay open until that evidence and the
-component-vector work are integrated.
+physical-device performance evidence are integrated.
