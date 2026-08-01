@@ -31,6 +31,10 @@ pub enum EnvelopeError {
     UnsupportedVersion,
     UnsupportedKind,
     UnsupportedProfile,
+    UnsupportedPurpose,
+    UnsupportedFormat,
+    ZeroGeneration,
+    EmptyField,
     MissingField,
     UnexpectedField,
     WrongType,
@@ -199,21 +203,21 @@ fn map_component_error(error: HybridCryptoError) -> EnvelopeError {
     }
 }
 
-struct Decoder<'a> {
+pub(crate) struct Decoder<'a> {
     input: &'a [u8],
     position: usize,
 }
 
 impl<'a> Decoder<'a> {
-    fn new(input: &'a [u8]) -> Self {
+    pub(crate) fn new(input: &'a [u8]) -> Self {
         Self { input, position: 0 }
     }
 
-    fn is_finished(&self) -> bool {
+    pub(crate) fn is_finished(&self) -> bool {
         self.position == self.input.len()
     }
 
-    fn read_uint(&mut self) -> Result<u64, EnvelopeError> {
+    pub(crate) fn read_uint(&mut self) -> Result<u64, EnvelopeError> {
         let (major, value) = self.read_head()?;
         if major != 0 {
             return Err(EnvelopeError::WrongType);
@@ -221,7 +225,7 @@ impl<'a> Decoder<'a> {
         Ok(value)
     }
 
-    fn read_text(&mut self) -> Result<&'a str, EnvelopeError> {
+    pub(crate) fn read_text(&mut self) -> Result<&'a str, EnvelopeError> {
         let bytes = self.read_string(3, MAX_TEXT_BYTES)?;
         std::str::from_utf8(bytes).map_err(|_| EnvelopeError::InvalidUtf8)
     }
@@ -230,7 +234,11 @@ impl<'a> Decoder<'a> {
         Ok(self.read_string(2, MAX_ENVELOPE_BYTES)?.to_vec())
     }
 
-    fn read_string(&mut self, expected_major: u8, limit: usize) -> Result<&'a [u8], EnvelopeError> {
+    pub(crate) fn read_string(
+        &mut self,
+        expected_major: u8,
+        limit: usize,
+    ) -> Result<&'a [u8], EnvelopeError> {
         let (major, length) = self.read_head()?;
         if major != expected_major {
             return Err(EnvelopeError::WrongType);
@@ -251,7 +259,7 @@ impl<'a> Decoder<'a> {
         Ok(value)
     }
 
-    fn read_head(&mut self) -> Result<(u8, u64), EnvelopeError> {
+    pub(crate) fn read_head(&mut self) -> Result<(u8, u64), EnvelopeError> {
         let first = *self
             .input
             .get(self.position)
@@ -309,24 +317,24 @@ impl<'a> Decoder<'a> {
     }
 }
 
-fn write_uint_pair(output: &mut Vec<u8>, key: u64, value: u64) {
+pub(crate) fn write_uint_pair(output: &mut Vec<u8>, key: u64, value: u64) {
     write_head(output, 0, key);
     write_head(output, 0, value);
 }
 
-fn write_text_pair(output: &mut Vec<u8>, key: u64, value: &str) {
+pub(crate) fn write_text_pair(output: &mut Vec<u8>, key: u64, value: &str) {
     write_head(output, 0, key);
     write_head(output, 3, value.len() as u64);
     output.extend_from_slice(value.as_bytes());
 }
 
-fn write_bytes_pair(output: &mut Vec<u8>, key: u64, value: &[u8]) {
+pub(crate) fn write_bytes_pair(output: &mut Vec<u8>, key: u64, value: &[u8]) {
     write_head(output, 0, key);
     write_head(output, 2, value.len() as u64);
     output.extend_from_slice(value);
 }
 
-fn write_head(output: &mut Vec<u8>, major: u8, value: u64) {
+pub(crate) fn write_head(output: &mut Vec<u8>, major: u8, value: u64) {
     let prefix = major << 5;
     if value <= 23 {
         output.push(prefix | value as u8);

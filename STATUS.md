@@ -117,6 +117,12 @@ algorithm/profile and certification approval.
   - [x] Restrict provider links to an explicit allow-list and hybrid-required negotiation.
   - [x] Isolate experimental credential wrappers from the production catalogue namespace.
   - [x] Keep production adoption blocked pending standards, CAB/profile and conformance approval.
+- [x] [#119](https://github.com/advatar/EUWallet/issues/119): freeze `HybridCredentialWrapperV1`
+      and publish the shared credential-wrapper corpus.
+  - [x] Implement strict encode/decode/verify for the eleven-key wrapper with frozen bounds.
+  - [x] Record the byte layout, signed committed payload, and unsigned binding rule in a freeze document.
+  - [x] Publish the positive wrapper vector and twenty-one rejection mutations, byte-identical in VCIssuer.
+  - [x] Verify the corpus with independent aws-lc ES256 and RustCrypto ML-DSA-65 backends.
 - [ ] [#91](https://github.com/advatar/EUWallet/issues/91): build the complete adversarial test
       matrix.
   - [x] Cover the complete 2x2 validity, missing-component, profile, downgrade and mismatch matrix.
@@ -134,8 +140,17 @@ algorithm/profile and certification approval.
   - [x] Add the Tier-2 `HybridPqModel.lean` verifier machine with machine-checked AND
         verification, identity/generation binding, profile/purpose binding and
         downgrade-resistance theorems; registered in the lakefile and Tier-2 CI build.
-- [ ] [#93](https://github.com/advatar/EUWallet/issues/93): establish performance and resource
+- [x] [#93](https://github.com/advatar/EUWallet/issues/93): establish performance and resource
       budgets.
+  - [x] Benchmark ML-DSA-65 and ML-KEM-768 keygen/sign/verify/encapsulate/decapsulate and the
+        envelope codec against the real backends via `cargo run -p benches --release
+        --features experimental-pq`, including process peak memory and binary-size delta.
+  - [x] Document hard ceilings, headroom, message sizes and the enforced fail-closed input
+        limits in `docs/experimental-pq-performance-budgets.md`.
+  - [x] Pin the maximal signature-envelope wire size against the 8 KiB cap with a budget
+        regression test.
+  - [ ] Record physical-device benchmarks, battery cost and thermal concurrency as the
+        #86-dependent hardware closure gate.
 - [x] [#94](https://github.com/advatar/EUWallet/issues/94): add compile-time and runtime rollout
       controls.
   - [x] Add the default-off `experimental-hybrid-pq` feature; feature-off builds force the
