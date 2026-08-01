@@ -358,19 +358,6 @@ pub fn decapsulate_hybrid_key(
         });
     }
     let public = recipient.public_key()?;
-    let expected_transcript = hybrid_transcript_hash(
-        expected_sender_identity,
-        recipient.reference(),
-        context,
-        &public,
-        &encapsulation.classical_ephemeral_public,
-        &encapsulation.post_quantum_ciphertext,
-    )?;
-    if expected_transcript != encapsulation.transcript_hash
-        || expected_transcript != *authenticated_transcript_hash
-    {
-        return Err(HybridCryptoError::DowngradeDetected);
-    }
     let classical_secret = Zeroizing::new(
         recipient
             .classical
@@ -379,20 +366,87 @@ pub fn decapsulate_hybrid_key(
                 component: HybridComponent::Classical,
             })?,
     );
-    let post_quantum_secret = recipient
+    decapsulate_hybrid_key_with_components(&HybridPlatformDecapsulationInput {
+        recipient_reference: recipient.reference(),
+        recipient_public: &public,
+        post_quantum: &recipient.post_quantum,
+        classical_shared_secret: classical_secret.as_slice(),
+        expected_sender_identity,
+        context,
+        encapsulation,
+        authenticated_transcript_hash,
+    })
+}
+
+pub struct HybridPlatformDecapsulationInput<'a> {
+    pub recipient_reference: &'a HybridKeyRef,
+    pub recipient_public: &'a HybridKeyAgreementPublicKey,
+    pub post_quantum: &'a MlKem768SecretKey,
+    pub classical_shared_secret: &'a [u8],
+    pub expected_sender_identity: &'a str,
+    pub context: &'a [u8],
+    pub encapsulation: &'a HybridEncapsulation,
+    pub authenticated_transcript_hash: &'a [u8; 32],
+}
+
+/// Recipient-side composition for a platform-held P-256 key and Rust-held ML-KEM key. The
+/// platform supplies only the already-derived P-256 shared secret; this function authenticates
+/// the complete transcript, decapsulates ML-KEM, and releases one combined traffic key only after
+/// every identity, generation, profile and transcript check succeeds.
+pub fn decapsulate_hybrid_key_with_components(
+    input: &HybridPlatformDecapsulationInput<'_>,
+) -> Result<HybridTrafficKey, HybridCryptoError> {
+    validate_hybrid_identity(input.expected_sender_identity)?;
+    validate_hybrid_context(input.context)?;
+    if input.classical_shared_secret.len() != 32 {
+        return Err(HybridCryptoError::MalformedComponent {
+            component: HybridComponent::Classical,
+        });
+    }
+    if input.encapsulation.profile != HybridKeyAgreementProfile::P256MlKem768V1
+        || input.recipient_public.profile() != HybridKeyAgreementProfile::P256MlKem768V1
+    {
+        return Err(HybridCryptoError::UnsupportedProfile);
+    }
+    if input.encapsulation.sender_identity != input.expected_sender_identity
+        || input.encapsulation.recipient_identity != input.recipient_reference.identity()
+    {
+        return Err(HybridCryptoError::Mismatch {
+            field: HybridMismatch::Identity,
+        });
+    }
+    if input.encapsulation.key_generation != input.recipient_reference.generation() {
+        return Err(HybridCryptoError::Mismatch {
+            field: HybridMismatch::Generation,
+        });
+    }
+    let expected_transcript = hybrid_transcript_hash(
+        input.expected_sender_identity,
+        input.recipient_reference,
+        input.context,
+        input.recipient_public,
+        &input.encapsulation.classical_ephemeral_public,
+        &input.encapsulation.post_quantum_ciphertext,
+    )?;
+    if expected_transcript != input.encapsulation.transcript_hash
+        || expected_transcript != *input.authenticated_transcript_hash
+    {
+        return Err(HybridCryptoError::DowngradeDetected);
+    }
+    let post_quantum_secret = input
         .post_quantum
-        .decapsulate(&encapsulation.post_quantum_ciphertext)
+        .decapsulate(&input.encapsulation.post_quantum_ciphertext)
         .map_err(|_| HybridCryptoError::MalformedComponent {
             component: HybridComponent::PostQuantum,
         })?;
     Ok(hybrid_combiner(
         post_quantum_secret.as_bytes(),
-        classical_secret.as_slice(),
-        &encapsulation.post_quantum_ciphertext,
-        &encapsulation.classical_ephemeral_public,
-        public.post_quantum(),
-        public.classical(),
-        &encapsulation.transcript_hash,
+        input.classical_shared_secret,
+        &input.encapsulation.post_quantum_ciphertext,
+        &input.encapsulation.classical_ephemeral_public,
+        input.recipient_public.post_quantum(),
+        input.recipient_public.classical(),
+        &input.encapsulation.transcript_hash,
     ))
 }
 

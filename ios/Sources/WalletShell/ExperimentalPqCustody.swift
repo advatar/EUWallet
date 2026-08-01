@@ -25,6 +25,17 @@ public struct ExperimentalPqWrappedMaterial: Equatable {
     }
 }
 
+public struct ExperimentalHybridRecoveryEnvelope: Equatable {
+    public let senderIdentity: String
+    public let recipientIdentity: String
+    public let keyGeneration: UInt64
+    public let classicalEphemeralPublicKey: Data
+    public let mlKem768Ciphertext: Data
+    public let transcriptHash: Data
+    public let nonce: Data
+    public let ciphertext: Data
+}
+
 /// Implemented by the generated UniFFI adapter. The supplied key must be cleared by both sides.
 public protocol ExperimentalPqGenerating: AnyObject {
     func generateWrappedMaterial(wrappingKey: inout Data) throws
@@ -35,10 +46,21 @@ public protocol ExperimentalPqGenerating: AnyObject {
         encryptedPrivateKey: Data,
         payload: Data
     ) throws -> Data
+    func openWrappedRecovery(
+        wrappingKey: inout Data,
+        custodyNonce: Data,
+        encryptedPrivateKey: Data,
+        recipientClassicalPublicKey: Data,
+        recipientMlKem768PublicKey: Data,
+        classicalSharedSecret: inout Data,
+        context: Data,
+        envelope: ExperimentalHybridRecoveryEnvelope
+    ) throws -> Data
 }
 
 public protocol HybridClassicalKeyProviding: Signer, AnyObject {
     func publicKeyRaw(keyRef: String) throws -> Data
+    func keyAgreement(keyRef: String, peerPublicKey: Data) throws -> Data
 }
 
 extension SecureEnclaveSigner: HybridClassicalKeyProviding {}
@@ -303,6 +325,38 @@ public final class ExperimentalHybridKeyCustody: ExperimentalHybridSigning {
         // discriminator here prevents a generic signing entry point from entering this path.
         _ = purpose
         return try sign(reference: reference, payload: payload, prompt: prompt)
+    }
+
+    /// Open one recovery artifact only after a single biometric custody unlock, Secure Enclave
+    /// P-256 ECDH, wrapped ML-KEM decapsulation, transcript authentication and AEAD verification.
+    public func openRecovery(
+        logicalKeyID: String,
+        context: Data,
+        envelope: ExperimentalHybridRecoveryEnvelope,
+        prompt: String
+    ) throws -> Data {
+        guard let reference = try records.load(logicalKeyID: logicalKeyID)?.reference,
+              envelope.recipientIdentity == reference.logicalKeyID,
+              envelope.keyGeneration == reference.generation
+        else { throw ExperimentalPqCustodyError.mixedGeneration }
+        return try withUnlockedGeneration(reference: reference, prompt: prompt) {
+            record, wrappingKey in
+            var classicalSecret = try signer.keyAgreement(
+                keyRef: reference.classicalKeyReference,
+                peerPublicKey: envelope.classicalEphemeralPublicKey)
+            defer { classicalSecret.clearSensitiveBytes() }
+            let classicalPublic = try signer.publicKeyRaw(
+                keyRef: reference.classicalKeyReference)
+            return try backend.openWrappedRecovery(
+                wrappingKey: &wrappingKey,
+                custodyNonce: record.nonce,
+                encryptedPrivateKey: record.encryptedPrivateKey,
+                recipientClassicalPublicKey: classicalPublic,
+                recipientMlKem768PublicKey: record.mlKem768PublicKey,
+                classicalSharedSecret: &classicalSecret,
+                context: context,
+                envelope: envelope)
+        }
     }
 
     static func validate(

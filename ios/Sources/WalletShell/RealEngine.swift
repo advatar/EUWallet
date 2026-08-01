@@ -39,6 +39,43 @@ import Foundation
                 encryptedPrivateKey: encryptedPrivateKey,
                 payload: payload)
         }
+
+
+        func openWrappedRecovery(
+            wrappingKey: inout Data,
+            custodyNonce: Data,
+            encryptedPrivateKey: Data,
+            recipientClassicalPublicKey: Data,
+            recipientMlKem768PublicKey: Data,
+            classicalSharedSecret: inout Data,
+            context: Data,
+            envelope: ExperimentalHybridRecoveryEnvelope
+        ) throws -> Data {
+            var keyTransfer = wrappingKey
+            var secretTransfer = classicalSharedSecret
+            defer {
+                keyTransfer.clearSensitiveBytes()
+                secretTransfer.clearSensitiveBytes()
+            }
+            return try openExperimentalHybridRecovery(
+                request: FfiExperimentalHybridRecoveryOpenRequest(
+                    wrappingKey: keyTransfer,
+                    custodyNonce: custodyNonce,
+                    encryptedPrivateKey: encryptedPrivateKey,
+                    recipientClassicalPublicKey: recipientClassicalPublicKey,
+                    recipientMlKem768PublicKey: recipientMlKem768PublicKey,
+                    classicalSharedSecret: secretTransfer,
+                    context: context,
+                    envelope: FfiExperimentalHybridRecoveryEnvelope(
+                        senderIdentity: envelope.senderIdentity,
+                        recipientIdentity: envelope.recipientIdentity,
+                        keyGeneration: envelope.keyGeneration,
+                        classicalEphemeralPublicKey: envelope.classicalEphemeralPublicKey,
+                        mlKem768Ciphertext: envelope.mlKem768Ciphertext,
+                        transcriptHash: envelope.transcriptHash,
+                        nonce: envelope.nonce,
+                        ciphertext: envelope.ciphertext)))
+        }
     }
 
     /// Production composition for one application-scoped hybrid-key custody domain.

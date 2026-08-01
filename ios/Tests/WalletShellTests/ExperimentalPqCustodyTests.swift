@@ -23,6 +23,10 @@ private final class PqTestSigner: HybridClassicalKeyProviding {
         return Data(repeating: 0x51, count: 64)
     }
 
+    func keyAgreement(keyRef _: String, peerPublicKey _: Data) throws -> Data {
+        Data(repeating: 0x71, count: 32)
+    }
+
     func replacePublicKey(for reference: String, with value: Data) {
         publicKeys[reference] = value
     }
@@ -54,6 +58,19 @@ private final class PqTestBackend: ExperimentalPqGenerating {
         signCalls += 1
         if let signError { throw signError }
         return Data(repeating: 0x61, count: 3_309)
+    }
+
+    func openWrappedRecovery(
+        wrappingKey _: inout Data,
+        custodyNonce _: Data,
+        encryptedPrivateKey _: Data,
+        recipientClassicalPublicKey _: Data,
+        recipientMlKem768PublicKey _: Data,
+        classicalSharedSecret _: inout Data,
+        context _: Data,
+        envelope _: ExperimentalHybridRecoveryEnvelope
+    ) throws -> Data {
+        Data("recovered".utf8)
     }
 }
 
@@ -249,6 +266,43 @@ final class ExperimentalPqCustodyTests: XCTestCase {
             payload: Data([5]),
             prompt: "Sign"))
         XCTAssertEqual(backend.signCalls, 2, "PQ signing must not run after classical failure")
+    }
+
+    func testRecoveryBindsTheCurrentLogicalGenerationAndReturnsOnlyAtomicPlaintext() throws {
+        let reference = try custody.rotate(logicalKeyID: "wallet-key", prompt: "Create")
+        let envelope = ExperimentalHybridRecoveryEnvelope(
+            senderIdentity: "recovery-provider.example",
+            recipientIdentity: reference.logicalKeyID,
+            keyGeneration: reference.generation,
+            classicalEphemeralPublicKey: Data([0x04] + [UInt8](repeating: 1, count: 64)),
+            mlKem768Ciphertext: Data(repeating: 2, count: 1_088),
+            transcriptHash: Data(repeating: 3, count: 32),
+            nonce: Data(repeating: 4, count: 12),
+            ciphertext: Data(repeating: 5, count: 32))
+        XCTAssertEqual(
+            try custody.openRecovery(
+                logicalKeyID: "wallet-key",
+                context: Data("session".utf8),
+                envelope: envelope,
+                prompt: "Recover"),
+            Data("recovered".utf8))
+
+        let stale = ExperimentalHybridRecoveryEnvelope(
+            senderIdentity: envelope.senderIdentity,
+            recipientIdentity: envelope.recipientIdentity,
+            keyGeneration: reference.generation + 1,
+            classicalEphemeralPublicKey: envelope.classicalEphemeralPublicKey,
+            mlKem768Ciphertext: envelope.mlKem768Ciphertext,
+            transcriptHash: envelope.transcriptHash,
+            nonce: envelope.nonce,
+            ciphertext: envelope.ciphertext)
+        XCTAssertThrowsError(try custody.openRecovery(
+            logicalKeyID: "wallet-key",
+            context: Data("session".utf8),
+            envelope: stale,
+            prompt: "Recover")) {
+                XCTAssertEqual($0 as? ExperimentalPqCustodyError, .mixedGeneration)
+            }
     }
 
     func testMalformedBackendMaterialIsNeverCommittedAndCandidateKeyIsDeleted() {

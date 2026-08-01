@@ -1469,6 +1469,239 @@ public func FfiConverterTypeFfiDurableCheckpoint_lower(_ value: FfiDurableCheckp
 
 
 /**
+ * Complete public recovery artifact. The P-256 and ML-KEM shares, identities, generation and
+ * caller-supplied context are authenticated by `transcript_hash`; AES-GCM authenticates that
+ * transcript again together with the ciphertext metadata.
+ */
+public struct FfiExperimentalHybridRecoveryEnvelope {
+    public var senderIdentity: String
+    public var recipientIdentity: String
+    public var keyGeneration: UInt64
+    public var classicalEphemeralPublicKey: Data
+    public var mlKem768Ciphertext: Data
+    public var transcriptHash: Data
+    public var nonce: Data
+    public var ciphertext: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(senderIdentity: String, recipientIdentity: String, keyGeneration: UInt64, classicalEphemeralPublicKey: Data, mlKem768Ciphertext: Data, transcriptHash: Data, nonce: Data, ciphertext: Data) {
+        self.senderIdentity = senderIdentity
+        self.recipientIdentity = recipientIdentity
+        self.keyGeneration = keyGeneration
+        self.classicalEphemeralPublicKey = classicalEphemeralPublicKey
+        self.mlKem768Ciphertext = mlKem768Ciphertext
+        self.transcriptHash = transcriptHash
+        self.nonce = nonce
+        self.ciphertext = ciphertext
+    }
+}
+
+
+
+extension FfiExperimentalHybridRecoveryEnvelope: Equatable, Hashable {
+    public static func ==(lhs: FfiExperimentalHybridRecoveryEnvelope, rhs: FfiExperimentalHybridRecoveryEnvelope) -> Bool {
+        if lhs.senderIdentity != rhs.senderIdentity {
+            return false
+        }
+        if lhs.recipientIdentity != rhs.recipientIdentity {
+            return false
+        }
+        if lhs.keyGeneration != rhs.keyGeneration {
+            return false
+        }
+        if lhs.classicalEphemeralPublicKey != rhs.classicalEphemeralPublicKey {
+            return false
+        }
+        if lhs.mlKem768Ciphertext != rhs.mlKem768Ciphertext {
+            return false
+        }
+        if lhs.transcriptHash != rhs.transcriptHash {
+            return false
+        }
+        if lhs.nonce != rhs.nonce {
+            return false
+        }
+        if lhs.ciphertext != rhs.ciphertext {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(senderIdentity)
+        hasher.combine(recipientIdentity)
+        hasher.combine(keyGeneration)
+        hasher.combine(classicalEphemeralPublicKey)
+        hasher.combine(mlKem768Ciphertext)
+        hasher.combine(transcriptHash)
+        hasher.combine(nonce)
+        hasher.combine(ciphertext)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiExperimentalHybridRecoveryEnvelope: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiExperimentalHybridRecoveryEnvelope {
+        return
+            try FfiExperimentalHybridRecoveryEnvelope(
+                senderIdentity: FfiConverterString.read(from: &buf),
+                recipientIdentity: FfiConverterString.read(from: &buf),
+                keyGeneration: FfiConverterUInt64.read(from: &buf),
+                classicalEphemeralPublicKey: FfiConverterData.read(from: &buf),
+                mlKem768Ciphertext: FfiConverterData.read(from: &buf),
+                transcriptHash: FfiConverterData.read(from: &buf),
+                nonce: FfiConverterData.read(from: &buf),
+                ciphertext: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiExperimentalHybridRecoveryEnvelope, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.senderIdentity, into: &buf)
+        FfiConverterString.write(value.recipientIdentity, into: &buf)
+        FfiConverterUInt64.write(value.keyGeneration, into: &buf)
+        FfiConverterData.write(value.classicalEphemeralPublicKey, into: &buf)
+        FfiConverterData.write(value.mlKem768Ciphertext, into: &buf)
+        FfiConverterData.write(value.transcriptHash, into: &buf)
+        FfiConverterData.write(value.nonce, into: &buf)
+        FfiConverterData.write(value.ciphertext, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalHybridRecoveryEnvelope_lift(_ buf: RustBuffer) throws -> FfiExperimentalHybridRecoveryEnvelope {
+    return try FfiConverterTypeFfiExperimentalHybridRecoveryEnvelope.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalHybridRecoveryEnvelope_lower(_ value: FfiExperimentalHybridRecoveryEnvelope) -> RustBuffer {
+    return FfiConverterTypeFfiExperimentalHybridRecoveryEnvelope.lower(value)
+}
+
+
+public struct FfiExperimentalHybridRecoveryOpenRequest {
+    public var wrappingKey: Data
+    public var custodyNonce: Data
+    public var encryptedPrivateKey: Data
+    public var recipientClassicalPublicKey: Data
+    public var recipientMlKem768PublicKey: Data
+    public var classicalSharedSecret: Data
+    public var context: Data
+    public var envelope: FfiExperimentalHybridRecoveryEnvelope
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(wrappingKey: Data, custodyNonce: Data, encryptedPrivateKey: Data, recipientClassicalPublicKey: Data, recipientMlKem768PublicKey: Data, classicalSharedSecret: Data, context: Data, envelope: FfiExperimentalHybridRecoveryEnvelope) {
+        self.wrappingKey = wrappingKey
+        self.custodyNonce = custodyNonce
+        self.encryptedPrivateKey = encryptedPrivateKey
+        self.recipientClassicalPublicKey = recipientClassicalPublicKey
+        self.recipientMlKem768PublicKey = recipientMlKem768PublicKey
+        self.classicalSharedSecret = classicalSharedSecret
+        self.context = context
+        self.envelope = envelope
+    }
+}
+
+
+
+extension FfiExperimentalHybridRecoveryOpenRequest: Equatable, Hashable {
+    public static func ==(lhs: FfiExperimentalHybridRecoveryOpenRequest, rhs: FfiExperimentalHybridRecoveryOpenRequest) -> Bool {
+        if lhs.wrappingKey != rhs.wrappingKey {
+            return false
+        }
+        if lhs.custodyNonce != rhs.custodyNonce {
+            return false
+        }
+        if lhs.encryptedPrivateKey != rhs.encryptedPrivateKey {
+            return false
+        }
+        if lhs.recipientClassicalPublicKey != rhs.recipientClassicalPublicKey {
+            return false
+        }
+        if lhs.recipientMlKem768PublicKey != rhs.recipientMlKem768PublicKey {
+            return false
+        }
+        if lhs.classicalSharedSecret != rhs.classicalSharedSecret {
+            return false
+        }
+        if lhs.context != rhs.context {
+            return false
+        }
+        if lhs.envelope != rhs.envelope {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(wrappingKey)
+        hasher.combine(custodyNonce)
+        hasher.combine(encryptedPrivateKey)
+        hasher.combine(recipientClassicalPublicKey)
+        hasher.combine(recipientMlKem768PublicKey)
+        hasher.combine(classicalSharedSecret)
+        hasher.combine(context)
+        hasher.combine(envelope)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiExperimentalHybridRecoveryOpenRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiExperimentalHybridRecoveryOpenRequest {
+        return
+            try FfiExperimentalHybridRecoveryOpenRequest(
+                wrappingKey: FfiConverterData.read(from: &buf),
+                custodyNonce: FfiConverterData.read(from: &buf),
+                encryptedPrivateKey: FfiConverterData.read(from: &buf),
+                recipientClassicalPublicKey: FfiConverterData.read(from: &buf),
+                recipientMlKem768PublicKey: FfiConverterData.read(from: &buf),
+                classicalSharedSecret: FfiConverterData.read(from: &buf),
+                context: FfiConverterData.read(from: &buf),
+                envelope: FfiConverterTypeFfiExperimentalHybridRecoveryEnvelope.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiExperimentalHybridRecoveryOpenRequest, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.wrappingKey, into: &buf)
+        FfiConverterData.write(value.custodyNonce, into: &buf)
+        FfiConverterData.write(value.encryptedPrivateKey, into: &buf)
+        FfiConverterData.write(value.recipientClassicalPublicKey, into: &buf)
+        FfiConverterData.write(value.recipientMlKem768PublicKey, into: &buf)
+        FfiConverterData.write(value.classicalSharedSecret, into: &buf)
+        FfiConverterData.write(value.context, into: &buf)
+        FfiConverterTypeFfiExperimentalHybridRecoveryEnvelope.write(value.envelope, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalHybridRecoveryOpenRequest_lift(_ buf: RustBuffer) throws -> FfiExperimentalHybridRecoveryOpenRequest {
+    return try FfiConverterTypeFfiExperimentalHybridRecoveryOpenRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExperimentalHybridRecoveryOpenRequest_lower(_ value: FfiExperimentalHybridRecoveryOpenRequest) -> RustBuffer {
+    return FfiConverterTypeFfiExperimentalHybridRecoveryOpenRequest.lower(value)
+}
+
+
+/**
  * Wrapped PQ material returned to the native shell. Private seeds never cross FFI in plaintext.
  */
 public struct FfiExperimentalPqWrappedKeyMaterial {
@@ -1973,6 +2206,7 @@ public enum ExperimentalPqFfiError {
     case GenerationFailed
     case EncryptionFailed
     case SigningFailed
+    case RecoveryFailed
 }
 
 
@@ -1994,6 +2228,7 @@ public struct FfiConverterTypeExperimentalPqFfiError: FfiConverterRustBuffer {
         case 3: return .GenerationFailed
         case 4: return .EncryptionFailed
         case 5: return .SigningFailed
+        case 6: return .RecoveryFailed
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2024,6 +2259,10 @@ public struct FfiConverterTypeExperimentalPqFfiError: FfiConverterRustBuffer {
 
         case .SigningFailed:
             writeInt(&buf, Int32(5))
+
+
+        case .RecoveryFailed:
+            writeInt(&buf, Int32(6))
 
         }
     }
@@ -2123,6 +2362,34 @@ public func generateExperimentalPqWrappedKeyMaterial(wrappingKey: Data)throws  -
 })
 }
 /**
+ * Recipient-side recovery using a platform-derived P-256 shared secret and the wrapped ML-KEM
+ * seed. The seed is decrypted only inside this call and zeroized before return.
+ */
+public func openExperimentalHybridRecovery(request: FfiExperimentalHybridRecoveryOpenRequest)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeExperimentalPqFfiError.lift) {
+    uniffi_wallet_core_fn_func_open_experimental_hybrid_recovery(
+        FfiConverterTypeFfiExperimentalHybridRecoveryOpenRequest.lower(request),$0
+    )
+})
+}
+/**
+ * Sender-side recovery encryption using the exact P-256 + ML-KEM-768 combiner. No ciphertext is
+ * returned unless both component encapsulations and transcript construction succeed.
+ */
+public func sealExperimentalHybridRecovery(senderIdentity: String, recipientIdentity: String, keyGeneration: UInt64, recipientClassicalPublicKey: Data, recipientMlKem768PublicKey: Data, context: Data, plaintext: Data)throws  -> FfiExperimentalHybridRecoveryEnvelope {
+    return try  FfiConverterTypeFfiExperimentalHybridRecoveryEnvelope.lift(try rustCallWithError(FfiConverterTypeExperimentalPqFfiError.lift) {
+    uniffi_wallet_core_fn_func_seal_experimental_hybrid_recovery(
+        FfiConverterString.lower(senderIdentity),
+        FfiConverterString.lower(recipientIdentity),
+        FfiConverterUInt64.lower(keyGeneration),
+        FfiConverterData.lower(recipientClassicalPublicKey),
+        FfiConverterData.lower(recipientMlKem768PublicKey),
+        FfiConverterData.lower(context),
+        FfiConverterData.lower(plaintext),$0
+    )
+})
+}
+/**
  * Authenticate and decrypt one custody record, sign one already-domain-separated hybrid TBS,
  * then zeroize the recovered seed buffer before returning only the ML-DSA signature.
  */
@@ -2163,6 +2430,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if (uniffi_wallet_core_checksum_func_generate_experimental_pq_wrapped_key_material() != 22854) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_func_open_experimental_hybrid_recovery() != 55827) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_func_seal_experimental_hybrid_recovery() != 3227) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_func_sign_experimental_pq_wrapped_key_material() != 24508) {

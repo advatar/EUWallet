@@ -5076,6 +5076,35 @@ pub struct FfiExperimentalPqWrappedKeyMaterial {
     pub ml_kem_768_public_key: Vec<u8>,
 }
 
+/// Complete public recovery artifact. The P-256 and ML-KEM shares, identities, generation and
+/// caller-supplied context are authenticated by `transcript_hash`; AES-GCM authenticates that
+/// transcript again together with the ciphertext metadata.
+#[cfg(feature = "experimental-pq")]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FfiExperimentalHybridRecoveryEnvelope {
+    pub sender_identity: String,
+    pub recipient_identity: String,
+    pub key_generation: u64,
+    pub classical_ephemeral_public_key: Vec<u8>,
+    pub ml_kem_768_ciphertext: Vec<u8>,
+    pub transcript_hash: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+}
+
+#[cfg(feature = "experimental-pq")]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FfiExperimentalHybridRecoveryOpenRequest {
+    pub wrapping_key: Vec<u8>,
+    pub custody_nonce: Vec<u8>,
+    pub encrypted_private_key: Vec<u8>,
+    pub recipient_classical_public_key: Vec<u8>,
+    pub recipient_ml_kem_768_public_key: Vec<u8>,
+    pub classical_shared_secret: Vec<u8>,
+    pub context: Vec<u8>,
+    pub envelope: FfiExperimentalHybridRecoveryEnvelope,
+}
+
 #[cfg(feature = "experimental-pq")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]
 pub enum ExperimentalPqFfiError {
@@ -5084,6 +5113,7 @@ pub enum ExperimentalPqFfiError {
     GenerationFailed,
     EncryptionFailed,
     SigningFailed,
+    RecoveryFailed,
 }
 
 #[cfg(feature = "experimental-pq")]
@@ -5095,8 +5125,187 @@ impl core::fmt::Display for ExperimentalPqFfiError {
             Self::GenerationFailed => "experimental_pq_generation_failed",
             Self::EncryptionFailed => "experimental_pq_encryption_failed",
             Self::SigningFailed => "experimental_pq_signing_failed",
+            Self::RecoveryFailed => "experimental_pq_recovery_failed",
         })
     }
+}
+
+#[cfg(feature = "experimental-pq")]
+const EXPERIMENTAL_PQ_CUSTODY_AAD: &[u8] = b"euwallet-experimental-pq-custody-v1";
+#[cfg(feature = "experimental-pq")]
+const EXPERIMENTAL_HYBRID_RECOVERY_AAD: &[u8] = b"EUWALLET-HYBRID-RECOVERY-AEAD-V1";
+#[cfg(feature = "experimental-pq")]
+const MAX_EXPERIMENTAL_RECOVERY_PLAINTEXT_BYTES: usize = 32 * 1024 * 1024;
+
+#[cfg(feature = "experimental-pq")]
+fn experimental_recovery_aad(
+    context: &[u8],
+    envelope: &FfiExperimentalHybridRecoveryEnvelope,
+) -> Result<Vec<u8>, ExperimentalPqFfiError> {
+    let generation = envelope.key_generation.to_be_bytes();
+    let fields: [&[u8]; 8] = [
+        envelope.sender_identity.as_bytes(),
+        envelope.recipient_identity.as_bytes(),
+        &generation,
+        context,
+        &envelope.classical_ephemeral_public_key,
+        &envelope.ml_kem_768_ciphertext,
+        &envelope.transcript_hash,
+        b"euwallet-hybrid-recovery-v1",
+    ];
+    let mut aad = Vec::with_capacity(3_000 + context.len());
+    aad.extend_from_slice(EXPERIMENTAL_HYBRID_RECOVERY_AAD);
+    for field in fields {
+        let length =
+            u32::try_from(field.len()).map_err(|_| ExperimentalPqFfiError::RecoveryFailed)?;
+        aad.extend_from_slice(&length.to_be_bytes());
+        aad.extend_from_slice(field);
+    }
+    Ok(aad)
+}
+
+/// Sender-side recovery encryption using the exact P-256 + ML-KEM-768 combiner. No ciphertext is
+/// returned unless both component encapsulations and transcript construction succeed.
+#[cfg(feature = "experimental-pq")]
+#[uniffi::export]
+pub fn seal_experimental_hybrid_recovery(
+    sender_identity: String,
+    recipient_identity: String,
+    key_generation: u64,
+    recipient_classical_public_key: Vec<u8>,
+    recipient_ml_kem_768_public_key: Vec<u8>,
+    context: Vec<u8>,
+    plaintext: Vec<u8>,
+) -> Result<FfiExperimentalHybridRecoveryEnvelope, ExperimentalPqFfiError> {
+    use crypto_backend::experimental_pq::encapsulate_hybrid_key;
+    use crypto_backend::AwsLc;
+    use crypto_traits::{Aead, Random};
+    use hybrid_pq::{HybridKeyAgreementProfile, HybridKeyAgreementPublicKey, HybridKeyRef};
+
+    if plaintext.is_empty() || plaintext.len() > MAX_EXPERIMENTAL_RECOVERY_PLAINTEXT_BYTES {
+        return Err(ExperimentalPqFfiError::RecoveryFailed);
+    }
+    let reference = HybridKeyRef::try_new(recipient_identity.clone(), key_generation)
+        .map_err(|_| ExperimentalPqFfiError::RecoveryFailed)?;
+    let public = HybridKeyAgreementPublicKey::try_new(
+        HybridKeyAgreementProfile::P256MlKem768V1,
+        recipient_classical_public_key,
+        recipient_ml_kem_768_public_key,
+    )
+    .map_err(|_| ExperimentalPqFfiError::RecoveryFailed)?;
+    let (encapsulation, traffic_key) =
+        encapsulate_hybrid_key(&sender_identity, &reference, &public, &context)
+            .map_err(|_| ExperimentalPqFfiError::RecoveryFailed)?;
+    let mut nonce = vec![0_u8; 12];
+    AwsLc.fill(&mut nonce);
+    let mut envelope = FfiExperimentalHybridRecoveryEnvelope {
+        sender_identity: encapsulation.sender_identity,
+        recipient_identity: encapsulation.recipient_identity,
+        key_generation: encapsulation.key_generation,
+        classical_ephemeral_public_key: encapsulation.classical_ephemeral_public,
+        ml_kem_768_ciphertext: encapsulation.post_quantum_ciphertext,
+        transcript_hash: encapsulation.transcript_hash.to_vec(),
+        nonce,
+        ciphertext: Vec::new(),
+    };
+    let aad = experimental_recovery_aad(&context, &envelope)?;
+    envelope.ciphertext = AwsLc
+        .seal(traffic_key.as_bytes(), &envelope.nonce, &aad, &plaintext)
+        .map_err(|_| ExperimentalPqFfiError::RecoveryFailed)?;
+    Ok(envelope)
+}
+
+/// Recipient-side recovery using a platform-derived P-256 shared secret and the wrapped ML-KEM
+/// seed. The seed is decrypted only inside this call and zeroized before return.
+#[cfg(feature = "experimental-pq")]
+#[uniffi::export]
+pub fn open_experimental_hybrid_recovery(
+    request: FfiExperimentalHybridRecoveryOpenRequest,
+) -> Result<Vec<u8>, ExperimentalPqFfiError> {
+    use crypto_backend::experimental_pq::{
+        decapsulate_hybrid_key_with_components, HybridEncapsulation,
+        HybridPlatformDecapsulationInput, MlKem768SecretKey,
+    };
+    use crypto_backend::AwsLc;
+    use crypto_traits::Aead;
+    use hybrid_pq::{HybridKeyAgreementProfile, HybridKeyAgreementPublicKey, HybridKeyRef};
+    use zeroize::Zeroizing;
+
+    let wrapping_key = Zeroizing::new(request.wrapping_key);
+    let classical_shared_secret = Zeroizing::new(request.classical_shared_secret);
+    let envelope = request.envelope;
+    if wrapping_key.len() != 32
+        || request.custody_nonce.len() != 12
+        || request.encrypted_private_key.len() != 132
+        || classical_shared_secret.len() != 32
+        || envelope.nonce.len() != 12
+        || envelope.transcript_hash.len() != 32
+        || envelope.ciphertext.len() < 17
+        || envelope.ciphertext.len() > MAX_EXPERIMENTAL_RECOVERY_PLAINTEXT_BYTES + 16
+    {
+        return Err(ExperimentalPqFfiError::InvalidWrappedMaterial);
+    }
+    let plaintext_seeds = Zeroizing::new(
+        AwsLc
+            .open(
+                wrapping_key.as_slice(),
+                &request.custody_nonce,
+                EXPERIMENTAL_PQ_CUSTODY_AAD,
+                &request.encrypted_private_key,
+            )
+            .map_err(|_| ExperimentalPqFfiError::InvalidWrappedMaterial)?,
+    );
+    if plaintext_seeds.len() != 116 || &plaintext_seeds[..20] != b"EUWALLET-PQ-SEEDS-V1" {
+        return Err(ExperimentalPqFfiError::InvalidWrappedMaterial);
+    }
+    let kem = MlKem768SecretKey::from_seed(&plaintext_seeds[52..116])
+        .map_err(|_| ExperimentalPqFfiError::InvalidWrappedMaterial)?;
+    if kem.public_key() != request.recipient_ml_kem_768_public_key {
+        return Err(ExperimentalPqFfiError::RecoveryFailed);
+    }
+    let reference =
+        HybridKeyRef::try_new(envelope.recipient_identity.clone(), envelope.key_generation)
+            .map_err(|_| ExperimentalPqFfiError::RecoveryFailed)?;
+    let public = HybridKeyAgreementPublicKey::try_new(
+        HybridKeyAgreementProfile::P256MlKem768V1,
+        request.recipient_classical_public_key,
+        request.recipient_ml_kem_768_public_key,
+    )
+    .map_err(|_| ExperimentalPqFfiError::RecoveryFailed)?;
+    let transcript_hash: [u8; 32] = envelope
+        .transcript_hash
+        .as_slice()
+        .try_into()
+        .map_err(|_| ExperimentalPqFfiError::RecoveryFailed)?;
+    let encapsulation = HybridEncapsulation {
+        profile: HybridKeyAgreementProfile::P256MlKem768V1,
+        sender_identity: envelope.sender_identity.clone(),
+        recipient_identity: envelope.recipient_identity.clone(),
+        key_generation: envelope.key_generation,
+        classical_ephemeral_public: envelope.classical_ephemeral_public_key.clone(),
+        post_quantum_ciphertext: envelope.ml_kem_768_ciphertext.clone(),
+        transcript_hash,
+    };
+    let traffic_key = decapsulate_hybrid_key_with_components(&HybridPlatformDecapsulationInput {
+        recipient_reference: &reference,
+        recipient_public: &public,
+        post_quantum: &kem,
+        classical_shared_secret: classical_shared_secret.as_slice(),
+        expected_sender_identity: &envelope.sender_identity,
+        context: &request.context,
+        encapsulation: &encapsulation,
+        authenticated_transcript_hash: &transcript_hash,
+    })
+    .map_err(|_| ExperimentalPqFfiError::RecoveryFailed)?;
+    let aad = experimental_recovery_aad(&request.context, &envelope)?;
+    AwsLc
+        .open(
+            traffic_key.as_bytes(),
+            &envelope.nonce,
+            &aad,
+            &envelope.ciphertext,
+        )
+        .map_err(|_| ExperimentalPqFfiError::RecoveryFailed)
 }
 
 /// Authenticate and decrypt one custody record, sign one already-domain-separated hybrid TBS,
@@ -5253,6 +5462,74 @@ mod experimental_pq_ffi_tests {
                 payload,
             ),
             Err(ExperimentalPqFfiError::InvalidWrappedMaterial)
+        );
+    }
+
+    #[test]
+    fn wrapped_hybrid_recovery_requires_both_component_secrets_and_exact_transcript() {
+        let wrapping_key = vec![0x31; 32];
+        let material = generate_experimental_pq_wrapped_key_material(wrapping_key.clone()).unwrap();
+        let classical = crypto_backend::P256AgreementKey::generate().unwrap();
+        let context = b"wallet-recovery/session-7".to_vec();
+        let payload = b"actual durable wallet checkpoint".to_vec();
+        let envelope = seal_experimental_hybrid_recovery(
+            "recovery-provider.example".into(),
+            "wallet-device-key".into(),
+            7,
+            classical.public_raw().to_vec(),
+            material.ml_kem_768_public_key.clone(),
+            context.clone(),
+            payload.clone(),
+        )
+        .unwrap();
+        let classical_secret = classical
+            .agree(&envelope.classical_ephemeral_public_key)
+            .unwrap();
+        assert_eq!(
+            open_experimental_hybrid_recovery(FfiExperimentalHybridRecoveryOpenRequest {
+                wrapping_key: wrapping_key.clone(),
+                custody_nonce: material.nonce.clone(),
+                encrypted_private_key: material.encrypted_private_key.clone(),
+                recipient_classical_public_key: classical.public_raw().to_vec(),
+                recipient_ml_kem_768_public_key: material.ml_kem_768_public_key.clone(),
+                classical_shared_secret: classical_secret.clone(),
+                context: context.clone(),
+                envelope: envelope.clone(),
+            },)
+            .unwrap(),
+            payload
+        );
+
+        let mut wrong_classical = classical_secret;
+        wrong_classical[0] ^= 1;
+        assert_eq!(
+            open_experimental_hybrid_recovery(FfiExperimentalHybridRecoveryOpenRequest {
+                wrapping_key: wrapping_key.clone(),
+                custody_nonce: material.nonce.clone(),
+                encrypted_private_key: material.encrypted_private_key.clone(),
+                recipient_classical_public_key: classical.public_raw().to_vec(),
+                recipient_ml_kem_768_public_key: material.ml_kem_768_public_key.clone(),
+                classical_shared_secret: wrong_classical,
+                context: context.clone(),
+                envelope: envelope.clone(),
+            },),
+            Err(ExperimentalPqFfiError::RecoveryFailed)
+        );
+
+        let mut tampered = envelope;
+        tampered.transcript_hash[0] ^= 1;
+        assert_eq!(
+            open_experimental_hybrid_recovery(FfiExperimentalHybridRecoveryOpenRequest {
+                wrapping_key,
+                custody_nonce: material.nonce,
+                encrypted_private_key: material.encrypted_private_key,
+                recipient_classical_public_key: classical.public_raw().to_vec(),
+                recipient_ml_kem_768_public_key: material.ml_kem_768_public_key,
+                classical_shared_secret: vec![0; 32],
+                context,
+                envelope: tampered,
+            },),
+            Err(ExperimentalPqFfiError::RecoveryFailed)
         );
     }
 }
