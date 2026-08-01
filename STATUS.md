@@ -1,5 +1,10 @@
 # Full-wallet delivery status
 
+## ActiveChain identity bridge conformance
+
+- [x] [#130](https://github.com/advatar/EUWallet/issues/130): consume the digest-locked synthetic
+  corpus shared with ActiveChain and VCIssuer and reject consent/vector drift.
+
 Tracking issue: [#1 — Build an independent full German EUDI Wallet solution](https://github.com/advatar/EUWallet/issues/1)
 
 ## Product direction
