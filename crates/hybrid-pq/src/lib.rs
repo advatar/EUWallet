@@ -36,6 +36,7 @@ pub mod envelope;
 pub mod rollout;
 pub mod tbs;
 pub mod use_cases;
+pub mod wrapper;
 
 /// Exact public component sizes frozen by `euwallet-hybrid-pq-v1`.
 pub const ES256_PUBLIC_KEY_BYTES: usize = 65;
