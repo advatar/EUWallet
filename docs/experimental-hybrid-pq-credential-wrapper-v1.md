@@ -6,7 +6,7 @@ registered credential format.
 
 `HybridCredentialWrapperV1` is the byte-exact credential wrapper for the
 `euwallet-hybrid-pq-v1` profile, jointly frozen with VCIssuer. It carries an
-opaque experimental credential payload, its disclosures, both component key
+canonical experimental credential payload, its disclosures, both component key
 identifiers, the logical key generation, and both mandatory signatures.
 
 ## Framing
@@ -61,7 +61,7 @@ in VCIssuer (`rust/issuer-service/tests/vectors/`):
 - `hybrid-pq-v1-wrapper-envelope.hex` — positive wrapper over the issue #105
   component fixture; its committed TBS is exactly
   `hybrid-pq-v1-component-tbs.hex`, so the wrapper reuses the corpus keys and
-  real signatures.
+real signatures.
 - `hybrid-pq-v1-wrapper-mutations.json` — twenty-one structural, downgrade,
   binding, and signature rejection mutations, plus the fixture context and
   binding values needed to reproduce verification.
@@ -71,9 +71,18 @@ production keys. `crates/crypto-backend/tests/hybrid_wrapper_vectors.rs`
 verifies the positive vector with independent backends (aws-lc ES256,
 RustCrypto ML-DSA-65) and rejects every mutation.
 
+The positive payload is the same seven-field canonical CBOR shape emitted by
+VCIssuer: issuer origin, creation/expiry, experimental VCT, holder JWK,
+disclosure hashes, and the mandatory development-only marker. The signed
+context wallet identity is the RFC 7638 thumbprint of that holder JWK.
+`HybridProviderIntegrationTests` drives the frozen bytes through the Swift
+acquisition coordinator and real Rust verifier, then proves the accepted value
+exists only in the experimental namespace and cannot satisfy PID or mDL
+production requests.
+
 ## Non-goals
 
-The wrapper does not define issuance-protocol transport, credential-payload
-semantics, revocation, or any production trust decision. Production adoption
+The wrapper does not define a standards-track issuance format, revocation, or
+any production trust decision. Production adoption
 remains blocked behind the staged use-case gates
 (`docs/experimental-pq-use-case-isolation.md`) and external approval.

@@ -183,9 +183,9 @@ algorithm/profile and certification approval.
     - [ ] Add and execute a sustained thermal-concurrency case with battery/thermal snapshots.
   - [ ] Re-run NIST/cross-library, Rust/property/fuzz, Swift, serial simulator, UniFFI/XCFramework,
         Lean and Tamarin gates from the final integrated commit.
-  - [ ] Verify the experimental credential acquisition path consumes and atomically verifies the
+  - [x] Verify the experimental credential acquisition path consumes and atomically verifies the
         frozen VCIssuer wrapper without entering certified catalogue or presentation paths.
-    - [ ] Add a Swift-to-real-Rust acquisition integration test using the frozen signed wrapper.
+    - [x] Add a Swift-to-real-Rust acquisition integration test using the frozen signed wrapper.
   - [ ] Reconcile and close #91 and #93, publish the final evidence index, merge #95 to `main`,
         verify reachability, and delete every merged hybrid-PQ source branch.
 

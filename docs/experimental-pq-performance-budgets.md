@@ -60,5 +60,8 @@ so a codec change that breaks the storage/message budget fails CI.
 
 Physical-device benchmarks (supported iPhone hardware), battery cost, and concurrency behavior
 under thermal constraints remain an explicit #86-dependent closure gate: they require the
-connected passcode/biometric-enabled device runs recorded there. Simulator XCTests remain serial
+connected passcode/biometric-enabled device runs recorded there. The physical harness includes a
+five-second, four-worker sustained real-backend run that records operation count, battery level and
+state, and thermal state before/after, and fails if the device reaches the critical thermal state.
+Simulator XCTests remain serial
 under repository hygiene rules, with disposable clone sets cleaned only after runs finish.

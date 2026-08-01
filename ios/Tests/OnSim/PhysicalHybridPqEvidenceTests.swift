@@ -80,6 +80,67 @@ final class PhysicalHybridPqEvidenceTests: XCTestCase {
         #endif
     }
 
+    @MainActor
+    func testPhysicalPqSustainedConcurrencyBatteryAndThermalSnapshot() throws {
+        #if targetEnvironment(simulator)
+            throw XCTSkip("physical iPhone evidence only")
+        #else
+            UIDevice.current.isBatteryMonitoringEnabled = true
+            defer { UIDevice.current.isBatteryMonitoringEnabled = false }
+            let batteryBefore = UIDevice.current.batteryLevel
+            let batteryStateBefore = UIDevice.current.batteryState.rawValue
+            let thermalBefore = ProcessInfo.processInfo.thermalState.rawValue
+            let deadline = ContinuousClock.now + .seconds(5)
+            let lock = NSLock()
+            var operations = 0
+            var failures: [String] = []
+
+            DispatchQueue.concurrentPerform(iterations: 4) { worker in
+                while ContinuousClock.now < deadline {
+                    do {
+                        let material = try generateExperimentalPqWrappedKeyMaterial(
+                            wrappingKey: wrappingKeyBytes)
+                        let signature = try signExperimentalPqWrappedKeyMaterial(
+                            wrappingKey: wrappingKeyBytes,
+                            nonce: material.nonce,
+                            encryptedPrivateKey: material.encryptedPrivateKey,
+                            payload: Data("sustained-\(worker)".utf8))
+                        guard signature.count == 3_309 else {
+                            lock.withLock { failures.append("signature-length-\(worker)") }
+                            break
+                        }
+                        lock.withLock { operations += 1 }
+                    } catch {
+                        lock.withLock { failures.append("operation-\(worker):\(error)") }
+                        break
+                    }
+                }
+            }
+
+            let batteryAfter = UIDevice.current.batteryLevel
+            let batteryStateAfter = UIDevice.current.batteryState.rawValue
+            let thermalAfter = ProcessInfo.processInfo.thermalState.rawValue
+            XCTAssertTrue(failures.isEmpty, failures.joined(separator: ","))
+            XCTAssertGreaterThan(operations, 100, "sustained run did not exercise enough operations")
+            XCTAssertNotEqual(
+                ProcessInfo.processInfo.thermalState, .critical,
+                "hybrid-PQ sustained concurrency reached critical thermal state")
+            attachDeviceRecord(
+                caseName: "pq-sustained-battery-thermal",
+                extra: [
+                    "durationSeconds": 5,
+                    "workers": 4,
+                    "operations": operations,
+                    "batteryLevelBefore": batteryBefore,
+                    "batteryLevelAfter": batteryAfter,
+                    "batteryStateBefore": batteryStateBefore,
+                    "batteryStateAfter": batteryStateAfter,
+                    "thermalStateBefore": thermalBefore,
+                    "thermalStateAfter": thermalAfter,
+                ])
+        #endif
+    }
+
     func testPhysicalCustodyRotationRollbackAndCiphertextOnlyStorage() throws {
         #if targetEnvironment(simulator)
             throw XCTSkip("physical iPhone evidence only")
@@ -207,6 +268,59 @@ final class PhysicalHybridPqEvidenceTests: XCTestCase {
                 }
             }
             attachDeviceRecord(caseName: "biometric-\(action)")
+        #endif
+    }
+
+    /// Manual evidence gate. Start while the device is unlocked, set the environment variable to
+    /// `locked`, and lock the iPhone during the countdown. The protected wrapping key must remain
+    /// unavailable and no signature may be returned.
+    func testInteractivePhysicalLockedDeviceFailsClosed() throws {
+        #if targetEnvironment(simulator)
+            throw XCTSkip("physical iPhone evidence only")
+        #else
+            guard ProcessInfo.processInfo.environment["EUWALLET_PQ_DEVICE_STATE"] == "locked"
+            else { throw XCTSkip("set EUWALLET_PQ_DEVICE_STATE=locked for manual evidence") }
+
+            let suffix = UUID().uuidString.lowercased()
+            let logicalKeyID = "physical-pq-locked-\(suffix)"
+            let serviceRoot = "eu.advatar.wallet.tests.experimental-pq.locked.\(suffix)"
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("physical-pq-locked-\(suffix)", isDirectory: true)
+            defer {
+                try? FileManager.default.removeItem(at: root)
+                deleteKeychainService("\(serviceRoot).wrapping")
+                deleteKeychainService("\(serviceRoot).generation")
+                deleteSecureEnclaveKeys(logicalKeyIDs: [logicalKeyID])
+            }
+            let custody = ExperimentalHybridKeyCustody(
+                signer: SecureEnclaveSigner(),
+                backend: FfiExperimentalPqBackend(),
+                wrappingKeys: AppleExperimentalPqWrappingKeyStore(
+                    service: "\(serviceRoot).wrapping"),
+                records: try AppleExperimentalPqRecordStore(applicationSupportRoot: root),
+                anchors: AppleExperimentalPqGenerationAnchorStore(
+                    service: "\(serviceRoot).generation"))
+            let reference = try custody.rotate(
+                logicalKeyID: logicalKeyID,
+                prompt: "Create locked-device evidence key")
+
+            XCTContext.runActivity(named: "Lock the connected iPhone now; signing starts in 15 seconds") {
+                _ in Thread.sleep(forTimeInterval: 15)
+            }
+            XCTAssertThrowsError(
+                try custody.sign(
+                    reference: reference,
+                    payload: Data("locked-device-must-fail".utf8),
+                    prompt: "Locked device must not unlock hybrid key")
+            ) { error in
+                guard case .keychainFailure(let status) = error as? ExperimentalPqCustodyError
+                else { return XCTFail("unexpected locked-device error: \(error)") }
+                XCTAssertTrue(
+                    status == errSecInteractionNotAllowed || status == errSecAuthFailed
+                        || status == errSecUserCanceled,
+                    "unexpected locked-device Keychain status: \(status)")
+            }
+            attachDeviceRecord(caseName: "locked-device-fail-closed")
         #endif
     }
 
