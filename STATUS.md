@@ -175,14 +175,17 @@ algorithm/profile and certification approval.
         device model, OS build, timestamp, fail-closed results and ciphertext-only storage evidence.
         The non-interactive generation/rotation, missing-key, rollback and ciphertext-only cases
         passed on iPhone 15 Pro; biometric and locked-device actions remain (`docs/experimental-pq-physical-evidence.md`).
+    - [ ] Add and execute explicit locked-device and biometric approve/cancel evidence cases.
   - [ ] Measure physical-device hybrid key generation/signing latency, memory, battery and bounded
         concurrency against the documented budgets; retain the raw XCTest result bundle.
         Latency, CPU, memory and four-way concurrency evidence is recorded; battery/thermal
         observation remains (`docs/experimental-pq-physical-evidence.md`).
+    - [ ] Add and execute a sustained thermal-concurrency case with battery/thermal snapshots.
   - [ ] Re-run NIST/cross-library, Rust/property/fuzz, Swift, serial simulator, UniFFI/XCFramework,
         Lean and Tamarin gates from the final integrated commit.
   - [ ] Verify the experimental credential acquisition path consumes and atomically verifies the
         frozen VCIssuer wrapper without entering certified catalogue or presentation paths.
+    - [ ] Add a Swift-to-real-Rust acquisition integration test using the frozen signed wrapper.
   - [ ] Reconcile and close #91 and #93, publish the final evidence index, merge #95 to `main`,
         verify reachability, and delete every merged hybrid-PQ source branch.
 
