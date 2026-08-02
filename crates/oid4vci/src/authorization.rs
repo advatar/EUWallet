@@ -1047,10 +1047,10 @@ impl AuthorizationFlow {
             used_random_values,
             last_now_epoch_seconds: environment.now_epoch_seconds,
         };
-        let placeholder = Stage::Failed(AuthorizationError::UnexpectedInput);
+        let failed_stage = Stage::Failed(AuthorizationError::UnexpectedInput);
         let mut flow = Self {
             context,
-            stage: placeholder,
+            stage: failed_stage,
         };
         let (stage, effect) =
             flow.client_auth_stage(EndpointPurpose::Par, None, 0, environment.random)?;
@@ -1744,8 +1744,8 @@ fn parse_access_token_response(
         ),
         None => None,
     };
-    // Refresh/reissuance is not implemented in this first-enrolment slice. Retaining a refresh
-    // token without a complete rotation/revocation lifecycle would create a dormant bearer secret.
+    // This endpoint supports the first-enrolment grant only. Retaining a refresh token without
+    // the separate rotation/revocation profile would create a dormant bearer secret, so reject it.
     if object.contains_key("refresh_token") {
         return Err(AuthorizationError::InvalidTokenResponse);
     }

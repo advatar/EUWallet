@@ -66,8 +66,9 @@ cd tools/hlr-import && python3 import_hlr.py high-level-requirements.csv ../../t
 
 ## Status
 
-This is a **verified skeleton**: every layer compiles and its example tests pass, the three
-formal tiers are wired end-to-end, and the module boundaries match the register's P0 build
-profile. Each module is a documented stub to be filled per the implementation plan. It is
-**not** a certified wallet — a prototype is not an official EUDI Wallet until the applicable
-Member State certification and listing are complete (register: *legal/product-status boundary*).
+This repository contains a tested implementation of the wallet core, native shell adapters, and
+three formal-assurance tiers described above. `STATUS.md` is the authoritative record of completed
+engineering slices and remaining product, interoperability, hardware-evidence, operational, and
+certification gates. It is **not** a certified wallet: implementation evidence does not replace the
+applicable Member State certification and Commission listing (register: *legal/product-status
+boundary*).

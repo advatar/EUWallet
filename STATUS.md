@@ -1,5 +1,22 @@
 # Full-wallet delivery status
 
+## Executable placeholder and unfinished-path audit
+
+- [x] [#132](https://github.com/advatar/EUWallet/issues/132): audit production source for
+  placeholder implementations and silently unimplemented behavior, replace repository-owned gaps
+  with tested behavior, and classify remaining hardware, standards, certification, and independent
+  review dependencies as explicit delivery gates.
+  - [x] Classify source markers separately from test/demo doubles, generated upstream internals,
+        protocol terminology, historical implementation-plan excerpts, and external gates.
+  - [x] Confirm every marker found in production source is implemented behavior or an explicit,
+        tested fail-closed profile boundary, and add a permanent CI audit that rejects executable
+        placeholder constructs.
+  - [x] Replace the one-line threat-model, DPIA, key-lifecycle, and known-answer-test evidence files
+        with bounded evidence documents, and reconcile status language without claiming external
+        product or certification gates complete.
+  - [x] Run the Rust workspace, Swift/iOS, Android debug/unit, documentation, and marker-audit gates.
+  - [ ] Merge to `main`, verify reachability from `origin/main`, and delete the source branch.
+
 ## ActiveChain identity bridge conformance
 
 - [x] [#130](https://github.com/advatar/EUWallet/issues/130): consume the digest-locked synthetic

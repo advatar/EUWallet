@@ -843,8 +843,8 @@ fn parse_request(bytes: &[u8]) -> Result<AuthRequest, ()> {
     };
     let payload_bytes = Base64UrlUnpadded::decode_vec(parts[1]).map_err(|_| ())?;
     let p: Json = serde_json::from_slice(&payload_bytes).map_err(|_| ())?;
-    // Transaction-data hashing/binding is not implemented yet. Ignoring it while still producing
-    // a presentation would authorize a different transaction, so fail closed on any presence.
+    // Transaction data is outside the currently supported request profile. Ignoring it while
+    // producing a presentation could authorize a different transaction, so reject its presence.
     if p.get("transaction_data").is_some() {
         return Err(());
     }

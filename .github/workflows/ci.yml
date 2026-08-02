@@ -20,6 +20,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - name: Reject production placeholder implementations
+        run: tools/verify-no-production-placeholders.sh
       - name: Validate CI and evidence gates
         run: python3 -m unittest discover -s tools/evidence/tests -p 'test_*.py'
       - name: Format

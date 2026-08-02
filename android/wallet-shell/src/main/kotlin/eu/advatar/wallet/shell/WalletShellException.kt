@@ -46,7 +46,7 @@ sealed class WalletShellException(
         WalletShellException("No production dependency is configured for $effectType")
 
     class UnsupportedEffect(val effectType: String) :
-        WalletShellException("Effect is not implemented by this shell: $effectType")
+        WalletShellException("Unsupported wallet-core effect type: $effectType")
 
     class EffectCascadeLimitExceeded(val limit: Int) :
         WalletShellException("Wallet-core effect cascade exceeded the limit of $limit")
