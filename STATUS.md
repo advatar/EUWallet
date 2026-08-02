@@ -15,7 +15,7 @@
         with bounded evidence documents, and reconcile status language without claiming external
         product or certification gates complete.
   - [x] Run the Rust workspace, Swift/iOS, Android debug/unit, documentation, and marker-audit gates.
-  - [ ] Merge to `main`, verify reachability from `origin/main`, and delete the source branch.
+  - [x] Merge to `main`, verify reachability from `origin/main`, and delete the source branch.
 
 ## ActiveChain identity bridge conformance
 
