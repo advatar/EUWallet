@@ -153,12 +153,19 @@ impl ReceiptLog {
         seq: u64,
         action_hash: &[u8; 32],
         mandate_jti: Option<&str>,
+        on_behalf_of: &str,
     ) -> [u8; 32] {
-        let mut buffer = Vec::with_capacity(72);
+        // Length-prefix the variable-length fields so no two distinct (jti, on_behalf_of) pairs can
+        // produce the same pre-image — the delegator identity is bound into the tamper-evidence.
+        let mut buffer = Vec::with_capacity(96);
         buffer.extend_from_slice(&prev_hash);
         buffer.extend_from_slice(action_hash);
         buffer.extend_from_slice(&seq.to_be_bytes());
-        buffer.extend_from_slice(mandate_jti.unwrap_or("").as_bytes());
+        let jti = mandate_jti.unwrap_or("");
+        buffer.extend_from_slice(&(jti.len() as u64).to_be_bytes());
+        buffer.extend_from_slice(jti.as_bytes());
+        buffer.extend_from_slice(&(on_behalf_of.len() as u64).to_be_bytes());
+        buffer.extend_from_slice(on_behalf_of.as_bytes());
         digest.sha256(&buffer)
     }
 
@@ -171,7 +178,14 @@ impl ReceiptLog {
     ) -> Receipt {
         let seq = self.next_seq;
         let prev_hash = self.head;
-        let chain_hash = Self::link(digest, prev_hash, seq, &action_hash, mandate_jti.as_deref());
+        let chain_hash = Self::link(
+            digest,
+            prev_hash,
+            seq,
+            &action_hash,
+            mandate_jti.as_deref(),
+            &on_behalf_of,
+        );
         let receipt = Receipt {
             seq,
             mandate_jti,
@@ -200,6 +214,7 @@ impl ReceiptLog {
                 receipt.seq,
                 &receipt.action_hash,
                 receipt.mandate_jti.as_deref(),
+                &receipt.on_behalf_of,
             );
             if expected != receipt.chain_hash {
                 return false;
@@ -475,5 +490,23 @@ mod tests {
         assert_eq!(second.receipt.prev_hash, first.receipt.chain_hash);
         assert_eq!(second.receipt.seq, 1);
         assert!(session.log().verify(&AwsLc));
+    }
+
+    #[test]
+    fn tampering_the_delegator_identity_breaks_the_chain() {
+        let mut session = enclave_session();
+        let plan = plan(&["urn:eudi:mandate:power:present-identity"]);
+        let request = request(
+            &["urn:eudi:mandate:power:present-identity"],
+            AssuranceTier::T1,
+        );
+        session.act(&plan, &request, None, &AwsLc).unwrap();
+        assert!(session.log().verify(&AwsLc));
+        // Forge WHO the agent acted for — the load-bearing claim of a delegation receipt.
+        session.log.entries[0].on_behalf_of = "urn:eudi:subject:attacker".to_owned();
+        assert!(
+            !session.log().verify(&AwsLc),
+            "on_behalf_of must be bound into the tamper-evident chain"
+        );
     }
 }

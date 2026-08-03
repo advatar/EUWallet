@@ -46,6 +46,9 @@ pub struct HeldMandate {
 pub enum DelegationError {
     /// The credential's `vct` is not the mandate type.
     NotAMandate,
+    /// The mandate discloses no non-empty `mandator` (delegator) claim — the load-bearing identity
+    /// of a power-of-representation credential must never be absent or empty.
+    MandatorMissing,
     /// The mandate discloses no non-empty `scope` claim.
     ScopeMissing,
     /// The mandate is not bound to the presenting agent key (`cnf` mismatch).
@@ -108,7 +111,8 @@ pub fn parse_mandate(held: &HeldCredential) -> Result<HeldMandate, DelegationErr
         .ok_or(DelegationError::ScopeMissing)?;
     let mandator = disclosed_claim(held, "mandator")
         .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_default();
+        .filter(|delegator| !delegator.is_empty())
+        .ok_or(DelegationError::MandatorMissing)?;
     let mandate_jti =
         disclosed_claim(held, "mandate_jti").and_then(|value| value.as_str().map(str::to_owned));
     let delegate_cnf_jwk = payload.get("cnf").and_then(|cnf| cnf.get("jwk")).cloned();
@@ -228,7 +232,13 @@ fn jwk_identity(jwk: &Value) -> Option<BTreeMap<String, String>> {
             identity.insert(field.to_owned(), value.to_owned());
         }
     }
-    (!identity.is_empty()).then_some(identity)
+    // A comparable key identity MUST carry discriminating public-key material — an EC/OKP `x` or an
+    // RSA `n`. Two JWKs sharing only `{kty, crv}` are NOT the same key and must never compare bound.
+    if identity.contains_key("x") || identity.contains_key("n") {
+        Some(identity)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +333,25 @@ mod tests {
         let mut holding = mandate_holding();
         holding.disclosures_by_claim.remove("scope");
         assert_eq!(parse_mandate(&holding), Err(DelegationError::ScopeMissing));
+    }
+
+    #[test]
+    fn a_mandate_without_a_mandator_disclosure_is_rejected() {
+        let mut holding = mandate_holding();
+        holding.disclosures_by_claim.remove("mandator");
+        // The delegator identity is load-bearing — an absent mandator must not parse as valid
+        // (and must never render as the holder acting for themselves).
+        assert_eq!(
+            parse_mandate(&holding),
+            Err(DelegationError::MandatorMissing)
+        );
+    }
+
+    #[test]
+    fn a_key_with_no_coordinate_material_is_never_bound() {
+        let mandate = parse_mandate(&mandate_holding()).unwrap();
+        // Sharing only {kty, crv} is not identity — must not compare bound.
+        assert!(!mandate.is_bound_to(&serde_json::json!({"kty": "EC", "crv": "P-256"})));
     }
 
     #[test]
