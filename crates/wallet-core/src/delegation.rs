@@ -145,6 +145,63 @@ pub fn plan_delegated_presentation(
     })
 }
 
+/// A chosen delegated presentation: which held mandate backs it and the exercised plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DelegatedPresentation {
+    pub mandate: HeldMandate,
+    pub plan: DelegationPlan,
+}
+
+impl DelegatedPresentation {
+    /// The consent context the shell surfaces before signing: on whose behalf, and exactly which
+    /// powers this presentation exercises (never wider than the mandate's grant).
+    #[must_use]
+    pub fn consent(&self) -> DelegationConsent {
+        DelegationConsent {
+            on_behalf_of: self.plan.mandator.clone(),
+            exercised_scope: self.plan.exercised_scope.clone(),
+        }
+    }
+}
+
+/// What the "acting on behalf of" consent step shows the holder for a delegated presentation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DelegationConsent {
+    pub on_behalf_of: String,
+    pub exercised_scope: BTreeSet<String>,
+}
+
+/// From the wallet's held credentials, pick a mandate that is bound to `agent_jwk` and grants the
+/// `required` powers, and return the delegated-presentation plan. The holder credential proving the
+/// agent key is presented alongside the mandate by the existing multi-credential OpenID4VP path.
+///
+/// # Errors
+///
+/// The most specific failure seen while scanning the holdings: [`DelegationError::NotAMandate`] if
+/// none is a mandate, else [`DelegationError::AgentKeyMismatch`] / [`DelegationError::ScopeInsufficient`]
+/// / [`DelegationError::ScopeMissing`] from the closest candidate.
+pub fn select_delegated_presentation<'a, I>(
+    held: I,
+    agent_jwk: &Value,
+    required: &BTreeSet<String>,
+) -> Result<DelegatedPresentation, DelegationError>
+where
+    I: IntoIterator<Item = &'a HeldCredential>,
+{
+    let mut closest = DelegationError::NotAMandate;
+    for credential in held {
+        match parse_mandate(credential) {
+            Ok(mandate) => match plan_delegated_presentation(&mandate, agent_jwk, required) {
+                Ok(plan) => return Ok(DelegatedPresentation { mandate, plan }),
+                Err(error) => closest = error,
+            },
+            Err(DelegationError::NotAMandate) => {}
+            Err(error) => closest = error,
+        }
+    }
+    Err(closest)
+}
+
 /// The base64url-encoded JWT payload as JSON (the always-visible issuer claims).
 fn jwt_payload(issuer_jwt: &str) -> Option<Value> {
     let payload_b64 = issuer_jwt.split('.').nth(1)?;
@@ -309,5 +366,58 @@ mod tests {
         // Same key, different member order plus an extra non-identity member.
         let reordered = serde_json::json!({"y": "AGENT_Y", "use": "sig", "x": "AGENT_X", "crv": "P-256", "kty": "EC"});
         assert!(mandate.is_bound_to(&reordered));
+    }
+
+    /// A non-mandate holding (an ordinary PID) bound to the same agent key.
+    fn pid_holding() -> HeldCredential {
+        let payload = serde_json::json!({
+            "iss": "https://issuer.example",
+            "vct": "eu.europa.ec.eudi.pid.1",
+            "cnf": {"jwk": agent_jwk()}
+        });
+        HeldCredential {
+            issuer_jwt: format!(
+                "{}.{}.{}",
+                b64(b"{}"),
+                b64(&serde_json::to_vec(&payload).unwrap()),
+                "sig"
+            ),
+            disclosures_by_claim: BTreeMap::new(),
+            status: None,
+        }
+    }
+
+    #[test]
+    fn selects_the_qualifying_mandate_from_mixed_holdings() {
+        let holdings = [pid_holding(), mandate_holding()];
+        let required: BTreeSet<String> =
+            ["urn:eudi:mandate:power:present-identity".to_owned()].into();
+        let chosen = select_delegated_presentation(holdings.iter(), &agent_jwk(), &required)
+            .expect("a held mandate qualifies");
+        let consent = chosen.consent();
+        assert_eq!(consent.on_behalf_of, "urn:eudi:subject:delegator-1");
+        assert_eq!(consent.exercised_scope, required);
+    }
+
+    #[test]
+    fn selection_reports_scope_insufficient_when_no_mandate_covers_the_request() {
+        let holdings = [pid_holding(), mandate_holding()];
+        let required: BTreeSet<String> =
+            ["urn:eudi:mandate:power:authorise-payment".to_owned()].into();
+        assert_eq!(
+            select_delegated_presentation(holdings.iter(), &agent_jwk(), &required),
+            Err(DelegationError::ScopeInsufficient)
+        );
+    }
+
+    #[test]
+    fn selection_reports_not_a_mandate_when_no_mandate_is_held() {
+        let holdings = [pid_holding()];
+        let required: BTreeSet<String> =
+            ["urn:eudi:mandate:power:present-identity".to_owned()].into();
+        assert_eq!(
+            select_delegated_presentation(holdings.iter(), &agent_jwk(), &required),
+            Err(DelegationError::NotAMandate)
+        );
     }
 }
