@@ -1362,6 +1362,10 @@ pub enum HttpDeliveryProfile {
     QesAuthorization,
 }
 
+// Variants carry their full typed payloads (e.g. `Render { screen: ScreenDescription }`) and cross
+// the UniFFI boundary to the native shells; boxing to equalise variant size would only complicate
+// the generated bindings.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 // See the note on `Event`: `rename_all_fields` makes struct-variant fields (`client_id` ->
 // `clientId`, `key_ref` -> `keyRef`) camelCase so the shell's `WalletEffect` decoder matches.
