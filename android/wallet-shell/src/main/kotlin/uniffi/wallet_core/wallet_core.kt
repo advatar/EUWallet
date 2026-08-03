@@ -776,6 +776,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -823,6 +825,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_wallet_core_fn_constructor_walletengine_new(`walletClientId`: RustBuffer.ByValue,`deviceKeyRef`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
+    fun uniffi_wallet_core_fn_method_walletengine_agent_mandates_json(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_wallet_core_fn_method_walletengine_attestation_catalogue_json(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_wallet_core_fn_method_walletengine_durable_resume_effects_json(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -991,6 +995,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_wallet_core_checksum_method_demowallet_sign_device(
     ): Short
+    fun uniffi_wallet_core_checksum_method_walletengine_agent_mandates_json(
+    ): Short
     fun uniffi_wallet_core_checksum_method_walletengine_attestation_catalogue_json(
     ): Short
     fun uniffi_wallet_core_checksum_method_walletengine_durable_resume_effects_json(
@@ -1073,6 +1079,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_wallet_core_checksum_method_demowallet_sign_device() != 56295.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_wallet_core_checksum_method_walletengine_agent_mandates_json() != 34205.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_wallet_core_checksum_method_walletengine_attestation_catalogue_json() != 15813.toShort()) {
@@ -1916,6 +1925,12 @@ public object FfiConverterTypeDemoWallet: FfiConverter<DemoWallet, Pointer> {
 public interface WalletEngineInterface {
     
     /**
+     * The power-of-representation mandates the wallet holds as a JSON array
+     * (`[{mandator, scope:[urn], mandateJti, hasStatusList}]`), for the "My Agents" screen.
+     */
+    fun `agentMandatesJson`(): kotlin.String
+    
+    /**
      * The attestation catalogue as JSON (TS11): known credential types + their claims/issuers.
      */
     fun `attestationCatalogueJson`(): kotlin.String
@@ -2101,6 +2116,22 @@ open class WalletEngine: Disposable, AutoCloseable, WalletEngineInterface {
             UniffiLib.INSTANCE.uniffi_wallet_core_fn_clone_walletengine(pointer!!, status)
         }
     }
+
+    
+    /**
+     * The power-of-representation mandates the wallet holds as a JSON array
+     * (`[{mandator, scope:[urn], mandateJti, hasStatusList}]`), for the "My Agents" screen.
+     */override fun `agentMandatesJson`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_wallet_core_fn_method_walletengine_agent_mandates_json(
+        it, _status)
+}
+    }
+    )
+    }
+    
 
     
     /**
