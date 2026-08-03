@@ -29,6 +29,16 @@ members = [
     "crates/wallet-core",
     "crates/benches",
 ]
+# The NFC reader bridge (crates/nfc-bridge) and the iProov reader-rust submodule
+# (third_party/credentials-platform) are deliberately EXCLUDED from the default workspace.
+# advatar's GitHub-hosted CI builds only the members above, so it never resolves the
+# submodule path and never needs iProov credentials. The bridge is built out-of-tree
+# (locally, or on a runner that has the reader-rust submodule checked out) — see
+# crates/nfc-bridge/README.md.
+exclude = [
+    "crates/nfc-bridge",
+    "third_party/credentials-platform",
+]
 
 [workspace.package]
 version = "0.0.1"
