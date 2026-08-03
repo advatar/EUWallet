@@ -50,7 +50,7 @@ final class DemoIssuer: IssuerResponder {
 
     func token() async -> (bound: Bool, cNonce: UInt64) { (true, cNonce) }
 
-    func credential(proofJwt: Data) async -> (format: String, bytes: Data) {
+    func credential(proofJwt: Data, emrtdAttestation: String?) async -> (format: String, bytes: Data) {
         (format, credentialCompact)
     }
 }

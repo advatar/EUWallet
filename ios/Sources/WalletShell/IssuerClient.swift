@@ -385,16 +385,28 @@ public final class LiveIssuerClient: IssuerResponder {
         return (true, numericNonce)
     }
 
-    public func credential(proofJwt: Data) async throws -> (format: String, bytes: Data) {
+    /// - Parameter emrtdAttestation: for the NFC-sourced PID profile, the trusted reader/liveness
+    ///   backend's eMRTD evidence attestation (a compact JWS). When present it is forwarded to the
+    ///   issuer as `emrtd_evidence` and VCIssuer's proved chip+liveness gate decides. `nil` for every
+    ///   other credential — the request is byte-for-byte unchanged, so existing flows are unaffected.
+    public func credential(
+        proofJwt: Data,
+        emrtdAttestation: String?
+    ) async throws -> (format: String, bytes: Data) {
         guard stage == .tokenReady, let token = accessToken, credentialNonce != nil, !consumed,
               let proof = String(data: proofJwt, encoding: .utf8), !proof.isEmpty
         else { throw IssuerClientError.invalidState }
         stage = .credentialPending
         let dpop = try dpop(method: "POST", endpoint: credentialEndpoint, accessToken: token)
-        let body = try JSONSerialization.data(withJSONObject: [
+        var bodyObject: [String: Any] = [
             "credential_configuration_id": configurationId,
             "proofs": ["jwt": [proof]],
-        ])
+        ]
+        if let emrtdAttestation, !emrtdAttestation.isEmpty {
+            // Matches VCIssuer's CredentialRequest.emrtd_evidence = { attestation: String }.
+            bodyObject["emrtd_evidence"] = ["attestation": emrtdAttestation]
+        }
+        let body = try JSONSerialization.data(withJSONObject: bodyObject)
         let response = try await transport.issuerRequest(
             url: credentialEndpoint, method: "POST", body: body,
             headers: [
@@ -438,7 +450,7 @@ public final class LiveIssuerClient: IssuerResponder {
         let signature = try signer.sign(keyRef: keyReference, payload: Data(input.utf8))
         guard signature.count == 64 else { throw IssuerClientError.invalidResponse }
         return try await credential(
-            proofJwt: Data("\(input).\(Self.base64url(signature))".utf8))
+            proofJwt: Data("\(input).\(Self.base64url(signature))".utf8), emrtdAttestation: nil)
     }
 
     public func hybridVerificationContext() throws -> LiveHybridIssuerVerificationContext {
