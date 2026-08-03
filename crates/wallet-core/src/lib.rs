@@ -28,6 +28,10 @@ use presenter::{
 use serde::{Deserialize, Serialize};
 use trust::{ServiceType, TrustStore};
 
+/// Power-of-representation (mandate) support: recognise a held mandate, read its delegated scope,
+/// and plan a delegated presentation for the agent key. See D6 in docs/delegation.
+pub mod delegation;
+
 /// Which flow the wallet is currently driving, so a device signature is routed to the right
 /// machine (presentation's key-binding JWT vs. payment's SCA authentication code).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
