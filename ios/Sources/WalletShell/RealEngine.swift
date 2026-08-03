@@ -316,6 +316,7 @@ import Foundation
         }
 
         func heldCredentialsJSON() -> String { engine.heldCredentialsJson() }
+        func agentMandatesJSON() -> String { engine.agentMandatesJson() }
         func transactionLogJSON() -> String { engine.transactionLogJson() }
         func transactionReportJSON() -> String { engine.transactionReportJson() }
         func exportJSON() -> String { engine.exportJson() }

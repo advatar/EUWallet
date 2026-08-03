@@ -69,6 +69,7 @@ struct WalletHomeView: View {
     let onOpenSettings: () -> Void
 
     @State private var detail: WalletCredential?
+    @State private var showAgents = false
 
     private func openCredentialOffer() {
         model.showConnectSheet = true
@@ -111,6 +112,10 @@ struct WalletHomeView: View {
                     WalletRow(title: "Activity", subtitle: model.history.isEmpty ? "Nothing shared yet" : "\(model.history.count) recent actions",
                               systemImage: "list.bullet.rectangle", action: onOpenHistory)
                     Divider().padding(.leading, 52)
+                    WalletRow(title: "My Agents",
+                              subtitle: model.agentMandates.isEmpty ? "Delegate scoped authority to an AI agent" : "\(model.agentMandates.count) delegated \(model.agentMandates.count == 1 ? "agent" : "agents")",
+                              systemImage: "person.badge.key", action: { showAgents = true })
+                    Divider().padding(.leading, 52)
                     WalletRow(title: "Settings", subtitle: nil,
                               systemImage: "gear", action: onOpenSettings)
                 }
@@ -137,6 +142,108 @@ struct WalletHomeView: View {
                 detail = nil
                 onPresent()
             })
+        }
+        .sheet(isPresented: $showAgents) {
+            MyAgentsView(model: model)
+        }
+    }
+}
+
+/// The "My Agents" screen: the power-of-representation mandates the wallet holds — the scoped,
+/// revocable authority the holder has delegated to AI agents. Read-only for now (grant/revoke are
+/// issuer/status-list flows); shows on whose behalf each agent acts and exactly which powers it may
+/// exercise, so the human stays in control of what an agent can do.
+struct MyAgentsView: View {
+    @ObservedObject var model: WalletModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Agents act for you, only within the powers you grant — revocable at any time.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("agents.intro")
+
+                    if model.agentMandates.isEmpty {
+                        VStack(spacing: 12) {
+                            ConsumerStatusOrb(systemImage: "person.badge.key")
+                            Text("No agents yet").font(.title3.bold())
+                            Text("When you delegate a scoped authority to an AI agent, its mandate appears here.")
+                                .font(.body).foregroundStyle(ConsumerDesign.mutedInk)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .consumerSurface(radius: 20)
+                    } else {
+                        ForEach(model.agentMandates) { mandate in
+                            AgentMandateCard(mandate: mandate)
+                        }
+                    }
+                }
+                .padding(20)
+            }
+            .navigationTitle("My Agents")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task { model.reloadAgentMandates() }
+        }
+    }
+}
+
+/// One agent's mandate: the delegator it represents and the exact powers it may exercise.
+private struct AgentMandateCard: View {
+    let mandate: AgentMandate
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "person.badge.key.fill")
+                    .font(.title2).foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Acts on behalf of").font(.caption).foregroundStyle(.secondary)
+                    Text(mandate.mandator.isEmpty ? "You" : mandate.mandator)
+                        .font(.headline).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer()
+                if mandate.revocable {
+                    Label("Revocable", systemImage: "xmark.shield")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .labelStyle(.titleAndIcon)
+                }
+            }
+
+            Text("Authorised to")
+                .font(.caption).foregroundStyle(.secondary)
+            FlowingChips(items: mandate.scopeLabels)
+
+            if let jti = mandate.mandateJti {
+                Text("Mandate \(jti)")
+                    .font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .consumerSurface(radius: 18)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Simple wrapping row of scope chips.
+private struct FlowingChips: View {
+    let items: [String]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(items, id: \.self) { item in
+                Text(item)
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(.tint.opacity(0.14), in: Capsule())
+            }
         }
     }
 }
