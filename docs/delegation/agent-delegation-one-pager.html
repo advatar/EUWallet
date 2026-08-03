@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Delegating Authority to AI Agents — One-Pager</title>
+<style>
+  @page { size: A4; margin: 14mm 15mm; }
+  :root {
+    --ink: #14181f;
+    --ink-soft: #3c4653;
+    --muted: #667080;
+    --line: #e2e6ec;
+    --panel: #f7f8fa;
+    --gold: #9a6a12;
+    --gold-soft: #b98a2e;
+    --accent: #1b2a4a;
+    --good: #1f6b46;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    font-size: 10.2px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 190mm; margin: 0 auto; }
+
+  header { border-bottom: 2px solid var(--ink); padding-bottom: 8px; margin-bottom: 12px; }
+  .eyebrow {
+    font-size: 8.4px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--gold); font-weight: 700; margin: 0 0 4px;
+  }
+  h1 { font-size: 20px; line-height: 1.12; margin: 0; letter-spacing: -0.01em; }
+  .sub { margin: 5px 0 0; font-size: 10.6px; color: var(--ink-soft); }
+
+  .thesis {
+    background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--gold);
+    border-radius: 6px; padding: 9px 12px; margin: 12px 0 14px;
+    font-size: 11px; line-height: 1.5;
+  }
+  .thesis b { color: var(--ink); }
+
+  h2 {
+    font-size: 8.8px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--muted); font-weight: 700; margin: 0 0 6px;
+    border-bottom: 1px solid var(--line); padding-bottom: 3px;
+  }
+
+  .cols { display: flex; gap: 14px; }
+  .col { flex: 1; }
+
+  /* two worlds */
+  .worlds { display: flex; align-items: stretch; gap: 8px; margin-bottom: 4px; }
+  .world {
+    flex: 1; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: #fff;
+  }
+  .world .wt { font-weight: 700; font-size: 9.6px; color: var(--accent); margin: 0 0 3px; }
+  .world p { margin: 0; color: var(--ink-soft); font-size: 9.4px; line-height: 1.42; }
+  .bridge {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 8px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--gold);
+    font-weight: 700; padding: 0 2px; white-space: nowrap;
+  }
+  .worldnote { margin: 7px 0 0; font-size: 9.2px; color: var(--muted); }
+  .worldnote b { color: var(--gold); }
+
+  /* guarantees */
+  ul.g { list-style: none; margin: 0; padding: 0; }
+  ul.g li { position: relative; padding: 0 0 6px 15px; font-size: 9.6px; line-height: 1.4; color: var(--ink-soft); }
+  ul.g li::before {
+    content: ""; position: absolute; left: 0; top: 4px; width: 7px; height: 7px;
+    border-radius: 2px; background: var(--gold-soft);
+  }
+  ul.g li b { color: var(--ink); display: block; font-size: 9.8px; }
+
+  /* control row */
+  .control { display: flex; gap: 8px; margin-top: 2px; }
+  .cbox { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 9px; }
+  .cbox .ct { font-weight: 700; font-size: 9.4px; margin: 0 0 2px; color: var(--accent); }
+  .cbox p { margin: 0; font-size: 9px; color: var(--ink-soft); line-height: 1.4; }
+
+  .flow {
+    margin-top: 6px; font-size: 9px; color: var(--muted); text-align: center;
+    letter-spacing: 0.02em;
+  }
+  .flow b { color: var(--ink-soft); font-weight: 600; }
+
+  .split { display: flex; gap: 14px; margin-top: 14px; }
+  .posbox { flex: 1; }
+  .posbox p { margin: 0; font-size: 9.6px; color: var(--ink-soft); line-height: 1.44; }
+  .status-pill {
+    display: inline-block; background: #eef6f1; color: var(--good); border: 1px solid #cfe6da;
+    border-radius: 4px; padding: 1px 6px; font-size: 8.6px; font-weight: 700; margin-bottom: 4px;
+  }
+
+  footer {
+    margin-top: 14px; padding-top: 7px; border-top: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 8px; color: var(--muted); letter-spacing: 0.03em;
+  }
+  footer b { color: var(--ink-soft); }
+  .section { margin-bottom: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">advatar · EU Digital Identity × Mandamus</p>
+    <h1>Delegating Authority to AI Agents</h1>
+    <p class="sub">Give an agent a narrow, time-boxed, revocable slice of your authority — provable to anyone, enforced at runtime, fully audited.</p>
+  </header>
+
+  <div class="thesis">
+    The missing trust layer for agentic AI is not <i>“can this agent reach the tool?”</i> — it is
+    <b>“is this agent authorized to do this, on whose behalf, and within what limits?”</b>
+    We answer that with a government-trust <b>EU Digital Identity mandate</b> the agent carries, and a
+    <b>Mandamus/WAUTH</b> runtime that enforces it and receipts every action.
+  </div>
+
+  <div class="section">
+    <h2>Two worlds, bridged — the moat</h2>
+    <div class="worlds">
+      <div class="world">
+        <p class="wt">EU Digital Identity — portable proof</p>
+        <p>The agent carries a verifiable <b>power-of-representation mandate</b> credential. Any EU relying party can verify its delegated authority with standard wallet protocols. Authority becomes <i>interoperable</i>.</p>
+      </div>
+      <div class="bridge">↔<br/>bind</div>
+      <div class="world">
+        <p class="wt">Mandamus / WAUTH — enforced authority</p>
+        <p>Governs the agent <i>as it acts</i>: the authorization gate, <b>human step-up (iProov)</b> for consequential actions, and <b>tamper-evident signed receipts</b>. Authority becomes <i>accountable</i>.</p>
+      </div>
+    </div>
+    <p class="worldnote">The EU credential is the <b>verifiable face</b> of a Mandamus mandate. Competitors do one side; together they do both.</p>
+  </div>
+
+  <div class="cols">
+    <div class="col">
+      <div class="section">
+        <h2>Guarantees that matter</h2>
+        <ul class="g">
+          <li><b>An agent can never exceed its grant</b>Monotonic narrowing — a delegate holds only a <i>subset</i> of the delegator’s powers. Proven in Lean.</li>
+          <li><b>Post-quantum from day one</b>Hybrid-PQ on the most sensitive new authority surface — ahead of the EU itself.</li>
+          <li><b>Human-in-the-loop where it counts</b>High-consequence actions require a fresh iProov biometric, bound into the authorization.</li>
+          <li><b>Instant kill-switch</b>One tap revokes an agent; it stops being verifiable immediately (status-list revocation).</li>
+          <li><b>Every action is receipted</b>A hash-chained audit trail — accountability record and reputation signal in one.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="col">
+      <div class="section">
+        <h2>Where the human stays in control</h2>
+        <div class="control">
+          <div class="cbox">
+            <p class="ct">EU Wallet — “My Agents”</p>
+            <p>You grant, scope, revoke and approve the big moves.</p>
+          </div>
+          <div class="cbox">
+            <p class="ct">Mandamus — govern</p>
+            <p>Policy, receipts and agent reputation at runtime.</p>
+          </div>
+        </div>
+        <div class="control" style="margin-top:8px;">
+          <div class="cbox">
+            <p class="ct">The agent — just runs</p>
+            <p>A Mac app, an iPhone app, or in the cloud. Its key is hardware-protected — Secure Enclave on device; HSM/TEE with remote attestation in the cloud. The mandate is bound to <i>that</i> key, so it can’t be lent out.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow">
+    Issue <b>(VCIssuer)</b> &nbsp;→&nbsp; Hold &amp; grant <b>(EU Wallet)</b> &nbsp;→&nbsp; Present <b>(Agent)</b> &nbsp;→&nbsp; Verify <b>(VCVerifier)</b> &nbsp;→&nbsp; Enforce &amp; receipt <b>(Mandamus)</b>
+  </div>
+
+  <div class="split">
+    <div class="posbox">
+      <h2>Honest positioning</h2>
+      <p>The EU has the <b>legal hook</b> for mandates (Reg. 2024/1183, Annex VI) but <b>no standard yet for delegating to a machine agent</b>. That is the gap we fill — as a formally-verified, post-quantum extension, ready to converge when the EU rulebook lands.</p>
+    </div>
+    <div class="posbox">
+      <h2>Status</h2>
+      <p><span class="status-pill">FIRST SLICE VERIFIED</span><br/>
+      Design agreed; building <b>core-first</b> across five repos. The issuer’s delegation decision kernel — narrowing, PQ, delegate-key binding, revocation — is implemented with <b>12/12 tests green</b> and its Lean proof mirror in progress. Next: issuer service → verifier → wallet journey → agent runtime + receipts → end-to-end.</p>
+    </div>
+  </div>
+
+  <footer>
+    <span><b>advatar</b> — internal / partner briefing</span>
+    <span>EU Digital Identity Wallet × Mandamus / WAUTH · post-quantum · formally verified</span>
+    <span>2026-08-03</span>
+  </footer>
+
+</div>
+</body>
+</html>
