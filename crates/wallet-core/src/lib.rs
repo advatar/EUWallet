@@ -28,6 +28,14 @@ use presenter::{
 use serde::{Deserialize, Serialize};
 use trust::{ServiceType, TrustStore};
 
+/// Power-of-representation (mandate) support: recognise a held mandate, read its delegated scope,
+/// and plan a delegated presentation for the agent key. See D6 in docs/delegation.
+pub mod delegation;
+
+/// Headless AI-agent shell: scope-gated, HAPP-stepped, receipt-chained actions on a delegator's
+/// behalf, over an attested keystore. The Mandamus/WAUTH runtime twin. See D7 in docs/delegation.
+pub mod agent;
+
 /// Which flow the wallet is currently driving, so a device signature is routed to the right
 /// machine (presentation's key-binding JWT vs. payment's SCA authentication code).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1358,6 +1366,10 @@ pub enum HttpDeliveryProfile {
     QesAuthorization,
 }
 
+// Variants carry their full typed payloads (e.g. `Render { screen: ScreenDescription }`) and cross
+// the UniFFI boundary to the native shells; boxing to equalise variant size would only complicate
+// the generated bindings.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 // See the note on `Event`: `rename_all_fields` makes struct-variant fields (`client_id` ->
 // `clientId`, `key_ref` -> `keyRef`) camelCase so the shell's `WalletEffect` decoder matches.

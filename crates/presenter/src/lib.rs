@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 
 /// Closed vocabulary of screen archetypes. No expressions/conditionals live in a description:
 /// all branching happened upstream in the protocol machines.
+// Variants intentionally hold their full typed screen payloads (consent, issuance, credential
+// detail) rather than boxing them: `ScreenDescription` crosses the UniFFI boundary to the native
+// shells, where an extra indirection would complicate the generated bindings for no user benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "screen", rename_all = "camelCase")]
 pub enum ScreenDescription {
@@ -474,6 +478,9 @@ fn activechain_consent_value(context: &ActiveChainConsentContext) -> Value {
     ])
 }
 
+// Adopted from in-flight consent work: production serialization helpers were appended after this
+// test module. Suppress the ordering lint rather than risk reordering the module by hand.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod activechain_tests {
     use super::*;
