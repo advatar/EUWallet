@@ -32,6 +32,10 @@ use trust::{ServiceType, TrustStore};
 /// and plan a delegated presentation for the agent key. See D6 in docs/delegation.
 pub mod delegation;
 
+/// Headless AI-agent shell: scope-gated, HAPP-stepped, receipt-chained actions on a delegator's
+/// behalf, over an attested keystore. The Mandamus/WAUTH runtime twin. See D7 in docs/delegation.
+pub mod agent;
+
 /// Which flow the wallet is currently driving, so a device signature is routed to the right
 /// machine (presentation's key-binding JWT vs. payment's SCA authentication code).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
