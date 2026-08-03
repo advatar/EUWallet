@@ -69,6 +69,7 @@ private class FakeGeneratedEngine : WalletEngineInterface {
     override fun attestationCatalogueJson() = "[]"
     override fun exportJson() = "{}"
     override fun heldCredentialsJson() = "[]"
+    override fun agentMandatesJson() = "[]"
     override fun ingestCredential(
         format: String,
         credential: ByteArray,

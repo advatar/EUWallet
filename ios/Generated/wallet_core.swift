@@ -798,6 +798,12 @@ public func FfiConverterTypeDemoWallet_lower(_ value: DemoWallet) -> UnsafeMutab
 public protocol WalletEngineProtocol : AnyObject {
 
     /**
+     * The power-of-representation mandates the wallet holds as a JSON array
+     * (`[{mandator, scope:[urn], mandateJti, hasStatusList}]`), for the "My Agents" screen.
+     */
+    func agentMandatesJson()  -> String
+
+    /**
      * The attestation catalogue as JSON (TS11): known credential types + their claims/issuers.
      */
     func attestationCatalogueJson()  -> String
@@ -953,6 +959,17 @@ public convenience init(walletClientId: String, deviceKeyRef: String) {
 
 
 
+
+    /**
+     * The power-of-representation mandates the wallet holds as a JSON array
+     * (`[{mandator, scope:[urn], mandateJti, hasStatusList}]`), for the "My Agents" screen.
+     */
+open func agentMandatesJson() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_agent_mandates_json(self.uniffiClonePointer(),$0
+    )
+})
+}
 
     /**
      * The attestation catalogue as JSON (TS11): known credential types + their claims/issuers.
@@ -3086,6 +3103,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_demowallet_sign_device() != 56295) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_agent_mandates_json() != 34205) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_attestation_catalogue_json() != 15813) {

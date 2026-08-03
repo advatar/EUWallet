@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Settings
@@ -53,6 +54,7 @@ private val Success = Color(0xFF0A6C51)
 
 private enum class Destination(val label: String, val icon: ImageVector) {
     HOME("Wallet", Icons.Outlined.Home),
+    AGENTS("Agents", Icons.Outlined.Key),
     HISTORY("Activity", Icons.Outlined.History),
     SETTINGS("Settings", Icons.Outlined.Settings),
 }
@@ -87,6 +89,7 @@ fun EUWalletApp(initialOffer: String? = null) {
         ) { insets ->
             when (destination) {
                 Destination.HOME -> WalletHome(initialOffer, Modifier.padding(insets))
+                Destination.AGENTS -> MyAgentsJourney(Modifier.padding(insets))
                 Destination.HISTORY -> PlaceholderJourney(
                     title = "Activity",
                     body = "Your private history stays on this device.",
@@ -176,6 +179,60 @@ private fun NoticeCard(title: String, body: String) {
             verticalAlignment = Alignment.Top,
         ) {
             Icon(Icons.Outlined.Lock, contentDescription = null, tint = Success)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(title, color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text(body, color = Muted, fontSize = 15.sp, lineHeight = 21.sp)
+            }
+        }
+    }
+}
+
+/// The "My Agents" journey: the delegator's view of scoped authority handed to AI agents. Each
+/// mandate names who the agent acts for and exactly which powers it may exercise — revocable at any
+/// time. The wallet-core FFI `agentMandatesJson()` (now generated in the Kotlin bindings) backs the
+/// live list once the app wires a durable engine, matching the iOS "My Agents" screen.
+@Composable
+private fun MyAgentsJourney(modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.fillMaxSize().padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Text("My Agents", color = Ink, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Text(
+            "Agents act for you, only within the powers you grant — revocable at any time.",
+            color = Muted,
+            fontSize = 16.sp,
+            lineHeight = 22.sp,
+        )
+        AgentPowerCard(
+            title = "Scoped mandate",
+            body = "An agent holds a short-lived power-of-representation credential bound to its own key. It can never do more than the specific operations you delegated.",
+        )
+        AgentPowerCard(
+            title = "Human approval for big moves",
+            body = "Consequential actions ask for a fresh Face ID / iProov step-up before the agent may sign. A higher assurance tier can raise the bar, never widen the scope.",
+        )
+        AgentPowerCard(
+            title = "Every action is receipted",
+            body = "Each thing an agent does writes a tamper-evident receipt linked to its mandate, so you always have an auditable record.",
+        )
+    }
+}
+
+@Composable
+private fun AgentPowerCard(title: String, body: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(18.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Icon(Icons.Outlined.Key, contentDescription = null, tint = Brand)
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(title, color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
                 Text(body, color = Muted, fontSize = 15.sp, lineHeight = 21.sp)

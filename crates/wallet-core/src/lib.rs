@@ -2105,6 +2105,28 @@ impl Core {
         format!("[{}]", items.join(","))
     }
 
+    /// The power-of-representation mandates the wallet holds, as a JSON array for the "My Agents"
+    /// screen: `[{mandator, scope:[urn], mandateJti, hasStatusList}]`. Each is a held SD-JWT
+    /// credential whose `vct` is the mandate type, parsed via [`delegation::parse_mandate`]; the
+    /// delegated scope is exactly what the agent may exercise on the delegator's behalf.
+    #[must_use]
+    pub fn agent_mandates_json(&self) -> String {
+        let mandates: Vec<serde_json::Value> = self
+            .credentials
+            .iter()
+            .filter_map(|stored| {
+                let mandate = delegation::parse_mandate(&stored.holding).ok()?;
+                Some(serde_json::json!({
+                    "mandator": mandate.mandator,
+                    "scope": mandate.scope.iter().collect::<Vec<_>>(),
+                    "mandateJti": mandate.mandate_jti,
+                    "hasStatusList": stored.holding.status.is_some(),
+                }))
+            })
+            .collect();
+        serde_json::Value::Array(mandates).to_string()
+    }
+
     fn clear_pending_operations(&mut self, flow: ActiveFlow) {
         self.pending_operations
             .retain(|_, pending| pending.flow != flow);
@@ -6592,6 +6614,16 @@ impl WalletEngine {
             .expect("poisoned")
             .core
             .held_credentials_json()
+    }
+
+    /// The power-of-representation mandates the wallet holds as a JSON array
+    /// (`[{mandator, scope:[urn], mandateJti, hasStatusList}]`), for the "My Agents" screen.
+    pub fn agent_mandates_json(&self) -> String {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .core
+            .agent_mandates_json()
     }
 
     /// Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed

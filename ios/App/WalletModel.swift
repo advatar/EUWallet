@@ -103,6 +103,9 @@ final class WalletModel: ObservableObject {
     /// The credentials shown on the wallet home — decoded from what the CORE actually holds
     /// (`held_credentials_json`), labelled via the attestation catalogue (TS11).
     @Published private(set) var credentials: [WalletCredential] = []
+    /// Power-of-representation mandates the wallet holds, for the "My Agents" screen — the scoped,
+    /// revocable authority delegated to AI agents (`agent_mandates_json`).
+    @Published private(set) var agentMandates: [AgentMandate] = []
     /// True while a real OpenID4VCI issuance is running (drives the home's progress state).
     @Published private(set) var isIssuing = false
     /// Drives the real "Connect" sheet (scan/paste a link, probe the live issuer).
@@ -612,6 +615,27 @@ final class WalletModel: ObservableObject {
         credentials = arr.enumerated().map { i, obj in
             Self.decodeCard(obj, index: i, catalogue: catalogue)
         }
+        reloadAgentMandates()
+    }
+
+    /// Refresh the held power-of-representation mandates from the core (`agent_mandates_json`).
+    func reloadAgentMandates() {
+        guard let runtime,
+              let data = runtime.agentMandatesJSON().data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else {
+            agentMandates = []
+            return
+        }
+        agentMandates = arr.enumerated().map { index, obj in
+            let scope = (obj["scope"] as? [String]) ?? []
+            return AgentMandate(
+                id: (obj["mandateJti"] as? String) ?? "mandate#\(index)",
+                mandator: (obj["mandator"] as? String) ?? "",
+                scope: scope,
+                mandateJti: obj["mandateJti"] as? String,
+                revocable: (obj["hasStatusList"] as? Bool) ?? false)
+        }
     }
 
     /// Decode one `held_credentials_json` entry into a card: label each disclosure via the
@@ -925,6 +949,24 @@ struct WalletCredential: Identifiable {
     let format: String
     /// Two hex colors for the card gradient.
     let gradientHex: (UInt32, UInt32)
+}
+
+/// A power-of-representation mandate the wallet holds on an AI agent's behalf, for the "My Agents"
+/// screen: who it represents, the scope URNs it delegates, and whether it is status-list revocable.
+struct AgentMandate: Identifiable {
+    let id: String
+    let mandator: String
+    let scope: [String]
+    let mandateJti: String?
+    let revocable: Bool
+
+    /// Human-readable operation names from the pinned power-URN taxonomy.
+    var scopeLabels: [String] {
+        scope.map { urn in
+            let leaf = urn.split(separator: ":").last.map(String.init) ?? urn
+            return leaf.replacingOccurrences(of: "-", with: " ").capitalized
+        }
+    }
 }
 
 /// One attestation-catalogue entry (TS11).
