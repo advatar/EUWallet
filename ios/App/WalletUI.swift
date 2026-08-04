@@ -112,6 +112,9 @@ struct WalletHomeView: View {
                     WalletRow(title: "Add from passport", subtitle: "Read your passport or ID chip over NFC",
                               systemImage: "wave.3.right.circle", action: { model.showPassportReader = true })
                     Divider().padding(.leading, 52)
+                    WalletRow(title: "Add web evidence", subtitle: "Import a TLSNotary-attested web fact",
+                              systemImage: "checkmark.shield", action: { model.showWebEvidence = true })
+                    Divider().padding(.leading, 52)
                     WalletRow(title: "Activity", subtitle: model.history.isEmpty ? "Nothing shared yet" : "\(model.history.count) recent actions",
                               systemImage: "list.bullet.rectangle", action: onOpenHistory)
                     Divider().padding(.leading, 52)
@@ -144,6 +147,9 @@ struct WalletHomeView: View {
             ReadPassportView(reader: ChipmunkPassportReader()) { result in
                 model.handlePassportRead(result)
             }
+        }
+        .sheet(isPresented: $model.showWebEvidence) {
+            AddWebEvidenceView(model: model)
         }
         .sheet(item: $detail) { c in
             CredentialDetailView(credential: c, onPresent: {

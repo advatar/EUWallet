@@ -112,6 +112,9 @@ final class WalletModel: ObservableObject {
     @Published var showConnectSheet = false
     /// Drives the "Add from passport (NFC)" sheet (eMRTD chip read via the ChipmunkNFC relay).
     @Published var showPassportReader = false
+    /// Drives the "Add web evidence (TLSNotary)" sheet — a discoverable entry into redeeming a
+    /// TLSNotary evidence credential-offer.
+    @Published var showWebEvidence = false
     /// The most recent on-device passport read (for display / hand-off to PID minting).
     @Published var lastPassportRead: PassportReadResult?
     /// Human-readable classification of the last scanned/pasted link.
