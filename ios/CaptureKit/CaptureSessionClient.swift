@@ -103,18 +103,31 @@ public struct CaptureSessionClient: Sendable {
     }
 
     /// POST the trusted-reader eMRTD attestation for a session → the issuance result.
+    ///
+    /// When `appAttestor` is supplied (device only), a per-request App Attest assertion is computed
+    /// over the EXACT body bytes and attached as `x-app-attest-*` headers, so VCIssuer can bind this
+    /// mint request to a genuine, registered companion instance. The body is serialized once and both
+    /// hashed and sent, so the client-signed and server-verified bytes are identical.
     public func submitEvidence(
         sessionID: String,
         attestation: String,
-        clientIP: String? = nil
+        clientIP: String? = nil,
+        appAttestor: AppAttestAssertor? = nil
     ) async throws -> IssuanceResult {
+        var body: [String: String] = ["attestation": attestation]
+        if let clientIP { body["client_ip"] = clientIP }
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+
         var request = URLRequest(url: sessionURL(sessionID, suffix: "/evidence"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        var body: [String: String] = ["attestation": attestation]
-        if let clientIP { body["client_ip"] = clientIP }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        if let appAttestor {
+            for (field, value) in await appAttestor.assertionHeaders(over: bodyData) {
+                request.setValue(value, forHTTPHeaderField: field)
+            }
+        }
+        request.httpBody = bodyData
         return try await send(request)
     }
 

@@ -9,17 +9,22 @@ public actor CaptureCoordinator {
     private let chipReader: ChipReader
     private let liveness: LivenessCapturing
     private let nfcServerURL: String
+    /// App Attest for the companion instance; when set (device only), the evidence submit carries a
+    /// body-bound assertion so VCIssuer can require a genuine, registered companion.
+    private let appAttestor: AppAttestAssertor?
 
     public init(
         client: CaptureSessionClient,
         chipReader: ChipReader = ChipmunkChipReader(),
         liveness: LivenessCapturing = IProovLivenessCapture(),
-        nfcServerURL: String
+        nfcServerURL: String,
+        appAttestor: AppAttestAssertor? = nil
     ) {
         self.client = client
         self.chipReader = chipReader
         self.liveness = liveness
         self.nfcServerURL = nfcServerURL
+        self.appAttestor = appAttestor
     }
 
     /// Coarse progress for a capture, suitable for driving UI.
@@ -76,7 +81,7 @@ public actor CaptureCoordinator {
 
             onStage(.submitting)
             let result = try await client.submitEvidence(
-                sessionID: sessionID, attestation: read.attestation)
+                sessionID: sessionID, attestation: read.attestation, appAttestor: appAttestor)
             switch result.status {
             case .issued:
                 onStage(.issued)

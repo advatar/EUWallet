@@ -84,9 +84,16 @@ final class CaptureFlowModel: ObservableObject {
         {
             var base = "\(scheme)://\(host)"
             if let port = invocationURL.port { base += ":\(port)" }
-            let client = CaptureSessionClient(issuerBaseURL: URL(string: base)!)
+            let issuerBaseURL = URL(string: base)!
+            let client = CaptureSessionClient(issuerBaseURL: issuerBaseURL)
+            // App Attest for the companion instance (device only). Register now — the user still has
+            // to scan the MRZ before evidence is submitted, so there is time to complete — so the
+            // evidence submit can carry a body-bound assertion VCIssuer can require.
+            let appAttestor = AppAttestAssertor(issuerBaseURL: issuerBaseURL)
+            Task { try? await appAttestor.register() }
             self.sessionID = sessionID
-            coordinator = CaptureCoordinator(client: client, nfcServerURL: nfcServerURL)
+            coordinator = CaptureCoordinator(
+                client: client, nfcServerURL: nfcServerURL, appAttestor: appAttestor)
             phase = .needsMRZ
         } else {
             sessionID = nil
