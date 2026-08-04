@@ -315,6 +315,9 @@ private struct WalletRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // Stable identifier (= the row title) so UI tests can find/tap the row despite SwiftUI
+        // combining title + subtitle into one accessibility label.
+        .accessibilityIdentifier(title)
     }
 }
 

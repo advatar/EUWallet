@@ -97,6 +97,14 @@ struct ContentView: View {
     /// UI-test / screenshot affordance: `-autostart presentation|payment|history|catalogue|settings`.
     private func handleLaunchArguments() {
         let args = ProcessInfo.processInfo.arguments
+        // `-deeplink <action>` drives the SAME routing table widgets / Control Center / Siri use,
+        // so a UI test can assert every quick action lands on the right screen.
+        if let j = args.firstIndex(of: "-deeplink"), j + 1 < args.count,
+            let link = WalletDeepLink(rawValue: args[j + 1])
+        {
+            apply(link)
+            return
+        }
         guard let i = args.firstIndex(of: "-autostart"), i + 1 < args.count else { return }
         switch args[i + 1] {
         case "home": nav.send(.finishedOnboarding)
