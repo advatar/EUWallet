@@ -16,6 +16,7 @@ struct EUWalletDemoApp: App {
 struct ContentView: View {
     @StateObject private var model = WalletModel()
     @StateObject private var nav = NavigationMachine()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
@@ -36,6 +37,31 @@ struct ContentView: View {
             }
         }
         .onAppear(perform: handleLaunchArguments)
+        // Widgets deep-link straight in; Control Center / Siri intents leave a pending action the app
+        // picks up when it becomes active. Both route through the same handler.
+        .onOpenURL { url in
+            if let link = WalletDeepLink(url: url) { apply(link) }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active, let link = WalletPendingAction.take() { apply(link) }
+        }
+    }
+
+    /// Route a quick action to the screen the wallet already presents (no data crosses this path).
+    /// Parity target: every action available in the UI is reachable here (and therefore from a
+    /// widget, a Control Center control, and a Siri/Shortcuts phrase).
+    private func apply(_ link: WalletDeepLink) {
+        if case .onboarding = nav.state { nav.send(.finishedOnboarding) }
+        switch link {
+        case .home: break
+        case .scan, .present: model.showConnectSheet = true
+        case .passport: model.showPassportReader = true
+        case .webEvidence: model.showWebEvidence = true
+        case .agents: model.showAgents = true
+        case .activity: model.reloadHistory(); nav.send(.openHistory)
+        case .catalogue: nav.send(.openCatalogue)
+        case .settings: nav.send(.openSettings)
+        }
     }
 
     /// The app-shell container the navigation machine currently presents.

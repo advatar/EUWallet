@@ -69,7 +69,6 @@ struct WalletHomeView: View {
     let onOpenSettings: () -> Void
 
     @State private var detail: WalletCredential?
-    @State private var showAgents = false
 
     private func openCredentialOffer() {
         model.showConnectSheet = true
@@ -120,7 +119,7 @@ struct WalletHomeView: View {
                     Divider().padding(.leading, 52)
                     WalletRow(title: "My Agents",
                               subtitle: model.agentMandates.isEmpty ? "Delegate scoped authority to an AI agent" : "\(model.agentMandates.count) delegated \(model.agentMandates.count == 1 ? "agent" : "agents")",
-                              systemImage: "person.badge.key", action: { showAgents = true })
+                              systemImage: "person.badge.key", action: { model.showAgents = true })
                     Divider().padding(.leading, 52)
                     WalletRow(title: "Settings", subtitle: nil,
                               systemImage: "gear", action: onOpenSettings)
@@ -157,7 +156,7 @@ struct WalletHomeView: View {
                 onPresent()
             })
         }
-        .sheet(isPresented: $showAgents) {
+        .sheet(isPresented: $model.showAgents) {
             MyAgentsView(model: model)
         }
     }

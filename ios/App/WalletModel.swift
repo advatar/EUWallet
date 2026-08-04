@@ -115,6 +115,9 @@ final class WalletModel: ObservableObject {
     /// Drives the "Add web evidence (TLSNotary)" sheet — a discoverable entry into redeeming a
     /// TLSNotary evidence credential-offer.
     @Published var showWebEvidence = false
+    /// Drives the "My Agents" (delegation) sheet — lifted to the model so a deep link / App Intent
+    /// can open it (UI ↔ App Intent parity).
+    @Published var showAgents = false
     /// The most recent on-device passport read (for display / hand-off to PID minting).
     @Published var lastPassportRead: PassportReadResult?
     /// Human-readable classification of the last scanned/pasted link.
@@ -627,12 +630,15 @@ final class WalletModel: ObservableObject {
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else {
             credentials = []
+            WalletStatusStore.publish(documentCount: 0)
             return
         }
         credentials = arr.enumerated().map { i, obj in
             Self.decodeCard(obj, index: i, catalogue: catalogue)
         }
         reloadAgentMandates()
+        // Push the non-sensitive count to the widgets/controls (never any credential data).
+        WalletStatusStore.publish(documentCount: credentials.count)
     }
 
     /// Refresh the held power-of-representation mandates from the core (`agent_mandates_json`).

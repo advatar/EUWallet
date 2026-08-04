@@ -15,5 +15,9 @@
 	<array>
 		<string>TAG</string>
 	</array>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.eu.advatar.wallet</string>
+	</array>
 </dict>
 </plist>
