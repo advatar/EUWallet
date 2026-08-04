@@ -3,16 +3,29 @@ import SwiftUI
 /// Discoverable entry point for TLSNotary "web evidence" credentials.
 ///
 /// TLSNotary attests a fact from a real TLS (HTTPS) session — a notary co-signs the transcript so a
-/// verifier can trust a web fact without the origin server participating. The wallet cannot originate
-/// a notary attestation itself (that happens in a browser/notary session); this screen explains the
-/// credential and lets the user bring in the resulting **credential-offer** (scan the QR or paste the
-/// link), which flows through the same OpenID4VCI issuance path as any other offer. The wallet's
-/// TLSNotary-specific policy check (see `IssuerClient`) then runs during redemption.
+/// verifier can trust a web fact without the origin server participating. The user captures the
+/// evidence **inside the wallet**: this screen opens the TLSNotary capture web app in an embedded
+/// browser ([`TLSNotaryCaptureView`]); when the notarisation completes, the capture page hands back
+/// an OpenID4VCI credential-offer, which flows through the same issuance path as any other offer
+/// (`handleScanned` → `startLiveIssuance`). A paste field remains as a fallback for a pre-made offer.
 struct AddWebEvidenceView: View {
     @ObservedObject var model: WalletModel
     @Environment(\.dismiss) private var dismiss
+
+    /// The TLSNotary capture web app URL (editable; persisted). Points at the page that runs the
+    /// browser prover and posts the artifact to VCIssuer's `/evidence-offers/tlsnotary`.
+    @AppStorage("tlsn.captureURL") private var captureURLString =
+        "https://issuer.advatar.systems/tlsn/capture"
+    @State private var capturing = false
     @State private var pasted = ""
-    @State private var scanning = false
+
+    private var captureURL: URL? {
+        let trimmed = captureURLString.trimmingCharacters(in: .whitespaces)
+        guard let url = URL(string: trimmed), url.scheme?.hasPrefix("http") == true else {
+            return nil
+        }
+        return url
+    }
 
     var body: some View {
         NavigationStack {
@@ -28,20 +41,39 @@ struct AddWebEvidenceView: View {
                     } icon: {
                         Image(systemName: "checkmark.shield").foregroundStyle(.tint)
                     }
-                } footer: {
-                    Text("Create the evidence in the notarised web session, then bring the offer here.")
                 }
 
                 Section {
-                    if #available(iOS 16.0, *), QRScannerView.isAvailable {
-                        Button { scanning = true } label: {
-                            Label("Scan the evidence offer", systemImage: "qrcode.viewfinder")
-                        }
+                    Button {
+                        capturing = true
+                    } label: {
+                        Label("Capture web evidence", systemImage: "safari")
                     }
-                    TextField("Paste the offer link", text: $pasted, axis: .vertical)
+                    .disabled(captureURL == nil)
+                } header: {
+                    Text("Capture in the wallet")
+                } footer: {
+                    Text("Opens a secure in-app browser to notarise the web session. When it "
+                        + "finishes you will review the credential before anything is stored.")
+                }
+
+                Section {
+                    TextField("Capture app URL", text: $captureURLString)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    Button("Add web evidence") {
+                        .font(.callout.monospaced())
+                } header: {
+                    Text("Capture app")
+                } footer: {
+                    Text("The TLSNotary capture web app that runs the browser prover and returns an "
+                        + "openid-credential-offer link.")
+                }
+
+                Section {
+                    TextField("Paste an offer link", text: $pasted, axis: .vertical)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("Add from link") {
                         model.handleScanned(pasted.trimmingCharacters(in: .whitespacesAndNewlines))
                     }
                     .disabled(pasted.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -49,10 +81,10 @@ struct AddWebEvidenceView: View {
                         Text(scan).font(.callout)
                     }
                 } header: {
-                    Text("Add the credential")
+                    Text("Or paste an offer")
                 } footer: {
-                    Text("Scan or paste the openid-credential-offer link from the notarised session. "
-                        + "You will review it before anything is stored.")
+                    Text("If you already have an openid-credential-offer link from a notarised "
+                        + "session, paste it here instead.")
                 }
             }
             .navigationTitle("Add web evidence")
@@ -60,13 +92,16 @@ struct AddWebEvidenceView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
             }
-            .sheet(isPresented: $scanning) {
-                if #available(iOS 16.0, *) {
-                    QRScannerView { payload in
-                        scanning = false
-                        model.handleScanned(payload)
+            .navigationDestination(isPresented: $capturing) {
+                if let url = captureURL {
+                    TLSNotaryCaptureView(url: url) { offerUri in
+                        capturing = false
+                        model.handleScanned(offerUri)
+                        dismiss()
                     }
-                    .ignoresSafeArea()
+                    .ignoresSafeArea(edges: .bottom)
+                    .navigationTitle("Capture web evidence")
+                    .navigationBarTitleDisplayMode(.inline)
                 }
             }
         }
