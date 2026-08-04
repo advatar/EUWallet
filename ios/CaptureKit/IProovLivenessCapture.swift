@@ -26,18 +26,20 @@ public struct IProovLivenessCapture: LivenessCapturing {
                         switch status {
                         case .success:
                             continuation.resume()
-                        case .failure:
+                        case let .failure(result):
                             continuation.resume(
                                 throwing: CaptureProviderError.underlying(
-                                    "liveness capture did not pass"))
+                                    "liveness capture did not pass: \(result.reason.feedbackCode)"))
                         case let .error(error):
                             continuation.resume(
                                 throwing: CaptureProviderError.underlying(error.localizedDescription))
-                        case .cancelled:
+                        case let .canceled(canceler):
                             continuation.resume(
-                                throwing: CaptureProviderError.underlying("liveness capture cancelled"))
-                        default:
-                            // connecting / connected / processing — keep waiting.
+                                throwing: CaptureProviderError.underlying(
+                                    "liveness capture canceled (\(canceler))"))
+                        case .connecting, .connected, .processing:
+                            break  // in-progress — keep waiting for a terminal status
+                        @unknown default:
                             break
                         }
                     }
