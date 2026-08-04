@@ -15,7 +15,7 @@ struct AddWebEvidenceView: View {
     /// The TLSNotary capture web app URL (editable; persisted). Points at the page that runs the
     /// browser prover and posts the artifact to VCIssuer's `/evidence-offers/tlsnotary`.
     @AppStorage("tlsn.captureURL") private var captureURLString =
-        "https://issuer.advatar.systems/tlsn/capture"
+        "https://euwallet.advatar.systems/tlsn/capture"
     @State private var capturing = false
     @State private var pasted = ""
 
