@@ -34,12 +34,15 @@
 	<key>NFCReaderUsageDescription</key>
 	<string>Hold your ID card to your iPhone to add your verified ID.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Use the camera to scan QR codes when adding an ID or sharing information.</string>
+	<string>Use the camera to scan QR codes and read the machine-readable zone (MRZ) of your passport or ID when adding a document.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
 	<array>
+		<!-- German eID (AusweisApp) -->
 		<string>E80704007F00070302</string>
+		<!-- ICAO 9303 eMRTD (ePassport / eID) LDS application — required or CoreNFC drops the passport chip -->
+		<string>A0000002471001</string>
 	</array>
 </dict>
 </plist>

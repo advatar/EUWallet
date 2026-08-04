@@ -109,6 +109,9 @@ struct WalletHomeView: View {
                                   systemImage: "qrcode.viewfinder", action: { model.showConnectSheet = true })
                         Divider().padding(.leading, 52)
                     }
+                    WalletRow(title: "Add from passport", subtitle: "Read your passport or ID chip over NFC",
+                              systemImage: "wave.3.right.circle", action: { model.showPassportReader = true })
+                    Divider().padding(.leading, 52)
                     WalletRow(title: "Activity", subtitle: model.history.isEmpty ? "Nothing shared yet" : "\(model.history.count) recent actions",
                               systemImage: "list.bullet.rectangle", action: onOpenHistory)
                     Divider().padding(.leading, 52)
@@ -136,6 +139,11 @@ struct WalletHomeView: View {
         .consumerPage()
         .sheet(isPresented: $model.showConnectSheet) {
             ConnectView(model: model)
+        }
+        .sheet(isPresented: $model.showPassportReader) {
+            ReadPassportView(reader: ChipmunkPassportReader()) { result in
+                model.handlePassportRead(result)
+            }
         }
         .sheet(item: $detail) { c in
             CredentialDetailView(credential: c, onPresent: {

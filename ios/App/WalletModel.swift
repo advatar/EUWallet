@@ -110,6 +110,10 @@ final class WalletModel: ObservableObject {
     @Published private(set) var isIssuing = false
     /// Drives the real "Connect" sheet (scan/paste a link, probe the live issuer).
     @Published var showConnectSheet = false
+    /// Drives the "Add from passport (NFC)" sheet (eMRTD chip read via the ChipmunkNFC relay).
+    @Published var showPassportReader = false
+    /// The most recent on-device passport read (for display / hand-off to PID minting).
+    @Published var lastPassportRead: PassportReadResult?
     /// Human-readable classification of the last scanned/pasted link.
     @Published var lastScan: String?
     /// Result of probing the live EUDI reference issuer over real HTTPS.
@@ -301,6 +305,16 @@ final class WalletModel: ObservableObject {
         Task {
             guard await issue(type, requiresReview: true) else { isIssuing = false; return }
         }
+    }
+
+    /// Receives a completed eMRTD (passport) NFC read. Records it and notes what was read. Minting a
+    /// PID from it — forwarding the read + a liveness proof to VCIssuer's NFC-PID endpoint (its proved
+    /// chip+liveness gate) and ingesting the returned credential — is the next layer; the read result
+    /// (inline document or `resultToken`) is what that step consumes.
+    func handlePassportRead(_ result: PassportReadResult) {
+        lastPassportRead = result
+        let who = result.holderName.isEmpty ? result.documentNumber : result.holderName
+        note("Read passport chip: \(who)\(result.resultToken != nil ? " (reader token received)" : "")")
     }
 
     /// Screenshot/demo affordance: issue BOTH a PID and an mDL (sequentially — a real issuance is
