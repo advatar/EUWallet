@@ -35,6 +35,8 @@
 	<string>Hold your ID card to your iPhone to add your verified ID.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Use the camera to scan QR codes and read the machine-readable zone (MRZ) of your passport or ID when adding a document.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>

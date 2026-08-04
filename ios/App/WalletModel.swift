@@ -308,8 +308,15 @@ final class WalletModel: ObservableObject {
         guard !isIssuing else { return }
         isIssuing = true
         log = ["Adding \(type.displayName)…"]
+        // Surface progress on the Lock Screen / Dynamic Island (document type only — never contents).
+        LiveActivityController.shared.start(
+            documentName: type.displayName, systemImage: type.systemImage)
         Task {
-            guard await issue(type, requiresReview: true) else { isIssuing = false; return }
+            guard await issue(type, requiresReview: true) else {
+                isIssuing = false
+                LiveActivityController.shared.finish(.failed)
+                return
+            }
         }
     }
 
@@ -412,6 +419,7 @@ final class WalletModel: ObservableObject {
                 self.decisionAuthorizationHash = authorizationHash
                 self.decisionKind = WalletDecisionKind(screen: screen)
                 self.phase = .screen(screen)
+                LiveActivityController.shared.advance(to: .reviewing)
             }
         }) else {
             return false
@@ -501,6 +509,7 @@ final class WalletModel: ObservableObject {
             phase = .failed("Wallet confirmation is no longer active")
             return
         }
+        if kind == .issuance { LiveActivityController.shared.advance(to: .finishing) }
         Task {
             guard await run(
                 executor,
@@ -508,7 +517,13 @@ final class WalletModel: ObservableObject {
                     operationId: operationId,
                     authorizationHash: authorizationHash),
                 requiring: .succeeded
-            ) else { return }
+            ) else {
+                if kind == .issuance {
+                    isIssuing = false
+                    LiveActivityController.shared.finish(.failed)
+                }
+                return
+            }
             switch kind {
             case .presentation:
                 note("Device signed the key-binding JWT; vp_token posted to the RP.")
@@ -527,6 +542,7 @@ final class WalletModel: ObservableObject {
                 reloadCredentials()
                 reloadHistory()
                 isIssuing = false
+                LiveActivityController.shared.finish(.done)
                 // The core's final authenticated IssuanceReady screen is the product completion
                 // state. Do not replace it with the shell's generic completion message.
             }
@@ -552,7 +568,10 @@ final class WalletModel: ObservableObject {
                 eventJson: kind.declineEvent(operationId: operationId),
                 requiring: .declined
             ) else { return }
-            if kind == .issuance { isIssuing = false }
+            if kind == .issuance {
+                isIssuing = false
+                LiveActivityController.shared.dismiss()
+            }
             phase = .done(kind == .issuance ? "Nothing was added." : "Nothing was shared.")
         }
     }
@@ -813,6 +832,8 @@ final class WalletModel: ObservableObject {
     private func startLiveIssuance(offerUri: String) {
         guard !isIssuing else { return }
         isIssuing = true
+        LiveActivityController.shared.start(
+            documentName: "your document", systemImage: "doc.badge.plus")
         Task {
             do {
                 let keyReference = "wallet-device-key"
@@ -858,6 +879,7 @@ final class WalletModel: ObservableObject {
                         self.decisionAuthorizationHash = authorizationHash
                         self.decisionKind = WalletDecisionKind(screen: screen)
                         self.phase = .screen(screen)
+                        LiveActivityController.shared.advance(to: .reviewing)
                     }
                 }) else { throw IssuerClientError.invalidState }
                 executor = ex
@@ -870,9 +892,14 @@ final class WalletModel: ObservableObject {
                         issuerCertChain: [context.signingLeaf],
                         issuerId: context.issuer),
                     requiring: .awaitingInput
-                ) else { return }
+                ) else {
+                    isIssuing = false
+                    LiveActivityController.shared.finish(.failed)
+                    return
+                }
             } catch {
                 isIssuing = false
+                LiveActivityController.shared.finish(.failed)
                 lastScan = "Could not start issuance: \(error.localizedDescription)"
                 phase = .failed("The credential issuer could not be verified or reached.")
             }

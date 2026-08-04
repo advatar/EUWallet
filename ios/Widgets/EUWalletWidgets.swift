@@ -131,6 +131,7 @@ struct WalletPassportControl: ControlWidget {
 struct EUWalletWidgetBundle: WidgetBundle {
     var body: some Widget {
         WalletStatusWidget()
+        WalletIssuanceLiveActivity()
         if #available(iOS 18.0, *) {
             WalletScanControl()
             WalletPassportControl()
