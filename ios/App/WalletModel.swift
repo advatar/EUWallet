@@ -650,14 +650,17 @@ final class WalletModel: ObservableObject {
         else {
             credentials = []
             WalletStatusStore.publish(documentCount: 0)
+            WatchBridge.shared.sync(documentCount: 0)
             return
         }
         credentials = arr.enumerated().map { i, obj in
             Self.decodeCard(obj, index: i, catalogue: catalogue)
         }
         reloadAgentMandates()
-        // Push the non-sensitive count to the widgets/controls (never any credential data).
+        // Push the non-sensitive count to the widgets/controls (never any credential data)…
         WalletStatusStore.publish(documentCount: credentials.count)
+        // …and mirror it to the paired Apple Watch over WatchConnectivity.
+        WatchBridge.shared.sync(documentCount: credentials.count)
     }
 
     /// Refresh the held power-of-representation mandates from the core (`agent_mandates_json`).

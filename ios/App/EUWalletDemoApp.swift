@@ -47,6 +47,11 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, let link = WalletPendingAction.take() { apply(link) }
         }
+        // A paired Apple Watch quick action, applied live when the app is already foreground (it is
+        // otherwise picked up as a pending action above the next time the app becomes active).
+        .onReceive(NotificationCenter.default.publisher(for: .walletWatchAction)) { note in
+            if let link = note.object as? WalletDeepLink { apply(link) }
+        }
         // Best-effort App Attest registration (binds this app instance to genuine Apple hardware at
         // VCIssuer). Device-only — a no-op on the Simulator and when already registered.
         .task {

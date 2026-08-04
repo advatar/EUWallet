@@ -18,6 +18,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             guard granted else { return }
             DispatchQueue.main.async { application.registerForRemoteNotifications() }
         }
+        // Bring up the WatchConnectivity link so the paired Apple Watch can mirror the document count
+        // and request quick actions (no-op without a paired watch).
+        WatchBridge.shared.activate()
         return true
     }
 
