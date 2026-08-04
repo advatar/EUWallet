@@ -102,6 +102,93 @@ targets:
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
 
+  # Shared capture framework for the standalone PID Capture companion (app + App Clip). Contains the
+  # VCIssuer capture-session client, the MRZ scanner, and the ChipmunkNFC/iProov provider wrappers.
+  # Builds in CI without the private SDKs: the wrappers compile to fail-closed `#if canImport` stubs;
+  # project.local.yml links the real ChipmunkNFC + iProov to this framework on a provisioned machine.
+  CaptureKit:
+    type: framework
+    platform: iOS
+    sources:
+      - path: CaptureKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.capturekit
+        PRODUCT_NAME: CaptureKit
+        DEFINES_MODULE: YES
+        GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: L2AF8KFX35
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        SKIP_INSTALL: YES
+
+  # The standalone PID Capture companion. Reads the eMRTD chip + runs liveness and hands the evidence
+  # to VCIssuer, which issues a PID to a DIFFERENT wallet. No size budget — the guaranteed path.
+  PIDCapture:
+    type: application
+    platform: iOS
+    entitlements:
+      path: PIDCapture/PIDCapture.entitlements
+      properties:
+        com.apple.developer.associated-domains:
+          - applinks:issuer.advatar.systems
+        com.apple.developer.nfc.readersession.formats:
+          - TAG
+    sources:
+      - path: PIDCapture
+    dependencies:
+      - target: CaptureKit
+        embed: true
+      - target: PIDCaptureClip
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.pidcapture
+        PRODUCT_NAME: PIDCapture
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: "PID Capture"
+        INFOPLIST_KEY_NSCameraUsageDescription: "Use the camera to scan the machine-readable zone on your passport."
+        INFOPLIST_KEY_NFCReaderUsageDescription: "Hold your passport to your iPhone to read its chip."
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        DEVELOPMENT_TEAM: L2AF8KFX35
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+
+  # The App Clip variant of the companion — instant launch from an App Clip Code / QR, no full install.
+  # Links CaptureKit only (never wallet code) to stay under the 15 MB budget; see
+  # docs/nfc-pid/appclip-size-feasibility.md.
+  PIDCaptureClip:
+    type: application.on-demand-install-capable
+    platform: iOS
+    entitlements:
+      path: PIDCaptureClip/PIDCaptureClip.entitlements
+      properties:
+        com.apple.developer.parent-application-identifiers:
+          - $(AppIdentifierPrefix)eu.advatar.wallet.pidcapture
+        com.apple.developer.associated-domains:
+          - appclips:issuer.advatar.systems
+    sources:
+      - path: PIDCaptureClip
+    dependencies:
+      - target: CaptureKit
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.pidcapture.Clip
+        PRODUCT_NAME: PIDCaptureClip
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: PIDCaptureClip/Info.plist
+        DEVELOPMENT_TEAM: L2AF8KFX35
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        SKIP_INSTALL: YES
+
   # Runs the REAL Rust core (aws-lc-rs, compiled for the simulator) end to end, on the simulator.
   # Deterministic proof that the flows work on-device, independent of UI screenshotting.
   EUWalletDemoTests:
@@ -143,6 +230,14 @@ targets:
         TEST_TARGET_NAME: EUWalletDemo
 
 schemes:
+  PIDCapture:
+    build:
+      targets:
+        PIDCapture: all
+    run:
+      config: Debug
+    archive:
+      config: Release
   EUWalletDemo:
     build:
       targets:

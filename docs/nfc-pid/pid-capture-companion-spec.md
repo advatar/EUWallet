@@ -182,17 +182,23 @@ CI + BUNDLE-manifest discipline; SP creds + `<assoc-domain>` are env config.
 - **Liveness authority — iProov, validated by VCIssuer.** VCIssuer mints the iProov token and
   validates the capture server-to-server; that verdict is `liveness_matched`. The reader attestation
   is chip-verdicts + portrait only.
-- **SP credentials — environment.** `IPROOV_API_KEY` / `IPROOV_API_SECRET` /
-  `IPROOV_SERVICE_LOCATION`; absent → fail-closed. Never hard-coded.
+- **SP credentials — environment.** `MANDAMUS_IPROOV_BASE_URL` / `MANDAMUS_IPROOV_API_KEY` /
+  `MANDAMUS_IPROOV_SECRET` (the same Service-Provider credentials that drive the iProov Web and iOS
+  SDKs); absent → fail-closed. Never hard-coded or logged.
+
+- **Cross-wallet delivery — credential-offer is primary; deferred/poll is a supported secondary.**
+  Once NFC + liveness have gated the issuance there is no reason to delay, so the default is: when a
+  session becomes **issuable**, VCIssuer emits an OpenID4VCI **credential-offer** (pre-authorized-code
+  grant) to the target wallet — e.g. `openid-credential-offer://?credential_offer_uri=…` shown/sent
+  back through the originating channel. Both models are supported: a target wallet that opened a
+  (deferred) OID4VCI session may instead **poll** it to completion. The session therefore records its
+  delivery mode; `offer` is the default.
 
 **Still open (needed before / during Phase 2)**
 1. **App Clip liveness** — depends on the Phase-0 size result: full capture in the clip, or chip-only
    clip + liveness in the full app.
-2. **Cross-wallet delivery** — how VCIssuer hands the finished PID to the target wallet: the wallet
-   polls its open OID4VCI session (deferred issuance), or VCIssuer emits a credential-offer. Affects
-   the session model.
-3. **Associated domain** — which VCIssuer domain hosts the AASA / App Clip experience (prod vs dev).
-4. **Supervised vs self-service** — is an operator/kiosk attestation needed to close the
+2. **Associated domain** — which VCIssuer domain hosts the AASA / App Clip experience (prod vs dev).
+3. **Supervised vs self-service** — is an operator/kiosk attestation needed to close the
    captured-human ↔ target-wallet-controller gap for non-self-service issuance?
 
 ## 12. Reused vs new
