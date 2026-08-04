@@ -13,7 +13,8 @@ struct ReadPassportView: View {
     let reader: PassportReading
     let onComplete: (PassportReadResult) -> Void
 
-    @AppStorage("nfc.serverURL") private var serverURL = ""
+    // Default service-nfc relay endpoint (editable + remembered once you change it).
+    @AppStorage("nfc.serverURL") private var serverURL = "wss://nfc.dev-eu.iproov.id/channel"
     @State private var documentNumber = ""
     @State private var dateOfBirth = ""
     @State private var dateOfExpiry = ""
