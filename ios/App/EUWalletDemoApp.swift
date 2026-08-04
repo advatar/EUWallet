@@ -45,6 +45,12 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, let link = WalletPendingAction.take() { apply(link) }
         }
+        // Best-effort App Attest registration (binds this app instance to genuine Apple hardware at
+        // VCIssuer). Device-only — a no-op on the Simulator and when already registered.
+        .task {
+            guard let issuer = URL(string: "https://vcissuer.advatar.systems") else { return }
+            try? await AppAttestClient(issuerBaseURL: issuer).register()
+        }
     }
 
     /// Route a quick action to the screen the wallet already presents (no data crosses this path).
