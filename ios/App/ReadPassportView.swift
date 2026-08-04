@@ -18,16 +18,18 @@ struct ReadPassportView: View {
     @State private var documentNumber = ""
     @State private var dateOfBirth = ""
     @State private var dateOfExpiry = ""
+    @State private var scannedMrz: String?
+    @State private var showScanner = false
     @State private var reading = false
     @State private var errorMessage: String?
     @State private var result: PassportReadResult?
 
+    private var manualComplete: Bool {
+        !documentNumber.isEmpty && dateOfBirth.count == 6 && dateOfExpiry.count == 6
+    }
+
     private var canRead: Bool {
-        !reading
-            && serverURL.hasPrefix("ws")
-            && !documentNumber.isEmpty
-            && dateOfBirth.count == 6
-            && dateOfExpiry.count == 6
+        !reading && serverURL.hasPrefix("ws") && (scannedMrz != nil || manualComplete)
     }
 
     var body: some View {
@@ -45,17 +47,36 @@ struct ReadPassportView: View {
                 }
 
                 Section {
-                    TextField("Document number", text: $documentNumber)
-                        .textInputAutocapitalization(.characters)
-                        .autocorrectionDisabled()
-                    TextField("Date of birth — YYMMDD", text: $dateOfBirth)
-                        .keyboardType(.numberPad)
-                    TextField("Date of expiry — YYMMDD", text: $dateOfExpiry)
-                        .keyboardType(.numberPad)
+                    Button {
+                        showScanner = true
+                    } label: {
+                        Label(
+                            scannedMrz == nil ? "Scan MRZ with camera" : "Re-scan MRZ",
+                            systemImage: "camera.viewfinder")
+                    }
+                    if scannedMrz != nil {
+                        HStack {
+                            Label("MRZ scanned", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Spacer()
+                            Button("Clear") { scannedMrz = nil }.font(.footnote)
+                        }
+                    } else {
+                        TextField("Document number", text: $documentNumber)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
+                        TextField("Date of birth — YYMMDD", text: $dateOfBirth)
+                            .keyboardType(.numberPad)
+                        TextField("Date of expiry — YYMMDD", text: $dateOfExpiry)
+                            .keyboardType(.numberPad)
+                    }
                 } header: {
                     Text("From the passport's data page")
                 } footer: {
-                    Text("These derive the key the chip requires (BAC/PACE). Camera scanning of the MRZ is coming next.")
+                    Text(
+                        scannedMrz == nil
+                            ? "Scan the two machine-readable lines at the bottom of the data page, or type the fields."
+                            : "Using the scanned MRZ. Tap Clear to type the fields instead.")
                 }
 
                 if let errorMessage {
@@ -103,6 +124,28 @@ struct ReadPassportView: View {
                     Button("Cancel") { dismiss() }
                 }
             }
+            .sheet(isPresented: $showScanner) {
+                NavigationStack {
+                    MRZScannerView { mrz in
+                        scannedMrz = mrz
+                        showScanner = false
+                    }
+                    .ignoresSafeArea()
+                    .overlay(alignment: .bottom) {
+                        Text("Point at the machine-readable zone (the <<< lines)")
+                            .font(.footnote).padding(8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .padding(.bottom, 24)
+                    }
+                    .navigationTitle("Scan MRZ")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { showScanner = false }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -112,11 +155,16 @@ struct ReadPassportView: View {
         reading = true
         defer { reading = false }
         do {
-            let read = try await reader.read(
-                serverURL: serverURL,
-                passportNumber: documentNumber.trimmingCharacters(in: .whitespaces),
-                dateOfBirth: dateOfBirth,
-                dateOfExpiry: dateOfExpiry)
+            let input: PassportMrzInput
+            if let scannedMrz {
+                input = .raw(scannedMrz)
+            } else {
+                input = .fields(
+                    number: documentNumber.trimmingCharacters(in: .whitespaces),
+                    dateOfBirth: dateOfBirth,
+                    dateOfExpiry: dateOfExpiry)
+            }
+            let read = try await reader.read(serverURL: serverURL, mrz: input)
             result = read
             onComplete(read)
         } catch {
