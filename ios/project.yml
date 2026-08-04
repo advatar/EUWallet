@@ -35,6 +35,8 @@ targets:
         # Shared, non-sensitive status container for the widgets/controls (document count only).
         com.apple.security.application-groups:
           - group.eu.advatar.wallet
+        # Remote notifications (VCIssuer pushes status updates). "development" for dev/TestFlight.
+        aps-environment: development
     sources:
       - path: App
       # The thin native shell (renderer, effect executor, signer, transports, storage) and the

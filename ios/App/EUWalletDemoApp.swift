@@ -8,6 +8,8 @@ import SwiftUI
 ///  - `NavigationMachine` owns app-shell *containment/routing*. It holds no security state.
 @main
 struct EUWalletDemoApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup { ContentView() }
     }
