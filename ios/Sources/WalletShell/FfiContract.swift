@@ -627,10 +627,20 @@ public protocol IssuerResponder {
     /// The `/token` response: whether the token is sender-bound, and a fresh `c_nonce`.
     func token() async throws -> (bound: Bool, cNonce: UInt64)
     /// The `/credential` response for the assembled proof: the format + credential bytes.
-    func credential(proofJwt: Data) async throws -> (format: String, bytes: Data)
+    /// `emrtdAttestation` is the NFC-sourced-PID evidence (a compact JWS from the trusted
+    /// reader/liveness backend) forwarded as `emrtd_evidence`; `nil` for every other credential.
+    func credential(proofJwt: Data, emrtdAttestation: String?) async throws -> (
+        format: String, bytes: Data
+    )
 }
 
 public extension IssuerResponder {
+    /// Back-compatible convenience: the non-NFC credential request (no eMRTD evidence). Existing
+    /// call sites keep calling `credential(proofJwt:)`; the NFC flow calls the two-arg form.
+    func credential(proofJwt: Data) async throws -> (format: String, bytes: Data) {
+        try await credential(proofJwt: proofJwt, emrtdAttestation: nil)
+    }
+
     func pushAuthorizationRequest() async throws -> Bool {
         throw IssuerClientError.unsupportedFlow
     }

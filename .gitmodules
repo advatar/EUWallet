@@ -1,3 +1,11 @@
 [submodule "LandingPage"]
 	path = LandingPage
 	url = git@github.com:advatar/euro-wallet-echo.git
+[submodule "third_party/credentials-platform"]
+	path = third_party/credentials-platform
+	url = git@github.com-iproov:iProov/credentials-platform.git
+	branch = security/formal-protocol-verification
+	# Not fetched by advatar's GitHub-hosted CI (checkout does not recurse submodules);
+	# resolves only where the github.com-iproov SSH alias is configured. Holds the
+	# reader-rust crates (chipmunk-relay/-mrz/-models) consumed by the excluded crates/nfc-bridge.
+	update = none

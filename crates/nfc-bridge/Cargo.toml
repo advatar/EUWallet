@@ -1,0 +1,29 @@
+# NFC reader bridge — DELIBERATELY EXCLUDED from the root Cargo workspace
+# (see the root Cargo.toml `exclude`). advatar's GitHub-hosted CI builds only the
+# default members and never resolves the path dependencies below, so it never needs
+# the iProov `credentials-platform` submodule or its credentials.
+#
+# Build this crate only where the submodule is checked out (locally, or on a runner
+# that has the github.com-iproov SSH alias):
+#   cargo build  --manifest-path crates/nfc-bridge/Cargo.toml
+#   cargo test   --manifest-path crates/nfc-bridge/Cargo.toml
+[package]
+name = "nfc-bridge"
+description = "Wallet-side bridge over the iProov reader-rust sans-IO relay (eMRTD NFC read). Out-of-tree; not a default workspace member."
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.97"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["lib", "staticlib"]
+
+[dependencies]
+# The reader-rust crates live in the excluded submodule and are taken with
+# default-features = false: `chipmunk-reader-models` + `chipmunk-mrz` pull ZERO
+# external crates, and `chipmunk-relay` pulls only `ciborium` (already in EUWallet's
+# dependency budget). rust-version 1.77 there ≤ 1.97 here, so no toolchain change.
+chipmunk-relay = { path = "../../third_party/credentials-platform/service-nfc/reader-rust/crates/relay", default-features = false }
+chipmunk-mrz = { path = "../../third_party/credentials-platform/service-nfc/reader-rust/crates/mrz", default-features = false }
+chipmunk-reader-models = { path = "../../third_party/credentials-platform/service-nfc/reader-rust/crates/models", default-features = false }
