@@ -160,6 +160,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.pidcapture
         PRODUCT_NAME: PIDCapture
         GENERATE_INFOPLIST_FILE: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_CFBundleDisplayName: "PID Capture"
         INFOPLIST_KEY_NSCameraUsageDescription: "Use the camera to scan the machine-readable zone on your passport."
@@ -195,6 +196,7 @@ targets:
         PRODUCT_NAME: PIDCaptureClip
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: PIDCaptureClip/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         DEVELOPMENT_TEAM: L2AF8KFX35
         CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.0"
@@ -244,6 +246,7 @@ targets:
         PRODUCT_NAME: EU Wallet
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: WatchApp/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         DEVELOPMENT_TEAM: L2AF8KFX35
         CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.0"
