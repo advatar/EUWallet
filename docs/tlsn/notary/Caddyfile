@@ -1,0 +1,14 @@
+# Add this block to the host Caddyfile. Caddy obtains/renews a TLS cert for the notary hostname and
+# reverse-proxies to the loopback notary gateway, upgrading WebSockets (/ws/notary, /ws/tcp) as well
+# as the plain HTTP poll endpoint (/api/sessions). The gateway itself listens on 127.0.0.1:7047.
+#
+# Caddy's reverse_proxy handles the WebSocket Upgrade automatically — no extra directives needed.
+
+notary.euwallet.advatar.systems {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:7047
+
+	log {
+		output file /var/log/caddy/notary.euwallet.advatar.systems.log
+	}
+}

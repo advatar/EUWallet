@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd service for the TLSNotary notary gateway (tlsn-browser-demo).
+  Listens on loopback 127.0.0.1:7047; Caddy terminates TLS for notary.euwallet.advatar.systems.
+
+  The signing key is passed via TLSN_NOTARY_SIGNING_KEY. Prefer reading it from a chmod-600 file at
+  launch instead of hardcoding it here — e.g. wrap the program in a small shell script that does
+  `export TLSN_NOTARY_SIGNING_KEY=$(cat .../notary-signing-key.hex)`. The inline EnvironmentVariables
+  form below is shown for clarity; do NOT commit a real key.
+
+  Edit the --allow-host entries to the domains you will notarize. Remember: TLS 1.2 targets only.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>systems.advatar.tlsn-notary</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/johansellstrom/services/tlsn-notary/run.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- run.sh should populate TLSN_NOTARY_SIGNING_KEY from the chmod-600 key file. -->
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/johansellstrom/services/tlsn-notary</string>
+    <key>StandardOutPath</key>
+    <string>/Users/johansellstrom/services/tlsn-notary/notary.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/johansellstrom/services/tlsn-notary/notary.err.log</string>
+</dict>
+</plist>

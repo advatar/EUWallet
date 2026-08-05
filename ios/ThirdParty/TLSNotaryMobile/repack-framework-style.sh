@@ -12,9 +12,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/Artifacts/TLSNMobile.xcframework"
 
+# NOTE: no associative arrays — macOS ships bash 3.2, which does not support `declare -A`.
 declare -a SLICES=(ios-arm64_x86_64-simulator ios-arm64 macos-arm64_x86_64)
-declare -A PLAT=( [ios-arm64_x86_64-simulator]=iPhoneSimulator [ios-arm64]=iPhoneOS [macos-arm64_x86_64]=MacOSX )
-declare -A MINOS=( [ios-arm64_x86_64-simulator]=17.0 [ios-arm64]=17.0 [macos-arm64_x86_64]=14.0 )
+plat_for() { case "$1" in ios-arm64) echo iPhoneOS;; macos-arm64_x86_64) echo MacOSX;; *) echo iPhoneSimulator;; esac; }
+minos_for() { case "$1" in macos-arm64_x86_64) echo 14.0;; *) echo 17.0;; esac; }
 
 for slice in "${SLICES[@]}"; do
   [ -d "$slice" ] || continue
@@ -42,8 +43,8 @@ MM
 <key>CFBundlePackageType</key><string>FMWK</string>
 <key>CFBundleShortVersionString</key><string>1.0</string>
 <key>CFBundleVersion</key><string>1</string>
-<key>CFBundleSupportedPlatforms</key><array><string>${PLAT[$slice]}</string></array>
-<key>MinimumOSVersion</key><string>${MINOS[$slice]}</string>
+<key>CFBundleSupportedPlatforms</key><array><string>$(plat_for "$slice")</string></array>
+<key>MinimumOSVersion</key><string>$(minos_for "$slice")</string>
 </dict></plist>
 PL
   rm -rf "$slice/Headers" "$slice/libtlsn_mobile.a"
