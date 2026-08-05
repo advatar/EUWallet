@@ -72,3 +72,16 @@ The configured VCIssuer validates the embedded artifact at
 `deep_link` for EUWallet or another compatible wallet. The resulting
 `dev.advatar.tlsn.evidence.1` credential remains development TLSNotary
 evidence; it is not promoted to PID or (Q)EAA.
+
+## Source pin (build from GitHub, not a sibling checkout)
+
+`TLSNMobile.xcframework` MUST be rebuilt from the TLSNotary fork **on GitHub**, not a local
+`../tlsn` checkout. `build-xcframework.sh` clones `advatar/tlsn` at a pinned ref into a git-ignored
+`.tlsn-src/` and builds from there:
+
+- **Repo:** `https://github.com/advatar/tlsn.git` (override `TLSN_REPO`)
+- **Ref:** `fix/artifact-wire-format-tests` (override `TLSN_REF`; switch to `main` once the fix merges)
+
+Building from GitHub guarantees the artifact-signing fix (canonical sorted-key signing bytes,
+commit `89a638f6a`) is included and avoids the `serde_json/preserve_order` divergence that vendoring
+a sibling copy can introduce. After building, run `repack-framework-style.sh`.
