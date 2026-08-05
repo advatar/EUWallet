@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Post-Quantum Web-Evidence Issuance with TLSNotary — Technical Overview</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root{
+    --navy:#0a1f14; --navy2:#0e2a1d; --green:#0e8f5a; --green-soft:#e8f6ee; --accent:#0e8f5a;
+    --ink:#12201a; --muted:#5a6b62; --line:#d9e5df; --bg:#ffffff; --chip:#eef5f1;
+    --amber:#b7791f; --violet:#6b46c1; --blue:#1d6fe0;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    color:var(--ink); font-size:10.6pt; line-height:1.5;}
+  @page{ size:A4; margin:16mm 15mm 18mm 15mm; }
+  h1,h2,h3{ color:var(--navy); line-height:1.2; }
+  h1{ font-size:23pt; letter-spacing:-.02em; margin:0 0 6px; }
+  h2{ font-size:15pt; margin:26px 0 8px; padding-bottom:5px; border-bottom:2px solid var(--line); }
+  h3{ font-size:11.5pt; margin:16px 0 4px; }
+  p{ margin:7px 0; } ul{ margin:6px 0; padding-left:20px; } li{ margin:3px 0; }
+  code{ font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace; font-size:9pt;
+    background:var(--chip); padding:1px 5px; border-radius:4px; color:var(--navy2); }
+  .eyebrow{ font-size:8.2pt; font-weight:800; letter-spacing:.18em; text-transform:uppercase; color:var(--green); }
+  .lede{ font-size:11.5pt; color:var(--muted); max-width:53em; }
+  .cover{ padding:6mm 0 4mm; border-bottom:3px solid var(--navy); margin-bottom:10px; }
+  .meta{ font-size:8.6pt; color:var(--muted); margin-top:10px; }
+  .meta b{ color:var(--ink); }
+  .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .grid3{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+  .card{ border:1px solid var(--line); border-radius:12px; padding:12px 14px; background:#fff; }
+  .card h3{ margin-top:0; }
+  .tint{ background:var(--green-soft); border-color:#c7e6d6; }
+  .kv{ font-size:9.2pt; color:var(--muted); }
+  .badge{ display:inline-block; font-size:7.6pt; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+    padding:2px 8px; border-radius:999px; vertical-align:middle; }
+  .b-mock{ background:#fdf3e0; color:var(--amber); border:1px solid #f0dcae; }
+  .b-pq{ background:#efe9fb; color:var(--violet); border:1px solid #d9ccf3; }
+  figure{ margin:12px 0; } figcaption{ font-size:8.8pt; color:var(--muted); margin-top:6px; }
+  figcaption b{ color:var(--ink); }
+  .diagram{ border:1px solid var(--line); border-radius:12px; padding:12px; overflow:hidden; background:#fff; }
+  .note{ border-left:3px solid var(--green); background:#f4fbf7; padding:8px 12px; border-radius:0 8px 8px 0; font-size:9.6pt; }
+  .warn{ border-left:3px solid var(--amber); background:#fffaf0; padding:8px 12px; border-radius:0 8px 8px 0; font-size:9.6pt; }
+  .page-break{ page-break-before:always; } .avoid-break{ page-break-inside:avoid; break-inside:avoid; }
+  table{ border-collapse:collapse; width:100%; font-size:9pt; margin:8px 0; }
+  th,td{ border:1px solid var(--line); padding:5px 8px; text-align:left; vertical-align:top; }
+  th{ background:var(--navy); color:#fff; font-weight:600; } tr:nth-child(even) td{ background:#f6faf8; }
+
+  /* phone + disclosure mockups */
+  .phones{ display:flex; gap:14px 12px; flex-wrap:wrap; }
+  .phones > div{ page-break-inside:avoid; break-inside:avoid; }
+  .device{ width:150px; height:315px; background:#000; border-radius:26px; padding:9px 8px; position:relative;
+    box-shadow:0 4px 14px rgba(10,31,20,.18); }
+  .device.big{ width:250px; height:500px; border-radius:34px; padding:12px 10px; }
+  .device .notch{ position:absolute; top:8px; left:50%; transform:translateX(-50%); width:46px; height:12px; background:#000; border-radius:0 0 10px 10px; z-index:3; }
+  .disp{ width:100%; height:100%; border-radius:19px; overflow:hidden; position:relative; display:flex; flex-direction:column; background:#fff; color:#12201a; }
+  .device.big .disp{ border-radius:24px; }
+  .disp .sb{ height:16px; font-size:6.6pt; display:flex; justify-content:space-between; padding:5px 12px 0; opacity:.85; }
+  .device.big .disp .sb{ font-size:8pt; }
+  .disp .nav{ text-align:center; font-weight:700; font-size:8pt; padding:4px 0 6px; border-bottom:1px solid #eef2f0; position:relative; }
+  .device.big .disp .nav{ font-size:11pt; padding:8px 0 10px; }
+  .disp .nav .l{ position:absolute; left:10px; top:4px; color:var(--green); font-weight:600; font-size:7pt; }
+  .disp .nav .r{ position:absolute; right:10px; top:4px; color:var(--green); font-weight:600; font-size:7pt; }
+  .device.big .disp .nav .l,.device.big .disp .nav .r{ font-size:9.5pt; top:8px; }
+  .disp .body{ flex:1; padding:6px 8px; display:flex; flex-direction:column; overflow:hidden; }
+  .device.big .disp .body{ padding:10px 12px; }
+  .cap-title{ font-size:8.4pt; font-weight:700; text-align:center; margin:6px 0 3px; }
+  .cap-sub{ font-size:6.9pt; opacity:.65; text-align:center; line-height:1.35; }
+  .addr{ background:#eef2f0; border-radius:8px; font-size:6.6pt; padding:4px 7px; color:#3a4a42; margin:2px 0 6px; font-family:"SF Mono",monospace; }
+  .page-json{ background:#0c1a12; color:#8fe0b4; font-family:"SF Mono",monospace; font-size:5.8pt; border-radius:6px; padding:6px; line-height:1.5; flex:1; overflow:hidden; }
+  .btn{ display:block; text-align:center; font-size:7pt; background:var(--green); color:#fff; border-radius:999px; padding:5px 6px; margin-top:6px; font-weight:600; }
+  .btn.ghost{ background:#eef2f0; color:#0e8f5a; }
+  .phone-cap{ font-size:7.6pt; color:var(--muted); text-align:center; margin-top:5px; }
+  .phone-cap b{ color:var(--ink); display:block; font-size:8.2pt; }
+  .spin{ width:26px; height:26px; border:3px solid rgba(14,143,90,.25); border-top-color:var(--green); border-radius:50%; margin:16px auto 8px; }
+
+  /* disclosure field rows */
+  .disc-hdr{ font-size:6.6pt; text-transform:uppercase; letter-spacing:.06em; color:#8b9a92; margin:2px 2px 4px; }
+  .device.big .disc-hdr{ font-size:8.5pt; }
+  .frow{ display:flex; align-items:center; gap:7px; padding:5px 3px; border-bottom:1px solid #eef2f0; }
+  .device.big .frow{ padding:8px 4px; gap:10px; }
+  .frow .ck{ width:14px; height:14px; border-radius:50%; border:1.6px solid #c2ccc7; flex:none; }
+  .device.big .frow .ck{ width:19px; height:19px; }
+  .frow.on .ck{ background:var(--green); border-color:var(--green); position:relative; }
+  .frow.on .ck::after{ content:"✓"; color:#fff; font-size:8pt; position:absolute; left:2px; top:-2px; }
+  .device.big .frow.on .ck::after{ font-size:11pt; left:3px; top:-1px; }
+  .frow .ptr{ font-family:"SF Mono",monospace; font-size:6.6pt; color:#12201a; }
+  .device.big .frow .ptr{ font-size:9pt; }
+  .frow .prev{ font-size:5.8pt; color:#8b9a92; }
+  .device.big .frow .prev{ font-size:7.5pt; }
+  .frow.off .ptr{ color:#9aa8a1; }
+  .disc-foot{ font-size:6pt; color:#8b9a92; margin-top:6px; line-height:1.4; }
+  .device.big .disc-foot{ font-size:8pt; }
+  .callout{ border:1px dashed #c7e6d6; background:#f4fbf7; border-radius:12px; padding:12px 14px; font-size:9.4pt; }
+  .callout b{ color:var(--navy); }
+  .tag-ok{ color:var(--green); font-weight:700; } .tag-no{ color:#9aa8a1; font-weight:700; }
+  .footer{ margin-top:22px; padding-top:8px; border-top:1px solid var(--line); font-size:8pt; color:var(--muted); }
+</style>
+</head>
+<body>
+
+<header class="cover">
+  <div class="eyebrow">Advatar EUDI Wallet · Technical Overview</div>
+  <h1>Post-Quantum Web-Evidence Issuance with TLSNotary</h1>
+  <p class="lede">How the EU Wallet turns a fact from a real HTTPS session into a verifiable credential:
+  a <b>TLSNotary</b> prover co-signs the session with a <b>post-quantum</b> notary, the holder chooses
+  exactly <b>which JSON fields to disclose</b>, and the issuer mints an SD-JWT web-evidence VC straight
+  into the wallet over OpenID4VCI.</p>
+  <div class="meta">
+    <b>Notary:</b> <code>notary.euwallet.advatar.systems</code> &nbsp;·&nbsp; <b>Issuer:</b> <code>vcissuer.advatar.systems</code>
+    &nbsp;·&nbsp; <b>Credential:</b> SD-JWT, <code>vct dev.advatar.tlsn.evidence.1</code> &nbsp;·&nbsp; <b>Transport:</b> TLS 1.2.
+  </div>
+</header>
+
+<section>
+  <h2>1 · At a glance</h2>
+  <p>TLSNotary lets a holder prove <em>&ldquo;this is what the server actually sent me&rdquo;</em> without
+  giving the verifier their credentials or a replayable session. The wallet runs the prover against a
+  <b>notary + proxy</b>; the notary sees only ciphertext but co-signs a commitment to the transcript.
+  The result is bound into a wallet credential the holder can present later — and the holder decides,
+  field by field, what the credential reveals.</p>
+  <div class="grid3">
+    <div class="card tint"><h3>1. Notarise</h3><div class="kv">The prover runs the HTTPS session with a notary that co-signs the transcript — over a <b>post-quantum</b> key exchange and a <b>post-quantum</b> signature.</div></div>
+    <div class="card tint"><h3>2. Disclose</h3><div class="kv">For JSON/API responses the holder picks which leaf fields (RFC 6901 pointers) go into the proof; the rest stay private.</div></div>
+    <div class="card tint"><h3>3. Issue</h3><div class="kv">The signed artifact becomes an OpenID4VCI offer; the issuer mints an SD-JWT web-evidence VC into the wallet.</div></div>
+  </div>
+
+  <h3>Components</h3>
+  <div class="diagram avoid-break">
+  <pre class="mermaid">
+flowchart LR
+  W["EU Wallet<br/>embedded browser +<br/>TLSNotary prover"]
+  SRV["Target website<br/>(HTTPS / TLS 1.2)"]
+  NOT["Notary + proxy<br/>notary.euwallet.advatar.systems<br/>post-quantum"]
+  VC["VCIssuer<br/>vcissuer.advatar.systems"]
+
+  W -->|"1 browse, choose fields"| SRV
+  W -->|"2 notarise session (PQ)"| NOT
+  NOT -->|"co-signed SignedArtifact"| W
+  W -->|"3 POST artifact"| VC
+  VC -->|"4 openid-credential-offer://"| W
+  </pre>
+  </div>
+  <figcaption><b>Figure 1.</b> The notary co-signs a commitment to the ciphertext transcript — it never sees plaintext or holder secrets. The wallet carries the artifact to the issuer.</figcaption>
+</section>
+
+<section class="page-break">
+  <h2>2 · End-to-end sequence</h2>
+  <div class="diagram avoid-break">
+  <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as User
+  participant W as Wallet + prover
+  participant S as Website
+  participant N as PQ notary
+  participant I as VCIssuer
+
+  U->>W: Add web evidence → browse to an HTTPS page
+  U->>W: Choose fields (RFC 6901 JSON pointers)
+  W->>N: open notarised session (PQ key exchange)
+  W->>S: HTTPS request (via proxy, TLS 1.2)
+  S-->>W: response (ciphertext seen by notary)
+  N-->>W: co-signed SignedArtifact (ES256 + ML-DSA-65)
+  W->>I: POST artifact + disclosed fields
+  I-->>W: openid-credential-offer:// (SD-JWT web evidence)
+  W-->>U: VC stored — present later, holder-key bound
+  </pre>
+  </div>
+  <figcaption><b>Figure 2.</b> Steps mirror <code>AddWebEvidenceView</code> → <code>TLSNotaryMobileClient.notarize(url, headers, disclosedFields)</code> → <code>prepareWalletOffer</code>. In self-contained demo mode the capture page calls the issuer's <code>/dev/tlsnotary/demo-offer</code> (<code>ENABLE_TLSN_DEMO</code>); production POSTs to <code>/evidence-offers/tlsnotary</code>.</figcaption>
+</section>
+
+<section class="page-break">
+  <h2>3 · Selective disclosure — the holder chooses what to reveal <span class="badge b-mock">representative mockup</span></h2>
+  <p>This is the heart of the flow. When the notarised response is JSON, the wallet flattens it into its
+  leaf fields and lets the holder tick exactly which ones become part of the proof. Everything else is
+  withheld — the verifier learns the disclosed facts and nothing more.</p>
+
+  <div class="grid2 avoid-break" style="grid-template-columns:auto 1fr; align-items:center; gap:22px;">
+    <figure style="margin:0">
+      <div class="device big"><div class="notch"></div><div class="disp">
+        <div class="sb"><span>9:41</span><span>▟</span></div>
+        <div class="nav"><span class="l">All</span>Fields to disclose<span class="r">Done</span></div>
+        <div class="body">
+          <div class="disc-hdr">3 of 6 fields disclosed</div>
+          <div class="frow on"><div class="ck"></div><div><div class="ptr">/account/status</div><div class="prev">good_standing</div></div></div>
+          <div class="frow on"><div class="ck"></div><div><div class="ptr">/account/type</div><div class="prev">current</div></div></div>
+          <div class="frow on"><div class="ck"></div><div><div class="ptr">/holder/name</div><div class="prev">Erika Mustermann</div></div></div>
+          <div class="frow off"><div class="ck"></div><div><div class="ptr">/account/iban</div><div class="prev">DE89 3704 0044 0532 0130 00</div></div></div>
+          <div class="frow off"><div class="ck"></div><div><div class="ptr">/account/balance</div><div class="prev">18,240.55</div></div></div>
+          <div class="frow off"><div class="ck"></div><div><div class="ptr">/holder/dateOfBirth</div><div class="prev">1964-08-12</div></div></div>
+          <div class="disc-foot">Only the selected fields are recorded as disclosed in the proof. Deselect a field to keep it private.</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>Fields to disclose</b>the wallet's DisclosureFieldPicker</div>
+    </figure>
+    <div class="callout">
+      <p style="margin-top:0"><b>Reading the screen.</b> The holder is proving their bank account is real and in good
+      standing — without revealing their balance, IBAN, or date of birth.</p>
+      <ul>
+        <li><span class="tag-ok">Disclosed</span> — <code>/account/status</code>, <code>/account/type</code>, <code>/holder/name</code></li>
+        <li><span class="tag-no">Kept private</span> — <code>/account/iban</code>, <code>/account/balance</code>, <code>/holder/dateOfBirth</code></li>
+      </ul>
+      <p>Fields are addressed as <b>RFC 6901 JSON Pointers</b>. The default is to disclose everything; the
+      holder <em>deselects</em> what to withhold. The chosen pointers are recorded in the credential's
+      <code>credentialSubject.disclosedFields</code>.</p>
+    </div>
+  </div>
+  <div class="warn"><b>Honest scope.</b> The picker is the <b>selection / consent surface</b>, and the chosen pointers
+  are recorded as disclosed. The transcript-level redaction that reveals <em>only</em> the selected byte-spans and
+  cryptographically strips the rest is the remaining core work — until it lands, unselected fields are simply not
+  listed as disclosed rather than being removed from the underlying attestation.</div>
+</section>
+
+<section class="page-break">
+  <h2>4 · The rest of the flow <span class="badge b-mock">representative mockups</span></h2>
+  <div class="phones">
+    <div>
+      <div class="device"><div class="notch"></div><div class="disp">
+        <div class="sb"><span>9:41</span><span>▟</span></div>
+        <div class="nav">Web evidence</div>
+        <div class="body">
+          <div class="addr">🔒 https://bank.example/api/account</div>
+          <div class="page-json">{<br/>&nbsp;"account":{<br/>&nbsp;&nbsp;"status":"good_standing",<br/>&nbsp;&nbsp;"type":"current",<br/>&nbsp;&nbsp;"iban":"DE89…",<br/>&nbsp;&nbsp;"balance":18240.55<br/>&nbsp;},<br/>&nbsp;"holder":{ "name":"Erika…" }<br/>}</div>
+          <div class="btn ghost">☑︎ Choose fields</div>
+          <div class="btn">✅ Create web evidence</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>Browse</b>embedded prover browser</div>
+    </div>
+    <div>
+      <div class="device"><div class="notch"></div><div class="disp">
+        <div class="sb"><span>9:41</span><span>▟</span></div>
+        <div class="nav">Web evidence</div>
+        <div class="body" style="justify-content:center">
+          <div class="spin"></div>
+          <div class="cap-title">Notarising…</div>
+          <div class="cap-sub">Running the TLSNotary prover on this page with the post-quantum notary.</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>Notarise</b>PQ co-signed session</div>
+    </div>
+    <div>
+      <div class="device"><div class="notch"></div><div class="disp">
+        <div class="sb"><span>9:41</span><span>▟</span></div>
+        <div class="nav">Add credential</div>
+        <div class="body">
+          <div style="text-align:center;margin:6px 0"><span style="font-size:20px">🛡️</span></div>
+          <div class="cap-title">TLSNotary web evidence</div>
+          <div class="cap-sub" style="margin-bottom:6px">dev.advatar.tlsn.evidence.1 · SD-JWT</div>
+          <div class="frow on" style="border:none;padding:3px 3px"><div class="ck"></div><div class="ptr">/account/status</div></div>
+          <div class="frow on" style="border:none;padding:3px 3px"><div class="ck"></div><div class="ptr">/account/type</div></div>
+          <div class="frow on" style="border:none;padding:3px 3px"><div class="ck"></div><div class="ptr">/holder/name</div></div>
+          <div class="btn">Add to wallet</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>Issue</b>SD-JWT web-evidence VC</div>
+    </div>
+    <div>
+      <div class="device"><div class="notch"></div><div class="disp">
+        <div class="sb"><span>9:41</span><span>▟</span></div>
+        <div class="nav">Wallet</div>
+        <div class="body">
+          <div style="background:#0a1f14;color:#e8f6ee;border-radius:12px;padding:10px;margin-top:6px">
+            <div style="font-size:6.4pt;letter-spacing:.1em;opacity:.7">WEB EVIDENCE · PQ NOTARY</div>
+            <div style="font-size:9pt;font-weight:700;margin-top:6px">Account in good standing</div>
+            <div style="font-size:6.4pt;opacity:.8;margin-top:4px">bank.example · notarised</div>
+            <div style="font-size:6pt;opacity:.7;margin-top:10px">3 fields disclosed · holder-key bound</div>
+          </div>
+          <div class="cap-sub" style="margin-top:8px">Present later over OpenID4VP.</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>Held</b>presentable credential</div>
+    </div>
+  </div>
+  <div class="warn" style="margin-top:8px"><b>Note on the screens.</b> These are faithful <b>representative mockups</b> built from the app's real
+  <code>AddWebEvidenceView</code> / <code>DisclosureFieldPicker</code> copy. The full flow needs a live notary + prover,
+  so it is illustrated rather than captured; send real device screenshots and they can be swapped in.</div>
+</section>
+
+<section class="page-break">
+  <h2>5 · What makes it post-quantum</h2>
+  <p>A classical TLSNotary proof is only as durable as the classical crypto underneath it — a future
+  quantum adversary who recorded the session could forge or unmask it. This deployment hardens both the
+  key exchange and the notary&rsquo;s signature with NIST PQC primitives, in <b>hybrid</b> mode (a
+  classical algorithm AND a post-quantum one must both hold).</p>
+  <div class="grid2">
+    <div class="card"><h3>Post-quantum key exchange <span class="badge b-pq">ML-KEM</span></h3>
+      <p class="kv">The session key is derived from a <b>hybrid P-256 + ML-KEM-768</b> agreement
+      (<code>P256MlKem768V1</code>): a classical ECDH share and a lattice KEM encapsulation, combined so
+      recording the traffic today does not let a future quantum computer recover the key.</p></div>
+    <div class="card"><h3>Post-quantum attestation <span class="badge b-pq">ML-DSA</span></h3>
+      <p class="kv">The notary&rsquo;s <code>SignedArtifact</code> carries a <b>hybrid ES256 + ML-DSA-65</b>
+      signature — an ECDSA P-256 signature and an ML-DSA (Dilithium) signature over the same commitment.
+      A verifier requires <em>both</em> to check out.</p></div>
+  </div>
+  <div class="diagram avoid-break">
+  <pre class="mermaid">
+flowchart LR
+  subgraph KX["Key exchange (hybrid)"]
+    A["P-256 ECDH"] --- B["ML-KEM-768"]
+  end
+  subgraph SIG["Notary attestation (hybrid)"]
+    C["ES256 (ECDSA P-256)"] --- D["ML-DSA-65"]
+  end
+  KX -->|"session over TLS 1.2"| SIG
+  SIG -->|"verify: classical AND PQ"| V["Verifier accepts"]
+  </pre>
+  </div>
+  <figcaption><b>Figure 3.</b> Hybrid everywhere: the proof stays sound as long as <em>either</em> the classical or the post-quantum layer is unbroken — so it is safe against both today&rsquo;s attackers and a future quantum one.</figcaption>
+  <div class="note">TLSNotary here runs over <b>TLS 1.2</b>: the prover pins the session to 1.2 because the notary&rsquo;s selective-reveal machinery operates on the 1.2 record layer. The post-quantum hardening is layered on top of that transport.</div>
+</section>
+
+<section class="page-break">
+  <h2>6 · The issued credential &amp; how it verifies</h2>
+  <table>
+    <tr><th>Aspect</th><th>Detail</th></tr>
+    <tr><td><b>Format</b></td><td>SD-JWT VC, <code>vct dev.advatar.tlsn.evidence.1</code> ("TLSNotary web evidence (development)").</td></tr>
+    <tr><td><b>What it asserts</b></td><td>The notarised server + the disclosed JSON fields, listed as RFC 6901 pointers under <code>credentialSubject.disclosedFields</code>, bound to the notary attestation.</td></tr>
+    <tr><td><b>Holder binding</b></td><td>Issued to the wallet's key (Secure Enclave when available, software fallback otherwise); presented later over OpenID4VP with proof-of-possession.</td></tr>
+    <tr><td><b>Notary trust</b></td><td>The verifier checks the hybrid <b>ES256 + ML-DSA-65</b> signature against the notary's published key (<code>tlsn.notaryKeyB64u</code>); both components must verify.</td></tr>
+    <tr><td><b>Issuance</b></td><td>OpenID4VCI credential offer by value (<code>openid-credential-offer://</code>) handed to the wallet's normal add-credential flow.</td></tr>
+  </table>
+
+  <h3>Honest limits</h3>
+  <ul>
+    <li><b>Selective disclosure</b> is a consent/selection surface today; transcript-level redaction (reveal only selected spans) is the remaining core work — see §3.</li>
+    <li><b>Development credential</b>: the <code>vct</code> is dev-scoped; the demo path (<code>/dev/tlsnotary/demo-offer</code>) mints a genuine self-signed offer so the wallet loop completes without a live notary. Production uses the WASM prover ↔ notary+proxy and <code>/evidence-offers/tlsnotary</code>.</li>
+    <li><b>TLS 1.2 only</b> — the notary's selective-reveal works on the 1.2 record layer.</li>
+  </ul>
+
+  <div class="footer">
+    Advatar EU Wallet — Post-Quantum Web-Evidence Issuance with TLSNotary. Notary <code>notary.euwallet.advatar.systems</code> ·
+    issuer <code>vcissuer.advatar.systems</code> · credential <code>dev.advatar.tlsn.evidence.1</code> (SD-JWT). PQ: hybrid
+    P-256 + ML-KEM-768 key agreement, hybrid ES256 + ML-DSA-65 attestation. Device screens are representative mockups.
+  </div>
+</section>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true, theme: 'base',
+    themeVariables: {
+      primaryColor: '#e8f6ee', primaryBorderColor: '#0e8f5a', primaryTextColor: '#0a1f14',
+      lineColor: '#5a6b62', fontFamily: '-apple-system,Segoe UI,Helvetica,Arial,sans-serif',
+      fontSize: '13px', actorBkg: '#0a1f14', actorTextColor: '#ffffff', actorBorder: '#0a1f14',
+      noteBkgColor: '#f4fbf7', noteBorderColor: '#0e8f5a', signalColor: '#12201a', signalTextColor: '#12201a',
+      clusterBkg: '#f4fbf7', clusterBorder: '#c7e6d6'
+    }
+  });
+</script>
+</body>
+</html>
