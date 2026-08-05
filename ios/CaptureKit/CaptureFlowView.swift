@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+    import UIKit
+#endif
 
 /// The whole companion UI: launched with an invocation URL, it captures the MRZ (camera or manual),
 /// then runs the capture coordinator (liveness → chip → submit) and reports the outcome. Shared by
@@ -11,6 +14,7 @@ public struct CaptureFlowView: View {
     private let nfcServerURL: String
 
     @StateObject private var model: CaptureFlowModel
+    @Environment(\.openURL) private var openURL
 
     public init(invocationURL: URL, nfcServerURL: String = CaptureFlowView.defaultNFCServerURL) {
         self.invocationURL = invocationURL
@@ -40,8 +44,16 @@ public struct CaptureFlowView: View {
                     Text(model.stageText).foregroundStyle(.secondary)
                 }
             case .issued:
-                Label("PID issued to the target wallet", systemImage: "checkmark.seal.fill")
-                    .foregroundStyle(.green).font(.headline)
+                VStack(spacing: 12) {
+                    Label("PID issued to the target wallet", systemImage: "checkmark.seal.fill")
+                        .foregroundStyle(.green).font(.headline)
+                    // Same-device hand-off: return to the wallet that requested the capture with the
+                    // freshly-issued PID (opened automatically on success; button is the fallback).
+                    if let handoff = model.handoffURL {
+                        Button("Return to wallet") { openURL(handoff) }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
             case let .failed(message):
                 VStack(spacing: 12) {
                     Label("Capture failed", systemImage: "xmark.octagon.fill")
@@ -72,6 +84,9 @@ final class CaptureFlowModel: ObservableObject {
 
     @Published private(set) var phase: Phase
     @Published private(set) var stageText = ""
+    /// The `openid-credential-offer://` deep link to hand the issued PID back to the requesting
+    /// wallet on the same device. Set once issuance succeeds.
+    @Published private(set) var handoffURL: URL?
 
     private let sessionID: String?
     private let coordinator: CaptureCoordinator?
@@ -109,7 +124,15 @@ final class CaptureFlowModel: ObservableObject {
             let result = await coordinator.run(sessionID: sessionID, mrz: mrz) { stage in
                 Task { @MainActor in self.apply(stage) }
             }
-            if result?.status != .issued, case .running = self.phase {
+            if result?.status == .issued {
+                // Hand the PID back to the wallet on the same device via its offer deep link.
+                if let link = result?.deepLink, let url = URL(string: link) {
+                    self.handoffURL = url
+                    #if canImport(UIKit)
+                        _ = await UIApplication.shared.open(url)
+                    #endif
+                }
+            } else if case .running = self.phase {
                 self.phase = .failed("The issuer did not complete issuance.")
             }
         }
