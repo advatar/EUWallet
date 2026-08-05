@@ -80,7 +80,7 @@ evidence; it is not promoted to PID or (Q)EAA.
 `.tlsn-src/` and builds from there:
 
 - **Repo:** `https://github.com/advatar/tlsn.git` (override `TLSN_REPO`)
-- **Ref:** `fix/artifact-wire-format-tests` (override `TLSN_REF`; switch to `main` once the fix merges)
+- **Ref:** `main` (the artifact-signing fix landed as `b29b8024b`; override `TLSN_REF` if needed)
 
 Building from GitHub guarantees the artifact-signing fix (canonical sorted-key signing bytes,
 commit `89a638f6a`) is included and avoids the `serde_json/preserve_order` divergence that vendoring

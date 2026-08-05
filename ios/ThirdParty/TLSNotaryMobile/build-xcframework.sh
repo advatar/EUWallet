@@ -9,7 +9,7 @@ set -eu
 #
 # Override the source with TLSN_REPO / TLSN_REF (e.g. once the fix lands on main, set TLSN_REF=main).
 TLSN_REPO="${TLSN_REPO:-https://github.com/advatar/tlsn.git}"
-TLSN_REF="${TLSN_REF:-fix/artifact-wire-format-tests}"
+TLSN_REF="${TLSN_REF:-main}"
 
 package_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 artifact_dir="$package_dir/Artifacts/TLSNMobile.xcframework"
