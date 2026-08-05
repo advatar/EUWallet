@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cross-Wallet PID Issuance via App Clip — Technical Overview</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<style>
+  :root{
+    --navy:#081b34; --navy2:#0e2a4d; --blue:#1d6fe0; --blue-soft:#eaf2fd;
+    --ink:#12202f; --muted:#5b6b7d; --line:#dbe3ec; --bg:#ffffff; --chip:#eef4fb;
+    --green:#128a4b; --amber:#b7791f; --violet:#6b46c1;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    color:var(--ink); font-size:10.6pt; line-height:1.5; background:var(--bg);}
+  @page{ size:A4; margin:16mm 15mm 18mm 15mm; }
+  h1,h2,h3{ color:var(--navy); line-height:1.2; }
+  h1{ font-size:24pt; letter-spacing:-.02em; margin:0 0 6px; }
+  h2{ font-size:15pt; margin:26px 0 8px; padding-bottom:5px; border-bottom:2px solid var(--line); }
+  h3{ font-size:11.5pt; margin:16px 0 4px; }
+  p{ margin:7px 0; } ul{ margin:6px 0 6px 0; padding-left:20px; } li{ margin:3px 0; }
+  code{ font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace; font-size:9pt;
+    background:var(--chip); padding:1px 5px; border-radius:4px; color:var(--navy2); }
+  a{ color:var(--blue); text-decoration:none; }
+  .eyebrow{ font-size:8.2pt; font-weight:800; letter-spacing:.18em; text-transform:uppercase; color:var(--blue); }
+  .lede{ font-size:11.5pt; color:var(--muted); max-width:52em; }
+  .cover{ padding:6mm 0 4mm; border-bottom:3px solid var(--navy); margin-bottom:10px; }
+  .meta{ font-size:8.6pt; color:var(--muted); margin-top:10px; }
+  .meta b{ color:var(--ink); }
+  .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .grid3{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+  .card{ border:1px solid var(--line); border-radius:12px; padding:12px 14px; background:#fff; }
+  .card h3{ margin-top:0; }
+  .tint{ background:var(--blue-soft); border-color:#cfe0f7; }
+  .dark{ background:var(--navy); color:#e8eef6; border:none; }
+  .dark h3{ color:#fff; } .dark .k{ color:#8fb6e8; }
+  .kv{ font-size:9.2pt; color:var(--muted); }
+  .badge{ display:inline-block; font-size:7.6pt; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+    padding:2px 8px; border-radius:999px; vertical-align:middle; }
+  .b-live{ background:#e4f7ec; color:var(--green); border:1px solid #b7e6c9; }
+  .b-mock{ background:#fdf3e0; color:var(--amber); border:1px solid #f0dcae; }
+  .b-real{ background:#e9edf7; color:var(--navy2); border:1px solid #cdd7ec; }
+  figure{ margin:12px 0; }
+  figcaption{ font-size:8.8pt; color:var(--muted); margin-top:6px; }
+  figcaption b{ color:var(--ink); }
+  .mermaid{ background:#fff; }
+  .diagram{ border:1px solid var(--line); border-radius:12px; padding:12px; overflow:hidden; }
+  .note{ border-left:3px solid var(--blue); background:#f6faff; padding:8px 12px; border-radius:0 8px 8px 0; font-size:9.6pt; }
+  .warn{ border-left:3px solid var(--amber); background:#fffaf0; padding:8px 12px; border-radius:0 8px 8px 0; font-size:9.6pt; }
+  .page-break{ page-break-before:always; }
+  .avoid-break{ page-break-inside:avoid; }
+  table{ border-collapse:collapse; width:100%; font-size:9pt; margin:8px 0; }
+  th,td{ border:1px solid var(--line); padding:5px 8px; text-align:left; vertical-align:top; }
+  th{ background:var(--navy); color:#fff; font-weight:600; }
+  tr:nth-child(even) td{ background:#f7fafd; }
+
+  /* phone mockups */
+  .phones{ display:flex; gap:14px 12px; flex-wrap:wrap; justify-content:flex-start; }
+  .phones > div{ page-break-inside:avoid; break-inside:avoid; }
+  .phone{ width:150px; }
+  .screen{ position:relative; border:2px solid #1a2b45; border-radius:22px; }
+  .device{ width:150px; height:315px; background:#000; border-radius:26px; padding:9px 8px;
+    box-shadow:0 4px 14px rgba(8,27,52,.18); position:relative; }
+  .device .notch{ position:absolute; top:8px; left:50%; transform:translateX(-50%); width:46px; height:12px;
+    background:#000; border-radius:0 0 10px 10px; z-index:3; }
+  .disp{ width:100%; height:100%; border-radius:19px; overflow:hidden; position:relative;
+    display:flex; flex-direction:column; }
+  .disp.black{ background:#000; color:#fff; }
+  .disp.white{ background:#fff; color:#12202f; }
+  .disp .sb{ height:16px; font-size:6.6pt; display:flex; justify-content:space-between; padding:5px 12px 0; color:inherit; opacity:.85; }
+  .disp .body{ flex:1; padding:8px 12px; display:flex; flex-direction:column; }
+  .cap-title{ font-size:8.6pt; font-weight:700; text-align:center; margin:6px 0 3px; }
+  .cap-sub{ font-size:6.9pt; opacity:.7; text-align:center; line-height:1.35; }
+  .mk-mrz{ margin:8px 4px 0; border:1.5px dashed #3a86ff; border-radius:8px; height:74px; position:relative; background:#0c1626; }
+  .mk-mrz .zone{ position:absolute; bottom:8px; left:8px; right:8px; height:22px; background:repeating-linear-gradient(0deg,#1a2b45,#1a2b45 3px,#22314c 3px,#22314c 6px); border-radius:3px; }
+  .mk-mrz .oc{ position:absolute; inset:8px; border:1px solid rgba(120,160,220,.35); border-radius:5px;}
+  .mk-face{ margin:10px auto 4px; width:88px; height:112px; border-radius:50%/56%; border:3px solid #35d07f; position:relative; background:radial-gradient(ellipse at 50% 40%, #1b3a5a, #0a1526);}
+  .mk-face .scan{ position:absolute; left:6%; right:6%; height:2px; top:46%; background:#35d07f; box-shadow:0 0 6px #35d07f;}
+  .mk-face .head{ position:absolute; left:50%; top:52%; transform:translate(-50%,-50%); width:44px; height:56px; border-radius:50%/60%; background:#33547d;}
+  .mk-nfc{ margin:10px auto 4px; width:96px; height:96px; }
+  .pill{ display:block; text-align:center; font-size:7pt; background:#1d6fe0; color:#fff; border-radius:999px; padding:5px 6px; margin-top:auto; }
+  .pill.grey{ background:#2a3a52; }
+  .spin{ width:26px; height:26px; border:3px solid rgba(255,255,255,.25); border-top-color:#fff; border-radius:50%; margin:14px auto 6px; }
+  .rows{ margin-top:8px; font-size:6.9pt; }
+  .rows .r{ display:flex; justify-content:space-between; border-bottom:1px solid #e7edf4; padding:3px 0; }
+  .rows .r span:first-child{ color:#7d8ba0; }
+  .ok{ width:34px; height:34px; border-radius:50%; background:#e4f7ec; color:#128a4b; display:flex; align-items:center; justify-content:center; font-size:18px; margin:14px auto 6px; }
+  .phone-cap{ font-size:7.6pt; color:var(--muted); text-align:center; margin-top:5px; }
+  .phone-cap b{ color:var(--ink); display:block; font-size:8.2pt; }
+
+  /* QR card reproducing the VCIssuer landing */
+  .qrcard{ display:flex; gap:16px; align-items:center; border:1px solid #cfe0f7; border-radius:16px; padding:14px 16px; background:#f7fbff; }
+  .qrbox{ background:#fff; border:1px solid var(--line); border-radius:12px; padding:8px; width:132px; height:132px; display:flex; align-items:center; justify-content:center; }
+  .qrbox svg{ width:116px; height:116px; }
+  .realshot{ width:186px; border-radius:26px; border:1px solid var(--line); }
+  .legend span{ display:inline-block; margin-right:14px; font-size:8.6pt; color:var(--muted); }
+  .dot{ display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:4px; vertical-align:middle; }
+  .footer{ margin-top:22px; padding-top:8px; border-top:1px solid var(--line); font-size:8pt; color:var(--muted); }
+</style>
+</head>
+<body>
+
+<header class="cover">
+  <div class="eyebrow">Advatar EUDI Wallet · Technical Overview</div>
+  <h1>Cross-Wallet PID Issuance via App&nbsp;Clip</h1>
+  <p class="lede">How any wallet obtains a formally-verified Person Identification Datum (PID) by launching the
+  standalone <b>PID Capture</b> companion (a full app or an install-free App Clip) that reads an eMRTD passport chip
+  over NFC and confirms a live human with iProov Genuine Presence Assurance — with the credential minted straight
+  back into the wallet that started the flow, bound to that wallet&rsquo;s own key.</p>
+  <div class="meta">
+    <b>Scope:</b> the shipped capture-session backend, the companion app/App Clip, and the cross-wallet correlation that routes the issued PID to the requesting wallet.
+    &nbsp;·&nbsp; <b>Issuer:</b> <code>issuer.advatar.systems</code> &nbsp;·&nbsp; <b>Capture host:</b> <code>pid.advatar.systems</code>
+    &nbsp;·&nbsp; <b>Credential:</b> German PID, SD-JWT VC (<code>dc+sd-jwt</code>).
+  </div>
+</header>
+
+<section>
+  <h2>1 · At a glance</h2>
+  <p>PID Capture decouples <b>who proves the identity</b> from <b>who holds the credential</b>. A wallet that cannot
+  itself read a passport chip — a thin wallet, an App-Clip-only experience, or a wallet on another device — opens a
+  short-lived <b>capture session</b> bound to its own proof-of-possession key. The companion performs the sensitive
+  capture (liveness + chip), the issuer validates it authoritatively, and the resulting PID is bound to the
+  requesting wallet&rsquo;s key. The companion never holds the credential and never sees a signing key.</p>
+
+  <div class="grid3">
+    <div class="card tint"><h3>1. Bind</h3><div class="kv">The wallet generates a P-256 holder key and opens a session; the PID will be bound to that key&rsquo;s <code>cnf</code>.</div></div>
+    <div class="card tint"><h3>2. Capture</h3><div class="kv">A universal link / App Clip launches PID Capture: iProov liveness, then a chip read over the <code>service-nfc</code> relay.</div></div>
+    <div class="card tint"><h3>3. Issue</h3><div class="kv">VCIssuer re-runs Passive Authentication + validates liveness, then mints the PID and hands it back to the wallet.</div></div>
+  </div>
+
+  <h3>Components</h3>
+  <div class="diagram avoid-break">
+  <pre class="mermaid">
+flowchart LR
+  W["Requesting wallet<br/>(e.g. PID Test Wallet)<br/>holds ephemeral P-256 key"]
+  EDGE["pid.advatar.systems edge<br/>App Site Association +<br/>reverse proxy"]
+  PC["PID Capture<br/>app / App Clip<br/>(CaptureKit)"]
+  IPROOV["iProov GPA<br/>liveness SP"]
+  RELAY["service-nfc relay<br/>+ eMRTD chip"]
+  VC["VCIssuer<br/>capture backend<br/>Lean-verified gate"]
+
+  W -->|"1 create session (holder_jwk)"| VC
+  W -->|"2 open invocation URL (QR / link)"| EDGE
+  EDGE -->|"universal link"| PC
+  PC -->|"3 liveness"| IPROOV
+  PC -->|"4 chip read (APDU relay)"| RELAY
+  PC -->|"5 submit attestation + App Attest"| EDGE
+  EDGE --> VC
+  VC -->|"validate + mint PID"| VC
+  VC -->|"6 credential offer / poll"| W
+  </pre>
+  </div>
+  <figcaption><b>Figure 1.</b> Component map. The <code>pid.advatar.systems</code> edge serves the Apple App Site Association (so the link opens the app) and proxies the capture API to the issuer.</figcaption>
+</section>
+
+<section class="page-break">
+  <h2>2 · End-to-end sequence</h2>
+  <div class="diagram avoid-break">
+  <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant W as Wallet
+  participant VC as VCIssuer
+  participant PC as PID Capture
+  participant IP as iProov GPA
+  participant NF as service-nfc + chip
+
+  W->>VC: POST /v1/pid-capture/session {holder_jwk}
+  VC-->>W: session_id, nonce, invocation_url, iProov token
+  Note over W: binds PID to holder key (cnf = holder_jwk)
+  W->>PC: open invocation_url (universal link / App Clip)
+  PC->>VC: GET /v1/pid-capture/{id} (params)
+  VC-->>PC: nonce, holder_jkt, audience, iProov token+URL
+  PC->>IP: launch GPA capture (client, with token)
+  IP-->>PC: capture completed
+  PC->>NF: read eMRTD (MRZ, nonce, holder_jkt, audience)
+  NF-->>PC: signed attestation (resultToken)
+  PC->>VC: POST /v1/pid-capture/{id}/evidence {attestation} + App Attest
+  Note over VC: validate liveness (S2S), re-run Passive Auth,<br/>check binding, App Attest → Lean-proved gate
+  VC-->>VC: mint PID SD-JWT bound to holder key
+  VC-->>W: poll → credential_offer + deep link
+  Note over W: wallet ingests / displays the PID
+  </pre>
+  </div>
+  <figcaption><b>Figure 2.</b> The full capture-to-credential sequence. Steps mirror <code>CaptureCoordinator.run</code> (liveness before chip) and the <code>/v1/pid-capture</code> handlers in the issuer service.</figcaption>
+
+  <div class="note"><b>Why this shape?</b> The wallet registers its key <em>first</em>, so the PID is bound to the wallet by construction — there is no redirect chain carrying a bearer credential. The companion only ever produces <em>evidence</em>; the issuer makes the authoritative decision and is the only party that can sign.</div>
+</section>
+
+<section class="page-break">
+  <h2>3 · Walkthrough with screens</h2>
+  <p class="legend">
+    <span><span class="dot" style="background:#128a4b"></span>Live screenshot</span>
+    <span><span class="dot" style="background:#b7791f"></span>Representative UI mockup (device-only screen)</span>
+  </p>
+
+  <h3>Step 1 — Start from any wallet <span class="badge b-live">live</span></h3>
+  <div class="grid2 avoid-break">
+    <figure>
+      <img class="realshot" src="assets/testwallet-idle.png" alt="PID Test Wallet home screen">
+      <figcaption><b>PID Test Wallet.</b> A minimal reference wallet: it creates a key-bound session, launches PID Capture, and displays the PID it receives. It stores nothing.</figcaption>
+    </figure>
+    <figure>
+      <div class="qrcard avoid-break">
+        <div class="qrbox"><div id="qr"></div></div>
+        <div>
+          <div class="eyebrow">Start a capture</div>
+          <div style="font-size:12pt;font-weight:700;color:var(--navy);margin:4px 0 3px">Scan to get a PID issued to your wallet</div>
+          <div style="font-size:8.8pt;color:var(--muted)">Any wallet scans this to open a capture session bound to its own key. <code>https://pid.advatar.systems</code></div>
+        </div>
+      </div>
+      <figcaption><b>VCIssuer landing QR.</b> Reproduced from the WebIssuer <em>PID Capture</em> section; the code encodes <code>https://pid.advatar.systems</code>.</figcaption>
+    </figure>
+  </div>
+
+  <h3 style="page-break-before:always">Step 2–6 — Inside PID Capture <span class="badge b-mock">representative mockups</span></h3>
+  <div class="phones">
+    <div>
+      <div class="device"><div class="notch"></div><div class="disp black">
+        <div class="sb"><span>9:41</span><span>▟</span></div>
+        <div class="body">
+          <div class="cap-title">Add PID from passport</div>
+          <div class="cap-sub">Scan the machine-readable zone on your passport data page.</div>
+          <div class="mk-mrz"><div class="oc"></div><div class="zone"></div></div>
+          <div class="pill">Position the MRZ in frame</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>MRZ scan</b>camera reads the data page</div>
+    </div>
+
+    <div>
+      <div class="device"><div class="notch"></div><div class="disp black">
+        <div class="sb"><span>9:41</span><span>▟</span></div>
+        <div class="body">
+          <div class="cap-title">Face verification…</div>
+          <div class="cap-sub">iProov Genuine Presence Assurance confirms a live, present human.</div>
+          <div class="mk-face"><div class="head"></div><div class="scan"></div></div>
+          <div class="pill grey">Genuine Presence Assurance</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>iProov liveness</b>flashing GPA scan</div>
+    </div>
+
+    <div>
+      <div class="device"><div class="notch"></div><div class="disp black">
+        <div class="sb"><span>9:41</span><span>▟</span></div>
+        <div class="body">
+          <div class="cap-title">Reading passport chip…</div>
+          <div class="cap-sub">Hold your passport to the top of your iPhone.</div>
+          <svg class="mk-nfc" viewBox="0 0 96 96" fill="none" stroke="#3a86ff" stroke-width="4" stroke-linecap="round">
+            <rect x="26" y="20" width="30" height="42" rx="4" stroke="#8fb0dd"/>
+            <path d="M60 30a20 20 0 0 1 0 34" opacity=".9"/><path d="M68 24a30 30 0 0 1 0 46" opacity=".6"/><path d="M76 18a40 40 0 0 1 0 58" opacity=".35"/>
+          </svg>
+          <div class="pill grey">NFC · eMRTD</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>NFC chip read</b>relayed to service-nfc</div>
+    </div>
+
+    <div>
+      <div class="device"><div class="notch"></div><div class="disp black">
+        <div class="sb"><span>9:41</span><span>▟</span></div>
+        <div class="body">
+          <div class="cap-title">Sending to issuer…</div>
+          <div class="cap-sub">Submitting the signed attestation with an App Attest assertion.</div>
+          <div class="spin"></div>
+          <div class="pill grey">Verifying</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>Submit</b>evidence to VCIssuer</div>
+    </div>
+
+    <div>
+      <div class="device"><div class="notch"></div><div class="disp black">
+        <div class="sb"><span>9:41</span><span>▟</span></div>
+        <div class="body">
+          <div class="ok">✓</div>
+          <div class="cap-title">PID issued to the target wallet</div>
+          <div class="cap-sub">Return to the wallet to see the credential.</div>
+          <div class="pill">Return to wallet</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>Issued</b>hand back via deep link</div>
+    </div>
+
+    <div>
+      <div class="device"><div class="notch"></div><div class="disp white">
+        <div class="sb" style="color:#12202f"><span>9:41</span><span>▟</span></div>
+        <div class="body">
+          <div class="cap-title" style="color:#128a4b">✓ PID issued</div>
+          <div class="rows">
+            <div class="r"><span>Family name</span><b>Mustermann</b></div>
+            <div class="r"><span>Given name</span><b>Erika</b></div>
+            <div class="r"><span>Date of birth</span><b>1964-08-12</b></div>
+            <div class="r"><span>Nationality</span><b>DE</b></div>
+            <div class="r"><span>Issuer</span><b>advatar</b></div>
+          </div>
+          <div class="cap-sub" style="margin-top:auto">Displayed only — the test wallet does not store it.</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>Wallet displays PID</b>bound to its key</div>
+    </div>
+  </div>
+  <div class="warn" style="margin-top:10px"><b>Note on the device screens.</b> PID Capture runs only on a physical iPhone — iProov&rsquo;s liveness SDK and CoreNFC are unavailable in the iOS Simulator — so the six screens above are faithful <b>representative mockups</b> built from the app&rsquo;s exact on-screen copy. Only the home screen (Step&nbsp;1, left) and the QR are live output.</div>
+</section>
+
+<section class="page-break">
+  <h2>4 · Backend NFC — reading the passport chip</h2>
+  <p>The passport&rsquo;s contactless chip is an <b>eMRTD</b> (ICAO 9303). PID Capture uses the <code>ChipmunkNFC</code> SDK,
+  which drives CoreNFC on the phone but runs the eMRTD protocol through the <b>service-nfc WebSocket relay</b>
+  (<code>wss://nfc.dev-eu.iproov.id/channel</code>). The phone is the radio bridge; the cryptographic session and the
+  document&rsquo;s authenticity checks are handled server-side and returned as a <b>signed attestation</b>.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h3>What the read includes</h3>
+      <ul>
+        <li><b>Access</b> — BAC/PACE derived from the MRZ (passport number, DOB, expiry).</li>
+        <li><b>DG2 portrait</b> — the chip&rsquo;s facial image (<code>skipDG2:&nbsp;false</code>).</li>
+        <li><b>Passive Authentication</b> (<code>doPA</code>) — verifies the Document Security Object signature chains to a CSCA.</li>
+        <li><b>Active Authentication</b> (<code>doAA</code>) — challenge–response proving the chip is genuine, not cloned.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>The binding</h3>
+      <p class="kv">The relay welds the VCIssuer session context — <b>session nonce</b>, <b>target holder-key thumbprint</b>, and <b>audience</b> — into the signed <code>resultToken</code> it returns. That ties this specific chip read to this specific capture session and this specific wallet, so evidence cannot be replayed or re-pointed at another wallet.</p>
+    </div>
+  </div>
+
+  <div class="diagram avoid-break">
+  <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as Passport chip
+  participant PH as iPhone (CoreNFC)
+  participant RL as service-nfc relay
+  participant VC as VCIssuer
+
+  PH->>U: RF field + APDUs (BAC/PACE from MRZ)
+  U-->>PH: encrypted APDU responses
+  PH->>RL: relay APDUs over WebSocket (+ session binding)
+  RL->>U: DG2 read, Passive Auth, Active Auth (via phone)
+  RL-->>PH: signed attestation (resultToken) with binding
+  PH->>VC: submit attestation
+  Note over VC: re-runs Passive Authentication authoritatively<br/>and verifies the welded binding
+  VC-->>VC: accept chip evidence
+  </pre>
+  </div>
+  <figcaption><b>Figure 3.</b> Backend NFC. The phone bridges RF; the relay drives the eMRTD session and signs the result; VCIssuer re-verifies Passive Authentication itself — the client is never trusted to decide.</figcaption>
+</section>
+
+<section class="page-break">
+  <h2>5 · iProov liveness — proving a live human</h2>
+  <p>Before the chip read, PID Capture runs an <b>iProov Genuine Presence Assurance (GPA)</b> capture: a brief,
+  screen-illuminated face scan that proves the user is a real, present person — not a photo, mask, or replay — and
+  binds that live face to the capture session. VCIssuer mints the iProov verify token <b>server-to-server</b> when the
+  session opens, so the client never chooses its own liveness parameters.</p>
+
+  <div class="grid2">
+    <div class="card tint">
+      <h3>Authoritative at the issuer</h3>
+      <p class="kv">The SDK reports only whether the capture <em>completed</em>. The authoritative pass/fail is decided by
+      VCIssuer validating the result against iProov&rsquo;s API — <b>downgrade-closed</b>: if the liveness provider is
+      unconfigured or unreachable, issuance fails rather than proceeding without proof.</p>
+    </div>
+    <div class="card">
+      <h3>Order matters</h3>
+      <p class="kv">Liveness runs <em>first</em>, while the user is already holding the phone up to their face, and the
+      chip read follows. Both are required; a session that is missing its iProov token is rejected before any chip
+      interaction.</p>
+    </div>
+  </div>
+  <div class="note">The live face (DG2 portrait from the chip vs. the GPA capture) and the document authenticity (Passive/Active Authentication) together answer the two questions an issuer must answer before minting person-identification data: <b>is the document genuine</b>, and <b>is the person presenting it the document&rsquo;s subject, live and present</b>.</div>
+</section>
+
+<section class="page-break">
+  <h2>6 · Security properties</h2>
+  <table>
+    <tr><th>Property</th><th>How it is enforced</th></tr>
+    <tr><td><b>Holder-key binding</b></td><td>The PID&rsquo;s <code>cnf</code> is the wallet&rsquo;s P-256 JWK, registered at session creation. Only that wallet&rsquo;s key can later present the credential.</td></tr>
+    <tr><td><b>Session binding &amp; anti-replay</b></td><td>A per-session <b>nonce</b> and the target <b>holder-key thumbprint</b> + <b>audience</b> are welded into the eMRTD attestation and checked by the issuer.</td></tr>
+    <tr><td><b>Genuine companion</b></td><td>The evidence submission carries an <b>App Attest</b> assertion bound to the request body, so VCIssuer can require a real, registered PID Capture instance.</td></tr>
+    <tr><td><b>Authoritative validation</b></td><td>Liveness (iProov, S2S) and Passive Authentication are <b>re-run at the issuer</b>, downgrade-closed. The client is never trusted to decide.</td></tr>
+    <tr><td><b>Short-lived sessions</b></td><td>A capture session accepts evidence for <b>900&nbsp;s</b>, then must be recreated.</td></tr>
+    <tr><td><b>Verified issuance gate</b></td><td>The signing decision is a pure Rust kernel mirrored by a <b>Lean 4</b> model and <b>Tamarin</b> lemmas; only the kernel can authorize a signature. An optional hybrid <b>ES256 + ML-DSA-65</b> (post-quantum) wrapper is available.</td></tr>
+  </table>
+
+  <h2>7 · App Clip &amp; universal-link mechanics</h2>
+  <p>PID Capture claims <code>applinks:pid.advatar.systems</code> (and <code>appclips:pid.advatar.systems</code>). The
+  <code>pid.advatar.systems</code> edge serves the Apple App Site Association at
+  <code>/.well-known/apple-app-site-association</code> for app id <code>L2AF8KFX35.eu.advatar.wallet.pidcapture</code>
+  (and <code>.Clip</code>), so opening <code>https://pid.advatar.systems/pid-capture?session=…</code> launches the
+  installed app — or an <b>App Clip</b> with no App Store install. The same host reverse-proxies the capture API
+  (<code>/v1/pid-capture/*</code>) to the issuer, so the companion resolves everything from one origin.</p>
+  <div class="grid3">
+    <div class="card"><h3>App</h3><div class="kv">Full PID Capture install; universal link opens it directly.</div></div>
+    <div class="card"><h3>App Clip</h3><div class="kv">Instant, install-free; links only CaptureKit to stay under Apple&rsquo;s 15&nbsp;MB budget.</div></div>
+    <div class="card"><h3>Cross-device</h3><div class="kv">A wallet on another device polls the session and receives the PID by credential offer.</div></div>
+  </div>
+
+  <div class="footer">
+    Advatar EUDI Wallet — Cross-Wallet PID Issuance via App Clip. Endpoints: <code>POST /v1/pid-capture/session</code>,
+    <code>GET /v1/pid-capture/{id}</code>, <code>POST /v1/pid-capture/{id}/evidence</code>. Credential configuration
+    <code>eu.europa.ec.eudi.pid_vc_sd_jwt.de</code> · format <code>dc+sd-jwt</code>. Device screens are representative mockups; home screen and QR are live output.
+  </div>
+</section>
+
+<script>
+  // Render the PID Capture QR (encodes the capture front door).
+  try {
+    var qr = qrcode(0, 'M');
+    qr.addData('https://pid.advatar.systems');
+    qr.make();
+    document.getElementById('qr').innerHTML = qr.createSvgTag({ cellSize: 4, margin: 1 });
+  } catch (e) { document.getElementById('qr').textContent = 'QR'; }
+
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      primaryColor: '#eaf2fd', primaryBorderColor: '#1d6fe0', primaryTextColor: '#081b34',
+      lineColor: '#5b6b7d', fontFamily: '-apple-system,Segoe UI,Helvetica,Arial,sans-serif',
+      fontSize: '13px', actorBkg: '#081b34', actorTextColor: '#ffffff', actorBorder: '#081b34',
+      noteBkgColor: '#fff7e6', noteBorderColor: '#b7791f', signalColor: '#12202f', signalTextColor:'#12202f'
+    }
+  });
+</script>
+</body>
+</html>
