@@ -62,8 +62,20 @@ struct ContentView: View {
             if #available(iOS 16.0, *) {
                 QRScannerView { payload in
                     scanning = false
-                    if let url = URL(string: payload), url.scheme?.hasPrefix("http") == true {
-                        model.issuerURL = payload
+                    // A wallet may scan a credential-offer QR directly — display it, no capture.
+                    if let offer = URL(string: payload), offer.scheme == "openid-credential-offer" {
+                        model.handleIncomingOffer(offer)
+                        return
+                    }
+                    // Otherwise treat the QR as the issuer entry point: use only its origin
+                    // (scheme://host[:port]) so any path/query in the code can't corrupt the API base.
+                    if let comps = URLComponents(string: payload),
+                        let scheme = comps.scheme, scheme.hasPrefix("http"),
+                        let host = comps.host
+                    {
+                        var origin = "\(scheme)://\(host)"
+                        if let port = comps.port { origin += ":\(port)" }
+                        model.issuerURL = origin
                     }
                     model.start()
                 }

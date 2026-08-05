@@ -146,7 +146,7 @@ targets:
       path: PIDCapture/PIDCapture.entitlements
       properties:
         com.apple.developer.associated-domains:
-          - applinks:issuer.advatar.systems
+          - applinks:pid.advatar.systems
         com.apple.developer.nfc.readersession.formats:
           - TAG
     sources:
@@ -184,7 +184,7 @@ targets:
         com.apple.developer.parent-application-identifiers:
           - $(AppIdentifierPrefix)eu.advatar.wallet.pidcapture
         com.apple.developer.associated-domains:
-          - appclips:issuer.advatar.systems
+          - appclips:pid.advatar.systems
     sources:
       - path: PIDCaptureClip
     dependencies:

@@ -4,7 +4,7 @@
 <dict>
 	<key>com.apple.developer.associated-domains</key>
 	<array>
-		<string>appclips:issuer.advatar.systems</string>
+		<string>appclips:pid.advatar.systems</string>
 	</array>
 	<key>com.apple.developer.parent-application-identifiers</key>
 	<array>

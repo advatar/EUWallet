@@ -41,7 +41,7 @@ final class TestWalletModel: ObservableObject {
             do {
                 let created = try await client.createSession(holderJwk: holder.publicJwk)
                 self.sessionID = created.sessionID
-                if let url = URL(string: created.invocationURL) {
+                if let url = Self.universalInvocationURL(created.invocationURL) {
                     #if canImport(UIKit)
                         _ = await UIApplication.shared.open(url)  // launch PIDCapture (same device)
                     #endif
@@ -52,6 +52,20 @@ final class TestWalletModel: ObservableObject {
                 self.phase = .failed(error.localizedDescription)
             }
         }
+    }
+
+    /// The issuer mints invocation links on its own origin (`issuer.advatar.systems`), but the
+    /// PIDCapture app claims `applinks:pid.advatar.systems`. Retarget the host so iOS opens the app
+    /// via the universal link instead of dropping to Safari. The `pid.advatar.systems` edge mirrors
+    /// the capture API to the same issuer, so the session still resolves. Only the production issuer
+    /// is retargeted — a local/dev issuer URL is opened as-is.
+    static func universalInvocationURL(_ raw: String) -> URL? {
+        guard var comps = URLComponents(string: raw) else { return nil }
+        if comps.host == "issuer.advatar.systems" {
+            comps.host = "pid.advatar.systems"
+            comps.port = nil
+        }
+        return comps.url
     }
 
     /// Step 3 (cross-device / fallback): poll the session until the PID is issued.

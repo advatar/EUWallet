@@ -4,7 +4,7 @@
 <dict>
 	<key>com.apple.developer.associated-domains</key>
 	<array>
-		<string>applinks:issuer.advatar.systems</string>
+		<string>applinks:pid.advatar.systems</string>
 	</array>
 	<key>com.apple.developer.nfc.readersession.formats</key>
 	<array>
