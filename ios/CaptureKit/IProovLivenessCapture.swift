@@ -19,6 +19,10 @@ public struct IProovLivenessCapture: LivenessCapturing {
             guard let url = URL(string: request.streamingURL) else {
                 throw CaptureProviderError.invalidServerURL
             }
+            // `request.referencePortrait` (the chip's DG2 image) is the 1:1 likeness reference. It is
+            // registered with iProov server-side against this session's token, so the launch below
+            // carries only the token; the SP settles liveness + likeness when VCIssuer validates.
+            // (This SDK version's `launch` takes streamingURL + token.)
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 // IProov presents UI — launch on the main thread.
                 DispatchQueue.main.async {

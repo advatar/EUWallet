@@ -61,10 +61,15 @@ public protocol ChipReader: Sendable {
 public struct LivenessRequest: Sendable {
     public let iproovToken: String
     public let streamingURL: String
+    /// The document (DG2) portrait the live face is matched against 1:1 (likeness). The reference is
+    /// registered with iProov server-side against this session's token; it is carried here because the
+    /// capture order (chip → face) makes the portrait available before the scan runs.
+    public let referencePortrait: Data?
 
-    public init(iproovToken: String, streamingURL: String) {
+    public init(iproovToken: String, streamingURL: String, referencePortrait: Data? = nil) {
         self.iproovToken = iproovToken
         self.streamingURL = streamingURL
+        self.referencePortrait = referencePortrait
     }
 }
 

@@ -59,17 +59,14 @@ public actor CaptureCoordinator {
                 return nil
             }
 
-            // Liveness first (while the user is holding the phone up), then the chip read. Both are
-            // required; VCIssuer validates liveness itself and re-runs Passive Authentication.
-            if let token = params.iproovToken, let streaming = params.iproovStreamingURL {
-                onStage(.capturingLiveness)
-                try await liveness.capture(
-                    LivenessRequest(iproovToken: token, streamingURL: streaming))
-            } else {
+            // The session must offer a liveness token, else fail closed before any capture.
+            guard let token = params.iproovToken, let streaming = params.iproovStreamingURL else {
                 onStage(.failed("session has no iProov capture token"))
                 return nil
             }
 
+            // Read the chip FIRST: its DG2 portrait is the reference for the 1:1 likeness match, so it
+            // must exist before the face scan. VCIssuer re-runs Passive Authentication authoritatively.
             onStage(.readingChip)
             let read = try await chipReader.read(
                 ChipReadRequest(
@@ -78,6 +75,14 @@ public actor CaptureCoordinator {
                     sessionNonce: nonce,
                     holderJkt: holderJkt,
                     audience: audience))
+
+            // Then the liveness scan: iProov GPA proves a live, present human and matches that face 1:1
+            // against the chip's DG2 portrait (registered as the reference server-side for this token).
+            onStage(.capturingLiveness)
+            try await liveness.capture(
+                LivenessRequest(
+                    iproovToken: token, streamingURL: streaming,
+                    referencePortrait: read.portrait))
 
             onStage(.submitting)
             let result = try await client.submitEvidence(
