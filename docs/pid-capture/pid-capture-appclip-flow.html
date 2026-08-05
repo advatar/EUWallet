@@ -121,13 +121,13 @@
   <p>PID Capture decouples <b>who proves the identity</b> from <b>who holds the credential</b>. A wallet that cannot
   itself read a passport chip — a thin wallet, an App-Clip-only experience, or a wallet on another device — opens a
   short-lived <b>capture session</b> bound to its own proof-of-possession key. The companion performs the sensitive
-  capture (liveness + chip), the issuer validates it authoritatively, and the resulting PID is bound to the
+  capture (chip, then liveness + face match), the issuer validates it authoritatively, and the resulting PID is bound to the
   requesting wallet&rsquo;s key. The companion never holds the credential and never sees a signing key.</p>
 
   <div class="grid3">
     <div class="card tint"><h3>1. Bind</h3><div class="kv">The wallet generates a P-256 holder key and opens a session; the PID will be bound to that key&rsquo;s <code>cnf</code>.</div></div>
-    <div class="card tint"><h3>2. Capture</h3><div class="kv">A universal link / App Clip launches PID Capture: iProov liveness, then a chip read over the <code>service-nfc</code> relay.</div></div>
-    <div class="card tint"><h3>3. Issue</h3><div class="kv">VCIssuer re-runs Passive Authentication + validates liveness, then mints the PID and hands it back to the wallet.</div></div>
+    <div class="card tint"><h3>2. Capture</h3><div class="kv">A universal link / App Clip launches PID Capture: a chip read over the <code>service-nfc</code> relay, then an iProov GPA scan that proves liveness and matches the face to the chip portrait.</div></div>
+    <div class="card tint"><h3>3. Issue</h3><div class="kv">VCIssuer re-runs Passive Authentication and validates the liveness + portrait-match verdict, then mints the PID and hands it back to the wallet.</div></div>
   </div>
 
   <h3>Components</h3>
@@ -144,8 +144,8 @@ flowchart LR
   W -->|"1 create session (holder_jwk)"| VC
   W -->|"2 open invocation URL (QR / link)"| EDGE
   EDGE -->|"universal link"| PC
-  PC -->|"3 liveness"| IPROOV
-  PC -->|"4 chip read (APDU relay)"| RELAY
+  PC -->|"3 chip read (APDU relay) → DG2"| RELAY
+  PC -->|"4 liveness + match (portrait ref)"| IPROOV
   PC -->|"5 submit attestation + App Attest"| EDGE
   EDGE --> VC
   VC -->|"validate + mint PID"| VC
@@ -173,18 +173,18 @@ sequenceDiagram
   W->>PC: open invocation_url (universal link / App Clip)
   PC->>VC: GET /v1/pid-capture/{id} (params)
   VC-->>PC: nonce, holder_jkt, audience, iProov token+URL
-  PC->>IP: launch GPA capture (client, with token)
-  IP-->>PC: capture completed
   PC->>NF: read eMRTD (MRZ, nonce, holder_jkt, audience)
-  NF-->>PC: signed attestation (resultToken)
+  NF-->>PC: signed attestation (resultToken) + DG2 portrait
+  PC->>IP: register DG2 as reference, launch GPA
+  IP-->>PC: liveness + 1:1 likeness verdict
   PC->>VC: POST /v1/pid-capture/{id}/evidence {attestation} + App Attest
-  Note over VC: validate liveness (S2S), re-run Passive Auth,<br/>check binding, App Attest → Lean-proved gate
+  Note over VC: validate liveness + likeness (S2S), re-run Passive Auth,<br/>check binding, App Attest → Lean-proved gate
   VC-->>VC: mint PID SD-JWT bound to holder key
   VC-->>W: poll → credential_offer + deep link
   Note over W: wallet ingests / displays the PID
   </pre>
   </div>
-  <figcaption><b>Figure 2.</b> The full capture-to-credential sequence. Steps mirror <code>CaptureCoordinator.run</code> (liveness before chip) and the <code>/v1/pid-capture</code> handlers in the issuer service.</figcaption>
+  <figcaption><b>Figure 2.</b> The full capture-to-credential sequence, in the correct order (chip&nbsp;→&nbsp;GPA so the DG2 portrait is the match reference). The <code>/v1/pid-capture</code> handlers are as shipped; the current <code>CaptureCoordinator.run</code> still runs liveness before the chip, so reordering it to this is a tracked follow-up.</figcaption>
 
   <div class="note"><b>Why this shape?</b> The wallet registers its key <em>first</em>, so the PID is bound to the wallet by construction — there is no redirect chain carrying a bearer credential. The companion only ever produces <em>evidence</em>; the issuer makes the authoritative decision and is the only party that can sign.</div>
 </section>
@@ -234,29 +234,29 @@ sequenceDiagram
       <div class="device"><div class="notch"></div><div class="disp black">
         <div class="sb"><span>9:41</span><span>▟</span></div>
         <div class="body">
-          <div class="cap-title">Face verification…</div>
-          <div class="cap-sub">iProov Genuine Presence Assurance confirms a live, present human.</div>
-          <div class="mk-face"><div class="head"></div><div class="scan"></div></div>
-          <div class="pill grey">Genuine Presence Assurance</div>
-        </div>
-      </div></div>
-      <div class="phone-cap"><b>iProov liveness</b>flashing GPA scan</div>
-    </div>
-
-    <div>
-      <div class="device"><div class="notch"></div><div class="disp black">
-        <div class="sb"><span>9:41</span><span>▟</span></div>
-        <div class="body">
           <div class="cap-title">Reading passport chip…</div>
           <div class="cap-sub">Hold your passport to the top of your iPhone.</div>
           <svg class="mk-nfc" viewBox="0 0 96 96" fill="none" stroke="#3a86ff" stroke-width="4" stroke-linecap="round">
             <rect x="26" y="20" width="30" height="42" rx="4" stroke="#8fb0dd"/>
             <path d="M60 30a20 20 0 0 1 0 34" opacity=".9"/><path d="M68 24a30 30 0 0 1 0 46" opacity=".6"/><path d="M76 18a40 40 0 0 1 0 58" opacity=".35"/>
           </svg>
-          <div class="pill grey">NFC · eMRTD</div>
+          <div class="pill grey">NFC · eMRTD → DG2</div>
         </div>
       </div></div>
-      <div class="phone-cap"><b>NFC chip read</b>relayed to service-nfc</div>
+      <div class="phone-cap"><b>NFC chip read</b>portrait (DG2) + authenticity</div>
+    </div>
+
+    <div>
+      <div class="device"><div class="notch"></div><div class="disp black">
+        <div class="sb"><span>9:41</span><span>▟</span></div>
+        <div class="body">
+          <div class="cap-title">Face verification…</div>
+          <div class="cap-sub">iProov GPA — registered with the chip portrait — proves a live human and matches the face to it.</div>
+          <div class="mk-face"><div class="head"></div><div class="scan"></div></div>
+          <div class="pill grey">Liveness + 1:1 match</div>
+        </div>
+      </div></div>
+      <div class="phone-cap"><b>iProov GPA</b>liveness + likeness</div>
     </div>
 
     <div>
@@ -352,11 +352,15 @@ sequenceDiagram
 </section>
 
 <section class="page-break">
-  <h2>5 · iProov liveness — proving a live human</h2>
-  <p>Before the chip read, PID Capture runs an <b>iProov Genuine Presence Assurance (GPA)</b> capture: a brief,
-  screen-illuminated face scan that proves the user is a real, present person — not a photo, mask, or replay — and
-  binds that live face to the capture session. VCIssuer mints the iProov verify token <b>server-to-server</b> when the
-  session opens, so the client never chooses its own liveness parameters.</p>
+  <h2>5 · iProov — liveness and likeness</h2>
+  <p>Two distinct checks are involved, and separating them explains the order. <b>Liveness</b> (iProov Genuine
+  Presence Assurance) asks <em>&ldquo;is this a real, present human?&rdquo;</em> — a brief, screen-illuminated face
+  scan that resists photos, masks and replays. <b>Likeness</b> (a 1:1 face match) asks <em>&ldquo;is that live face
+  the same person as the passport photo?&rdquo;</em> A likeness check needs a reference photo, and the only
+  trustworthy one is the chip&rsquo;s DG2 portrait — so the chip is read <em>first</em>, its portrait is registered
+  with iProov as the reference, and the GPA scan runs <em>after</em>, settling liveness and likeness in one capture.
+  VCIssuer mints the iProov token <b>server-to-server</b> when the session opens, so the client never chooses its own
+  parameters.</p>
 
   <div class="grid2">
     <div class="card tint">
@@ -366,13 +370,14 @@ sequenceDiagram
       unconfigured or unreachable, issuance fails rather than proceeding without proof.</p>
     </div>
     <div class="card">
-      <h3>Order matters</h3>
-      <p class="kv">Liveness runs <em>first</em>, while the user is already holding the phone up to their face, and the
-      chip read follows. Both are required; a session that is missing its iProov token is rejected before any chip
-      interaction.</p>
+      <h3>Why the chip is read first</h3>
+      <p class="kv">The likeness match needs a reference face, and the authoritative one is the chip&rsquo;s DG2
+      portrait — which only exists after the NFC read. So the sequence is <b>MRZ → NFC (portrait) → GPA</b>: iProov is
+      registered with that portrait and the scan proves a live human <em>and</em> matches it. Running GPA before the
+      chip could only ever prove liveness, never likeness.</p>
     </div>
   </div>
-  <div class="note">The live face (DG2 portrait from the chip vs. the GPA capture) and the document authenticity (Passive/Active Authentication) together answer the two questions an issuer must answer before minting person-identification data: <b>is the document genuine</b>, and <b>is the person presenting it the document&rsquo;s subject, live and present</b>.</div>
+  <div class="note"><b>How the match happens.</b> The chip&rsquo;s DG2 portrait is registered with iProov as the reference; the GPA capture then returns a combined <b>liveness + 1:1 likeness</b> verdict. VCIssuer re-validates that verdict server-to-server and requires it alongside verified Passive/Active Authentication — the Lean-proved gate refuses to mint without <b>portrait-matched liveness</b>. Together they answer the issuer&rsquo;s two questions: <b>is the document genuine</b>, and <b>is the live person its subject</b>.</div>
 </section>
 
 <section class="page-break">
@@ -382,7 +387,7 @@ sequenceDiagram
     <tr><td><b>Holder-key binding</b></td><td>The PID&rsquo;s <code>cnf</code> is the wallet&rsquo;s P-256 JWK, registered at session creation. Only that wallet&rsquo;s key can later present the credential.</td></tr>
     <tr><td><b>Session binding &amp; anti-replay</b></td><td>A per-session <b>nonce</b> and the target <b>holder-key thumbprint</b> + <b>audience</b> are welded into the eMRTD attestation and checked by the issuer.</td></tr>
     <tr><td><b>Genuine companion</b></td><td>The evidence submission carries an <b>App Attest</b> assertion bound to the request body, so VCIssuer can require a real, registered PID Capture instance.</td></tr>
-    <tr><td><b>Authoritative validation</b></td><td>Liveness (iProov, S2S) and Passive Authentication are <b>re-run at the issuer</b>, downgrade-closed. The client is never trusted to decide.</td></tr>
+    <tr><td><b>Authoritative validation</b></td><td>The iProov <b>liveness + likeness</b> verdict (S2S) and Passive Authentication are <b>re-validated at the issuer</b>, downgrade-closed. The client is never trusted to decide.</td></tr>
     <tr><td><b>Short-lived sessions</b></td><td>A capture session accepts evidence for <b>900&nbsp;s</b>, then must be recreated.</td></tr>
     <tr><td><b>Verified issuance gate</b></td><td>The signing decision is a pure Rust kernel mirrored by a <b>Lean 4</b> model and <b>Tamarin</b> lemmas; only the kernel can authorize a signature. An optional hybrid <b>ES256 + ML-DSA-65</b> (post-quantum) wrapper is available.</td></tr>
   </table>
