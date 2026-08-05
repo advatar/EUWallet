@@ -25,6 +25,14 @@ struct AddWebEvidenceView: View {
     @State private var busy = false
     @State private var didStart = false
 
+    // Field-level selective disclosure for JSON/API responses: the leaf fields discovered in the
+    // current page and the subset the holder chooses to disclose (as RFC 6901 JSON Pointers passed to
+    // the prover). Empty ⇒ no field selection made (whole-response default).
+    @State private var disclosureFields: [DisclosureField] = []
+    @State private var selectedDisclosures: Set<String> = []
+    @State private var showFieldPicker = false
+    @State private var fieldsBusy = false
+
     private var initialURL: String {
         #if canImport(TLSNotaryMobile)
             return "https://example.com/"
@@ -61,6 +69,9 @@ struct AddWebEvidenceView: View {
                     dismiss()
                 }
             }
+            .sheet(isPresented: $showFieldPicker) {
+                DisclosureFieldPicker(fields: disclosureFields, selected: $selectedDisclosures)
+            }
         }
     }
 
@@ -89,20 +100,64 @@ struct AddWebEvidenceView: View {
                 Text(status).font(.footnote).foregroundStyle(.secondary)
             }
             #if canImport(TLSNotaryMobile)
-                Button {
-                    Task { await notarizeAndOffer() }
-                } label: {
-                    Label(busy ? "Working…" : "Create web evidence", systemImage: "checkmark.shield")
-                        .frame(maxWidth: .infinity)
+                if !disclosureFields.isEmpty {
+                    Text("Disclosing \(selectedDisclosures.count) of \(disclosureFields.count) fields")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(busy || browser.currentURL?.scheme != "https")
+                HStack(spacing: 8) {
+                    Button {
+                        Task { await loadDisclosureFields() }
+                    } label: {
+                        Label(fieldsBusy ? "Reading…" : "Choose fields", systemImage: "checklist")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(fieldsBusy || browser.currentURL?.scheme != "https")
+
+                    Button {
+                        Task { await notarizeAndOffer() }
+                    } label: {
+                        Label(busy ? "Working…" : "Create web evidence", systemImage: "checkmark.shield")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(busy || browser.currentURL?.scheme != "https")
+                }
             #endif
         }
         .padding()
     }
 
     #if canImport(TLSNotaryMobile)
+        /// Fetch the current page (with the browser's cookies) and, when it is a JSON/API response,
+        /// discover its leaf fields so the holder can pick which to disclose. This preview only
+        /// enumerates the field NAMES; the authoritative bytes are what the prover notarizes, so the
+        /// chosen JSON Pointers are resolved against the real transcript, not this preview.
+        private func loadDisclosureFields() async {
+            guard let url = browser.currentURL else { return }
+            fieldsBusy = true
+            defer { fieldsBusy = false }
+            var request = URLRequest(url: url)
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            if let cookie = await browser.cookieHeader() {
+                request.setValue(cookie, forHTTPHeaderField: "Cookie")
+            }
+            do {
+                let (data, _) = try await URLSession.shared.data(for: request)
+                guard let fields = JSONDisclosure.fields(from: data), !fields.isEmpty else {
+                    status = "Field selection is available for JSON/API responses. "
+                        + "Other pages are notarized whole."
+                    return
+                }
+                disclosureFields = fields
+                // Default to disclosing everything; the holder deselects what to keep private.
+                selectedDisclosures = Set(fields.map(\.pointer))
+                status = ""
+                showFieldPicker = true
+            } catch {
+                status = "Could not read the page for field selection: \(error.localizedDescription)"
+            }
+        }
+
         private func notarizeAndOffer() async {
             guard
                 let url = browser.currentURL,
@@ -123,7 +178,11 @@ struct AddWebEvidenceView: View {
                     holderKey: holder)
                 let cookie = await browser.cookieHeader()
                 let headers = cookie.map { ["Cookie": $0] } ?? [:]
-                let credential = try await client.notarize(url: url, headers: headers)
+                // Pass the holder's chosen fields (RFC 6901 JSON Pointers). Empty ⇒ no selection made,
+                // so the prover's default (whole-response) disclosure applies.
+                let disclosed = disclosureFields.isEmpty ? [] : Array(selectedDisclosures).sorted()
+                let credential = try await client.notarize(
+                    url: url, headers: headers, disclosedFields: disclosed)
                 status = "Preparing wallet offer…"
                 let offer = try await client.prepareWalletOffer(from: credential)
                 model.handleScanned(offer.walletURI.absoluteString)
