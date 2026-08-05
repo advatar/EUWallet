@@ -1342,6 +1342,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "testagent"
+version = "0.0.1"
+dependencies = [
+ "base64ct",
+ "crypto-backend",
+ "serde_json",
+ "wallet-core",
+]
+
+[[package]]
 name = "textwrap"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

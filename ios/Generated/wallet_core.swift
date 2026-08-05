@@ -2934,6 +2934,22 @@ fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
     }
 }
 /**
+ * Exercise a delegated mandate and return a JSON report the TestAgent UI renders.
+ *
+ * `mandate_powers` / `requested_powers` are full power URNs (`urn:eudi:mandate:power:*`).
+ * `requested_powers` is what the on-device model proposed; the wallet decides here.
+ * `human_approved` supplies a fresh HAPP at the required tier for consequential actions.
+ */
+public func exerciseMandate(mandatePowers: [String], requestedPowers: [String], humanApproved: Bool) -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_func_exercise_mandate(
+        FfiConverterSequenceString.lower(mandatePowers),
+        FfiConverterSequenceString.lower(requestedPowers),
+        FfiConverterBool.lower(humanApproved),$0
+    )
+})
+}
+/**
  * Verify both freshly produced signatures before emitting the strict version-2 export artifact.
  */
 public func finalizeExperimentalHybridWalletExport(request: FfiExperimentalHybridExportFinalizeRequest)throws  -> Data {
@@ -3053,6 +3069,9 @@ private var initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_wallet_core_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_wallet_core_checksum_func_exercise_mandate() != 30544) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_func_finalize_experimental_hybrid_wallet_export() != 59142) {
         return InitializationResult.apiChecksumMismatch

@@ -316,6 +316,35 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1"
 
+  # Headless-agent playground: an on-device model (Apple Foundation Models) proposes an action and
+  # the shipped wallet-core delegation/agent engine decides whether the agent may do it. Pure
+  # wallet-core (no iProov/ChipmunkNFC), so it builds and runs on the Simulator.
+  TestAgent:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: TestAgent
+      - path: Generated/wallet_core.swift
+    dependencies:
+      - framework: WalletCore.xcframework
+        embed: false
+        link: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.testagent
+        PRODUCT_NAME: PIDTestAgent
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: "PID Test Agent"
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        DEVELOPMENT_TEAM: L2AF8KFX35
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        OTHER_LDFLAGS: "-lc++"
+
 schemes:
   TestWallet:
     build:
