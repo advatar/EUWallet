@@ -1,0 +1,25 @@
+# TestAgent — a headless CLI to *play with* delegation against the shipped wallet-core engine.
+# Not a production component: it exercises delegation::select_delegated_presentation and
+# agent::AgentSession::act (Epic D1–D3) so you can watch a mandate be selected, exercised within
+# scope, refused out of scope, and gated behind a fresh human approval — with a verifiable receipt
+# chain — without a device or the iOS FFI.
+[package]
+name = "testagent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "testagent"
+path = "src/main.rs"
+
+[dependencies]
+wallet-core = { path = "../wallet-core" }
+crypto-backend = { path = "../crypto-backend" }
+serde_json = { workspace = true }
+base64ct = { workspace = true }
+
+[lints]
+workspace = true
