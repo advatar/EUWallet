@@ -266,6 +266,16 @@ pub fn session_transcript(device_engagement: &[u8], e_reader_key_cose: &[u8]) ->
     .to_canonical()
 }
 
+/// `SessionTranscriptBytes = #6.24(bstr .cbor SessionTranscript)` — the tag-24-wrapped form of the
+/// bytes from [`session_transcript`]. This is the byte string the §9.1.1.4 session-key derivation
+/// hashes for its HKDF salt (`salt = SHA-256(SessionTranscriptBytes)`), and the form a peer reader
+/// expects. Pure CBOR — the key derivation itself (ECDH/HKDF/AEAD) lives in the facade, above this
+/// crypto-free core.
+#[must_use]
+pub fn session_transcript_bytes(session_transcript: &[u8]) -> Vec<u8> {
+    Value::Tag(24, Box::new(Value::Bytes(session_transcript.to_vec()))).to_canonical()
+}
+
 /// Build the real ISO/IEC 18013-5 §9.1.3.4 `DeviceAuthenticationBytes` the device key signs:
 ///
 /// ```text
