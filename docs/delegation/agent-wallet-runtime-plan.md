@@ -66,11 +66,26 @@ The delegation **engine** is shipped and formally gated — the hard part is don
   `POST /v1/doorkeeper/eudi-wallet`.
 - **Custody profiles**: MAWP-1/2/3 are specified (mobile / hosted / brokered-local).
 
-**The gap (precise).** The delegation FFI surface is **read-only**: the only export is
-`agent_mandates_json()` ([`crates/wallet-core/src/lib.rs:7246`](../../crates/wallet-core/src/lib.rs)).
-`AgentSession::act`, `plan_delegated_presentation`, receipts, and revoke are **not** exposed over
-uniffi/FFI, so no shell — and therefore no MCP server or plugin — can *exercise* a mandate yet. That
-is the real work, and every adapter (Agent Plugins included) depends on it.
+**Exercise already works at demo level, driven by two TestAgents.** `exercise_mandate(mandate_powers,
+requested_powers, human_approved) -> String` is exported over uniffi
+([`crates/wallet-core/src/agent_demo.rs:121`](../../crates/wallet-core/src/agent_demo.rs); Swift
+`exerciseMandate` in `ios/Generated/wallet_core.swift`): it runs `select_delegated_presentation` +
+`AgentSession::act` and returns a signed/refused/step-up JSON report. Two clients drive it: a headless
+Rust CLI [`crates/testagent`](../../crates/testagent) and an **iOS `TestAgent`**
+([`ios/TestAgent/`](../../ios/TestAgent)) whose `AgentPlanner` uses Apple **Foundation Models** to
+PROPOSE the powers while wallet-core DECIDES — the "agent ≠ model" demo, already running on the
+simulator. The read path (`agent_mandates_json`) also ships.
+
+**The remaining gap (precise), in priority order:**
+1. **Real minted-mandate exercise.** `exercise_mandate` uses a `fixture_mandate(...)`, not a real
+   held/minted mandate presented over OpenID4VP to a verifier. Wiring a MINTED mandate (from
+   VCIssuer) through a real cross-wallet OID4VP exercise is the substantive runtime step.
+2. **Intent-API generalization.** `exercise_mandate` is narrow (powers-in → receipt-out). The full
+   intent surface (`present`, `delegate`, `revoke`, `requestAuthority`, `stepUp`, `capabilities`,
+   `receipts`) is not all exported yet.
+3. **The adapters don't exist.** There is no MCP server and no Agent Plugin package. The TestAgents
+   call the FFI *directly*; nothing yet speaks MCP or loads a plugin. This is the genuinely-new work
+   that every ecosystem integration (Agent Plugins included) depends on.
 
 ---
 
@@ -125,55 +140,60 @@ All five call the **same runtime**. The Agent Plugin is one row, not the product
 
 ## 4. TestAgent — the client side (answering "can we make TestAgent implement the client side?")
 
-**Yes.** There is no `TestAgent` today (only `ios/TestWallet`, a display-only holder), so this is a
-new, small harness whose job is to be an **Agent-Plugins-compatible client/host**:
+**Yes — and two TestAgents already exist**, they just don't speak the Agent-Plugins client protocol
+yet. Today [`crates/testagent`](../../crates/testagent) (Rust CLI) and
+[`ios/TestAgent/`](../../ios/TestAgent) (SwiftUI; `AgentPlanner` on Apple Foundation Models) call
+`exerciseMandate` on the runtime **directly** over the FFI. The "agent ≠ model" demo — the on-device
+model proposes powers, wallet-core decides — already runs.
+
+The new client-side work is to make a TestAgent an **Agent-Plugins-compatible host** rather than a
+direct FFI caller:
 
 1. Load a plugin package (a directory with `skills/*/SKILL.md` + `mcp.json`) — the v1 format.
-2. Launch/connect the declared **MCP server** (the Mandamus adapter).
-3. Expose the skills to a model loop and let it call the intent tools.
-4. Drive the demo: pair with the EU Wallet, receive a mandate, `execute`, hit a policy denial, request
+2. Launch/connect the declared **MCP server** (the Mandamus adapter, §5 P2).
+3. Expose the skills to the (already-wired) model loop and route its tool calls through MCP instead of
+   the direct FFI.
+4. Drive the demo through that path: pair, receive a mandate, `execute`, hit a policy denial, request
    step-up, inspect a receipt.
 
-**What's buildable now vs blocked:**
-- **Now (read-only):** the client can install the plugin, connect to the MCP server, and call
-  `identity()` / `capabilities()` / `credentials.list()` / `receipts.list()` — these map onto the
-  existing read FFI (`agent_mandates_json`) + the parsed mandate.
-- **Blocked on P1 (below):** `execute` / `present` / `delegate` / `revoke` / `stepUp` need the
-  exercise FFI exports first. Until then the client can *display* authority and *dry-run*
-  `authority.check`, but cannot perform a signed action.
+So the client side is **incremental**: the agents, the model-proposes/wallet-decides split, and the
+exercise call all exist; what's added is the MCP client + plugin loader so the SAME agent works
+against the runtime through the portable Agent-Plugins surface (proving the runtime-with-adapters
+thesis, not just a bespoke FFI demo).
 
-Form factor: a small Rust or TypeScript CLI is the cheapest honest "arbitrary agent" (installs the
-plugin, speaks MCP). It is deliberately **not** the wallet — it holds no keys; it talks to the runtime.
+The cheapest first host is the existing Rust CLI (add an MCP client + plugin loader); the iOS TestAgent
+follows. Either way the agent holds no keys — it talks to the runtime.
 
 ---
 
 ## 5. Phased plan
 
-**P0 — Runtime API shape + read-only MCP + TestAgent skeleton** *(days)*
-- Define the intent structs (`Intent`, `Decision = Permitted | Denied{reason} | StepUpRequired`,
-  `ActionReceipt`) as the stable contract.
-- Export the **read** intents over uniffi (`identity`, `capabilities`, `credentials.list`,
-  `authority.check` dry-run, `receipts.list`).
-- Ship a minimal **MCP server** (the Mandamus adapter) exposing those read tools.
-- Ship the **TestAgent** client: installs a plugin dir, connects MCP, lists identity/capabilities.
-- *Accept:* TestAgent installs the plugin and prints the agent's identity + current capabilities from
-  a real held mandate. No key use yet.
+**P0 — DONE (already shipped).** The exercise engine (`delegation.rs` + `agent.rs`, Lean-proved
+narrowing), a demo exercise FFI (`exercise_mandate`), the read FFI (`agent_mandates_json`), and two
+direct-FFI TestAgents (Rust CLI + iOS/Foundation-Models) all exist. The model-proposes / wallet-decides
+demo runs on the simulator. What P0 leaves open is only that it is FIXTURE-mandate and DIRECT-FFI, not
+minted-mandate and not adapter-mediated.
 
-**P1 — The exercise FFI (the real work)** *(the bulk of the effort)*
-- Export `execute` (→ `AgentSession::act` + `ReceiptLog`), `present` (→ `plan_delegated_presentation`),
-  `delegate` (monotonic narrowing), `revoke`, `stepUp` over uniffi — the privileged intents.
-- Route every privileged intent through the **policy gate** (`DelegationPlan::covers` + the
-  Lean-proved kernel) inside the runtime — the model's request is *evidence*, never the decision.
-- WYSIWYS binding on `execute`/`present` (reuse the operationId + authorizationHash pattern).
-- *Accept:* an `execute` within scope yields a signed `ActionReceipt`; an out-of-scope `execute` is
-  `Denied` with the mandate delta; `receipts.verify()` validates the chain. All in `e2e_*` tests.
+**P1 — Real minted-mandate exercise + intent-API generalization** *(the substantive runtime work)*
+- Replace `exercise_mandate`'s `fixture_mandate` with a REAL held/minted mandate (from VCIssuer)
+  presented over OpenID4VP to a verifier; keep the same narrowing gate + receipt.
+- Generalize the demo FFI into the full intent surface over uniffi: `execute` (→ `AgentSession::act`
+  + `ReceiptLog`), `present` (→ `plan_delegated_presentation`), `capabilities`, `authority.check`
+  (dry-run), `delegate` (monotonic narrowing), `revoke`, `stepUp`, `receipts`.
+- Every privileged intent routes through the policy gate (`DelegationPlan::covers` + the Lean-proved
+  kernel) — the model's request is *evidence*, never the decision. WYSIWYS on `execute`/`present`.
+- *Accept:* an in-scope `execute` on a MINTED mandate yields a signed `ActionReceipt`; out-of-scope is
+  `Denied` with the mandate delta; `receipts.verify()` validates the chain — in `e2e_*` tests.
 
-**P2 — Agent Plugin package + privileged MCP + TestAgent end-to-end** *(days)*
-- Author the plugin: `skills/{request-authority,prove-authority,request-step-up,show-receipts}` +
-  `mcp.json`.
-- Expose the privileged intents as MCP tools (broker-gated).
-- TestAgent drives the full loop against a real agent key (MAWP-3 brokered-local first).
-- *Accept:* install → pair → delegate → act → exceed → deny → step-up → receipt, end to end.
+**P2 — Adapters: MCP server + Agent Plugin package + host the existing TestAgent on it** *(days; genuinely new)*
+- Build the **MCP server** (the Mandamus adapter) exposing the intents as tools (privileged ones
+  broker-gated).
+- Author the **Agent Plugin** package: `skills/{request-authority,prove-authority,request-step-up,
+  show-receipts}` + `mcp.json`.
+- Add an MCP client + plugin loader to the existing Rust TestAgent so it drives the runtime through
+  the portable surface instead of the direct FFI (then the iOS TestAgent).
+- *Accept:* install the plugin into the TestAgent → pair → delegate → act → exceed → deny → step-up →
+  receipt, end to end, entirely over MCP/plugin (no direct FFI) — proving the runtime-with-adapters thesis.
 
 **P3 — Custody + attestation per MAWP** *(parallelizable)*
 - MAWP-1 Secure Enclave + App Attest (mobile); MAWP-2 KMS/HSM/TEE (hosted/web); MAWP-3 `mandamusd`
