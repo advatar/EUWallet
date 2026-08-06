@@ -25,7 +25,11 @@ use serde::{Deserialize, Serialize};
 // documentName) — WITHOUT it those fields stay snake_case and the generated bindings, whose keys are
 // camelCase, fail to decode `dcApiConsent`/`proximityConsent`/`pinPreparation`/`nfcReady`. Mirrors
 // the same attribute on wallet-core's `Event`/`Effect` enums.
-#[serde(tag = "screen", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "screen",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ScreenDescription {
     Loading,
     Error {

@@ -130,7 +130,8 @@ fn demo_pid_mdoc_issues_and_stores() {
         .expect("demo WUA loads");
 
     // Offer (mso_mdoc) → issuance review → accept → RequestToken.
-    let offer = br#"{"format":"mso_mdoc","grant":"pre-authorized","tx_code_required":false}"#.to_vec();
+    let offer =
+        br#"{"format":"mso_mdoc","grant":"pre-authorized","tx_code_required":false}"#.to_vec();
     let review = core.handle_event(Event::CredentialOfferReceived {
         offer,
         issuer_cert_chain: s.issuer_cert_chain.clone(),
@@ -143,10 +144,16 @@ fn demo_pid_mdoc_issues_and_stores() {
         }]
     ));
     let fx = core.handle_event(Event::CredentialOfferAccepted);
-    assert!(fx.contains(&Effect::RequestToken), "expected RequestToken, got {fx:?}");
+    assert!(
+        fx.contains(&Effect::RequestToken),
+        "expected RequestToken, got {fx:?}"
+    );
 
     // Token → proof-of-possession Sign → device signs → RequestCredential.
-    let fx = core.handle_event(Event::TokenReceived { bound: true, c_nonce: 111 });
+    let fx = core.handle_event(Event::TokenReceived {
+        bound: true,
+        c_nonce: 111,
+    });
     let signing_input = fx
         .iter()
         .find_map(|e| match e {
@@ -155,9 +162,12 @@ fn demo_pid_mdoc_issues_and_stores() {
         })
         .expect("proof key attested → Sign effect");
     let proof_sig = wallet.sign_device(signing_input);
-    let fx = core.handle_event(Event::DeviceSignatureProduced { signature: proof_sig });
+    let fx = core.handle_event(Event::DeviceSignatureProduced {
+        signature: proof_sig,
+    });
     assert!(
-        fx.iter().any(|e| matches!(e, Effect::RequestCredential { .. })),
+        fx.iter()
+            .any(|e| matches!(e, Effect::RequestCredential { .. })),
         "expected RequestCredential, got {fx:?}"
     );
 
@@ -193,9 +203,14 @@ fn demo_pid_mdoc_issues_and_stores() {
         .expect("a terminal Close");
     let ready_index = effects
         .iter()
-        .position(|e| matches!(e, Effect::Render {
-            screen: presenter::ScreenDescription::IssuanceReady(_)
-        }))
+        .position(|e| {
+            matches!(
+                e,
+                Effect::Render {
+                    screen: presenter::ScreenDescription::IssuanceReady(_)
+                }
+            )
+        })
         .expect("an IssuanceReady render");
     assert!(
         ready_index < close_index,

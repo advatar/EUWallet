@@ -365,13 +365,15 @@ fn full_issuance_with_in_core_trust_and_attestation() {
         .iter()
         .position(|effect| matches!(effect, Effect::Close))
         .expect("a terminal Close");
-    let ready_index = effects.iter().position(|effect| matches!(
-        effect,
-        Effect::Render {
-            screen: presenter::ScreenDescription::IssuanceReady(document)
-        } if document.status == presenter::DocumentStatus::Ready
-            && document.issuer_name == "Verified credential issuer"
-    ));
+    let ready_index = effects.iter().position(|effect| {
+        matches!(
+            effect,
+            Effect::Render {
+                screen: presenter::ScreenDescription::IssuanceReady(document)
+            } if document.status == presenter::DocumentStatus::Ready
+                && document.issuer_name == "Verified credential issuer"
+        )
+    });
     assert!(
         ready_index.is_some_and(|ready| ready < close_index),
         "IssuanceReady must render before the terminal Close, got {effects:?}"
