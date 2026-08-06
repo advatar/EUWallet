@@ -82,7 +82,9 @@ pub enum SubPresentation {
     },
     Mdoc {
         doctype: String,
-        issuer_signed: mdoc::IssuerSigned,
+        // Boxed: `IssuerSigned` is by far the largest field, so keeping it inline made this variant
+        // dwarf `SdJwt` (clippy::large_enum_variant). Boxing keeps `SubPresentation` compact.
+        issuer_signed: Box<mdoc::IssuerSigned>,
         device_namespaces: Vec<u8>,
         /// The COSE protected header the device signature is produced under (reassembled into the
         /// detached-payload `CoseSign1`).
@@ -593,7 +595,7 @@ pub fn step(state: &State, input: &Input, env: &Env) -> (State, Vec<Output>) {
                             cose::sig_structure(&protected_header, &[], &device_auth);
                         queue.push(SubPresentation::Mdoc {
                             doctype: doctype.clone(),
-                            issuer_signed: issuer_signed.clone(),
+                            issuer_signed: Box::new(issuer_signed.clone()),
                             device_namespaces: device_namespaces.clone(),
                             protected_header,
                             signing_input,

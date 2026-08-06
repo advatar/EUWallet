@@ -621,6 +621,49 @@ fn mdoc_device_binding_matches(device_key: &cose::cbor::Value, key: &[u8]) -> bo
         && matches!(y, Some(Value::Bytes(bytes)) if bytes.as_slice() == &key[33..65])
 }
 
+/// Private-use COSE unprotected-header labels the VCIssuer capture mdoc uses to carry the
+/// experimental hybrid-PQ ML-DSA-65 signature + public key over the same COSE `Sig_structure` as the
+/// ES256 `issuerAuth` signature. Kept in sync with VCIssuer's `issue_mdoc`.
+#[cfg(feature = "experimental-pq")]
+const HYBRID_PQ_MDOC_SIGNATURE_LABEL: i64 = -65537;
+#[cfg(feature = "experimental-pq")]
+const HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL: i64 = -65538;
+
+/// Verify the OPTIONAL experimental hybrid-PQ ML-DSA-65 signature an mdoc `issuerAuth` may carry in
+/// its unprotected header. The signature covers the SAME COSE `Sig_structure` as the ES256 signature
+/// the caller already verified. Contract:
+/// - neither label present  → classical mdoc, nothing to check (`Ok`);
+/// - both present + valid    → hybrid signature verified (`Ok`);
+/// - both present + invalid  → reject (`SignatureInvalid`);
+/// - exactly one present     → malformed (reject).
+///
+/// Opportunistic by design: a classical (ES256-only) mdoc is still accepted, so an attacker who
+/// STRIPS the PQ labels only removes the PQ protection — they never forge (the ES256 signature still
+/// gates issuance). Making the PQ signature MANDATORY for a hybrid-profiled credential is a
+/// profile-level follow-up (mirror the issuer's `require_hybrid_pq`).
+#[cfg(feature = "experimental-pq")]
+fn verify_optional_hybrid_pq_issuer_auth(
+    issued: &mdoc::IssuerSigned,
+) -> Result<(), CredentialIngestionError> {
+    let unprotected = &issued.issuer_auth.unprotected;
+    let signature = unprotected.private_label(HYBRID_PQ_MDOC_SIGNATURE_LABEL);
+    let public_key = unprotected.private_label(HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL);
+    match (signature, public_key) {
+        (None, None) => Ok(()),
+        (Some(signature), Some(public_key)) => {
+            let payload = issued
+                .issuer_auth
+                .payload
+                .as_ref()
+                .ok_or(CredentialIngestionError::MalformedCredential)?;
+            let signed = cose::sig_structure(&issued.issuer_auth.protected, &[], payload);
+            crypto_backend::experimental_pq::verify_ml_dsa_65(public_key, &signed, signature)
+                .map_err(|_| CredentialIngestionError::SignatureInvalid)
+        }
+        _ => Err(CredentialIngestionError::MalformedCredential),
+    }
+}
+
 fn mdoc_validity(
     validity: &mdoc::ValidityInfo,
     now: i64,
@@ -3828,6 +3871,12 @@ impl Core {
             Alg::Es256,
         )
         .map_err(|_| CredentialIngestionError::SignatureInvalid)?;
+        // If the issuerAuth ALSO carries an experimental hybrid-PQ ML-DSA-65 signature (over the same
+        // Sig_structure), actively verify it. Absent → classical mdoc (unchanged); present-but-bad →
+        // reject. Only compiled with the experimental-pq feature (the iOS xcframework build enables
+        // it); a classical build simply relies on the ES256 signature above.
+        #[cfg(feature = "experimental-pq")]
+        verify_optional_hybrid_pq_issuer_auth(&issuer_signed)?;
         if mso.version != "1.0" || mso.digest_algorithm != "SHA-256" || mso.doc_type.is_empty() {
             return Err(CredentialIngestionError::MalformedCredential);
         }
@@ -4032,7 +4081,10 @@ impl Core {
                     let ready = Effect::Render {
                         screen: ScreenDescription::IssuanceReady(document),
                     };
-                    match effects.iter().position(|effect| matches!(effect, Effect::Close)) {
+                    match effects
+                        .iter()
+                        .position(|effect| matches!(effect, Effect::Close))
+                    {
                         Some(close_index) => effects.insert(close_index, ready),
                         None => effects.push(ready),
                     }
@@ -8206,5 +8258,133 @@ mod structured_sdjwt_tests {
             assert!((1..=i64::MAX as u64).contains(&first));
             assert_eq!(second, first + 1);
         }
+    }
+}
+
+#[cfg(all(test, feature = "experimental-pq"))]
+mod hybrid_pq_mdoc_verification_tests {
+    use super::{
+        verify_optional_hybrid_pq_issuer_auth, HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL,
+        HYBRID_PQ_MDOC_SIGNATURE_LABEL,
+    };
+    use cose::cbor::Value;
+    use crypto_backend::experimental_pq::MlDsa65SecretKey;
+    use crypto_backend::{AwsLc, SoftwareSigner};
+    use crypto_traits::{Alg, KeyRef};
+    use mdoc::{build_and_sign, IssuerSignedItem, ValidityInfo};
+    use std::collections::BTreeMap;
+
+    fn signed_mdoc() -> mdoc::IssuerSigned {
+        let issuer = SoftwareSigner::generate_p256().unwrap();
+        let device = SoftwareSigner::generate_p256().unwrap();
+        let device_pub = device.public_key_raw();
+        let device_key = Value::Map(vec![
+            (Value::Uint(1), Value::Uint(2)),
+            (Value::Nint(0), Value::Uint(1)),
+            (Value::Nint(1), Value::Bytes(device_pub[1..33].to_vec())),
+            (Value::Nint(2), Value::Bytes(device_pub[33..65].to_vec())),
+        ]);
+        let mut name_spaces = BTreeMap::new();
+        name_spaces.insert(
+            "eu.europa.ec.eudi.pid.1".to_string(),
+            vec![IssuerSignedItem {
+                digest_id: 0,
+                random: vec![0x11; 16],
+                element_id: "age_over_18".into(),
+                element_value: Value::Bool(true),
+            }],
+        );
+        build_and_sign(
+            name_spaces,
+            "eu.europa.ec.eudi.pid.1",
+            device_key,
+            ValidityInfo {
+                signed: "2026-01-01T00:00:00Z".into(),
+                valid_from: "2026-01-01T00:00:00Z".into(),
+                valid_until: "2035-01-01T00:00:00Z".into(),
+            },
+            &AwsLc,
+            &issuer,
+            &KeyRef("issuer".into()),
+            Alg::Es256,
+        )
+        .unwrap()
+    }
+
+    /// Sign the mdoc's COSE Sig_structure with an ML-DSA-65 key and inject both hybrid-PQ labels.
+    fn add_hybrid_pq(issued: &mut mdoc::IssuerSigned, pq: &MlDsa65SecretKey) {
+        let payload = issued.issuer_auth.payload.clone().unwrap();
+        let tbs = cose::sig_structure(&issued.issuer_auth.protected, &[], &payload);
+        let signature = pq.sign(&tbs).unwrap();
+        issued
+            .issuer_auth
+            .unprotected
+            .private_labels
+            .push((HYBRID_PQ_MDOC_SIGNATURE_LABEL, signature));
+        issued
+            .issuer_auth
+            .unprotected
+            .private_labels
+            .push((HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL, pq.public_key()));
+    }
+
+    #[test]
+    fn valid_hybrid_pq_signature_verifies() {
+        let pq = MlDsa65SecretKey::generate().unwrap();
+        let mut issued = signed_mdoc();
+        add_hybrid_pq(&mut issued, &pq);
+        assert!(verify_optional_hybrid_pq_issuer_auth(&issued).is_ok());
+    }
+
+    #[test]
+    fn classical_mdoc_without_pq_labels_is_accepted() {
+        assert!(verify_optional_hybrid_pq_issuer_auth(&signed_mdoc()).is_ok());
+    }
+
+    #[test]
+    fn tampered_hybrid_pq_signature_is_rejected() {
+        let pq = MlDsa65SecretKey::generate().unwrap();
+        let mut issued = signed_mdoc();
+        add_hybrid_pq(&mut issued, &pq);
+        let entry = issued
+            .issuer_auth
+            .unprotected
+            .private_labels
+            .iter_mut()
+            .find(|(label, _)| *label == HYBRID_PQ_MDOC_SIGNATURE_LABEL)
+            .unwrap();
+        entry.1[0] ^= 0xff;
+        assert!(verify_optional_hybrid_pq_issuer_auth(&issued).is_err());
+    }
+
+    #[test]
+    fn hybrid_pq_signature_from_a_different_key_is_rejected() {
+        let pq = MlDsa65SecretKey::generate().unwrap();
+        let other = MlDsa65SecretKey::generate().unwrap();
+        let mut issued = signed_mdoc();
+        add_hybrid_pq(&mut issued, &pq);
+        // Swap in an unrelated public key — the signature no longer verifies against it.
+        let entry = issued
+            .issuer_auth
+            .unprotected
+            .private_labels
+            .iter_mut()
+            .find(|(label, _)| *label == HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL)
+            .unwrap();
+        entry.1 = other.public_key();
+        assert!(verify_optional_hybrid_pq_issuer_auth(&issued).is_err());
+    }
+
+    #[test]
+    fn half_present_pq_material_is_rejected() {
+        let pq = MlDsa65SecretKey::generate().unwrap();
+        let mut issued = signed_mdoc();
+        add_hybrid_pq(&mut issued, &pq);
+        issued
+            .issuer_auth
+            .unprotected
+            .private_labels
+            .retain(|(label, _)| *label != HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL);
+        assert!(verify_optional_hybrid_pq_issuer_auth(&issued).is_err());
     }
 }

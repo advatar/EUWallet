@@ -168,6 +168,30 @@ fn check_certificate_size(certificate: &[u8], total: &mut usize) -> Result<(), C
 pub struct UnprotectedHeader {
     pub kid: Option<Vec<u8>>,
     pub x5chain: Option<Box<X5Chain>>,
+    /// Private-use (negative integer) labelled byte-string entries retained verbatim. COSE permits
+    /// unknown, non-critical unprotected labels; this profile does not act on them, but retains
+    /// private-use labels so a caller can read a profile extension it understands — e.g. an
+    /// experimental hybrid-PQ mdoc `issuerAuth` carrying an ML-DSA-65 signature — without this crate
+    /// needing to know what they mean. Bounded (see `MAX_PRIVATE_LABELS` / per-entry cap). Retained
+    /// for READ only; not re-emitted by `to_value`.
+    pub private_labels: Vec<(i64, Vec<u8>)>,
+}
+
+/// Upper bound on retained private-use unprotected entries, and on each entry's byte length, so a
+/// crafted header cannot force unbounded retention. Comfortably covers an ML-DSA-65 signature
+/// (3309 bytes) + public key (1952 bytes).
+const MAX_PRIVATE_LABELS: usize = 8;
+const MAX_PRIVATE_LABEL_BYTES: usize = 64 * 1024;
+
+impl UnprotectedHeader {
+    /// The byte-string value of a retained private-use (negative) integer label, if present.
+    #[must_use]
+    pub fn private_label(&self, label: i64) -> Option<&[u8]> {
+        self.private_labels
+            .iter()
+            .find(|(candidate, _)| *candidate == label)
+            .map(|(_, value)| value.as_slice())
+    }
 }
 
 /// A COSE_Sign1 message. `protected` is the *serialized* protected-header byte string exactly
@@ -315,10 +339,29 @@ fn parse_unprotected_header(value: &Value) -> Result<UnprotectedHeader, CoseErro
         .map(X5Chain::from_value)
         .transpose()?
         .map(Box::new);
-    // Unknown unprotected labels are permitted by COSE because they are not declared critical.
-    // This profile ignores and does not re-emit them. Every supported label is parsed above;
-    // unknown labels named by protected `crit` still fail closed in the protected parser.
-    Ok(UnprotectedHeader { kid, x5chain })
+    // Unknown unprotected labels are permitted by COSE because they are not declared critical. Every
+    // supported label is parsed above; unknown labels named by protected `crit` still fail closed in
+    // the protected parser. We RETAIN bounded private-use (negative) byte-string labels so a caller
+    // can read a profile extension it understands (e.g. a hybrid-PQ mdoc signature); everything else
+    // is still ignored and not re-emitted.
+    let mut private_labels = Vec::new();
+    for (key, value) in pairs {
+        let (Ok(label), Value::Bytes(bytes)) = (integer_label(key), value) else {
+            continue;
+        };
+        if label >= 0 || bytes.len() > MAX_PRIVATE_LABEL_BYTES {
+            continue;
+        }
+        if private_labels.len() >= MAX_PRIVATE_LABELS {
+            break;
+        }
+        private_labels.push((label, bytes.clone()));
+    }
+    Ok(UnprotectedHeader {
+        kid,
+        x5chain,
+        private_labels,
+    })
 }
 
 fn check_header_collisions(

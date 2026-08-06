@@ -95,6 +95,7 @@ fn unprotected_x5chain_wire_shape_is_preserved_as_untrusted_evidence() {
             UnprotectedHeader {
                 kid: Some(b"issuer-key".to_vec()),
                 x5chain: Some(Box::new(chain.clone())),
+                ..Default::default()
             },
         )
         .expect("sign");
@@ -105,6 +106,54 @@ fn unprotected_x5chain_wire_shape_is_preserved_as_untrusted_evidence() {
             .verify(&crypto, Alg::Es256, b"issuer-pub", &[], None)
             .expect("verify");
     }
+}
+
+#[test]
+fn private_use_unprotected_labels_are_retained_for_profile_extensions() {
+    let crypto = StubCrypto;
+    let message = CoseSign1::sign(
+        &crypto,
+        &KeyRef("issuer".into()),
+        Alg::Es256,
+        b"payload",
+        &[],
+        UnprotectedHeader {
+            kid: Some(b"issuer-key".to_vec()),
+            ..Default::default()
+        },
+    )
+    .expect("sign");
+    // Inject a private-use (negative) label with a byte-string value into the unprotected map — the
+    // shape an issuer uses for a profile extension it understands (e.g. a hybrid-PQ mdoc ML-DSA-65
+    // signature), plus a NON-negative label that must NOT be retained.
+    let mut value = message.to_value();
+    let array = match &mut value {
+        Value::Tag(_, inner) => match inner.as_mut() {
+            Value::Array(items) => items,
+            _ => panic!("COSE_Sign1 body must be an array"),
+        },
+        Value::Array(items) => items,
+        _ => panic!("unexpected COSE_Sign1 shape"),
+    };
+    let Value::Map(unprotected) = &mut array[1] else {
+        panic!("unprotected header must be a map");
+    };
+    // `Nint(65536)` is the CBOR encoding of the integer label -65537.
+    unprotected.push((Value::Nint(65536), Value::Bytes(vec![0xAB; 3309])));
+    unprotected.push((Value::Uint(200), Value::Bytes(vec![0xCD])));
+
+    let parsed = CoseSign1::from_value(&value).expect("parse");
+    // The private-use negative label is retained verbatim for the caller to interpret.
+    assert_eq!(
+        parsed.unprotected.private_label(-65537),
+        Some(&vec![0xAB; 3309][..])
+    );
+    // A non-negative unknown label is NOT retained (private-use range only).
+    assert_eq!(parsed.unprotected.private_label(200), None);
+    // The extra unprotected entries are outside the Sig_structure, so the signature still verifies.
+    parsed
+        .verify(&crypto, Alg::Es256, b"issuer-pub", &[], None)
+        .expect("verify");
 }
 
 #[test]
