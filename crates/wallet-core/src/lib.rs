@@ -36,6 +36,7 @@ pub mod delegation;
 /// behalf, over an attested keystore. The Mandamus/WAUTH runtime twin. See D7 in docs/delegation.
 pub mod agent;
 pub mod agent_demo;
+pub mod proximity_session;
 
 /// Which flow the wallet is currently driving, so a device signature is routed to the right
 /// machine (presentation's key-binding JWT vs. payment's SCA authentication code).
@@ -47,6 +48,40 @@ enum ActiveFlow {
     Issuance,
     Qes,
     WalletTransfer,
+    /// In-person mdoc presentation over BLE/NFC/QR (ISO 18013-5).
+    Proximity,
+}
+
+/// In-person (ISO 18013-5) proximity-flow state: the sans-IO `iso18013-5` state machine plus the
+/// ephemeral crypto the facade owns above it — the device agreement key generated at engagement
+/// and, once the reader replies, the derived SessionData cipher. Manual `Debug` keeps key material
+/// out of logs.
+struct ProximityFlow {
+    state: iso18013_5::State,
+    /// EDeviceKey — the ephemeral P-256 agreement key whose public half goes into DeviceEngagement.
+    device_key: Option<crypto_backend::P256AgreementKey>,
+    /// The AES-256-GCM SessionData cipher, derived once the reader's EReaderKey arrives.
+    cipher: Option<proximity_session::SessionCipher>,
+}
+
+impl ProximityFlow {
+    fn idle() -> Self {
+        Self {
+            state: iso18013_5::State::Idle,
+            device_key: None,
+            cipher: None,
+        }
+    }
+}
+
+impl core::fmt::Debug for ProximityFlow {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ProximityFlow")
+            .field("state", &self.state)
+            .field("has_device_key", &self.device_key.is_some())
+            .field("has_cipher", &self.cipher.is_some())
+            .finish()
+    }
 }
 
 /// Failure classes the native shells can report for a correlated operation. Values are deliberately
@@ -1353,6 +1388,20 @@ pub enum Event {
         /// The transfer nonce.
         nonce: u64,
     },
+    /// Begin in-person (ISO 18013-5) presentation: the shell supplies the ephemeral BLE service
+    /// UUID (16 bytes) it will advertise; the core generates EDeviceKey and returns the
+    /// DeviceEngagement to broadcast.
+    ProximityEngagementRequested {
+        ble_uuid: Vec<u8>,
+    },
+    /// The in-person reader's `SessionEstablishment` (CBOR: `{ eReaderKey, data }`). The core
+    /// extracts the reader ephemeral key, performs ECDH + HKDF to derive the SessionData keys, and
+    /// binds the SessionTranscript.
+    ProximityReaderEstablishment {
+        session_establishment: Vec<u8>,
+    },
+    /// The in-person reader ended the transaction (SessionData status 20 / transport close).
+    ProximityReaderTermination,
 }
 
 /// Everything the core asks the shell to do (serialised to JSON at the FFI boundary).
@@ -1419,6 +1468,10 @@ pub enum Effect {
     /// Publish a wallet-to-wallet receive offer over the peer transport: this wallet's key (the
     /// binding the sender must target). The shell adds a fresh nonce + BLE/QR transport (TS09).
     PublishTransferOffer { offered_key: Vec<u8> },
+    /// Broadcast the ISO 18013-5 `DeviceEngagement` (over BLE peripheral-server / NFC / a QR code).
+    EmitDeviceEngagement { engagement: Vec<u8> },
+    /// Send the in-person `SessionData` (the AES-256-GCM-encrypted DeviceResponse) back to the reader.
+    EmitDeviceResponse { response: Vec<u8> },
     /// Tear down the exchange.
     Close,
 }
@@ -1515,6 +1568,8 @@ pub struct Core {
     // Wallet-to-wallet receive (TS09): the receiver machine + the credential it accepted.
     w2w: w2w::State,
     w2w_credential: Option<Vec<u8>>,
+    // In-person proximity presentation (ISO 18013-5): the sans-IO machine + facade-owned session crypto.
+    proximity: ProximityFlow,
 }
 
 impl Core {
@@ -1563,6 +1618,7 @@ impl Core {
             qes_consent_hash: [0u8; 32],
             w2w: w2w::State::Idle,
             w2w_credential: None,
+            proximity: ProximityFlow::idle(),
         }
     }
 
@@ -2166,6 +2222,9 @@ impl Core {
             ActiveFlow::WalletTransfer => {
                 self.w2w = w2w::State::Idle;
             }
+            ActiveFlow::Proximity => {
+                self.proximity = ProximityFlow::idle();
+            }
             ActiveFlow::None => {}
         }
         if self.active == flow {
@@ -2208,6 +2267,12 @@ impl Core {
             }
             ActiveFlow::Qes => {
                 self.qes_consent_hash = [0u8; 32];
+            }
+            ActiveFlow::Proximity => {
+                // Scrub the ephemeral session crypto; the terminal machine state is preserved (like
+                // the other flows) for diagnostics.
+                self.proximity.device_key = None;
+                self.proximity.cipher = None;
             }
             ActiveFlow::WalletTransfer | ActiveFlow::None => {}
         }
@@ -2461,6 +2526,10 @@ impl Core {
                 }))
             }
             Event::UserConsented => {
+                // In-person (18013-5) consent drives its own machine, not the OID4VP `vp` one.
+                if self.active == ActiveFlow::Proximity {
+                    return self.drive_proximity(iso18013_5::Input::ConsentGranted);
+                }
                 // Preserve an already-terminal state when the shell races a stale UI event after
                 // an earlier fail-closed abort (for example, no complete eligible selection).
                 if self.active != ActiveFlow::Presentation {
@@ -2491,6 +2560,9 @@ impl Core {
                 }
             }
             Event::UserDeclined => {
+                if self.active == ActiveFlow::Proximity {
+                    return self.drive_proximity(iso18013_5::Input::ConsentDeclined);
+                }
                 self.pending_status_references.clear();
                 let effects = self.drive(Input::ConsentDeclined);
                 if matches!(self.vp, State::Aborted(AbortReason::UserDeclined)) {
@@ -2515,6 +2587,9 @@ impl Core {
                     } else {
                         self.drive(Input::DeviceSignatureProduced(signature))
                     }
+                }
+                ActiveFlow::Proximity => {
+                    self.drive_proximity(iso18013_5::Input::DeviceSignatureProduced(signature))
                 }
                 _ => self.drive(Input::DeviceSignatureProduced(signature)),
             },
@@ -2628,6 +2703,40 @@ impl Core {
                     peer_bound,
                     credential,
                 })
+            }
+            Event::ProximityEngagementRequested { ble_uuid } => {
+                let Ok(ble_uuid): Result<[u8; 16], _> = ble_uuid.try_into() else {
+                    // A well-behaved shell always sends a 16-byte UUID; refuse otherwise.
+                    return vec![Effect::Close];
+                };
+                let Ok(device_key) = crypto_backend::P256AgreementKey::generate() else {
+                    return vec![Effect::Close];
+                };
+                let Ok(device_key_cose) =
+                    proximity_session::sec1_to_cose_ec2(device_key.public_raw())
+                else {
+                    return vec![Effect::Close];
+                };
+                self.begin_flow(ActiveFlow::Proximity);
+                self.proximity.device_key = Some(device_key);
+                self.drive_proximity(iso18013_5::Input::StartEngagement {
+                    device_key_cose,
+                    ble_uuid,
+                })
+            }
+            Event::ProximityReaderEstablishment {
+                session_establishment,
+            } => match proximity_session::parse_session_establishment(&session_establishment) {
+                Ok(est) => self.drive_proximity(iso18013_5::Input::ReaderEstablishment {
+                    e_reader_key_cose: est.e_reader_key_cose,
+                }),
+                // A malformed SessionEstablishment can't bind a transcript — fail closed.
+                Err(_) => self.drive_proximity(iso18013_5::Input::ReaderEstablishment {
+                    e_reader_key_cose: Vec::new(),
+                }),
+            },
+            Event::ProximityReaderTermination => {
+                self.drive_proximity(iso18013_5::Input::ReaderTermination)
             }
             Event::CredentialOfferReceived {
                 offer,
@@ -3024,6 +3133,11 @@ impl Core {
                 }
                 authorization_hash = Some(stored_hash);
                 result
+            }
+            // Proximity engagement/response are fire-and-forget transport broadcasts (like Close),
+            // not correlated operations that await a native callback.
+            Effect::EmitDeviceEngagement { .. } | Effect::EmitDeviceResponse { .. } => {
+                return Ok(None)
             }
             Effect::Close => return Ok(None),
         };
@@ -3896,6 +4010,116 @@ impl Core {
                 Some((format_name(*format).to_string(), credential.clone()))
             }
             _ => None,
+        }
+    }
+
+    /// Drive the sans-IO ISO 18013-5 proximity machine (mirrors `drive_payment`). The machine stays
+    /// crypto-free; this facade resolves the `Env` trust facts against the real crypto boundary and,
+    /// on the reader's establishment, performs the ECDH + HKDF that derives the SessionData cipher.
+    fn drive_proximity(&mut self, input: iso18013_5::Input) -> Vec<Effect> {
+        // For the reader's establishment, resolve the crypto facts (`reader_key_on_curve`,
+        // `transcript_bound`) by actually performing the ECDH the anti-relay binding depends on, and
+        // derive + stash the SessionData cipher. Passing these as shell booleans would let a hostile
+        // reader bypass the transcript binding, so they are computed here, never trusted.
+        let mut reader_key_on_curve = false;
+        let mut transcript_bound = false;
+        if let iso18013_5::Input::ReaderEstablishment { e_reader_key_cose } = &input {
+            let engagement = match &self.proximity.state {
+                iso18013_5::State::Engaged { device_engagement } => Some(device_engagement.clone()),
+                _ => None,
+            };
+            let derived = match (engagement, self.proximity.device_key.as_ref()) {
+                (Some(engagement), Some(device_key)) => {
+                    proximity_session::cose_ec2_to_sec1(e_reader_key_cose)
+                        .and_then(|sec1| {
+                            device_key
+                                .agree(&sec1)
+                                .map_err(|_| proximity_session::SessionError::Crypto)
+                        })
+                        .ok()
+                        .map(|z| {
+                            let transcript =
+                                iso18013_5::session_transcript(&engagement, e_reader_key_cose);
+                            proximity_session::SessionCipher::new(
+                                proximity_session::derive_session_keys(&AwsLc, &z, &transcript),
+                            )
+                        })
+                }
+                _ => None,
+            };
+            if let Some(cipher) = derived {
+                // ECDH succeeded (reader key is a valid curve point) and we bound the transcript
+                // over our own engagement + the reader key.
+                reader_key_on_curve = true;
+                transcript_bound = true;
+                self.proximity.cipher = Some(cipher);
+            }
+        }
+
+        let (next, outputs) = {
+            let env = iso18013_5::Env {
+                reader_key_on_curve,
+                transcript_bound,
+                // 18013-5 reader authentication is optional; this slice does not yet verify a
+                // reader-auth chain, so it is treated as absent (a present-but-invalid one would
+                // abort — that check arrives with reader-auth support).
+                reader_auth_present: false,
+                reader_auth_valid: false,
+                device_key_ref: &self.config.device_key_ref,
+            };
+            iso18013_5::step(&self.proximity.state, &input, &env)
+        };
+        self.proximity.state = next;
+
+        let mut effects: Vec<Effect> = outputs
+            .into_iter()
+            .flat_map(|o| self.translate_proximity(o))
+            .collect();
+
+        if let iso18013_5::State::Aborted(_) = &self.proximity.state {
+            if !effects.iter().any(|effect| matches!(effect, Effect::Close)) {
+                effects.push(Effect::Close);
+            }
+            self.reset_flow(ActiveFlow::Proximity);
+        }
+        effects
+    }
+
+    /// Map each `iso18013-5` output to shell effects. The SessionData AES-256-GCM encryption slots
+    /// in here (facade-side), exactly as `encrypt_direct_post_jwt` wraps the OID4VP response.
+    fn translate_proximity(&mut self, output: iso18013_5::Output) -> Vec<Effect> {
+        use iso18013_5::Output as PO;
+        match output {
+            PO::EmitDeviceEngagement(engagement) => {
+                vec![Effect::EmitDeviceEngagement { engagement }]
+            }
+            // The rich in-person consent screen (reader identity + the claims from the reader's
+            // ItemsRequest) is the tracked B3 remainder; until the request is parsed we ask for
+            // approval without fabricating claim/RP content.
+            PO::RenderConsent => vec![Effect::Render {
+                screen: ScreenDescription::AuthPrompt,
+            }],
+            PO::SignDeviceAuth {
+                key_ref,
+                signing_input,
+            } => vec![Effect::Sign {
+                key_ref,
+                payload: signing_input,
+            }],
+            PO::EmitDeviceResponse(plaintext) => {
+                // Encrypt the DeviceResponse into SessionData with the derived per-direction key.
+                match self.proximity.cipher.as_mut() {
+                    Some(cipher) => match cipher.seal_from_device(&AwsLc, &plaintext) {
+                        Ok(ciphertext) => vec![Effect::EmitDeviceResponse {
+                            response: proximity_session::session_data(&ciphertext),
+                        }],
+                        Err(_) => vec![Effect::Close],
+                    },
+                    // No session keys → the transcript was never bound; never emit plaintext.
+                    None => vec![Effect::Close],
+                }
+            }
+            PO::EmitTermination => vec![Effect::Close],
         }
     }
 

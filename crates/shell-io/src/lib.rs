@@ -125,6 +125,10 @@ pub struct Outcome {
     pub closed: bool,
     /// The wallet-to-wallet offer key the core asked to publish, if any (TS09).
     pub published_offer_key: Option<Vec<u8>>,
+    /// The ISO 18013-5 DeviceEngagement the core asked to broadcast, if any (in-person presentation).
+    pub device_engagement: Option<Vec<u8>>,
+    /// The ISO 18013-5 encrypted SessionData (DeviceResponse) the core emitted, if any.
+    pub device_response: Option<Vec<u8>>,
     /// Errors from I/O effects (an HTTP failure aborts the cascade for that branch).
     pub errors: Vec<String>,
 }
@@ -243,6 +247,16 @@ impl<S: DeviceSigner, T: TrustFetcher, F: StatusFetcher> ShellRunner<S, T, F> {
             }
             Effect::Close => {
                 outcome.closed = true;
+                None
+            }
+            // In-person (18013-5) transport broadcasts: this harness has no BLE radio, so it records
+            // the bytes for assertions rather than transmitting them. No follow-up event.
+            Effect::EmitDeviceEngagement { engagement } => {
+                outcome.device_engagement = Some(engagement);
+                None
+            }
+            Effect::EmitDeviceResponse { response } => {
+                outcome.device_response = Some(response);
                 None
             }
             Effect::RequestToken => {
