@@ -226,9 +226,12 @@ public enum ScreenDescription: Decodable, Equatable {
             self = .nfcReady(documentName: try c.decode(String.self, forKey: .documentName))
         case "nfcReading": self = .nfcReading(try c.decode(NfcReadState.self, forKey: .state))
         case "issuancePreparing":
-            self = .issuancePreparing(try c.decode(DocumentSummary.self, forKey: .document))
+            // Newtype variant `IssuancePreparing(DocumentSummary)`: serde's internal `screen` tag
+            // flattens the DocumentSummary fields into this object (no nested `document` key), so
+            // decode it from the same container.
+            self = .issuancePreparing(try DocumentSummary(from: decoder))
         case "issuanceReady":
-            self = .issuanceReady(try c.decode(DocumentSummary.self, forKey: .document))
+            self = .issuanceReady(try DocumentSummary(from: decoder))
         case "issuanceNeedsAttention":
             self = .issuanceNeedsAttention(
                 document: try c.decode(DocumentSummary.self, forKey: .document),

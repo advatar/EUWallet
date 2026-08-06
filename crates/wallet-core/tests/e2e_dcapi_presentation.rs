@@ -123,6 +123,13 @@ fn dcapi_presentation_binds_the_origin_and_returns_a_minimised_vp_token() {
         serde_json::json!("dcApiConsent")
     );
     assert_eq!(render["screen"]["origin"], serde_json::json!(ORIGIN));
+    // The consent screen exposes the minimised claim set under the camelCase key the bindings decode
+    // (`requestedClaims`, NOT snake_case) — guards the `rename_all_fields` serde attribute.
+    assert_eq!(
+        render["screen"]["requestedClaims"],
+        serde_json::json!(["eu.europa.ec.eudi.pid.1/age_over_18"]),
+        "dcApiConsent must expose requestedClaims (camelCase) minimised to the requested element"
+    );
     let operation_id = render["operationId"].as_u64().expect("operationId");
     let auth_hash_json =
         serde_json::to_string(&render["authorizationHash"]).expect("authorizationHash");

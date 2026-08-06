@@ -110,3 +110,82 @@ fn demo_payment_drives_to_signed_auth_code() {
         "expected the auth code to be posted, got {fx:?}"
     );
 }
+
+/// The ARF-mandated mdoc half of the demo PID must issue AND store through the real OpenID4VCI
+/// path — the same silent seed the iOS app runs before the SD-JWT half. This is a regression guard:
+/// the mdoc PID previously lacked the mandatory `portrait` element, so issuance rejected it and the
+/// holding never stored — invisibly, because the shell added it with a discarded result. Without a
+/// stored PID mdoc, in-person (ISO 18013-5) and Digital Credentials API presentment cannot work.
+#[test]
+fn demo_pid_mdoc_issues_and_stores() {
+    let wallet = DemoWallet::new();
+    let s = wallet.issuance_scenario();
+
+    let mut core = Core::new("wallet.example", "device-key");
+    core.handle_event(Event::SetClock { epoch: s.epoch });
+    core.load_device_key(s.device_public_key.clone());
+    core.load_trust_list(&s.trust_list, &s.operator_public_key)
+        .expect("demo trusted list loads");
+    core.load_wua(&s.wua_jwt, &s.wallet_provider_public_key)
+        .expect("demo WUA loads");
+
+    // Offer (mso_mdoc) → issuance review → accept → RequestToken.
+    let offer = br#"{"format":"mso_mdoc","grant":"pre-authorized","tx_code_required":false}"#.to_vec();
+    let review = core.handle_event(Event::CredentialOfferReceived {
+        offer,
+        issuer_cert_chain: s.issuer_cert_chain.clone(),
+        issuer_id: s.issuer_id.clone(),
+    });
+    assert!(matches!(
+        review.as_slice(),
+        [Effect::Render {
+            screen: presenter::ScreenDescription::IssuanceOffer(_)
+        }]
+    ));
+    let fx = core.handle_event(Event::CredentialOfferAccepted);
+    assert!(fx.contains(&Effect::RequestToken), "expected RequestToken, got {fx:?}");
+
+    // Token → proof-of-possession Sign → device signs → RequestCredential.
+    let fx = core.handle_event(Event::TokenReceived { bound: true, c_nonce: 111 });
+    let signing_input = fx
+        .iter()
+        .find_map(|e| match e {
+            Effect::Sign { payload, .. } => Some(payload.clone()),
+            _ => None,
+        })
+        .expect("proof key attested → Sign effect");
+    let proof_sig = wallet.sign_device(signing_input);
+    let fx = core.handle_event(Event::DeviceSignatureProduced { signature: proof_sig });
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::RequestCredential { .. })),
+        "expected RequestCredential, got {fx:?}"
+    );
+
+    // The demo PID mdoc is returned → must be authenticated and STORED, not rejected.
+    let effects = core.handle_event(Event::CredentialReceived {
+        format: "mso_mdoc".into(),
+        bytes: s.pid_mdoc_credential.clone().into_bytes(),
+    });
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::Render {
+                screen: presenter::ScreenDescription::Error { code, .. }
+            } if code == "credential_issuance_rejected"
+        )),
+        "PID mdoc issuance must not be rejected, got {effects:?}"
+    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::Render {
+            screen: presenter::ScreenDescription::IssuanceReady(_)
+        }
+    )));
+
+    let held = core.held_credentials_json();
+    assert!(held.contains("mso_mdoc"), "PID mdoc must be held: {held}");
+    assert!(
+        held.contains("eu.europa.ec.eudi.pid.1"),
+        "held PID mdoc must carry the PID doctype: {held}"
+    );
+}

@@ -20,7 +20,12 @@ use serde::{Deserialize, Serialize};
 // shells, where an extra indirection would complicate the generated bindings for no user benefit.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "screen", rename_all = "camelCase")]
+// `rename_all` renames the variant TAGS (DcApiConsent -> dcApiConsent); `rename_all_fields` renames
+// the INLINE struct-variant FIELDS (requested_claims -> requestedClaims, document_name ->
+// documentName) — WITHOUT it those fields stay snake_case and the generated bindings, whose keys are
+// camelCase, fail to decode `dcApiConsent`/`proximityConsent`/`pinPreparation`/`nfcReady`. Mirrors
+// the same attribute on wallet-core's `Event`/`Effect` enums.
+#[serde(tag = "screen", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ScreenDescription {
     Loading,
     Error {

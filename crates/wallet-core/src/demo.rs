@@ -568,6 +568,17 @@ impl DemoWallet {
                 element_id: "age_over_18".into(),
                 element_value: Value::Bool(true),
             },
+            // `portrait` is a MANDATORY PID element (catalogue + PID Rulebook 1.7 portrait profile);
+            // issuance rejects a PID mdoc without it. The demo carries an empty portrait, which
+            // `validate_mdoc_pid_portrait` accepts as the "not yet captured" case (a real PID sets
+            // the JPEG bytes here). Without this element the mdoc half never stored — the SD-JWT half
+            // masked it because the shell added the mdoc silently.
+            IssuerSignedItem {
+                digest_id: 4,
+                random: vec![0x81; 16],
+                element_id: "portrait".into(),
+                element_value: Value::Bytes(Vec::new()),
+            },
         ];
         let mut name_spaces = BTreeMap::new();
         name_spaces.insert("eu.europa.ec.eudi.pid.1".to_string(), items);
