@@ -2,7 +2,7 @@
 //! and a reader verifies it with aws-lc-rs. Tampering the transcript breaks the signature (anti-relay).
 use crypto_backend::{AwsLc, SoftwareSigner};
 use crypto_traits::{Alg, KeyRef, Signer, Verifier};
-use iso18013_5::{device_auth_signing_input, step, Env, Input, Output, State};
+use iso18013_5::{device_auth_signing_input, session_transcript, step, Env, Input, Output, State};
 
 #[test]
 fn device_response_is_signed_over_the_session_transcript() {
@@ -15,10 +15,20 @@ fn device_response_is_signed_over_the_session_transcript() {
         device_key_ref: "device-key",
     };
 
-    let s = step(&State::Idle, &Input::StartEngagement, &env).0;
+    let s = step(
+        &State::Idle,
+        &Input::StartEngagement {
+            device_key_cose: vec![0xA1, 0x01, 0x02],
+            ble_uuid: [0x11; 16],
+        },
+        &env,
+    )
+    .0;
     let s = step(
         &s,
-        &Input::ReaderEstablishment(b"reader-hello".to_vec()),
+        &Input::ReaderEstablishment {
+            e_reader_key_cose: b"reader-hello".to_vec(),
+        },
         &env,
     )
     .0;
@@ -50,8 +60,11 @@ fn device_response_is_signed_over_the_session_transcript() {
         )
         .is_ok());
 
-    // Anti-relay: verifying against a DIFFERENT transcript fails.
-    let other = device_auth_signing_input(b"different-transcript");
+    // Anti-relay: verifying against a DIFFERENT (but well-formed) transcript fails — a relayed
+    // signature can't be replayed into another session's transcript.
+    let relayed = session_transcript(b"other-engagement", b"other-reader-key");
+    let other = device_auth_signing_input(&relayed);
+    assert_ne!(other, device_auth_signing_input(&transcript));
     assert!(AwsLc
         .verify(Alg::Es256, device.public_key_raw(), &other, &sig)
         .is_err());

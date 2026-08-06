@@ -11,14 +11,29 @@ fn env<'a>() -> Env<'a> {
     }
 }
 
+/// StartEngagement with placeholder device key + BLE UUID (the state machine treats them as opaque).
+fn start() -> Input {
+    Input::StartEngagement {
+        device_key_cose: vec![0xA1, 0x01, 0x02],
+        ble_uuid: [0x11; 16],
+    }
+}
+
+/// A reader SessionEstablishment carrying an (opaque) reader ephemeral key.
+fn reader() -> Input {
+    Input::ReaderEstablishment {
+        e_reader_key_cose: vec![0xA1, 0x01, 0x02],
+    }
+}
+
 #[test]
 fn happy_path_engagement_to_response() {
     let e = env();
-    let (s, out) = step(&State::Idle, &Input::StartEngagement, &e);
+    let (s, out) = step(&State::Idle, &start(), &e);
     assert!(matches!(s, State::Engaged { .. }));
     assert!(matches!(out.as_slice(), [Output::EmitDeviceEngagement(_)]));
 
-    let (s, out) = step(&s, &Input::ReaderEstablishment(vec![1, 2, 3]), &e);
+    let (s, out) = step(&s, &reader(), &e);
     assert!(matches!(s, State::SessionEstablished { .. }));
     assert_eq!(out, vec![Output::RenderConsent]);
 
@@ -32,7 +47,7 @@ fn happy_path_engagement_to_response() {
 }
 
 fn engaged() -> State {
-    step(&State::Idle, &Input::StartEngagement, &env()).0
+    step(&State::Idle, &start(), &env()).0
 }
 
 #[test]
@@ -41,7 +56,7 @@ fn abort_reader_key_invalid() {
         reader_key_on_curve: false,
         ..env()
     };
-    let (s, _) = step(&engaged(), &Input::ReaderEstablishment(vec![1]), &e);
+    let (s, _) = step(&engaged(), &reader(), &e);
     assert_eq!(s, State::Aborted(AbortReason::ReaderKeyInvalid));
 }
 
@@ -51,7 +66,7 @@ fn abort_transcript_unbound() {
         transcript_bound: false,
         ..env()
     };
-    let (s, _) = step(&engaged(), &Input::ReaderEstablishment(vec![1]), &e);
+    let (s, _) = step(&engaged(), &reader(), &e);
     assert_eq!(s, State::Aborted(AbortReason::SessionTranscriptUnbound));
 }
 
@@ -62,7 +77,7 @@ fn abort_reader_auth_invalid() {
         reader_auth_valid: false,
         ..env()
     };
-    let (s, _) = step(&engaged(), &Input::ReaderEstablishment(vec![1]), &e);
+    let (s, _) = step(&engaged(), &reader(), &e);
     assert_eq!(s, State::Aborted(AbortReason::ReaderAuthInvalid));
 }
 
@@ -73,7 +88,7 @@ fn reader_auth_present_and_valid_is_accepted() {
         reader_auth_valid: true,
         ..env()
     };
-    let (s, _) = step(&engaged(), &Input::ReaderEstablishment(vec![1]), &e);
+    let (s, _) = step(&engaged(), &reader(), &e);
     assert!(matches!(s, State::SessionEstablished { .. }));
 }
 
@@ -87,7 +102,7 @@ fn abort_request_out_of_order() {
 #[test]
 fn abort_no_consent() {
     let e = env();
-    let session = step(&engaged(), &Input::ReaderEstablishment(vec![1]), &e).0;
+    let session = step(&engaged(), &reader(), &e).0;
     let (s, out) = step(&session, &Input::ConsentDeclined, &e);
     assert_eq!(s, State::Aborted(AbortReason::NoConsent));
     assert_eq!(out, vec![Output::EmitTermination]);
