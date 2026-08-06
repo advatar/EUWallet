@@ -102,6 +102,9 @@ public struct ScreenRenderer: View {
                 onLater: onDecline)
         case .issuanceRecovery(let recovery):
             IssuanceRecoveryView(recovery: recovery, onPrimary: onConsent, onSecondary: onDecline)
+        case .proximityConsent(let requestedClaims):
+            ProximityConsentView(
+                requestedClaims: requestedClaims, onConsent: onConsent, onDecline: onDecline)
         case .other(let name):
             JourneyChoiceView(
                 title: "This step isn’t available",
@@ -223,6 +226,61 @@ private struct IssuanceOfferView: View {
                 Button("Not now", role: .cancel, action: onDecline)
                     .buttonStyle(ConsumerSecondaryButtonStyle())
                     .accessibilityIdentifier("issuance.cancel")
+            }
+        }
+    }
+}
+
+/// In-person (ISO 18013-5) consent: the exact data elements the nearby reader asked for. Reader
+/// identity (readerAuth) is not yet surfaced, so this is a lighter screen than the OID4VP consent —
+/// but it shows precisely what will be shared before the holder approves (WYSIWYS).
+private struct ProximityConsentView: View {
+    let requestedClaims: [String]
+    let onConsent: () -> Void
+    let onDecline: () -> Void
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("SHARE IN PERSON")
+                    .font(.caption.weight(.bold))
+                    .tracking(1.5)
+                    .foregroundStyle(ConsumerDesign.brand)
+                Text("Share with the reader nearby?")
+                    .font(.largeTitle.bold())
+                    .accessibilityAddTraits(.isHeader)
+                HStack(spacing: 12) {
+                    Image(systemName: "wave.3.right.circle.fill")
+                        .foregroundStyle(ConsumerDesign.brand)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("A reader over Bluetooth").font(.headline)
+                        Text("Only the items below leave your phone")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }.consumerSurface()
+                Text("Sharing").font(.headline)
+                if requestedClaims.isEmpty {
+                    Text("This reader asked for nothing your wallet can share.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(requestedClaims, id: \.self) {
+                            Label(ConsumerCopy.claimName($0), systemImage: "checkmark")
+                        }
+                    }
+                    .consumerSurface()
+                }
+            }
+            .padding(20)
+        }
+        .safeAreaInset(edge: .bottom) {
+            ConsumerActionBar {
+                Button("Share", action: onConsent)
+                    .buttonStyle(ConsumerPrimaryButtonStyle())
+                    .accessibilityIdentifier("consent.approve")
+                    .disabled(requestedClaims.isEmpty)
+                Button("Don’t share", role: .cancel, action: onDecline)
+                    .buttonStyle(ConsumerSecondaryButtonStyle())
+                    .accessibilityIdentifier("consent.decline")
             }
         }
     }

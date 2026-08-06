@@ -364,6 +364,7 @@ public final class EffectExecutor {
     private let statusLists: StatusListResolver?
     private let issuer: IssuerResponder?
     private let transferOffers: TransferOfferPublisher?
+    private let proximity: ProximityResponder?
     private let presentationRedirectHandler: OpenID4VPRedirectHandler?
     private let render: (UInt64?, Data?, ScreenDescription) throws -> Void
     private let durableStateLock = NSLock()
@@ -379,6 +380,7 @@ public final class EffectExecutor {
         statusLists: StatusListResolver? = nil,
         issuer: IssuerResponder? = nil,
         transferOffers: TransferOfferPublisher? = nil,
+        proximity: ProximityResponder? = nil,
         presentationRedirectHandler: OpenID4VPRedirectHandler? = nil,
         render: @escaping (UInt64?, Data?, ScreenDescription) throws -> Void
     ) {
@@ -391,6 +393,7 @@ public final class EffectExecutor {
         self.statusLists = statusLists
         self.issuer = issuer
         self.transferOffers = transferOffers
+        self.proximity = proximity
         self.presentationRedirectHandler = presentationRedirectHandler
         self.render = render
     }
@@ -466,6 +469,11 @@ public final class EffectExecutor {
                 renderedInput = true
             case .close:
                 closed = true
+            case .emitDeviceEngagement, .emitDeviceResponse:
+                // In-person transport broadcasts: after engagement we await the reader's
+                // establishment; after the response we await teardown. Either way the flow stays
+                // open (not a terminal outcome the cascade can synthesize).
+                awaitingExternalInput = true
             default:
                 break
             }
@@ -802,6 +810,14 @@ public final class EffectExecutor {
         case .promptTxCode(let operationId):
             return WalletEventJSON.operationFailed(
                 operationId: operationId, failure: .unsupported)
+        case .emitDeviceEngagement(let engagement):
+            // Fire-and-forget (no operationId): hand the DeviceEngagement to the BLE transport to
+            // advertise. A throw aborts the cascade; the coordinator handles teardown.
+            try await proximity?.emitEngagement(Data(engagement))
+            return nil
+        case .emitDeviceResponse(let response):
+            try await proximity?.emitResponse(Data(response))
+            return nil
         case .close:
             return nil
         }
@@ -842,4 +858,12 @@ public protocol SecureStorage {
 /// means the wallet is waiting for the peer's next message; it does not complete the transfer.
 public protocol TransferOfferPublisher {
     func publish(offeredKey: Data) async throws
+}
+
+/// Drives the in-person (ISO 18013-5) BLE transport for the two fire-and-forget proximity effects.
+/// `emitEngagement` starts advertising the DeviceEngagement (and, off-band, awaits the reader's
+/// SessionEstablishment); `emitResponse` writes the encrypted SessionData DeviceResponse back.
+public protocol ProximityResponder {
+    func emitEngagement(_ engagement: Data) async throws
+    func emitResponse(_ response: Data) async throws
 }

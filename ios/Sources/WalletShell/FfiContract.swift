@@ -168,6 +168,8 @@ public enum ScreenDescription: Decodable, Equatable {
     case issuanceReady(DocumentSummary)
     case issuanceNeedsAttention(document: DocumentSummary, recovery: IssuanceRecovery)
     case issuanceRecovery(IssuanceRecoveryScreen)
+    /// In-person (ISO 18013-5) presentation consent: the data elements the nearby reader asked for.
+    case proximityConsent(requestedClaims: [String])
     case other(String)
 
     private enum CodingKeys: String, CodingKey {
@@ -231,6 +233,9 @@ public enum ScreenDescription: Decodable, Equatable {
                 recovery: try c.decode(IssuanceRecovery.self, forKey: .recovery))
         case "issuanceRecovery":
             self = .issuanceRecovery(try IssuanceRecoveryScreen(from: decoder))
+        case "proximityConsent":
+            self = .proximityConsent(
+                requestedClaims: try c.decode([String].self, forKey: .requestedClaims))
         case let other: self = .other(other)
         }
     }
@@ -244,6 +249,9 @@ public enum WalletDecisionKind: Equatable {
     case payment
     case qes
     case issuance
+    /// In-person (ISO 18013-5) consent. Uses the same `userConsented`/`userDeclined` wire events as
+    /// remote presentation — the core binds a `ProximityDecision` operation with a WYSIWYS hash.
+    case proximity
 
     public init?(screen: ScreenDescription) {
         switch screen {
@@ -251,13 +259,14 @@ public enum WalletDecisionKind: Equatable {
         case .paymentConfirmation: self = .payment
         case .signConfirmation: self = .qes
         case .issuanceOffer: self = .issuance
+        case .proximityConsent: self = .proximity
         default: return nil
         }
     }
 
     public func approvalEvent(operationId: UInt64, authorizationHash: Data) -> String {
         switch self {
-        case .presentation:
+        case .presentation, .proximity:
             return WalletEventJSON.userConsented(
                 operationId: operationId,
                 authorizationHash: authorizationHash)
@@ -278,7 +287,7 @@ public enum WalletDecisionKind: Equatable {
 
     public func declineEvent(operationId: UInt64) -> String {
         switch self {
-        case .presentation: return WalletEventJSON.userDeclined(operationId: operationId)
+        case .presentation, .proximity: return WalletEventJSON.userDeclined(operationId: operationId)
         case .payment: return WalletEventJSON.paymentDeclined(operationId: operationId)
         case .qes: return WalletEventJSON.qesDeclined(operationId: operationId)
         case .issuance: return WalletEventJSON.credentialOfferDeclined(operationId: operationId)
@@ -314,11 +323,15 @@ public enum WalletEffect: Decodable {
     case fetchStatusList(operationId: UInt64, uri: String)
     // --- Wallet-to-wallet (TS09) ---
     case publishTransferOffer(operationId: UInt64, offeredKey: [UInt8])
+    // --- In-person proximity (ISO 18013-5) transport broadcasts (fire-and-forget, no operationId) ---
+    case emitDeviceEngagement(engagement: [UInt8])
+    case emitDeviceResponse(response: [UInt8])
     case close
 
     private enum CodingKeys: String, CodingKey {
         case type, clientId, nonce, screen, keyRef, purpose, payload, url, body, proofJwt, offeredKey
         case uri, operationId, resultType, profile, authorizationHash
+        case engagement, response
     }
 
     private struct CoreErrorEnvelope: Decodable {
@@ -422,6 +435,12 @@ public enum WalletEffect: Decodable {
             self = .publishTransferOffer(
                 operationId: try c.decode(UInt64.self, forKey: .operationId),
                 offeredKey: try c.decode([UInt8].self, forKey: .offeredKey))
+        case "emitDeviceEngagement":
+            self = .emitDeviceEngagement(
+                engagement: try c.decode([UInt8].self, forKey: .engagement))
+        case "emitDeviceResponse":
+            self = .emitDeviceResponse(
+                response: try c.decode([UInt8].self, forKey: .response))
         case "close": self = .close
         default:
             throw DecodingError.dataCorruptedError(
@@ -533,6 +552,21 @@ public enum WalletEventJSON {
     }
     public static func qesDeclined(operationId: UInt64) -> String {
         #"{"type":"qesDeclined","operationId":\#(operationId)}"#
+    }
+
+    // --- In-person proximity (ISO 18013-5) ---
+    /// Begin in-person presentation: the shell supplies the 16-byte ephemeral BLE service UUID it
+    /// will advertise; the core generates EDeviceKey and returns the DeviceEngagement to broadcast.
+    public static func proximityEngagementRequested(bleUuid: Data) -> String {
+        #"{"type":"proximityEngagementRequested","bleUuid":\#(byteArray(bleUuid))}"#
+    }
+    /// The reader's `SessionEstablishment` CBOR (`{ eReaderKey, data }`), read off BLE.
+    public static func proximityReaderEstablishment(sessionEstablishment: Data) -> String {
+        #"{"type":"proximityReaderEstablishment","sessionEstablishment":\#(byteArray(sessionEstablishment))}"#
+    }
+    /// The reader ended the transaction (SessionData status 20 / transport close).
+    public static func proximityReaderTermination() -> String {
+        #"{"type":"proximityReaderTermination"}"#
     }
 
     /// Replace one audit-log entry with a chain-preserving tombstone. This mutation must travel
