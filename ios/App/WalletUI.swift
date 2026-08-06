@@ -108,6 +108,14 @@ struct WalletHomeView: View {
                                   systemImage: "qrcode.viewfinder", action: { model.showConnectSheet = true })
                         Divider().padding(.leading, 52)
                     }
+                    // In-person presentation is mdoc-only (ISO 18013-5), so gate on holding one.
+                    if model.credentials.contains(where: { $0.format == "mso_mdoc" }) {
+                        WalletRow(title: "Present in person",
+                                  subtitle: "Show your ID to a nearby reader over Bluetooth",
+                                  systemImage: "dot.radiowaves.left.and.right",
+                                  action: { model.startProximityPresentation() })
+                        Divider().padding(.leading, 52)
+                    }
                     WalletRow(title: "Add from passport", subtitle: "Read your passport or ID chip over NFC",
                               systemImage: "wave.3.right.circle", action: { model.showPassportReader = true })
                     Divider().padding(.leading, 52)

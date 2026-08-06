@@ -216,6 +216,8 @@ struct PresentingContainer: View {
                 ProgressView().controlSize(.large).accessibilityLabel("Checking the request")
             }
             .padding(24)
+        case .proximityEngagement(let engagement):
+            ProximityEngagementView(engagement: engagement, onCancel: model.cancelProximity)
         case .screen(let screen):
             ScreenRenderer(screen: screen, onConsent: model.approve, onDecline: model.decline)
         case .done(let message):

@@ -39,6 +39,9 @@ final class WalletModel: ObservableObject {
         case home
         case running
         case screen(ScreenDescription)
+        /// In-person (ISO 18013-5): show the DeviceEngagement (QR) while advertising over BLE and
+        /// awaiting the reader. Transitions to `.screen(.proximityConsent)` once the reader replies.
+        case proximityEngagement(Data)
         case done(String)
         case failed(String)
     }
@@ -137,6 +140,9 @@ final class WalletModel: ObservableObject {
     private let redirectUris: [String]
     /// The executor bound to `engine` for the current flow (rebuilt per flow; same engine).
     private var executor: EffectExecutor?
+    /// Owns the BLE transport for an in-person (ISO 18013-5) presentation across its async
+    /// engagement → establishment → response lifecycle.
+    private var proximityCoordinator: ProximityCoordinator?
     /// Correlation id attached by Rust to the currently rendered confirmation. A decision without
     /// this exact id is rejected as stale at the production JSON boundary.
     private var decisionOperationId: UInt64?
@@ -187,6 +193,7 @@ final class WalletModel: ObservableObject {
     /// `render` maps the core's screens to the live UI (or a no-op for silent seeding).
     private func makeExecutor(
         issuer: IssuerResponder?,
+        proximity: ProximityResponder? = nil,
         render: @escaping (UInt64?, Data?, ScreenDescription) -> Void
     ) -> EffectExecutor? {
         guard let runtime else {
@@ -200,12 +207,13 @@ final class WalletModel: ObservableObject {
             storage: InMemoryStorage(),
             trust: DemoTrustResolver(certChain: rpCertChain, redirectUris: redirectUris),
             issuer: issuer,
+            proximity: proximity,
             render: render)
     }
 
-    private func liveExecutor() -> EffectExecutor? {
+    private func liveExecutor(proximity: ProximityResponder? = nil) -> EffectExecutor? {
         clearDecision()
-        guard let ex = makeExecutor(issuer: nil, render: {
+        guard let ex = makeExecutor(issuer: nil, proximity: proximity, render: {
             [weak self] operationId, authorizationHash, screen in
             Task { @MainActor in
                 guard let self else { return }
@@ -477,6 +485,63 @@ final class WalletModel: ObservableObject {
         }
     }
 
+    /// In-person (ISO/IEC 18013-5) presentation over BLE: the wallet advertises a DeviceEngagement,
+    /// a nearby reader connects and sends its request, and after consent the wallet returns a
+    /// minimised, AES-256-GCM-encrypted DeviceResponse. Requires an mdoc holding + a real device
+    /// (CoreBluetooth peripheral mode does not run on the Simulator).
+    func startProximityPresentation() {
+        guard credentials.contains(where: { $0.format == "mso_mdoc" }) else { return }
+        phase = .running
+        log = ["In-person presentation: advertising over Bluetooth…"]
+        // The shell owns the ephemeral 16-byte BLE service UUID; the core embeds it verbatim in the
+        // engagement, so the reader that scanned the engagement connects to the matching service.
+        var uuid = Data(count: 16)
+        let ok = uuid.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) == errSecSuccess
+        }
+        guard ok else {
+            phase = .failed("Could not start a secure Bluetooth session")
+            return
+        }
+        let coordinator = ProximityCoordinator(
+            uuidBytes: uuid,
+            onEngagement: { [weak self] engagement in self?.phase = .proximityEngagement(engagement) },
+            onReaderEstablishment: { [weak self] establishment in
+                self?.feedProximityReaderEstablishment(establishment)
+            })
+        proximityCoordinator = coordinator
+        guard let ex = liveExecutor(proximity: coordinator) else { return }
+        Task {
+            _ = await run(
+                ex,
+                eventJson: WalletEventJSON.proximityEngagementRequested(bleUuid: uuid),
+                requiring: .awaitingInput)
+        }
+    }
+
+    /// The reader's SessionEstablishment arrived over BLE (off the engine loop) — feed it back as a
+    /// fresh cascade, which drains to the ProximityConsent render.
+    private func feedProximityReaderEstablishment(_ establishment: Data) {
+        guard let ex = executor else { return }
+        Task {
+            _ = await run(
+                ex,
+                eventJson: WalletEventJSON.proximityReaderEstablishment(
+                    sessionEstablishment: establishment),
+                requiring: .awaitingInput)
+        }
+    }
+
+    /// Abandon an in-person presentation (user cancelled, or the reader went away).
+    func cancelProximity() {
+        proximityCoordinator?.stop()
+        proximityCoordinator = nil
+        if let ex = executor {
+            Task { _ = try? await ex.send(eventJson: WalletEventJSON.proximityReaderTermination()) }
+        }
+        phase = .home
+    }
+
     /// PSD2/TS12 payment SCA: request → what-you-see-is-what-you-authorise confirmation.
     func startPayment() {
         phase = .running
@@ -511,20 +576,31 @@ final class WalletModel: ObservableObject {
         }
         if kind == .issuance { LiveActivityController.shared.advance(to: .finishing) }
         Task {
+            // Proximity: the response is sent over BLE (EmitDeviceResponse) and the flow stays open
+            // awaiting reader teardown, so the cascade ends `.awaitingInput`, not `.succeeded`.
+            let requirement: RequiredCascadeOutcome = kind == .proximity ? .awaitingInput : .succeeded
             guard await run(
                 executor,
                 eventJson: kind.approvalEvent(
                     operationId: operationId,
                     authorizationHash: authorizationHash),
-                requiring: .succeeded
+                requiring: requirement
             ) else {
                 if kind == .issuance {
                     isIssuing = false
                     LiveActivityController.shared.finish(.failed)
                 }
+                if kind == .proximity { cancelProximity() }
                 return
             }
             switch kind {
+            case .proximity:
+                // The encrypted DeviceResponse has been written to the reader over BLE.
+                note("Device signed the DeviceAuthentication; the encrypted DeviceResponse was sent.")
+                reloadHistory()
+                proximityCoordinator?.stop()
+                proximityCoordinator = nil
+                phase = .done("Shared with the reader.")
             case .presentation:
                 note("Device signed the key-binding JWT; vp_token posted to the RP.")
                 reloadHistory()
@@ -571,6 +647,10 @@ final class WalletModel: ObservableObject {
             if kind == .issuance {
                 isIssuing = false
                 LiveActivityController.shared.dismiss()
+            }
+            if kind == .proximity {
+                proximityCoordinator?.stop()
+                proximityCoordinator = nil
             }
             phase = .done(kind == .issuance ? "Nothing was added." : "Nothing was shared.")
         }
