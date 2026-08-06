@@ -822,6 +822,47 @@ pub fn oid4vp_session_transcript(
     Value::Array(vec![Value::Null, Value::Null, handover]).to_canonical()
 }
 
+/// The `SessionTranscript` for an mdoc presented over the **W3C Digital Credentials API**
+/// (OpenID4VP 1.0 Appendix B.2.6.2): `[ null, null, OpenID4VPDCAPIHandover ]`, where
+/// `OpenID4VPDCAPIHandover = [ "OpenID4VPDCAPIHandover", SHA-256(OpenID4VPDCAPIHandoverInfoBytes) ]`
+/// and `OpenID4VPDCAPIHandoverInfo = [ origin, nonce, jwkThumbprint ]`.
+///
+/// Unlike the redirect-flow [`oid4vp_session_transcript`], the DC-API handover binds to the
+/// browser-authenticated **Origin** instead of a client_id/response_uri — the anti-phishing anchor
+/// is the OS-supplied Origin. `origin` is the **bare** Origin (NOT prefixed with `origin:` — that
+/// prefix is only for the SD-JWT KB-JWT `aud`). `jwk_thumbprint` is the RFC 7638 SHA-256 thumbprint
+/// of the verifier's response-encryption key for `response_mode=dc_api.jwt`, or `None` (CBOR null)
+/// for the unencrypted `dc_api`.
+pub fn oid4vp_dcapi_session_transcript(
+    digest: &dyn Digest,
+    origin: &str,
+    nonce: &str,
+    jwk_thumbprint: Option<&[u8]>,
+) -> Vec<u8> {
+    let info = dcapi_handover_info(origin, nonce, jwk_thumbprint);
+    let handover = Value::Array(vec![
+        Value::Text("OpenID4VPDCAPIHandover".into()),
+        Value::Bytes(digest.sha256(&info).to_vec()),
+    ]);
+    Value::Array(vec![Value::Null, Value::Null, handover]).to_canonical()
+}
+
+/// The canonical CBOR of `OpenID4VPDCAPIHandoverInfo = [ origin, nonce, jwkThumbprint ]` — the exact
+/// bytes hashed into the DC-API handover. Split out so it can be tested byte-for-byte against the
+/// OpenID4VP 1.0 non-normative example.
+fn dcapi_handover_info(origin: &str, nonce: &str, jwk_thumbprint: Option<&[u8]>) -> Vec<u8> {
+    let thumbprint = match jwk_thumbprint {
+        Some(bytes) => Value::Bytes(bytes.to_vec()),
+        None => Value::Null,
+    };
+    Value::Array(vec![
+        Value::Text(origin.into()),
+        Value::Text(nonce.into()),
+        thumbprint,
+    ])
+    .to_canonical()
+}
+
 /// The `DeviceNameSpaces` a wallet sends when it adds no device-signed namespaces: an empty map,
 /// as the canonical-CBOR bytes that get tag-24 wrapped into `DeviceNameSpacesBytes`.
 pub fn empty_device_namespaces_bytes() -> Vec<u8> {
@@ -864,4 +905,97 @@ pub fn device_response(
         (Value::Text("status".into()), Value::Uint(0)),
     ])
     .to_canonical()
+}
+
+#[cfg(test)]
+mod dcapi_handover_tests {
+    use super::{dcapi_handover_info, oid4vp_dcapi_session_transcript};
+    use cose::cbor::{decode_value, Value};
+    use std::cell::RefCell;
+
+    /// A `Digest` that records the exact bytes it was asked to hash, so we can prove the handover
+    /// hashes the spec-exact `OpenID4VPDCAPIHandoverInfo`. Returns a fixed marker digest.
+    struct CapturingDigest(RefCell<Vec<u8>>);
+    impl crypto_traits::Digest for CapturingDigest {
+        fn sha256(&self, data: &[u8]) -> [u8; 32] {
+            *self.0.borrow_mut() = data.to_vec();
+            [0xAB; 32]
+        }
+    }
+
+    // OpenID4VP 1.0 Appendix B.2.6.2 non-normative example values.
+    const ORIGIN: &str = "https://example.com";
+    const NONCE: &str = "exc7gBkxjx1rdc9udRrveKvSsJIq80avlXeLHhGwqtA";
+    const THUMBPRINT_HEX: &str = "4283ec927ae0f208daaa2d026a814f2b22dca52cf85ffa8f3f8626c6bd669047";
+
+    fn thumbprint() -> Vec<u8> {
+        (0..THUMBPRINT_HEX.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&THUMBPRINT_HEX[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn handover_info_matches_the_openid4vp_spec_bytes() {
+        // The spec's non-normative OpenID4VPDCAPIHandoverInfo encoding, byte-for-byte:
+        //   83                          array(3)
+        //   73 "https://example.com"    tstr(19)
+        //   78 2b <nonce>               tstr(43)
+        //   58 20 <thumbprint>          bstr(32)
+        let tp = thumbprint();
+        let mut expected = vec![0x83, 0x73];
+        expected.extend_from_slice(ORIGIN.as_bytes());
+        expected.extend_from_slice(&[0x78, 0x2b]);
+        expected.extend_from_slice(NONCE.as_bytes());
+        expected.extend_from_slice(&[0x58, 0x20]);
+        expected.extend_from_slice(&tp);
+
+        assert_eq!(
+            dcapi_handover_info(ORIGIN, NONCE, Some(&tp)),
+            expected,
+            "OpenID4VPDCAPIHandoverInfo CBOR must be byte-exact vs the OpenID4VP 1.0 example"
+        );
+    }
+
+    #[test]
+    fn transcript_hashes_the_handover_info_and_wraps_it() {
+        let tp = thumbprint();
+        let digest = CapturingDigest(RefCell::new(Vec::new()));
+        let transcript = oid4vp_dcapi_session_transcript(&digest, ORIGIN, NONCE, Some(&tp));
+
+        // The digest saw exactly the spec-exact handover info bytes.
+        assert_eq!(
+            *digest.0.borrow(),
+            dcapi_handover_info(ORIGIN, NONCE, Some(&tp))
+        );
+
+        // SessionTranscript = [ null, null, ["OpenID4VPDCAPIHandover", <32-byte hash>] ].
+        let (value, rest) = decode_value(&transcript, 0).unwrap();
+        assert!(rest.is_empty());
+        let items = match value {
+            Value::Array(a) => a,
+            other => panic!("SessionTranscript is an array, got {other:?}"),
+        };
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0], Value::Null, "DeviceEngagementBytes MUST be null");
+        assert_eq!(items[1], Value::Null, "EReaderKeyBytes MUST be null");
+        match &items[2] {
+            Value::Array(handover) => {
+                assert_eq!(handover[0], Value::Text("OpenID4VPDCAPIHandover".into()));
+                assert_eq!(handover[1], Value::Bytes(vec![0xAB; 32]));
+            }
+            other => panic!("handover is an array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unencrypted_dc_api_uses_null_thumbprint() {
+        // response_mode=dc_api (no encryption) → jwkThumbprint is CBOR null, a distinct binding
+        // from the encrypted dc_api.jwt form.
+        let with_null = dcapi_handover_info(ORIGIN, NONCE, None);
+        let with_tp = dcapi_handover_info(ORIGIN, NONCE, Some(&thumbprint()));
+        assert_ne!(with_null, with_tp);
+        // Last element is null (0xf6) for the unencrypted form.
+        assert_eq!(*with_null.last().unwrap(), 0xf6);
+    }
 }
