@@ -71,6 +71,9 @@ struct ProximityFlow {
     /// The device signature for the in-flight DeviceAuthentication, captured so the response can be
     /// assembled when the machine reaches `Responded`.
     last_signature: Option<Vec<u8>>,
+    /// WYSIWYS hash of the rendered ProximityConsent screen — the authorization hash the shell must
+    /// echo in `userConsented`, mirroring `pay_consent_hash` / `qes_consent_hash`.
+    consent_hash: [u8; 32],
 }
 
 /// The concrete credential the wallet will present in person, resolved from the reader's request.
@@ -97,6 +100,7 @@ impl ProximityFlow {
             pending_request: None,
             presentation: None,
             last_signature: None,
+            consent_hash: [0u8; 32],
         }
     }
 }
@@ -154,6 +158,7 @@ enum OperationResultKind {
     PaymentDecision,
     QesDecision,
     IssuanceDecision,
+    ProximityDecision,
 }
 
 impl OperationResultKind {
@@ -176,12 +181,15 @@ impl OperationResultKind {
             Self::PaymentDecision => "paymentDecision",
             Self::QesDecision => "qesDecision",
             Self::IssuanceDecision => "issuanceDecision",
+            Self::ProximityDecision => "proximityDecision",
         }
     }
 
     fn accepts_event(&self, event_type: &str) -> bool {
         match self {
-            Self::PresentationDecision => matches!(event_type, "userConsented" | "userDeclined"),
+            Self::PresentationDecision | Self::ProximityDecision => {
+                matches!(event_type, "userConsented" | "userDeclined")
+            }
             Self::PaymentDecision => {
                 matches!(event_type, "paymentApproved" | "paymentDeclined")
             }
@@ -3158,6 +3166,10 @@ impl Core {
                         OperationResultKind::IssuanceDecision,
                         Some(self.issuance_consent_hash),
                     ),
+                    ScreenDescription::ProximityConsent { .. } => (
+                        OperationResultKind::ProximityDecision,
+                        Some(self.proximity.consent_hash),
+                    ),
                     _ => return Ok(None),
                 };
                 let computed_hash = presenter::consent_hash(&AwsLc, screen);
@@ -4199,9 +4211,11 @@ impl Core {
                     .as_ref()
                     .map(|p| p.disclosed.clone())
                     .unwrap_or_default();
-                vec![Effect::Render {
-                    screen: ScreenDescription::ProximityConsent { requested_claims },
-                }]
+                let screen = ScreenDescription::ProximityConsent { requested_claims };
+                // Bind the user's approval to this exact screen (WYSIWYS): the hash the shell must
+                // echo in `userConsented`, registered as a pending ProximityDecision operation.
+                self.proximity.consent_hash = presenter::consent_hash(&AwsLc, &screen);
+                vec![Effect::Render { screen }]
             }
             PO::SignDeviceAuth { key_ref, .. } => {
                 // Override the sans-IO core's placeholder signing input with the real one, bound to

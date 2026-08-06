@@ -258,3 +258,156 @@ fn declining_in_person_consent_closes_the_session() {
         "declining consent tears the exchange down before anything is disclosed"
     );
 }
+
+/// The iOS shell can only reach the core through `handle_event_json`, which gates
+/// `userConsented`/`userDeclined` on a valid `operationId` + `authorizationHash`. This drives the
+/// proximity flow over that JSON boundary (the typed-`handle_event` tests bypass it) to prove the
+/// consent render registers a `ProximityDecision` pending operation and that `userConsented`
+/// carrying the rendered screen's hash is accepted.
+#[test]
+fn proximity_consent_is_accepted_over_the_json_ffi_boundary() {
+    fn json_u8s(bytes: &[u8]) -> String {
+        let nums: Vec<String> = bytes.iter().map(ToString::to_string).collect();
+        format!("[{}]", nums.join(","))
+    }
+    fn effects(json: &str) -> Vec<serde_json::Value> {
+        serde_json::from_str(json).expect("effect array")
+    }
+    fn find<'a>(fx: &'a [serde_json::Value], ty: &str) -> Option<&'a serde_json::Value> {
+        fx.iter().find(|e| e["type"] == serde_json::json!(ty))
+    }
+
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let device = SoftwareSigner::generate_p256().unwrap();
+    let mut core = Core::new("wallet-client", "device-key");
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    seed_mdl(&mut core, &issuer, &device);
+
+    // 1. Engagement over JSON.
+    let out = core
+        .handle_event_json(&format!(
+            r#"{{"type":"proximityEngagementRequested","bleUuid":{}}}"#,
+            json_u8s(&[0x11; 16])
+        ))
+        .expect("engagement accepted");
+    let fx = effects(&out);
+    let engagement: Vec<u8> = find(&fx, "emitDeviceEngagement").expect("engagement")["engagement"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u8)
+        .collect();
+
+    // Simulated reader builds an encrypted ItemsRequest + SessionEstablishment.
+    let device_sec1 = cose_ec2_to_sec1(&device_key_from_engagement(&engagement).unwrap()).unwrap();
+    let reader = P256AgreementKey::generate().unwrap();
+    let reader_cose = sec1_to_cose_ec2(reader.public_raw()).unwrap();
+    let z = reader.agree(&device_sec1).unwrap();
+    let transcript = iso18013_5::session_transcript(&engagement, &reader_cose);
+    let mut reader_cipher = SessionCipher::new(derive_session_keys(&AwsLc, &z, &transcript));
+    let encrypted_request = reader_cipher
+        .seal_from_reader(&AwsLc, &device_request(&["age_over_18"]))
+        .unwrap();
+    let establishment = Value::Map(vec![
+        (
+            Value::Text("eReaderKey".into()),
+            Value::Tag(24, Box::new(Value::Bytes(reader_cose))),
+        ),
+        (Value::Text("data".into()), Value::Bytes(encrypted_request)),
+    ])
+    .to_canonical();
+
+    // 2. Establishment over JSON → the consent render MUST carry an operationId + 32-byte hash.
+    let out = core
+        .handle_event_json(&format!(
+            r#"{{"type":"proximityReaderEstablishment","sessionEstablishment":{}}}"#,
+            json_u8s(&establishment)
+        ))
+        .expect("establishment accepted");
+    let fx = effects(&out);
+    let render = find(&fx, "render").expect("a consent render");
+    assert_eq!(
+        render["screen"]["screen"],
+        serde_json::json!("proximityConsent"),
+        "render carries the proximity consent screen (got {})",
+        render["screen"]
+    );
+    let operation_id = render["operationId"]
+        .as_u64()
+        .expect("render has operationId");
+    let auth_hash = render["authorizationHash"]
+        .as_array()
+        .expect("render has authorizationHash");
+    assert_eq!(auth_hash.len(), 32, "32-byte WYSIWYS hash");
+    let auth_hash_json =
+        serde_json::to_string(&render["authorizationHash"]).expect("hash re-encodes");
+
+    // 3. userConsented echoing the rendered operationId + hash is ACCEPTED and yields a Sign effect
+    //    — proving the FFI boundary now admits in-person consent.
+    let out = core
+        .handle_event_json(&format!(
+            r#"{{"type":"userConsented","operationId":{operation_id},"authorizationHash":{auth_hash_json}}}"#
+        ))
+        .expect("userConsented accepted over the FFI boundary");
+    assert!(
+        find(&effects(&out), "sign").is_some(),
+        "consent triggers device-auth signing over the FFI"
+    );
+
+    // 4. A tampered authorization hash is rejected (WYSIWYS binding holds). Fresh core to avoid the
+    //    consumed pending operation.
+    let mut core2 = Core::new("wallet-client", "device-key");
+    core2.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    seed_mdl(&mut core2, &issuer, &device);
+    let out = core2
+        .handle_event_json(&format!(
+            r#"{{"type":"proximityEngagementRequested","bleUuid":{}}}"#,
+            json_u8s(&[0x11; 16])
+        ))
+        .unwrap();
+    let engagement2: Vec<u8> = find(&effects(&out), "emitDeviceEngagement").unwrap()["engagement"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u8)
+        .collect();
+    let device_sec1_2 =
+        cose_ec2_to_sec1(&device_key_from_engagement(&engagement2).unwrap()).unwrap();
+    let reader2 = P256AgreementKey::generate().unwrap();
+    let reader_cose2 = sec1_to_cose_ec2(reader2.public_raw()).unwrap();
+    let z2 = reader2.agree(&device_sec1_2).unwrap();
+    let transcript2 = iso18013_5::session_transcript(&engagement2, &reader_cose2);
+    let mut reader_cipher2 = SessionCipher::new(derive_session_keys(&AwsLc, &z2, &transcript2));
+    let req2 = reader_cipher2
+        .seal_from_reader(&AwsLc, &device_request(&["age_over_18"]))
+        .unwrap();
+    let est2 = Value::Map(vec![
+        (
+            Value::Text("eReaderKey".into()),
+            Value::Tag(24, Box::new(Value::Bytes(reader_cose2))),
+        ),
+        (Value::Text("data".into()), Value::Bytes(req2)),
+    ])
+    .to_canonical();
+    let out = core2
+        .handle_event_json(&format!(
+            r#"{{"type":"proximityReaderEstablishment","sessionEstablishment":{}}}"#,
+            json_u8s(&est2)
+        ))
+        .unwrap();
+    let oid2 = find(&effects(&out), "render").unwrap()["operationId"]
+        .as_u64()
+        .unwrap();
+    let bad = core2.handle_event_json(&format!(
+        r#"{{"type":"userConsented","operationId":{oid2},"authorizationHash":{}}}"#,
+        json_u8s(&[0u8; 32])
+    ));
+    assert!(
+        bad.is_err(),
+        "a userConsented whose hash does not match the rendered screen is rejected"
+    );
+}
