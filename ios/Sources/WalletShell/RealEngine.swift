@@ -316,6 +316,19 @@ import Foundation
         }
 
         func heldCredentialsJSON() -> String { engine.heldCredentialsJson() }
+
+        /// Drive one event straight through the Core and return its raw effect JSON. The Digital
+        /// Credentials API provider extension needs the `emitDcApiResponse` effect, which the
+        /// app-shell `EffectExecutor` intentionally drops (the browser response is returned by the
+        /// extension via `sendResponse`, not by the executor). This is a read-mostly presentation
+        /// path on an engine whose holdings were already seeded through `lifecycle`; the mutating
+        /// issuance/seed cascade owns durable staging, so the one-shot presentation that follows on
+        /// the ephemeral demo engine does not need it. NOT for mutating flows — those must go
+        /// through `lifecycle` so their checkpoints are staged and committed.
+        func drivePresentationEvent(_ eventJson: String) -> String {
+            engine.handleEventJson(eventJson: eventJson)
+        }
+
         func agentMandatesJSON() -> String { engine.agentMandatesJson() }
         func transactionLogJSON() -> String { engine.transactionLogJson() }
         func transactionReportJSON() -> String { engine.transactionReportJson() }

@@ -102,6 +102,19 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: DocumentProvider
+      # Drive the real Rust core from the extension: the thin shell (engine/effect executor/signer/
+      # renderer) + the UniFFI bindings compile straight in, exactly as they do into the app module.
+      - path: Sources/WalletShell
+      - path: Generated/wallet_core.swift
+      # Demo transport stubs (device signer over the Rust DemoWallet key, issuer/token transport,
+      # RP trust) — the same file the app and on-sim tests compile. Lets the extension seed a
+      # self-contained demo PID mdoc and sign the DeviceAuth with the matching key.
+      - path: App/DemoAdapters.swift
+    dependencies:
+      # The Rust wallet core (static libs → link, don't embed), same as the host app.
+      - framework: WalletCore.xcframework
+        embed: false
+        link: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.advatar.wallet.document-provider
@@ -263,6 +276,9 @@ targets:
       - path: Sources/WalletShell
       - path: Generated/wallet_core.swift
       - path: App/DemoAdapters.swift
+      # The DC-API provider's core driver is pure wallet-core (no IdentityDocument* deps), so it is
+      # exercised end to end on the simulator here — the OS DC-API path itself is device-only.
+      - path: DocumentProvider/DcApiPresentationDriver.swift
     dependencies:
       - target: EUWalletDemo
       - framework: WalletCore.xcframework

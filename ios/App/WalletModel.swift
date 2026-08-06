@@ -629,6 +629,11 @@ final class WalletModel: ObservableObject {
                 proximityCoordinator?.stop()
                 proximityCoordinator = nil
                 phase = .done("Shared with the reader.")
+            case .dcApi:
+                // The Digital Credentials API flow is driven by the provider extension, not this
+                // in-app model; it never renders a dcApiConsent here. Handled for exhaustiveness.
+                reloadHistory()
+                phase = .done("Information shared successfully.")
             case .presentation:
                 note("Device signed the key-binding JWT; vp_token posted to the RP.")
                 reloadHistory()
