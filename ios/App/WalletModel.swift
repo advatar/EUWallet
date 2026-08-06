@@ -945,6 +945,63 @@ final class WalletModel: ObservableObject {
         }
     }
 
+    /// Handle an `openid-credential-offer://` URL: the by-value hand-off a cross-device PID capture
+    /// uses to deliver the wallet its dual-format PID (SD-JWT + `mso_mdoc`). The credentials ride in
+    /// the offer's `credentials` array; each is authenticated in-core on ingest.
+    func handleCapturedOfferURL(_ url: URL) {
+        guard
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+            let raw = components.queryItems?
+                .first(where: { $0.name == "credential_offer" })?.value,
+            let data = raw.data(using: .utf8),
+            let offer = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            note("Ignored a malformed credential offer link.")
+            return
+        }
+        ingestCapturedOffer(offer)
+    }
+
+    /// Ingest every by-value credential in a capture credential offer. The core AUTHENTICATES each
+    /// before storing — an SD-JWT against the issuer cert chain, an mdoc against its embedded
+    /// `x5chain` — so a forged credential is refused, not stored.
+    func ingestCapturedOffer(_ offer: [String: Any]) {
+        guard let runtime else { return }
+        let issuerId = (offer["credential_issuer"] as? String) ?? issuance.issuerId
+        guard let entries = offer["credentials"] as? [[String: Any]], !entries.isEmpty else {
+            note("Credential offer carried no credentials.")
+            return
+        }
+        var stored: [String] = []
+        for entry in entries {
+            guard
+                let format = entry["format"] as? String,
+                let credential = entry["credential"] as? String
+            else { continue }
+            // The mdoc self-authenticates via its embedded x5chain; the SD-JWT needs the issuer
+            // chain. (The demo issuer chain works here; discovering a live issuer's chain is a
+            // production trust follow-up.)
+            let chain = format == "mso_mdoc" ? [] : issuance.issuerCertChain
+            let error = runtime.ingestCredential(
+                format: format,
+                credential: Data(credential.utf8),
+                issuerCertChain: chain,
+                issuerId: issuerId)
+            if error.isEmpty {
+                stored.append(format)
+            } else {
+                note("Capture credential (\(format)) was rejected: \(error)")
+            }
+        }
+        guard !stored.isEmpty else {
+            phase = .failed("Your identity could not be verified and was not added.")
+            return
+        }
+        reloadCredentials()
+        reloadHistory()
+        phase = .done("Your digital identity was added to your wallet.")
+    }
+
     private func startLiveIssuance(offerUri: String) {
         guard !isIssuing else { return }
         isIssuing = true

@@ -42,7 +42,14 @@ struct ContentView: View {
         // Widgets deep-link straight in; Control Center / Siri intents leave a pending action the app
         // picks up when it becomes active. Both route through the same handler.
         .onOpenURL { url in
-            if let link = WalletDeepLink(url: url) { apply(link) }
+            // A cross-device PID capture hands the wallet its dual-format PID by value on the
+            // `openid-credential-offer` scheme; everything else is an app quick-action deep link.
+            if url.scheme == "openid-credential-offer" {
+                if case .onboarding = nav.state { nav.send(.finishedOnboarding) }
+                model.handleCapturedOfferURL(url)
+            } else if let link = WalletDeepLink(url: url) {
+                apply(link)
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, let link = WalletPendingAction.take() { apply(link) }

@@ -329,6 +329,24 @@ import Foundation
             engine.handleEventJson(eventJson: eventJson)
         }
 
+        /// Ingest a pre-minted credential BY VALUE — the path a cross-device PID capture uses to hand
+        /// the wallet its dual-format PID (SD-JWT + mso_mdoc) from a single `openid-credential-offer`.
+        /// The core AUTHENTICATES before storing: an SD-JWT against `issuerCertChain`, an mdoc against
+        /// its embedded `x5chain` (so `issuerCertChain` may be empty for mdoc). Returns `""` on
+        /// success, else a diagnostic error string. Stores into the same engine `lifecycle` projects;
+        /// on the ephemeral demo engine that is sufficient (durable persistence of ingested
+        /// credentials is tracked separately, as for `drivePresentationEvent`).
+        @discardableResult
+        func ingestCredential(
+            format: String, credential: Data, issuerCertChain: [Data], issuerId: String
+        ) -> String {
+            engine.ingestCredential(
+                format: format,
+                credential: credential,
+                issuerCertChain: issuerCertChain,
+                issuerId: issuerId)
+        }
+
         func agentMandatesJSON() -> String { engine.agentMandatesJson() }
         func transactionLogJSON() -> String { engine.transactionLogJson() }
         func transactionReportJSON() -> String { engine.transactionReportJson() }

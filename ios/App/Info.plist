@@ -14,6 +14,14 @@
 				<string>eu.advatar.wallet</string>
 			</array>
 		</dict>
+		<dict>
+			<!-- OpenID4VCI credential-offer hand-off: a cross-device PID capture delivers the
+			     dual-format PID (SD-JWT + mso_mdoc) by value on this scheme. -->
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>openid-credential-offer</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleExecutable</key>
 	<string>EUWallet</string>
