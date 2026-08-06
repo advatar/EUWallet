@@ -320,6 +320,10 @@ final class WalletModel: ObservableObject {
         LiveActivityController.shared.start(
             documentName: type.displayName, systemImage: type.systemImage)
         Task {
+            // The ARF requires the PID in BOTH mdoc and SD-JWT VC. Silently add the mdoc half first
+            // so the single "Digital ID" the holder adds is presentable in person (ISO 18013-5) and
+            // over OpenID4VP / the Digital Credentials API, then run the reviewed SD-JWT issuance.
+            if type == .pid { _ = await issuePidMdoc() }
             guard await issue(type, requiresReview: true) else {
                 isIssuing = false
                 LiveActivityController.shared.finish(.failed)
@@ -412,10 +416,34 @@ final class WalletModel: ObservableObject {
         case .mdlMdoc: compact = issuance.mdlMdocCredential
         }
         let offer = type == .mdlMdoc ? Self.mdocOffer : issuance.offer
+        return await issueRaw(
+            compact: compact,
+            offer: offer,
+            format: type.issuanceFormat,
+            requiresReview: requiresReview)
+    }
+
+    /// The ARF-mandated mdoc half of the PID (doctype `eu.europa.ec.eudi.pid.1`), issued silently so
+    /// a PID holder can present in person (ISO 18013-5) and over the Digital Credentials API in mdoc
+    /// form. The SD-JWT half is `issue(.pid)`; together they are one logical PID.
+    @discardableResult
+    private func issuePidMdoc() async -> Bool {
+        await issueRaw(
+            compact: issuance.pidMdocCredential,
+            offer: Self.mdocOffer,
+            format: "mso_mdoc",
+            requiresReview: false)
+    }
+
+    /// The transport-stubbed OpenID4VCI cascade for one credential, parameterised by its compact
+    /// bytes, offer, and format. `issue(_:)` routes by demo type; the PID mdoc half calls it directly.
+    private func issueRaw(
+        compact: String, offer: Data, format: String, requiresReview: Bool
+    ) async -> Bool {
         let issuer = DemoIssuer(
             credentialCompact: Data(compact.utf8),
             cNonce: nextNonce(),
-            format: type.issuanceFormat)
+            format: format)
         let review = IssuanceReviewCapture()
         guard let ex = makeExecutor(issuer: issuer, render: {
             [weak self] operationId, authorizationHash, screen in

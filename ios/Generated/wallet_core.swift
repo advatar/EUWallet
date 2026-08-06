@@ -2430,6 +2430,13 @@ public struct IssuanceScenario {
      * what an mso_mdoc `/credential` endpoint returns. Presented over OpenID4VP as a DeviceResponse.
      */
     public var mdlMdocCredential: String
+    /**
+     * The PID in the ISO 18013-5 `mso_mdoc` format (doctype `eu.europa.ec.eudi.pid.1`),
+     * base64url(IssuerSigned CBOR). The ARF requires the PID in BOTH mdoc and SD-JWT VC; this is the
+     * mdoc half (the SD-JWT half is `pid_credential_compact`), so a PID holder can present in person
+     * (18013-5) as well as over OpenID4VP / the Digital Credentials API.
+     */
+    public var pidMdocCredential: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2482,7 +2489,13 @@ public struct IssuanceScenario {
         /**
          * An issuer-signed mDL in the ISO 18013-5 `mso_mdoc` format, base64url(IssuerSigned CBOR) —
          * what an mso_mdoc `/credential` endpoint returns. Presented over OpenID4VP as a DeviceResponse.
-         */mdlMdocCredential: String) {
+         */mdlMdocCredential: String,
+        /**
+         * The PID in the ISO 18013-5 `mso_mdoc` format (doctype `eu.europa.ec.eudi.pid.1`),
+         * base64url(IssuerSigned CBOR). The ARF requires the PID in BOTH mdoc and SD-JWT VC; this is the
+         * mdoc half (the SD-JWT half is `pid_credential_compact`), so a PID holder can present in person
+         * (18013-5) as well as over OpenID4VP / the Digital Credentials API.
+         */pidMdocCredential: String) {
         self.epoch = epoch
         self.trustList = trustList
         self.operatorPublicKey = operatorPublicKey
@@ -2498,6 +2511,7 @@ public struct IssuanceScenario {
         self.nidCredentialCompact = nidCredentialCompact
         self.germanIdCredentialCompact = germanIdCredentialCompact
         self.mdlMdocCredential = mdlMdocCredential
+        self.pidMdocCredential = pidMdocCredential
     }
 }
 
@@ -2550,6 +2564,9 @@ extension IssuanceScenario: Equatable, Hashable {
         if lhs.mdlMdocCredential != rhs.mdlMdocCredential {
             return false
         }
+        if lhs.pidMdocCredential != rhs.pidMdocCredential {
+            return false
+        }
         return true
     }
 
@@ -2569,6 +2586,7 @@ extension IssuanceScenario: Equatable, Hashable {
         hasher.combine(nidCredentialCompact)
         hasher.combine(germanIdCredentialCompact)
         hasher.combine(mdlMdocCredential)
+        hasher.combine(pidMdocCredential)
     }
 }
 
@@ -2594,7 +2612,8 @@ public struct FfiConverterTypeIssuanceScenario: FfiConverterRustBuffer {
                 passportCredentialCompact: FfiConverterString.read(from: &buf),
                 nidCredentialCompact: FfiConverterString.read(from: &buf),
                 germanIdCredentialCompact: FfiConverterString.read(from: &buf),
-                mdlMdocCredential: FfiConverterString.read(from: &buf)
+                mdlMdocCredential: FfiConverterString.read(from: &buf),
+                pidMdocCredential: FfiConverterString.read(from: &buf)
         )
     }
 
@@ -2614,6 +2633,7 @@ public struct FfiConverterTypeIssuanceScenario: FfiConverterRustBuffer {
         FfiConverterString.write(value.nidCredentialCompact, into: &buf)
         FfiConverterString.write(value.germanIdCredentialCompact, into: &buf)
         FfiConverterString.write(value.mdlMdocCredential, into: &buf)
+        FfiConverterString.write(value.pidMdocCredential, into: &buf)
     }
 }
 

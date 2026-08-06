@@ -121,6 +121,11 @@ pub struct IssuanceScenario {
     /// An issuer-signed mDL in the ISO 18013-5 `mso_mdoc` format, base64url(IssuerSigned CBOR) —
     /// what an mso_mdoc `/credential` endpoint returns. Presented over OpenID4VP as a DeviceResponse.
     pub mdl_mdoc_credential: String,
+    /// The PID in the ISO 18013-5 `mso_mdoc` format (doctype `eu.europa.ec.eudi.pid.1`),
+    /// base64url(IssuerSigned CBOR). The ARF requires the PID in BOTH mdoc and SD-JWT VC; this is the
+    /// mdoc half (the SD-JWT half is `pid_credential_compact`), so a PID holder can present in person
+    /// (18013-5) as well as over OpenID4VP / the Digital Credentials API.
+    pub pid_mdoc_credential: String,
 }
 
 /// Holds the demo's ephemeral keys and mints [`DemoScenario`]s. Also acts as the device signer for
@@ -302,6 +307,7 @@ impl DemoWallet {
             nid_credential_compact: Self::compact(&nid_jwt, &nid_claims),
             german_id_credential_compact: Self::compact(&german_jwt, &german_claims),
             mdl_mdoc_credential: self.mdl_mdoc_credential(),
+            pid_mdoc_credential: self.pid_mdoc_credential(),
         }
     }
 
@@ -525,6 +531,61 @@ impl DemoWallet {
             Alg::Es256,
         )
         .expect("issue demo mdoc");
+        issued.issuer_auth.unprotected.x5chain =
+            Some(Box::new(cose::X5Chain::Single(issuer_certificate_der())));
+        Base64UrlUnpadded::encode_string(&issued.to_value().to_canonical())
+    }
+
+    /// The PID in `mso_mdoc` form (doctype + namespace `eu.europa.ec.eudi.pid.1`), the mdoc half of
+    /// the ARF-mandated dual-format PID. Same device key + issuer as the SD-JWT PID, so both are one
+    /// logical credential the holder can present in person (18013-5) or over OpenID4VP / DC API.
+    fn pid_mdoc_credential(&self) -> String {
+        use mdoc::cbor::Value;
+        use mdoc::{build_and_sign, IssuerSignedItem, ValidityInfo};
+
+        let items = vec![
+            IssuerSignedItem {
+                digest_id: 0,
+                random: vec![0x4d; 16],
+                element_id: "family_name".into(),
+                element_value: Value::Text("Andersson".into()),
+            },
+            IssuerSignedItem {
+                digest_id: 1,
+                random: vec![0x5e; 16],
+                element_id: "given_name".into(),
+                element_value: Value::Text("Astrid".into()),
+            },
+            IssuerSignedItem {
+                digest_id: 2,
+                random: vec![0x6f; 16],
+                element_id: "birth_date".into(),
+                element_value: Value::Text("1990-01-01".into()),
+            },
+            IssuerSignedItem {
+                digest_id: 3,
+                random: vec![0x70; 16],
+                element_id: "age_over_18".into(),
+                element_value: Value::Bool(true),
+            },
+        ];
+        let mut name_spaces = BTreeMap::new();
+        name_spaces.insert("eu.europa.ec.eudi.pid.1".to_string(), items);
+        let mut issued = build_and_sign(
+            name_spaces,
+            "eu.europa.ec.eudi.pid.1",
+            Self::cose_key(self.device.public_key_raw()),
+            ValidityInfo {
+                signed: "2026-07-19T00:00:00Z".into(),
+                valid_from: "2026-07-19T00:00:00Z".into(),
+                valid_until: "2035-01-01T00:00:00Z".into(),
+            },
+            &AwsLc,
+            &self.issuer,
+            &KeyRef("i".into()),
+            Alg::Es256,
+        )
+        .expect("issue demo PID mdoc");
         issued.issuer_auth.unprotected.x5chain =
             Some(Box::new(cose::X5Chain::Single(issuer_certificate_der())));
         Base64UrlUnpadded::encode_string(&issued.to_value().to_canonical())
