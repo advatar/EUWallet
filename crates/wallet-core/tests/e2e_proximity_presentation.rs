@@ -1,23 +1,39 @@
 //! End-to-end in-person (ISO/IEC 18013-5) proximity presentation driven entirely through the
 //! wallet-core `Event`/`Effect` facade, with a **simulated reader** completing the crypto half.
 //!
-//! This exercises the full B3a wiring without a physical reader: engagement → establishment (real
-//! ECDH + HKDF key derivation) → consent → device signature → an AES-256-GCM-encrypted SessionData
-//! response that the simulated reader decrypts. The DeviceResponse *content* the core wraps is still
-//! the placeholder from the sans-IO core (real mdoc assembly from holdings is the remaining B3
-//! step); what this proves end-to-end is the driver + the SessionData session encryption.
+//! Covers the full B3a+B3b path without a physical reader:
+//!   engagement → the reader's encrypted ItemsRequest in SessionEstablishment → real ECDH + HKDF
+//!   key derivation → credential selection + data minimisation → consent (listing the requested
+//!   elements) → device signature → a real, minimised ISO 18013-5 DeviceResponse, AES-256-GCM
+//!   encrypted as SessionData, which the simulated reader decrypts and inspects.
+//!
+//! The remaining step needs a real reader/second device: reader authentication and a hardware
+//! interop run.
 
-use cose::cbor::Value;
-use crypto_backend::{AwsLc, P256AgreementKey};
+use cose::cbor::{decode_value, Value};
+use crypto_backend::{AwsLc, P256AgreementKey, SoftwareSigner};
+use crypto_traits::{Alg, KeyRef, Signer};
+use mdoc::{build_and_sign, IssuerSignedItem, ValidityInfo};
+use std::collections::BTreeMap;
 use wallet_core::proximity_session::{
     cose_ec2_to_sec1, derive_session_keys, device_key_from_engagement, parse_session_data,
     sec1_to_cose_ec2, SessionCipher,
 };
-use wallet_core::{Core, Effect, Event};
+use wallet_core::{Core, Effect, Event, MdocHolding};
+
+const DOCTYPE: &str = "org.iso.18013.5.1.mDL";
+const NS: &str = "org.iso.18013.5.1";
 
 fn find_engagement(effects: &[Effect]) -> Option<Vec<u8>> {
     effects.iter().find_map(|e| match e {
         Effect::EmitDeviceEngagement { engagement } => Some(engagement.clone()),
+        _ => None,
+    })
+}
+
+fn find_sign_payload(effects: &[Effect]) -> Option<Vec<u8>> {
+    effects.iter().find_map(|e| match e {
+        Effect::Sign { payload, .. } => Some(payload.clone()),
         _ => None,
     })
 }
@@ -29,96 +45,207 @@ fn find_device_response(effects: &[Effect]) -> Option<Vec<u8>> {
     })
 }
 
-#[test]
-fn in_person_presentation_drives_the_machine_and_encrypts_the_response() {
-    let mut core = Core::new("wallet-client", "device-key");
+/// COSE_Key (EC2/P-256) as a CBOR `Value`, for the MSO device key — via the same SEC1→COSE_Key
+/// conversion the wallet uses, then decoded back to a `Value` for `build_and_sign`.
+fn cose_key_value(sec1: &[u8]) -> Value {
+    let bytes = sec1_to_cose_ec2(sec1).expect("valid SEC1");
+    decode_value(&bytes, 0).expect("COSE_Key decodes").0
+}
 
-    // 1. The shell asks to present in person, supplying the BLE service UUID it will advertise.
+/// Seed the wallet with an mDL holding bound to `device`, carrying two data elements.
+fn seed_mdl(core: &mut Core, issuer: &SoftwareSigner, device: &SoftwareSigner) {
+    let mut name_spaces = BTreeMap::new();
+    name_spaces.insert(
+        NS.to_string(),
+        vec![
+            IssuerSignedItem {
+                digest_id: 0,
+                random: vec![0x11; 16],
+                element_id: "age_over_18".into(),
+                element_value: Value::Bool(true),
+            },
+            IssuerSignedItem {
+                digest_id: 1,
+                random: vec![0x22; 16],
+                element_id: "family_name".into(),
+                element_value: Value::Text("Andersson".into()),
+            },
+        ],
+    );
+    let issuer_signed = build_and_sign(
+        name_spaces,
+        DOCTYPE,
+        cose_key_value(device.public_key_raw()),
+        ValidityInfo {
+            signed: "2026-07-19T00:00:00Z".into(),
+            valid_from: "2026-07-19T00:00:00Z".into(),
+            valid_until: "2035-01-01T00:00:00Z".into(),
+        },
+        &AwsLc,
+        issuer,
+        &KeyRef("issuer".into()),
+        Alg::Es256,
+    )
+    .expect("issue mDL");
+    core.load_unverified_mdoc_for_testing(MdocHolding {
+        doctype: DOCTYPE.into(),
+        issuer_signed,
+    });
+}
+
+/// A reader's DeviceRequest asking for exactly `elements` of `DOCTYPE`.
+fn device_request(elements: &[&str]) -> Vec<u8> {
+    let items: Vec<(Value, Value)> = elements
+        .iter()
+        .map(|e| (Value::Text((*e).into()), Value::Bool(false)))
+        .collect();
+    let items_request = Value::Map(vec![
+        (Value::Text("docType".into()), Value::Text(DOCTYPE.into())),
+        (
+            Value::Text("nameSpaces".into()),
+            Value::Map(vec![(Value::Text(NS.into()), Value::Map(items))]),
+        ),
+    ])
+    .to_canonical();
+    let doc_request = Value::Map(vec![(
+        Value::Text("itemsRequest".into()),
+        Value::Tag(24, Box::new(Value::Bytes(items_request))),
+    )]);
+    Value::Map(vec![
+        (Value::Text("version".into()), Value::Text("1.0".into())),
+        (
+            Value::Text("docRequests".into()),
+            Value::Array(vec![doc_request]),
+        ),
+    ])
+    .to_canonical()
+}
+
+fn contains(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|w| w == needle.as_bytes())
+}
+
+#[test]
+fn in_person_presentation_returns_a_minimised_device_response() {
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let device = SoftwareSigner::generate_p256().unwrap();
+    let mut core = Core::new("wallet-client", "device-key");
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    seed_mdl(&mut core, &issuer, &device);
+
+    // 1. Engagement.
     let effects = core.handle_event(Event::ProximityEngagementRequested {
         ble_uuid: vec![0x11; 16],
     });
     let engagement = find_engagement(&effects).expect("DeviceEngagement is emitted");
 
-    // ---- Simulated reader: scan the engagement, pull the device key, make its own ephemeral key.
-    let device_cose = device_key_from_engagement(&engagement).expect("device key in engagement");
-    let device_sec1 = cose_ec2_to_sec1(&device_cose).expect("device COSE_Key → SEC1");
+    // ---- Simulated reader: scan engagement, make an ephemeral key, derive the SAME session keys,
+    // and encrypt an ItemsRequest asking for ONLY age_over_18 (not family_name).
+    let device_cose = device_key_from_engagement(&engagement).unwrap();
+    let device_sec1 = cose_ec2_to_sec1(&device_cose).unwrap();
     let reader = P256AgreementKey::generate().unwrap();
     let reader_cose = sec1_to_cose_ec2(reader.public_raw()).unwrap();
+    let z = reader.agree(&device_sec1).unwrap();
+    let transcript = iso18013_5::session_transcript(&engagement, &reader_cose);
+    let keys = derive_session_keys(&AwsLc, &z, &transcript);
+    let mut reader_cipher = SessionCipher::new(keys);
+    let encrypted_request = reader_cipher
+        .seal_from_reader(&AwsLc, &device_request(&["age_over_18"]))
+        .unwrap();
 
-    // 2. The reader's SessionEstablishment = { eReaderKey: #6.24(bstr COSE_Key), data: bstr }.
+    // 2. SessionEstablishment { eReaderKey, data }.
     let establishment = Value::Map(vec![
         (
             Value::Text("eReaderKey".into()),
             Value::Tag(24, Box::new(Value::Bytes(reader_cose.clone()))),
         ),
-        (
-            Value::Text("data".into()),
-            Value::Bytes(b"encrypted-itemsrequest-placeholder".to_vec()),
-        ),
+        (Value::Text("data".into()), Value::Bytes(encrypted_request)),
     ])
     .to_canonical();
     let effects = core.handle_event(Event::ProximityReaderEstablishment {
         session_establishment: establishment,
     });
-    assert!(
-        effects.iter().any(|e| matches!(e, Effect::Render { .. })),
-        "establishing the session renders a consent prompt"
-    );
-
-    // 3. The holder approves → the core asks the Secure Enclave to sign DeviceAuthentication.
-    let effects = core.handle_event(Event::UserConsented);
-    assert!(
-        effects.iter().any(|e| matches!(e, Effect::Sign { .. })),
-        "consent triggers a device-auth signing request"
-    );
-
-    // 4. The enclave returns a signature (opaque to the machine) → encrypted SessionData response.
-    let effects = core.handle_event(Event::DeviceSignatureProduced {
-        signature: vec![0xAB; 64],
+    // The consent screen lists exactly the requested element.
+    let consent_lists_age = effects.iter().any(|e| {
+        matches!(e, Effect::Render { screen }
+            if format!("{screen:?}").contains("age_over_18")
+            && !format!("{screen:?}").contains("family_name"))
     });
-    let response = find_device_response(&effects).expect("an encrypted DeviceResponse is emitted");
-
-    // ---- Simulated reader decrypts: same ECDH Z, same transcript, same derived SKDevice.
-    let z = reader.agree(&device_sec1).unwrap();
-    let transcript = iso18013_5::session_transcript(&engagement, &reader_cose);
-    let keys = derive_session_keys(&AwsLc, &z, &transcript);
-    let mut reader_cipher = SessionCipher::new(keys);
-    let ciphertext = parse_session_data(&response).expect("SessionData carries a data field");
-    let plaintext = reader_cipher
-        .open_from_device(&AwsLc, &ciphertext)
-        .expect("the reader decrypts the wallet's SessionData with SKDevice");
     assert!(
-        !plaintext.is_empty(),
-        "the decrypted DeviceResponse is non-empty"
+        consent_lists_age,
+        "consent surfaces only the requested element"
     );
 
-    // The SessionData is genuinely encrypted (not the plaintext response) and authenticated (a
-    // tampered byte fails the GCM tag under a fresh cipher at the same counter).
-    assert_ne!(ciphertext, plaintext);
-    let mut tampered = ciphertext.clone();
-    let last = tampered.len() - 1;
-    tampered[last] ^= 0x01;
-    let mut fresh_reader = SessionCipher::new(derive_session_keys(&AwsLc, &z, &transcript));
+    // 3. Consent → the core asks the device to sign DeviceAuthentication.
+    let effects = core.handle_event(Event::UserConsented);
+    let signing_input = find_sign_payload(&effects).expect("device-auth signing requested");
+    let signature = device
+        .sign(&KeyRef("device-key".into()), Alg::Es256, &signing_input)
+        .unwrap();
+
+    // 4. Device signature → encrypted SessionData DeviceResponse.
+    let effects = core.handle_event(Event::DeviceSignatureProduced { signature });
+    let response = find_device_response(&effects).expect("encrypted DeviceResponse emitted");
+
+    // ---- Reader decrypts + inspects the DeviceResponse.
+    let ciphertext = parse_session_data(&response).unwrap();
+    let device_response = reader_cipher
+        .open_from_device(&AwsLc, &ciphertext)
+        .expect("reader decrypts the SessionData with SKDevice");
+
+    // It is a well-formed CBOR DeviceResponse...
+    let (parsed, rest) = decode_value(&device_response, 0).expect("DeviceResponse decodes");
+    assert!(rest.is_empty());
+    assert!(matches!(parsed, Value::Map(_)), "DeviceResponse is a map");
     assert!(
-        fresh_reader.open_from_device(&AwsLc, &tampered).is_err(),
-        "a tampered SessionData ciphertext is rejected"
+        contains(&device_response, "documents"),
+        "carries a document"
+    );
+    // ...disclosing EXACTLY the requested element — data minimisation held end-to-end.
+    assert!(
+        contains(&device_response, "age_over_18"),
+        "the requested element is disclosed"
+    );
+    assert!(
+        !contains(&device_response, "family_name"),
+        "the un-requested element is NOT disclosed (minimised)"
     );
 }
 
 #[test]
 fn declining_in_person_consent_closes_the_session() {
+    let issuer = SoftwareSigner::generate_p256().unwrap();
+    let device = SoftwareSigner::generate_p256().unwrap();
     let mut core = Core::new("wallet-client", "device-key");
-    core.handle_event(Event::ProximityEngagementRequested {
+    core.handle_event(Event::SetClock {
+        epoch: 1_790_000_000,
+    });
+    seed_mdl(&mut core, &issuer, &device);
+
+    let effects = core.handle_event(Event::ProximityEngagementRequested {
         ble_uuid: vec![0x22; 16],
     });
+    let engagement = find_engagement(&effects).unwrap();
+    let device_cose = device_key_from_engagement(&engagement).unwrap();
+    let device_sec1 = cose_ec2_to_sec1(&device_cose).unwrap();
     let reader = P256AgreementKey::generate().unwrap();
     let reader_cose = sec1_to_cose_ec2(reader.public_raw()).unwrap();
+    let z = reader.agree(&device_sec1).unwrap();
+    let transcript = iso18013_5::session_transcript(&engagement, &reader_cose);
+    let mut reader_cipher = SessionCipher::new(derive_session_keys(&AwsLc, &z, &transcript));
+    let encrypted_request = reader_cipher
+        .seal_from_reader(&AwsLc, &device_request(&["age_over_18"]))
+        .unwrap();
     let establishment = Value::Map(vec![
         (
             Value::Text("eReaderKey".into()),
             Value::Tag(24, Box::new(Value::Bytes(reader_cose))),
         ),
-        (Value::Text("data".into()), Value::Bytes(b"x".to_vec())),
+        (Value::Text("data".into()), Value::Bytes(encrypted_request)),
     ])
     .to_canonical();
     core.handle_event(Event::ProximityReaderEstablishment {

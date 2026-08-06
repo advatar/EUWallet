@@ -59,6 +59,13 @@ pub enum ScreenDescription {
     ScanQr,
     AuthPrompt,
     TransactionHistory,
+    /// In-person (ISO 18013-5) presentation consent: the exact `namespace/element` data elements
+    /// the nearby reader asked for. Reader identity (from `readerAuth`) is not yet surfaced, so this
+    /// is a lighter archetype than the OID4VP `Consent` screen; the requested claims are hashed
+    /// (WYSIWYS) via the canonical codec like every other screen.
+    ProximityConsent {
+        requested_claims: Vec<String>,
+    },
 }
 
 /// A fully-resolved payment SCA confirmation screen (PSD2 dynamic linking surfaces here). Shows
@@ -453,6 +460,15 @@ fn to_value(screen: &ScreenDescription) -> Value {
         ScreenDescription::ScanQr => Value::Array(vec![tag("scanQr")]),
         ScreenDescription::AuthPrompt => Value::Array(vec![tag("authPrompt")]),
         ScreenDescription::TransactionHistory => Value::Array(vec![tag("transactionHistory")]),
+        ScreenDescription::ProximityConsent { requested_claims } => Value::Array(vec![
+            tag("proximityConsent"),
+            Value::Array(
+                requested_claims
+                    .iter()
+                    .map(|claim| Value::Text(claim.clone()))
+                    .collect(),
+            ),
+        ]),
     }
 }
 

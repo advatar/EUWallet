@@ -62,6 +62,30 @@ struct ProximityFlow {
     device_key: Option<crypto_backend::P256AgreementKey>,
     /// The AES-256-GCM SessionData cipher, derived once the reader's EReaderKey arrives.
     cipher: Option<proximity_session::SessionCipher>,
+    /// The reader's encrypted request (SessionEstablishment `data`), stashed until the cipher exists
+    /// so it can be decrypted + parsed into a credential selection.
+    pending_request: Option<Vec<u8>>,
+    /// The selected + minimised credential and the pre-computed DeviceAuth signing input, resolved
+    /// from the reader's ItemsRequest at establishment.
+    presentation: Option<ProximityPresentation>,
+    /// The device signature for the in-flight DeviceAuthentication, captured so the response can be
+    /// assembled when the machine reaches `Responded`.
+    last_signature: Option<Vec<u8>>,
+}
+
+/// The concrete credential the wallet will present in person, resolved from the reader's request.
+struct ProximityPresentation {
+    doctype: String,
+    /// The issuer-signed credential, already minimised to exactly the requested data elements.
+    issuer_signed: mdoc::IssuerSigned,
+    /// `DeviceNameSpacesBytes` — empty here (all disclosed data is issuer-signed).
+    device_namespaces_bytes: Vec<u8>,
+    /// The COSE protected header the device signature uses (must match on sign + assembly).
+    protected_header: Vec<u8>,
+    /// The exact bytes the device key signs: `sig_structure(protected, [], DeviceAuthenticationBytes)`.
+    signing_input: Vec<u8>,
+    /// The disclosed `namespace/element` labels, for the consent screen.
+    disclosed: Vec<String>,
 }
 
 impl ProximityFlow {
@@ -70,6 +94,9 @@ impl ProximityFlow {
             state: iso18013_5::State::Idle,
             device_key: None,
             cipher: None,
+            pending_request: None,
+            presentation: None,
+            last_signature: None,
         }
     }
 }
@@ -80,6 +107,7 @@ impl core::fmt::Debug for ProximityFlow {
             .field("state", &self.state)
             .field("has_device_key", &self.device_key.is_some())
             .field("has_cipher", &self.cipher.is_some())
+            .field("has_presentation", &self.presentation.is_some())
             .finish()
     }
 }
@@ -2269,10 +2297,13 @@ impl Core {
                 self.qes_consent_hash = [0u8; 32];
             }
             ActiveFlow::Proximity => {
-                // Scrub the ephemeral session crypto; the terminal machine state is preserved (like
-                // the other flows) for diagnostics.
+                // Scrub the ephemeral session crypto + selection; the terminal machine state is
+                // preserved (like the other flows) for diagnostics.
                 self.proximity.device_key = None;
                 self.proximity.cipher = None;
+                self.proximity.pending_request = None;
+                self.proximity.presentation = None;
+                self.proximity.last_signature = None;
             }
             ActiveFlow::WalletTransfer | ActiveFlow::None => {}
         }
@@ -2727,9 +2758,14 @@ impl Core {
             Event::ProximityReaderEstablishment {
                 session_establishment,
             } => match proximity_session::parse_session_establishment(&session_establishment) {
-                Ok(est) => self.drive_proximity(iso18013_5::Input::ReaderEstablishment {
-                    e_reader_key_cose: est.e_reader_key_cose,
-                }),
+                Ok(est) => {
+                    // Stash the encrypted request so `drive_proximity` can decrypt it once the
+                    // SessionData cipher exists, then select the credential to present.
+                    self.proximity.pending_request = Some(est.data);
+                    self.drive_proximity(iso18013_5::Input::ReaderEstablishment {
+                        e_reader_key_cose: est.e_reader_key_cose,
+                    })
+                }
                 // A malformed SessionEstablishment can't bind a transcript — fail closed.
                 Err(_) => self.drive_proximity(iso18013_5::Input::ReaderEstablishment {
                     e_reader_key_cose: Vec::new(),
@@ -4040,20 +4076,37 @@ impl Core {
                         .map(|z| {
                             let transcript =
                                 iso18013_5::session_transcript(&engagement, e_reader_key_cose);
-                            proximity_session::SessionCipher::new(
+                            let cipher = proximity_session::SessionCipher::new(
                                 proximity_session::derive_session_keys(&AwsLc, &z, &transcript),
-                            )
+                            );
+                            (cipher, transcript)
                         })
                 }
                 _ => None,
             };
-            if let Some(cipher) = derived {
+            if let Some((mut cipher, transcript)) = derived {
                 // ECDH succeeded (reader key is a valid curve point) and we bound the transcript
                 // over our own engagement + the reader key.
                 reader_key_on_curve = true;
                 transcript_bound = true;
+                // Decrypt the reader's request and select the credential to present. A request we
+                // can't decrypt/parse, or with no matching held credential, leaves `presentation`
+                // None — the machine still reaches consent, but the response will be empty.
+                let presentation = self
+                    .proximity
+                    .pending_request
+                    .take()
+                    .and_then(|ct| cipher.open_from_reader(&AwsLc, &ct).ok())
+                    .and_then(|request| proximity_session::parse_device_request(&request).ok())
+                    .and_then(|summary| self.build_proximity_presentation(&summary, &transcript));
                 self.proximity.cipher = Some(cipher);
+                self.proximity.presentation = presentation;
             }
+        }
+
+        // Capture the device signature so `EmitDeviceResponse` can assemble the real DeviceResponse.
+        if let iso18013_5::Input::DeviceSignatureProduced(signature) = &input {
+            self.proximity.last_signature = Some(signature.clone());
         }
 
         let (next, outputs) = {
@@ -4085,37 +4138,113 @@ impl Core {
         effects
     }
 
-    /// Map each `iso18013-5` output to shell effects. The SessionData AES-256-GCM encryption slots
-    /// in here (facade-side), exactly as `encrypt_direct_post_jwt` wraps the OID4VP response.
+    /// Select + minimise a held mdoc for the reader's request, and pre-compute the DeviceAuth
+    /// signing input. Returns `None` if no current holding matches the requested doctype.
+    fn build_proximity_presentation(
+        &self,
+        summary: &proximity_session::DeviceRequestSummary,
+        transcript: &[u8],
+    ) -> Option<ProximityPresentation> {
+        // Choose the first current holding of the requested doctype (mirrors the OID4VP mdoc path).
+        let issuer_signed = self
+            .mdoc_holdings
+            .iter()
+            .find(|stored| {
+                stored.holding.doctype == summary.doctype
+                    && self.mdoc_credential_is_current(stored).is_ok()
+            })
+            .map(|stored| stored.holding.issuer_signed.clone())?;
+        // Data minimisation: drop every element the reader did not request.
+        let issuer_signed = minimise_mdoc(&issuer_signed, &summary.claims);
+        let device_namespaces_bytes = mdoc::empty_device_namespaces_bytes();
+        let device_auth = mdoc::device_authentication_bytes(
+            transcript,
+            &summary.doctype,
+            &device_namespaces_bytes,
+        )
+        .ok()?;
+        let protected_header = cose::encode_protected_header(Alg::Es256);
+        let signing_input = cose::sig_structure(&protected_header, &[], &device_auth);
+        let disclosed = summary
+            .claims
+            .iter()
+            .map(|(namespace, element)| format!("{namespace}/{element}"))
+            .collect();
+        Some(ProximityPresentation {
+            doctype: summary.doctype.clone(),
+            issuer_signed,
+            device_namespaces_bytes,
+            protected_header,
+            signing_input,
+            disclosed,
+        })
+    }
+
+    /// Map each `iso18013-5` output to shell effects. wallet-core owns the response *content* (the
+    /// sans-IO core has no holdings): it substitutes the real, minimised DeviceAuth signing input and
+    /// assembles + AES-256-GCM-encrypts the real DeviceResponse (the SessionData encryption slots in
+    /// here, exactly as `encrypt_direct_post_jwt` wraps the OID4VP response).
     fn translate_proximity(&mut self, output: iso18013_5::Output) -> Vec<Effect> {
         use iso18013_5::Output as PO;
         match output {
             PO::EmitDeviceEngagement(engagement) => {
                 vec![Effect::EmitDeviceEngagement { engagement }]
             }
-            // The rich in-person consent screen (reader identity + the claims from the reader's
-            // ItemsRequest) is the tracked B3 remainder; until the request is parsed we ask for
-            // approval without fabricating claim/RP content.
-            PO::RenderConsent => vec![Effect::Render {
-                screen: ScreenDescription::AuthPrompt,
-            }],
-            PO::SignDeviceAuth {
-                key_ref,
-                signing_input,
-            } => vec![Effect::Sign {
-                key_ref,
-                payload: signing_input,
-            }],
-            PO::EmitDeviceResponse(plaintext) => {
-                // Encrypt the DeviceResponse into SessionData with the derived per-direction key.
-                match self.proximity.cipher.as_mut() {
-                    Some(cipher) => match cipher.seal_from_device(&AwsLc, &plaintext) {
-                        Ok(ciphertext) => vec![Effect::EmitDeviceResponse {
-                            response: proximity_session::session_data(&ciphertext),
-                        }],
-                        Err(_) => vec![Effect::Close],
-                    },
-                    // No session keys → the transcript was never bound; never emit plaintext.
+            PO::RenderConsent => {
+                // Show the holder exactly the data elements the reader asked for (WYSIWYS). If no
+                // held credential matched, there is nothing to disclose.
+                let requested_claims = self
+                    .proximity
+                    .presentation
+                    .as_ref()
+                    .map(|p| p.disclosed.clone())
+                    .unwrap_or_default();
+                vec![Effect::Render {
+                    screen: ScreenDescription::ProximityConsent { requested_claims },
+                }]
+            }
+            PO::SignDeviceAuth { key_ref, .. } => {
+                // Override the sans-IO core's placeholder signing input with the real one, bound to
+                // the selected credential's doctype + the minimised device namespaces.
+                match &self.proximity.presentation {
+                    Some(p) => vec![Effect::Sign {
+                        key_ref,
+                        payload: p.signing_input.clone(),
+                    }],
+                    None => vec![Effect::Close],
+                }
+            }
+            PO::EmitDeviceResponse(_placeholder) => {
+                // Assemble the real ISO 18013-5 DeviceResponse from the selected holding + the
+                // device signature, then AES-256-GCM-encrypt it into SessionData.
+                let signature = self.proximity.last_signature.take();
+                let device_response = match (self.proximity.presentation.as_ref(), signature) {
+                    (Some(p), Some(signature)) => {
+                        let device_auth = cose::CoseSign1 {
+                            protected: p.protected_header.clone(),
+                            unprotected: cose::UnprotectedHeader::default(),
+                            payload: None,
+                            signature,
+                        };
+                        Some(mdoc::device_response(
+                            &p.doctype,
+                            &p.issuer_signed,
+                            &p.device_namespaces_bytes,
+                            &device_auth,
+                        ))
+                    }
+                    _ => None,
+                };
+                match device_response.and_then(|response| {
+                    self.proximity
+                        .cipher
+                        .as_mut()
+                        .and_then(|cipher| cipher.seal_from_device(&AwsLc, &response).ok())
+                }) {
+                    Some(ciphertext) => vec![Effect::EmitDeviceResponse {
+                        response: proximity_session::session_data(&ciphertext),
+                    }],
+                    // No selection or no session keys → never emit plaintext; tear down.
                     None => vec![Effect::Close],
                 }
             }

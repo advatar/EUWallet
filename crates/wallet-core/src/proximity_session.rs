@@ -272,6 +272,68 @@ pub fn parse_session_data(bytes: &[u8]) -> Result<Vec<u8>, SessionError> {
     }
 }
 
+/// The reader's request, reduced to what the wallet needs to select + minimise a credential.
+pub struct DeviceRequestSummary {
+    /// The requested mdoc doctype (e.g. `org.iso.18013.5.1.mDL`).
+    pub doctype: String,
+    /// The requested `(namespace, element)` data elements.
+    pub claims: Vec<(String, String)>,
+}
+
+/// Parse an ISO/IEC 18013-5 §8.3.2.1.2.1 `DeviceRequest` down to `(docType, [(namespace, element)])`
+/// for its first `DocRequest`:
+///
+/// ```text
+/// DeviceRequest = { "version": tstr, "docRequests": [ DocRequest ] }
+/// DocRequest    = { "itemsRequest": #6.24(bstr .cbor ItemsRequest), ? "readerAuth": ... }
+/// ItemsRequest  = { "docType": tstr, "nameSpaces": { ns => { element => IntentToRetain } }, ? .. }
+/// ```
+///
+/// `readerAuth` (reader authentication) is intentionally ignored here — it is optional in 18013-5
+/// and verifying it is a tracked follow-up.
+pub fn parse_device_request(bytes: &[u8]) -> Result<DeviceRequestSummary, SessionError> {
+    let map = decode_map(bytes)?;
+    let doc_requests = match text_entry(&map, "docRequests") {
+        Some(Value::Array(a)) => a,
+        _ => return Err(SessionError::MalformedMessage),
+    };
+    let first = doc_requests.first().ok_or(SessionError::MalformedMessage)?;
+    let doc_request = match first {
+        Value::Map(m) => m,
+        _ => return Err(SessionError::MalformedMessage),
+    };
+    let items_request_bytes = match text_entry(doc_request, "itemsRequest") {
+        Some(Value::Tag(24, inner)) => match inner.as_ref() {
+            Value::Bytes(b) => b.clone(),
+            _ => return Err(SessionError::MalformedMessage),
+        },
+        _ => return Err(SessionError::MalformedMessage),
+    };
+    let items_request = decode_map(&items_request_bytes)?;
+    let doctype = match text_entry(&items_request, "docType") {
+        Some(Value::Text(t)) => t.clone(),
+        _ => return Err(SessionError::MalformedMessage),
+    };
+    let name_spaces = match text_entry(&items_request, "nameSpaces") {
+        Some(Value::Map(m)) => m,
+        _ => return Err(SessionError::MalformedMessage),
+    };
+    let mut claims = Vec::new();
+    for (namespace, elements) in name_spaces {
+        let Value::Text(namespace) = namespace else {
+            continue;
+        };
+        if let Value::Map(items) = elements {
+            for (element, _intent_to_retain) in items {
+                if let Value::Text(element) = element {
+                    claims.push((namespace.clone(), element.clone()));
+                }
+            }
+        }
+    }
+    Ok(DeviceRequestSummary { doctype, claims })
+}
+
 fn decode_map(bytes: &[u8]) -> Result<Vec<(Value, Value)>, SessionError> {
     let (value, _) = decode_value(bytes, 0).map_err(|_| SessionError::MalformedMessage)?;
     match value {
@@ -466,5 +528,55 @@ mod tests {
     fn session_data_round_trips() {
         let sd = session_data(b"encrypted-response");
         assert_eq!(parse_session_data(&sd).unwrap(), b"encrypted-response");
+    }
+
+    #[test]
+    fn device_request_parses_to_doctype_and_claims() {
+        // DeviceRequest asking for two elements of one doctype.
+        let items = Value::Map(vec![
+            (Value::Text("age_over_18".into()), Value::Bool(false)),
+            (Value::Text("family_name".into()), Value::Bool(true)),
+        ]);
+        let items_request = Value::Map(vec![
+            (
+                Value::Text("docType".into()),
+                Value::Text("org.iso.18013.5.1.mDL".into()),
+            ),
+            (
+                Value::Text("nameSpaces".into()),
+                Value::Map(vec![(Value::Text("org.iso.18013.5.1".into()), items)]),
+            ),
+        ])
+        .to_canonical();
+        let doc_request = Value::Map(vec![(
+            Value::Text("itemsRequest".into()),
+            Value::Tag(24, Box::new(Value::Bytes(items_request))),
+        )]);
+        let device_request = Value::Map(vec![
+            (Value::Text("version".into()), Value::Text("1.0".into())),
+            (
+                Value::Text("docRequests".into()),
+                Value::Array(vec![doc_request]),
+            ),
+        ])
+        .to_canonical();
+
+        let summary = parse_device_request(&device_request).expect("parse");
+        assert_eq!(summary.doctype, "org.iso.18013.5.1.mDL");
+        assert!(summary
+            .claims
+            .contains(&("org.iso.18013.5.1".into(), "age_over_18".into())));
+        assert!(summary
+            .claims
+            .contains(&("org.iso.18013.5.1".into(), "family_name".into())));
+        assert_eq!(summary.claims.len(), 2);
+    }
+
+    #[test]
+    fn malformed_device_request_is_rejected() {
+        assert_eq!(
+            parse_device_request(b"not-cbor").err(),
+            Some(SessionError::MalformedMessage)
+        );
     }
 }
