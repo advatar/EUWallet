@@ -31,6 +31,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Use Bluetooth to present your ID in person to a nearby reader (ISO 18013-5).</string>
 	<key>NFCReaderUsageDescription</key>
 	<string>Hold your ID card to your iPhone to add your verified ID.</string>
 	<key>NSCameraUsageDescription</key>

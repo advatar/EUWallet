@@ -131,7 +131,9 @@ private final class FailingIssuer: IssuerResponder {
         throw ExpectedFailure.failure
     }
 
-    func credential(proofJwt: Data) async throws -> (format: String, bytes: Data) {
+    func credential(proofJwt: Data, emrtdAttestation: String?) async throws -> (
+        format: String, bytes: Data
+    ) {
         throw ExpectedFailure.failure
     }
 }
@@ -141,7 +143,9 @@ private final class FixedCredentialIssuer: IssuerResponder {
         (true, 1)
     }
 
-    func credential(proofJwt: Data) async -> (format: String, bytes: Data) {
+    func credential(proofJwt: Data, emrtdAttestation: String?) async -> (
+        format: String, bytes: Data
+    ) {
         ("dc+sd-jwt", Data("issuer-credential".utf8))
     }
 }
