@@ -195,16 +195,14 @@ final class CoreOnSimulatorTests: XCTestCase {
                 issuerCertChain: issuance.issuerCertChain,
                 issuerId: issuance.issuerId))
         XCTAssertEqual(offerOutcome, .awaitingInput)
-        _ = try await XCTUnwrap(executor).send(
+        // Completing the review-gated issuance on the durable-store path reports `.succeeded`: the
+        // "document ready" render precedes the terminal `Close` (the core no longer emits a trailing
+        // effect after `Close`), and the credential is durably stored + committed.
+        let issuanceOutcome = try await XCTUnwrap(executor).send(
             eventJson: WalletEventJSON.credentialOfferAccepted(
                 operationId: try XCTUnwrap(issuanceOperationId),
                 authorizationHash: try XCTUnwrap(issuanceAuthorizationHash)))
-        // Assert on the ground-truth success signal — the credential is durably held. NOTE: on the
-        // durable-store path the completing accept cascade currently reports `effectAfterClose`
-        // (the durable coordinator emits a trailing effect after the issuance `close`) even though
-        // the credential is stored AND its commit succeeds; that terminal-outcome mismatch is a
-        // pre-existing durable-lifecycle quirk tracked separately, orthogonal to what this test
-        // guards (issued → redacted → restored).
+        XCTAssertEqual(issuanceOutcome, .succeeded)
         XCTAssertTrue(
             try XCTUnwrap(firstRuntime).heldCredentialsJSON().contains("urn:eudi:pid:1"),
             "durable issuance must store the PID before restart")

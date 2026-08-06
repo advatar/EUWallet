@@ -4024,9 +4024,18 @@ impl Core {
         if matches!(self.issuance, oid4vci::State::CredentialIssued { .. }) {
             if !was_issued {
                 if let Some(document) = self.issuance_document_summary(DocumentStatus::Ready) {
-                    effects.push(Effect::Render {
+                    // The "document ready" render must precede the terminal `Close` the oid4vci
+                    // machine already emitted. If it is pushed AFTER `Close`, the shell's effect
+                    // drain sees an effect past the close and reports a completed, durably-stored
+                    // issuance as `effectAfterClose` — i.e. a success mis-reported as an abort.
+                    // Insert just before the existing `Close`; append only if there is none.
+                    let ready = Effect::Render {
                         screen: ScreenDescription::IssuanceReady(document),
-                    });
+                    };
+                    match effects.iter().position(|effect| matches!(effect, Effect::Close)) {
+                        Some(close_index) => effects.insert(close_index, ready),
+                        None => effects.push(ready),
+                    }
                 }
             }
             self.finish_flow(ActiveFlow::Issuance);

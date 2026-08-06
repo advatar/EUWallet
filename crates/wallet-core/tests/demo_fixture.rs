@@ -181,6 +181,26 @@ fn demo_pid_mdoc_issues_and_stores() {
             screen: presenter::ScreenDescription::IssuanceReady(_)
         }
     )));
+    // `Close` must be the terminal effect: the "ready" render precedes it and NOTHING follows it,
+    // so the shell's drain reports `.succeeded` (not `.effectAfterClose`) for a stored credential.
+    assert!(
+        matches!(effects.last(), Some(Effect::Close)),
+        "Close must be the final issuance effect, got {effects:?}"
+    );
+    let close_index = effects
+        .iter()
+        .position(|e| matches!(e, Effect::Close))
+        .expect("a terminal Close");
+    let ready_index = effects
+        .iter()
+        .position(|e| matches!(e, Effect::Render {
+            screen: presenter::ScreenDescription::IssuanceReady(_)
+        }))
+        .expect("an IssuanceReady render");
+    assert!(
+        ready_index < close_index,
+        "IssuanceReady must be rendered before Close, got {effects:?}"
+    );
 
     let held = core.held_credentials_json();
     assert!(held.contains("mso_mdoc"), "PID mdoc must be held: {held}");

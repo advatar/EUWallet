@@ -357,14 +357,25 @@ fn full_issuance_with_in_core_trust_and_attestation() {
         format: "dc+sd-jwt".into(),
         bytes: cred.clone(),
     });
-    assert!(matches!(effects.first(), Some(Effect::Close)));
-    assert!(effects.iter().any(|effect| matches!(
+    // `Close` is the TERMINAL effect: the "document ready" render precedes it and nothing follows,
+    // so the shell's effect drain reports a completed issuance as `.succeeded` rather than treating
+    // a trailing render as `.effectAfterClose`.
+    assert!(matches!(effects.last(), Some(Effect::Close)));
+    let close_index = effects
+        .iter()
+        .position(|effect| matches!(effect, Effect::Close))
+        .expect("a terminal Close");
+    let ready_index = effects.iter().position(|effect| matches!(
         effect,
         Effect::Render {
             screen: presenter::ScreenDescription::IssuanceReady(document)
         } if document.status == presenter::DocumentStatus::Ready
             && document.issuer_name == "Verified credential issuer"
-    )));
+    ));
+    assert!(
+        ready_index.is_some_and(|ready| ready < close_index),
+        "IssuanceReady must render before the terminal Close, got {effects:?}"
+    );
     let (fmt, bytes) = core.issued_credential().expect("credential issued");
     assert_eq!(fmt, "dc+sd-jwt");
     assert_eq!(bytes, cred);
