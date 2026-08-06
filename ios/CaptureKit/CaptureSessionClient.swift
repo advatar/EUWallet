@@ -73,14 +73,23 @@ public struct CaptureSessionClient: Sendable {
         public let status: Status
         public let credential: String?
         public let format: String?
+        /// The ARF-required `mso_mdoc` half of the same captured PID (doctype
+        /// `eu.europa.ec.eudi.pid.1`), present once issued. Minted alongside the SD-JWT so the
+        /// captured PID is presentable in person (ISO 18013-5) and over the Digital Credentials API.
+        /// Both halves are also listed in the `openid-credential-offer://` `deepLink`.
+        public let credentialMdoc: String?
+        public let formatMdoc: String?
         /// `openid-credential-offer://` by-value deep link, present once issued. Lets the companion
-        /// hand the PID off to a wallet on the SAME device, or a wallet open it directly.
+        /// hand the PID off to a wallet on the SAME device, or a wallet open it directly. Carries
+        /// BOTH ARF formats.
         public let deepLink: String?
 
         enum CodingKeys: String, CodingKey {
             case status
             case credential
             case format
+            case credentialMdoc = "credential_mdoc"
+            case formatMdoc = "format_mdoc"
             case deepLink = "deep_link"
         }
     }
