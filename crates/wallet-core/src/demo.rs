@@ -137,6 +137,11 @@ pub struct DemoWallet {
     operator: SoftwareSigner,
     rp: SoftwareSigner,
     wallet_provider: SoftwareSigner,
+    /// Demo issuer ML-DSA-65 key for the hybrid-PQ PID mdoc issuerAuth (experimental-pq builds only).
+    /// Its public key travels in the credential's unprotected header — self-asserted like VCIssuer's,
+    /// so the demo mdoc is self-consistent and the wallet's mandatory-PQ check passes.
+    #[cfg(feature = "experimental-pq")]
+    pq: crypto_backend::experimental_pq::MlDsa65SecretKey,
 }
 
 #[uniffi::export]
@@ -152,6 +157,9 @@ impl DemoWallet {
             operator: SoftwareSigner::generate_p256().expect("operator keygen"),
             rp: SoftwareSigner::from_pkcs8_der(RP_PKCS8).expect("rp key"),
             wallet_provider: SoftwareSigner::generate_p256().expect("wp keygen"),
+            #[cfg(feature = "experimental-pq")]
+            pq: crypto_backend::experimental_pq::MlDsa65SecretKey::generate()
+                .expect("demo ML-DSA-65 keygen"),
         })
     }
 
@@ -599,6 +607,30 @@ impl DemoWallet {
         .expect("issue demo PID mdoc");
         issued.issuer_auth.unprotected.x5chain =
             Some(Box::new(cose::X5Chain::Single(issuer_certificate_der())));
+        // Experimental hybrid-PQ: carry an ML-DSA-65 signature over the SAME COSE Sig_structure the
+        // ES256 issuerAuth covers, so the demo PID mdoc satisfies the wallet's mandatory-PQ check for
+        // this doctype (mirrors what VCIssuer's capture flow emits). Only on experimental-pq builds;
+        // classical builds keep the ES256-only mdoc.
+        #[cfg(feature = "experimental-pq")]
+        {
+            let payload = issued
+                .issuer_auth
+                .payload
+                .clone()
+                .expect("mdoc issuerAuth has a payload");
+            let tbs = cose::sig_structure(&issued.issuer_auth.protected, &[], &payload);
+            let signature = self.pq.sign(&tbs).expect("demo ML-DSA-65 sign");
+            issued
+                .issuer_auth
+                .unprotected
+                .private_labels
+                .push((crate::HYBRID_PQ_MDOC_SIGNATURE_LABEL, signature));
+            issued
+                .issuer_auth
+                .unprotected
+                .private_labels
+                .push((crate::HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL, self.pq.public_key()));
+        }
         Base64UrlUnpadded::encode_string(&issued.to_value().to_canonical())
     }
 

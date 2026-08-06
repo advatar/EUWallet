@@ -629,27 +629,45 @@ const HYBRID_PQ_MDOC_SIGNATURE_LABEL: i64 = -65537;
 #[cfg(feature = "experimental-pq")]
 const HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL: i64 = -65538;
 
-/// Verify the OPTIONAL experimental hybrid-PQ ML-DSA-65 signature an mdoc `issuerAuth` may carry in
-/// its unprotected header. The signature covers the SAME COSE `Sig_structure` as the ES256 signature
-/// the caller already verified. Contract:
-/// - neither label present  → classical mdoc, nothing to check (`Ok`);
+/// mdoc doctypes for which a hybrid-PQ ML-DSA-65 `issuerAuth` signature is MANDATORY: a credential
+/// of this doctype WITHOUT the PQ labels is refused (a downgrade attempt), not accepted as classical.
+/// The PID mdoc is issued hybrid-PQ (VCIssuer capture + the demo issuer under this feature), so it is
+/// required here.
+///
+/// CAVEAT: today the ML-DSA-65 public key travels in the (unauthenticated) unprotected header, so a
+/// valid PQ signature proves the credential was not passively DOWNGRADED by stripping the labels —
+/// it does NOT yet prove PQ-level issuer authenticity, because an active attacker could re-sign with
+/// their own ML-DSA key and embed that public key (the ES256 signature against the trusted issuer key
+/// remains the authenticating gate). Binding the PQ public key to the issuer — carrying it inside the
+/// ES256-signed MSO, or anchoring it in the trusted list — is the follow-up that upgrades this from
+/// anti-downgrade to full hybrid issuer authentication.
+#[cfg(feature = "experimental-pq")]
+const HYBRID_PQ_REQUIRED_MDOC_DOCTYPES: &[&str] = &["eu.europa.ec.eudi.pid.1"];
+
+/// Verify the experimental hybrid-PQ ML-DSA-65 signature an mdoc `issuerAuth` may carry in its
+/// unprotected header. The signature covers the SAME COSE `Sig_structure` as the ES256 signature the
+/// caller already verified. Contract:
+/// - neither label present  → allowed ONLY when `required` is false (classical mdoc); a `required`
+///   doctype with the labels stripped is a downgrade attempt → reject;
 /// - both present + valid    → hybrid signature verified (`Ok`);
 /// - both present + invalid  → reject (`SignatureInvalid`);
 /// - exactly one present     → malformed (reject).
-///
-/// Opportunistic by design: a classical (ES256-only) mdoc is still accepted, so an attacker who
-/// STRIPS the PQ labels only removes the PQ protection — they never forge (the ES256 signature still
-/// gates issuance). Making the PQ signature MANDATORY for a hybrid-profiled credential is a
-/// profile-level follow-up (mirror the issuer's `require_hybrid_pq`).
 #[cfg(feature = "experimental-pq")]
-fn verify_optional_hybrid_pq_issuer_auth(
+fn verify_hybrid_pq_issuer_auth(
     issued: &mdoc::IssuerSigned,
+    required: bool,
 ) -> Result<(), CredentialIngestionError> {
     let unprotected = &issued.issuer_auth.unprotected;
     let signature = unprotected.private_label(HYBRID_PQ_MDOC_SIGNATURE_LABEL);
     let public_key = unprotected.private_label(HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL);
     match (signature, public_key) {
-        (None, None) => Ok(()),
+        (None, None) => {
+            if required {
+                Err(CredentialIngestionError::SignatureInvalid)
+            } else {
+                Ok(())
+            }
+        }
         (Some(signature), Some(public_key)) => {
             let payload = issued
                 .issuer_auth
@@ -3871,12 +3889,16 @@ impl Core {
             Alg::Es256,
         )
         .map_err(|_| CredentialIngestionError::SignatureInvalid)?;
-        // If the issuerAuth ALSO carries an experimental hybrid-PQ ML-DSA-65 signature (over the same
-        // Sig_structure), actively verify it. Absent → classical mdoc (unchanged); present-but-bad →
-        // reject. Only compiled with the experimental-pq feature (the iOS xcframework build enables
-        // it); a classical build simply relies on the ES256 signature above.
+        // Verify the experimental hybrid-PQ ML-DSA-65 signature. For a doctype in
+        // HYBRID_PQ_REQUIRED_MDOC_DOCTYPES (the PID mdoc) the signature is MANDATORY — a missing one
+        // is a downgrade and is rejected; other doctypes verify it only if present. Only compiled
+        // with the experimental-pq feature (the iOS xcframework build enables it); a classical build
+        // relies on the ES256 signature above.
         #[cfg(feature = "experimental-pq")]
-        verify_optional_hybrid_pq_issuer_auth(&issuer_signed)?;
+        verify_hybrid_pq_issuer_auth(
+            &issuer_signed,
+            HYBRID_PQ_REQUIRED_MDOC_DOCTYPES.contains(&mso.doc_type.as_str()),
+        )?;
         if mso.version != "1.0" || mso.digest_algorithm != "SHA-256" || mso.doc_type.is_empty() {
             return Err(CredentialIngestionError::MalformedCredential);
         }
@@ -8264,7 +8286,7 @@ mod structured_sdjwt_tests {
 #[cfg(all(test, feature = "experimental-pq"))]
 mod hybrid_pq_mdoc_verification_tests {
     use super::{
-        verify_optional_hybrid_pq_issuer_auth, HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL,
+        verify_hybrid_pq_issuer_auth, HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL,
         HYBRID_PQ_MDOC_SIGNATURE_LABEL,
     };
     use cose::cbor::Value;
@@ -8333,12 +8355,17 @@ mod hybrid_pq_mdoc_verification_tests {
         let pq = MlDsa65SecretKey::generate().unwrap();
         let mut issued = signed_mdoc();
         add_hybrid_pq(&mut issued, &pq);
-        assert!(verify_optional_hybrid_pq_issuer_auth(&issued).is_ok());
+        // Valid PQ signature: accepted whether or not the doctype requires it.
+        assert!(verify_hybrid_pq_issuer_auth(&issued, false).is_ok());
+        assert!(verify_hybrid_pq_issuer_auth(&issued, true).is_ok());
     }
 
     #[test]
-    fn classical_mdoc_without_pq_labels_is_accepted() {
-        assert!(verify_optional_hybrid_pq_issuer_auth(&signed_mdoc()).is_ok());
+    fn classical_mdoc_accepted_only_when_pq_not_required() {
+        // Not required → a classical mdoc is fine. REQUIRED → a missing PQ signature is a downgrade
+        // and MUST be rejected (this is the "mandatory PQ" guarantee).
+        assert!(verify_hybrid_pq_issuer_auth(&signed_mdoc(), false).is_ok());
+        assert!(verify_hybrid_pq_issuer_auth(&signed_mdoc(), true).is_err());
     }
 
     #[test]
@@ -8354,7 +8381,8 @@ mod hybrid_pq_mdoc_verification_tests {
             .find(|(label, _)| *label == HYBRID_PQ_MDOC_SIGNATURE_LABEL)
             .unwrap();
         entry.1[0] ^= 0xff;
-        assert!(verify_optional_hybrid_pq_issuer_auth(&issued).is_err());
+        assert!(verify_hybrid_pq_issuer_auth(&issued, true).is_err());
+        assert!(verify_hybrid_pq_issuer_auth(&issued, false).is_err());
     }
 
     #[test]
@@ -8372,7 +8400,7 @@ mod hybrid_pq_mdoc_verification_tests {
             .find(|(label, _)| *label == HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL)
             .unwrap();
         entry.1 = other.public_key();
-        assert!(verify_optional_hybrid_pq_issuer_auth(&issued).is_err());
+        assert!(verify_hybrid_pq_issuer_auth(&issued, true).is_err());
     }
 
     #[test]
@@ -8385,6 +8413,7 @@ mod hybrid_pq_mdoc_verification_tests {
             .unprotected
             .private_labels
             .retain(|(label, _)| *label != HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL);
-        assert!(verify_optional_hybrid_pq_issuer_auth(&issued).is_err());
+        assert!(verify_hybrid_pq_issuer_auth(&issued, true).is_err());
+        assert!(verify_hybrid_pq_issuer_auth(&issued, false).is_err());
     }
 }

@@ -197,6 +197,32 @@ fn issued_pid_mdoc(scenario: &IssuanceScenario, portrait: Option<Vec<u8>>) -> md
     issued.issuer_auth.unprotected.x5chain = Some(Box::new(cose::X5Chain::Single(
         scenario.issuer_cert_chain[0].clone(),
     )));
+    // Under experimental-pq the wallet REQUIRES a hybrid-PQ ML-DSA-65 signature on a PID mdoc, so
+    // add a self-consistent one (the public key travels in the label, as the demo/VCIssuer emit it)
+    // — otherwise the portrait cases below would be rejected for missing PQ before the portrait check.
+    // Labels -65537 (sig) / -65538 (pubkey) mirror wallet-core's HYBRID_PQ_MDOC_*_LABEL constants.
+    #[cfg(feature = "experimental-pq")]
+    {
+        use crypto_backend::experimental_pq::MlDsa65SecretKey;
+        let payload = issued
+            .issuer_auth
+            .payload
+            .clone()
+            .expect("issuerAuth payload");
+        let tbs = cose::sig_structure(&issued.issuer_auth.protected, &[], &payload);
+        let pq = MlDsa65SecretKey::generate().expect("ml-dsa keygen");
+        let signature = pq.sign(&tbs).expect("ml-dsa sign");
+        issued
+            .issuer_auth
+            .unprotected
+            .private_labels
+            .push((-65537, signature));
+        issued
+            .issuer_auth
+            .unprotected
+            .private_labels
+            .push((-65538, pq.public_key()));
+    }
     issued
 }
 

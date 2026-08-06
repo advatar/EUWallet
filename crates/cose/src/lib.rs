@@ -485,6 +485,17 @@ impl CoseSign1 {
         if let Some(x5chain) = &self.unprotected.x5chain {
             unprotected_pairs.push((Value::Uint(label::X5CHAIN), x5chain.to_value()));
         }
+        // Re-emit retained private-use labels (all negative; see `parse_unprotected_header`) so a
+        // parsed-then-re-encoded message (e.g. a hybrid-PQ mdoc presented onward) keeps its profile
+        // extension. Canonical encoding orders the map, so append order is irrelevant.
+        for (label, bytes) in &self.unprotected.private_labels {
+            let key = if *label < 0 {
+                Value::Nint((-1 - label) as u64)
+            } else {
+                Value::Uint(*label as u64)
+            };
+            unprotected_pairs.push((key, Value::Bytes(bytes.clone())));
+        }
         let unprotected = Value::Map(unprotected_pairs);
         let payload = match &self.payload {
             Some(p) => Value::Bytes(p.clone()),
