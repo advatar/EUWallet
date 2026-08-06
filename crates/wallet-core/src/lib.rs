@@ -315,7 +315,7 @@ fn operation_id_seed() -> u64 {
 }
 
 /// Convert an already authenticated SD-JWT VC into the wallet's presentation holding.
-fn held_credential_from_verified_sd(
+pub(crate) fn held_credential_from_verified_sd(
     sd: &sdjwt::SdJwtVc,
     processed: &sdjwt::ProcessedSdJwt,
     status: Option<StatusReference>,

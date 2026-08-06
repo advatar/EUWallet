@@ -60,9 +60,13 @@ fn b64(bytes: &[u8]) -> String {
     Base64UrlUnpadded::encode_string(bytes)
 }
 
-/// The agent's own key — the mandate's `cnf`. Whoever holds this key can exercise the mandate.
+/// The agent's own key — the mandate's `cnf`. Vendored from the golden mint (a REAL P-256 key), so the
+/// wallet presents exactly the key the mandate is bound to; a mandate bound to a different agent key is
+/// rejected at selection. (Proof-of-possession of this key is a presentation-layer concern, not shown
+/// here — the CLI/serve demos exercise the ISSUER-side verification + the scope/tier gate.)
 fn agent_jwk() -> Value {
-    json!({"kty": "EC", "crv": "P-256", "x": "AGENT_X", "y": "AGENT_Y"})
+    serde_json::from_str(include_str!("../testdata/agent_jwk.json"))
+        .expect("vendored agent jwk parses")
 }
 
 fn disclosure(name: &str, value: Value) -> String {
@@ -208,13 +212,11 @@ fn run(label: &str, granted: &[&str], required: &[&str]) {
 
 /// Exercise one delegated action end to end and return a STRUCTURED verdict (the same real gate the
 /// CLI `run` prints, but as JSON for the HTTP bridge). `granted`/`required` are short power names.
-fn exercise(granted: &[&str], required: &[&str], happ_fresh: bool) -> Value {
-    let granted_urns: Vec<&str> = granted.iter().filter_map(|s| urn(s)).collect();
+fn exercise_holdings(holdings: &[HeldCredential], required: &[&str], happ_fresh: bool) -> Value {
     let required_urns: Vec<&str> = required.iter().filter_map(|s| urn(s)).collect();
     if required_urns.is_empty() {
         return json!({"decision": "refused", "reason": "no known required power"});
     }
-    let holdings = [issued_mandate(&granted_urns)];
     let rp_required = powers(&required_urns);
 
     // 1. Select a held mandate bound to the agent key that covers the request (monotonic narrowing).
@@ -276,9 +278,56 @@ fn exercise(granted: &[&str], required: &[&str], happ_fresh: bool) -> Value {
     }
 }
 
-/// The default mandate the local wallet-agent holds for the demo agent — the full pinned taxonomy.
-fn default_granted() -> Vec<&'static str> {
-    POWERS.iter().map(|(s, _)| *s).collect()
+/// Load + cryptographically verify the vendored GOLDEN mandate — a REAL VCIssuer mint (its ES256
+/// issuer signature and `_sd` disclosure binding are checked by `verify_and_hold_mandate`). Panics on
+/// a bad golden so `serve` fails fast rather than serving an unverifiable mandate. Returns the held
+/// credential plus its parsed mandate view (delegator, scope, jti).
+fn load_golden_mandate() -> (HeldCredential, delegation::HeldMandate) {
+    let compact = include_str!("../testdata/mandate.sdjwt").trim();
+    let issuer_jwk: Value = serde_json::from_str(include_str!("../testdata/issuer_jwk.json"))
+        .expect("vendored issuer jwk parses");
+    let held = delegation::verify_and_hold_mandate(
+        compact,
+        &jwk_to_sec1(&issuer_jwk),
+        GOLDEN_VALID_AT,
+        &AwsLc,
+        &AwsLc,
+    )
+    .expect("vendored golden mandate must verify (real ES256 issuer signature, within its window)");
+    let mandate = delegation::parse_mandate(&held).expect("verified golden parses as a mandate");
+    (held, mandate)
+}
+
+/// The instant the wallet-agent verifies the vendored golden at. The golden is a fixed historical mint
+/// (a REAL, short-lived 15-minute mandate: nbf=1_700_000_000, exp=+900), so this demo pins the clock
+/// INSIDE its `[nbf, exp)` window; a production wallet passes real wall-clock time and re-mints a
+/// short-lived mandate per use. Keep in sync with the VCIssuer mint's `now`.
+const GOLDEN_VALID_AT: u64 = 1_700_000_450;
+
+/// A P-256 public JWK → SEC1 uncompressed bytes (`0x04 || X || Y`), the form the SD-JWT verifier wants.
+fn jwk_to_sec1(jwk: &Value) -> Vec<u8> {
+    let coord = |name: &str| {
+        jwk.get(name)
+            .and_then(Value::as_str)
+            .and_then(|s| Base64UrlUnpadded::decode_vec(s).ok())
+            .unwrap_or_default()
+    };
+    let mut sec1 = Vec::with_capacity(65);
+    sec1.push(0x04);
+    sec1.extend_from_slice(&coord("x"));
+    sec1.extend_from_slice(&coord("y"));
+    sec1
+}
+
+/// The mandate's granted powers as short names, in taxonomy order.
+fn granted_short_names(mandate: &delegation::HeldMandate) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for (short, power_urn) in POWERS {
+        if mandate.scope.contains(*power_urn) {
+            out.push(*short);
+        }
+    }
+    out
 }
 
 /// Pull an array-of-power-names field from a JSON body, normalising each to its short form.
@@ -293,8 +342,16 @@ fn body_powers(body: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Route one HTTP request to a JSON reply. Read-only; the exercise gate is the real `wallet-core` one.
-fn route(method: &str, path: &str, body: &[u8]) -> (&'static str, String) {
+/// Route one HTTP request to a JSON reply. The wallet-agent holds ONE real, verified minted mandate
+/// (`golden`/`mandate`); the exercise gate is the real `wallet-core` one and its granted scope is the
+/// mandate's own — the agent cannot dictate what it was granted.
+fn route(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    golden: &[HeldCredential],
+    mandate: &delegation::HeldMandate,
+) -> (&'static str, String) {
     let json_body = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
     let path = path.split('?').next().unwrap_or(path);
     match (method, path) {
@@ -302,69 +359,49 @@ fn route(method: &str, path: &str, body: &[u8]) -> (&'static str, String) {
             "200 OK",
             json!({"ok": true, "service": "wallet-agent"}).to_string(),
         ),
-        // Metadata only — the fixture mandate the wallet holds for this agent. Never the raw credential.
-        ("GET", "/v1/mandates") => {
-            let granted = default_granted();
-            (
-                "200 OK",
-                json!({
-                    "mandates": [{
-                        "vct": delegation::MANDATE_VCT,
-                        "mandate_jti": "mandamus:cap:7f3a",
-                        "mandator": "urn:eudi:subject:erika-mustermann",
-                        "granted_powers": granted,
-                    }],
-                })
-                .to_string(),
-            )
-        }
-        // Exercise a power against the real selection + agent gate; return the signed/step_up/refused verdict.
+        // Metadata only — the REAL minted mandate the wallet verified at startup. Never the raw credential.
+        ("GET", "/v1/mandates") => (
+            "200 OK",
+            json!({
+                "mandates": [{
+                    "vct": delegation::MANDATE_VCT,
+                    "mandate_jti": mandate.mandate_jti,
+                    "mandator": mandate.mandator,
+                    "granted_powers": granted_short_names(mandate),
+                    "issuer_verified": true,
+                }],
+            })
+            .to_string(),
+        ),
+        // Exercise a power against the REAL minted mandate; return the signed/step_up/refused verdict.
         ("POST", "/v1/present") => {
             let mut required = body_powers(&json_body, "required_powers");
             if let Some(p) = json_body.get("power").and_then(Value::as_str) {
                 required.push(short_of(p));
             }
-            let granted = {
-                let g = body_powers(&json_body, "granted_powers");
-                if g.is_empty() {
-                    default_granted().iter().map(|s| (*s).to_owned()).collect()
-                } else {
-                    g
-                }
-            };
             let happ = json_body
                 .get("happ_fresh")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let g: Vec<&str> = granted.iter().map(String::as_str).collect();
             let r: Vec<&str> = required.iter().map(String::as_str).collect();
-            let mut verdict = exercise(&g, &r, happ);
+            let mut verdict = exercise_holdings(golden, &r, happ);
             if let Some(rp) = json_body.get("relying_party").and_then(Value::as_str) {
                 verdict["relying_party"] = json!(rp);
             }
             ("200 OK", verdict.to_string())
         }
-        // Verify a narrowing sub-delegation (requested ⊆ granted) against the real selection gate.
+        // Verify a narrowing sub-delegation (requested ⊆ the mandate's grant) against the real gate.
         ("POST", "/v1/delegate") => {
-            let granted = {
-                let g = body_powers(&json_body, "granted_powers");
-                if g.is_empty() {
-                    default_granted().iter().map(|s| (*s).to_owned()).collect()
-                } else {
-                    g
-                }
-            };
             let requested = body_powers(&json_body, "requested_powers");
             let to_agent = json_body
                 .get("to_agent")
                 .and_then(Value::as_str)
                 .unwrap_or("agent:sub");
-            let granted_urns: Vec<&str> = granted.iter().filter_map(|s| urn(s)).collect();
             let requested_urns: Vec<&str> = requested.iter().filter_map(|s| urn(s)).collect();
-            let holdings = [issued_mandate(&granted_urns)];
             let rp = powers(&requested_urns);
+            let granted = granted_short_names(mandate);
             let verdict = match delegation::select_delegated_presentation(
-                holdings.iter(),
+                golden.iter(),
                 &agent_jwk(),
                 &rp,
             ) {
@@ -373,7 +410,7 @@ fn route(method: &str, path: &str, body: &[u8]) -> (&'static str, String) {
                     "to_agent": to_agent,
                     "granted": granted,
                     "requested": requested,
-                    "note": "narrowing verified against the real selection gate; a production sub-mandate is minted by the issuer/wallet",
+                    "note": "narrowing verified against the real minted mandate's selection gate; a production sub-mandate is minted by the issuer/wallet",
                 }),
                 Err(DelegationError::ScopeInsufficient) => json!({
                     "decision": "refused",
@@ -395,8 +432,16 @@ fn route(method: &str, path: &str, body: &[u8]) -> (&'static str, String) {
 /// a deeplink hand-off. Dev/demo only — NOT a production service.
 fn serve(addr: &str) -> std::io::Result<()> {
     use std::io::{BufRead, BufReader, Read, Write};
+    // Load + cryptographically verify the real minted mandate ONCE at startup (fail fast if bad).
+    let (golden_held, mandate) = load_golden_mandate();
+    let golden = [golden_held];
     let listener = std::net::TcpListener::bind(addr)?;
-    eprintln!("wallet-agent listening on http://{addr}  (GET /v1/mandates · POST /v1/present · POST /v1/delegate)");
+    eprintln!(
+        "wallet-agent listening on http://{addr}  holding verified mandate {} (powers: {})",
+        mandate.mandate_jti.as_deref().unwrap_or("-"),
+        granted_short_names(&mandate).join(",")
+    );
+    eprintln!("  (GET /v1/mandates · POST /v1/present · POST /v1/delegate)");
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(s) => s,
@@ -432,7 +477,7 @@ fn serve(addr: &str) -> std::io::Result<()> {
         if content_length > 0 && reader.read_exact(&mut body).is_err() {
             continue;
         }
-        let (status, payload) = route(&method, &path, &body);
+        let (status, payload) = route(&method, &path, &body, &golden, &mandate);
         let response = format!(
             "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
             payload.len()
@@ -455,6 +500,11 @@ fn main() {
     }
 
     println!("TestAgent — delegation playground (wallet-core delegation + agent)");
+    println!(
+        "NOTE: this CLI uses an UNSIGNED structure-only fixture mandate (no issuer signature is\n\
+         verified) to explore the scope/tier gate on arbitrary powers. For the REAL minted mandate\n\
+         with its ES256 issuer signature verified, run:  cargo run -p testagent -- serve"
+    );
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {

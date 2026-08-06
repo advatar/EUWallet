@@ -55,6 +55,18 @@ pub enum DelegationError {
     AgentKeyMismatch,
     /// The mandate's scope does not cover every required power.
     ScopeInsufficient,
+    /// The compact SD-JWT is not well-formed (bad structure, wrong `typ`/`alg`, or the disclosures
+    /// do not match the issuer-signed `_sd` digests). Raised only by [`verify_and_hold_mandate`].
+    Malformed,
+    /// The issuer's ES256 signature over the mandate did not verify against the trusted issuer key.
+    /// Raised only by [`verify_and_hold_mandate`].
+    SignatureInvalid,
+    /// The mandate is past its issuer-signed `exp` (or has no `exp`) at the verification instant.
+    /// Raised only by [`verify_and_hold_mandate`].
+    Expired,
+    /// The verification instant is before the mandate's issuer-signed `nbf`. Raised only by
+    /// [`verify_and_hold_mandate`].
+    NotYetValid,
 }
 
 /// The plan for one delegated presentation: who the agent acts for, the exact powers exercised
@@ -122,6 +134,87 @@ pub fn parse_mandate(held: &HeldCredential) -> Result<HeldMandate, DelegationErr
         mandate_jti,
         delegate_cnf_jwk,
     })
+}
+
+/// Cryptographically verify a mandate SD-JWT VC and return it as a [`HeldCredential`] ready for
+/// [`parse_mandate`] / [`select_delegated_presentation`].
+///
+/// Unlike [`parse_mandate`] (which trusts the caller to have authenticated the credential and only
+/// *reads* structure), this is the authenticated entry point a wallet uses when it receives a
+/// mandate from the issuer: it verifies the issuer's **ES256 signature** over the issuer-signed JWT
+/// **and** that every disclosure hashes into the signed `_sd` set (via the same
+/// [`sdjwt::SdJwtVc::verify_and_process`] the rest of the wallet uses for SD-JWT VCs), enforces the
+/// mandatory `typ: dc+sd-jwt`, and confirms the credential type is [`MANDATE_VCT`]. A tampered
+/// signature, a swapped disclosure, or a wrong issuer key is rejected — so a mandate accepted here
+/// is a real, issuer-minted one, not merely a well-shaped string.
+///
+/// `issuer_public_key_raw` is the issuer's P-256 public key in SEC1 uncompressed form
+/// (`0x04 || X || Y`, 65 bytes), typically obtained from the issuer's trusted JWKS.
+///
+/// `issuer_public_key_raw` is the issuer's P-256 public key in SEC1 uncompressed form
+/// (`0x04 || X || Y`, 65 bytes), typically obtained from the issuer's trusted JWKS.
+///
+/// `now_unix_secs` is the verification instant (seconds since the Unix epoch): the mandate's
+/// issuer-signed validity window (`nbf`/`exp`) is enforced against it, so an expired or not-yet-valid
+/// mandate is rejected even though its signature is intact. (What this does NOT do: verify the
+/// AGENT's proof-of-possession of the `cnf` key — that holder binding is checked at presentation time
+/// via a key-binding JWT, not here. This entry point authenticates the ISSUER's attestation.)
+///
+/// # Errors
+///
+/// [`DelegationError::Malformed`] if the compact form, header (`typ`/`alg`), or disclosure/`_sd`
+/// binding is invalid, or the `vct` is not [`MANDATE_VCT`]; [`DelegationError::SignatureInvalid`]
+/// if the issuer's ES256 signature does not verify against `issuer_public_key_raw`;
+/// [`DelegationError::Expired`] / [`DelegationError::NotYetValid`] if `now_unix_secs` is outside the
+/// signed `[nbf, exp)` window.
+pub fn verify_and_hold_mandate(
+    compact_sdjwt: &str,
+    issuer_public_key_raw: &[u8],
+    now_unix_secs: u64,
+    verifier: &dyn crypto_traits::Verifier,
+    digest: &dyn crypto_traits::Digest,
+) -> Result<HeldCredential, DelegationError> {
+    let sd = sdjwt::SdJwtVc::parse(compact_sdjwt).map_err(|_| DelegationError::Malformed)?;
+    if sd
+        .issuer_algorithm()
+        .map_err(|_| DelegationError::Malformed)?
+        != crypto_traits::Alg::Es256
+    {
+        return Err(DelegationError::Malformed);
+    }
+    // Verifies the ES256 issuer signature AND that every disclosure matches a signed `_sd` digest
+    // AND the mandatory `typ: dc+sd-jwt`. A bad signature or a swapped disclosure fails here.
+    let processed = sd
+        .verify_and_process(
+            verifier,
+            digest,
+            issuer_public_key_raw,
+            crypto_traits::Alg::Es256,
+        )
+        .map_err(|_| DelegationError::SignatureInvalid)?;
+    let held = crate::held_credential_from_verified_sd(&sd, &processed, None)
+        .map_err(|_| DelegationError::Malformed)?;
+    // Read the always-visible, now issuer-SIGNED claims (the signature was verified above).
+    let payload = jwt_payload(&held.issuer_jwt).ok_or(DelegationError::Malformed)?;
+    // Only vouch for it as a mandate if the issuer-signed payload actually says so.
+    if payload.get("vct").and_then(Value::as_str) != Some(MANDATE_VCT) {
+        return Err(DelegationError::Malformed);
+    }
+    // Temporal validity against the issuer-signed window. A mandate MUST carry an `exp`; `nbf` is
+    // enforced when present. A short-lived mandate that has expired is rejected even with a good sig.
+    let exp = payload
+        .get("exp")
+        .and_then(Value::as_u64)
+        .ok_or(DelegationError::Expired)?;
+    if now_unix_secs >= exp {
+        return Err(DelegationError::Expired);
+    }
+    if let Some(nbf) = payload.get("nbf").and_then(Value::as_u64) {
+        if now_unix_secs < nbf {
+            return Err(DelegationError::NotYetValid);
+        }
+    }
+    Ok(held)
 }
 
 /// Decide whether a held mandate can back a delegated presentation for `agent_jwk` covering the
