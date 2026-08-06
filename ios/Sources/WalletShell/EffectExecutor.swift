@@ -469,10 +469,10 @@ public final class EffectExecutor {
                 renderedInput = true
             case .close:
                 closed = true
-            case .emitDeviceEngagement, .emitDeviceResponse:
-                // In-person transport broadcasts: after engagement we await the reader's
-                // establishment; after the response we await teardown. Either way the flow stays
-                // open (not a terminal outcome the cascade can synthesize).
+            case .emitDeviceEngagement, .emitDeviceResponse, .emitDcApiResponse:
+                // In-person transport broadcasts + the DC-API response are surfaced out-of-band (BLE
+                // radio / the provider extension). Either way the flow stays open (not a terminal
+                // outcome the cascade can synthesize).
                 awaitingExternalInput = true
             default:
                 break
@@ -817,6 +817,11 @@ public final class EffectExecutor {
             return nil
         case .emitDeviceResponse(let response):
             try await proximity?.emitResponse(Data(response))
+            return nil
+        case .emitDcApiResponse:
+            // The DC-API response is returned to the browser by the provider extension, which reads
+            // this effect directly from the core's JSON output — not through this executor. In the
+            // app-shell drain it is a fire-and-forget terminal broadcast.
             return nil
         case .close:
             return nil

@@ -69,4 +69,31 @@ final class ProximityContractTests: XCTestCase {
             WalletEventJSON.proximityReaderTermination(),
             #"{"type":"proximityReaderTermination"}"#)
     }
+
+    func testDecodesDcApiResponseEffectAndConsentScreen() throws {
+        let effects = try WalletEffect.decodeCoreOutput(
+            #"[{"type":"emitDcApiResponse","response":[7,8,9]}]"#)
+        guard case .emitDcApiResponse(let response) = effects[0] else {
+            return XCTFail("expected emitDcApiResponse")
+        }
+        XCTAssertEqual(response, [7, 8, 9])
+
+        let json = #"{"screen":"dcApiConsent","origin":"https://verifier.example.com","requestedClaims":["eu.europa.ec.eudi.pid.1/age_over_18"]}"#
+        let screen = try JSONDecoder().decode(ScreenDescription.self, from: Data(json.utf8))
+        guard case .dcApiConsent(let origin, let claims) = screen else {
+            return XCTFail("expected dcApiConsent")
+        }
+        XCTAssertEqual(origin, "https://verifier.example.com")
+        XCTAssertEqual(claims, ["eu.europa.ec.eudi.pid.1/age_over_18"])
+        XCTAssertEqual(WalletDecisionKind(screen: screen), .dcApi)
+    }
+
+    func testDcApiDecisionAndEventBuilder() {
+        let approve = WalletDecisionKind.dcApi.approvalEvent(
+            operationId: 5, authorizationHash: Data(repeating: 3, count: 32))
+        XCTAssertTrue(approve.contains(#""type":"userConsented""#))
+        XCTAssertTrue(
+            WalletEventJSON.dcApiRequestReceived(request: Data([1]), origin: "https://v.example")
+                .contains(#""type":"dcApiRequestReceived""#))
+    }
 }

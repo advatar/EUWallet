@@ -105,6 +105,10 @@ public struct ScreenRenderer: View {
         case .proximityConsent(let requestedClaims):
             ProximityConsentView(
                 requestedClaims: requestedClaims, onConsent: onConsent, onDecline: onDecline)
+        case .dcApiConsent(let origin, let requestedClaims):
+            DcApiConsentView(
+                origin: origin, requestedClaims: requestedClaims,
+                onConsent: onConsent, onDecline: onDecline)
         case .other(let name):
             JourneyChoiceView(
                 title: "This step isn’t available",
@@ -283,6 +287,65 @@ private struct ProximityConsentView: View {
                     .accessibilityIdentifier("consent.decline")
             }
         }
+    }
+}
+
+/// Digital Credentials API consent: names the verifier's Web origin (the browser-authenticated
+/// anti-phishing anchor) and lists exactly the data elements it asked for (WYSIWYS).
+private struct DcApiConsentView: View {
+    let origin: String
+    let requestedClaims: [String]
+    let onConsent: () -> Void
+    let onDecline: () -> Void
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("SHARE WITH A WEBSITE")
+                    .font(.caption.weight(.bold))
+                    .tracking(1.5)
+                    .foregroundStyle(ConsumerDesign.brand)
+                Text("Share with this website?")
+                    .font(.largeTitle.bold())
+                    .accessibilityAddTraits(.isHeader)
+                HStack(spacing: 12) {
+                    Image(systemName: "globe").foregroundStyle(ConsumerDesign.brand)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(displayOrigin).font(.headline)
+                        Text("Requested this in your browser")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }.consumerSurface()
+                Text("Sharing").font(.headline)
+                if requestedClaims.isEmpty {
+                    Text("This website asked for nothing your wallet can share.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(requestedClaims, id: \.self) {
+                            Label(ConsumerCopy.claimName($0), systemImage: "checkmark")
+                        }
+                    }
+                    .consumerSurface()
+                }
+            }
+            .padding(20)
+        }
+        .safeAreaInset(edge: .bottom) {
+            ConsumerActionBar {
+                Button("Share", action: onConsent)
+                    .buttonStyle(ConsumerPrimaryButtonStyle())
+                    .accessibilityIdentifier("consent.approve")
+                    .disabled(requestedClaims.isEmpty)
+                Button("Don’t share", role: .cancel, action: onDecline)
+                    .buttonStyle(ConsumerSecondaryButtonStyle())
+                    .accessibilityIdentifier("consent.decline")
+            }
+        }
+    }
+
+    /// Show the bare host if the origin parses as a URL, else the raw string.
+    private var displayOrigin: String {
+        URL(string: origin)?.host() ?? origin
     }
 }
 

@@ -170,10 +170,12 @@ public enum ScreenDescription: Decodable, Equatable {
     case issuanceRecovery(IssuanceRecoveryScreen)
     /// In-person (ISO 18013-5) presentation consent: the data elements the nearby reader asked for.
     case proximityConsent(requestedClaims: [String])
+    /// Digital Credentials API consent: the verifier's Web origin + the requested data elements.
+    case dcApiConsent(origin: String, requestedClaims: [String])
     case other(String)
 
     private enum CodingKeys: String, CodingKey {
-        case screen, code, message, rpDisplayName, purpose, requestedClaims, notSharedClaims
+        case screen, code, message, rpDisplayName, purpose, requestedClaims, notSharedClaims, origin
         case verifierRegistration, trustMark, retention, overAsk
         case creditorName, creditorAccount, amountMinor, currency
         case documentName, qtspId, documentHashHex
@@ -236,6 +238,10 @@ public enum ScreenDescription: Decodable, Equatable {
         case "proximityConsent":
             self = .proximityConsent(
                 requestedClaims: try c.decode([String].self, forKey: .requestedClaims))
+        case "dcApiConsent":
+            self = .dcApiConsent(
+                origin: try c.decode(String.self, forKey: .origin),
+                requestedClaims: try c.decode([String].self, forKey: .requestedClaims))
         case let other: self = .other(other)
         }
     }
@@ -252,6 +258,9 @@ public enum WalletDecisionKind: Equatable {
     /// In-person (ISO 18013-5) consent. Uses the same `userConsented`/`userDeclined` wire events as
     /// remote presentation — the core binds a `ProximityDecision` operation with a WYSIWYS hash.
     case proximity
+    /// Digital Credentials API consent (same `userConsented`/`userDeclined` wire events; the core
+    /// binds a `DcApiDecision` operation with a WYSIWYS hash over the origin + requested claims).
+    case dcApi
 
     public init?(screen: ScreenDescription) {
         switch screen {
@@ -260,13 +269,14 @@ public enum WalletDecisionKind: Equatable {
         case .signConfirmation: self = .qes
         case .issuanceOffer: self = .issuance
         case .proximityConsent: self = .proximity
+        case .dcApiConsent: self = .dcApi
         default: return nil
         }
     }
 
     public func approvalEvent(operationId: UInt64, authorizationHash: Data) -> String {
         switch self {
-        case .presentation, .proximity:
+        case .presentation, .proximity, .dcApi:
             return WalletEventJSON.userConsented(
                 operationId: operationId,
                 authorizationHash: authorizationHash)
@@ -287,7 +297,8 @@ public enum WalletDecisionKind: Equatable {
 
     public func declineEvent(operationId: UInt64) -> String {
         switch self {
-        case .presentation, .proximity: return WalletEventJSON.userDeclined(operationId: operationId)
+        case .presentation, .proximity, .dcApi:
+            return WalletEventJSON.userDeclined(operationId: operationId)
         case .payment: return WalletEventJSON.paymentDeclined(operationId: operationId)
         case .qes: return WalletEventJSON.qesDeclined(operationId: operationId)
         case .issuance: return WalletEventJSON.credentialOfferDeclined(operationId: operationId)
@@ -326,6 +337,8 @@ public enum WalletEffect: Decodable {
     // --- In-person proximity (ISO 18013-5) transport broadcasts (fire-and-forget, no operationId) ---
     case emitDeviceEngagement(engagement: [UInt8])
     case emitDeviceResponse(response: [UInt8])
+    /// The Digital Credentials API response (`{ "vp_token": … }`) to hand back to the browser.
+    case emitDcApiResponse(response: [UInt8])
     case close
 
     private enum CodingKeys: String, CodingKey {
@@ -440,6 +453,9 @@ public enum WalletEffect: Decodable {
                 engagement: try c.decode([UInt8].self, forKey: .engagement))
         case "emitDeviceResponse":
             self = .emitDeviceResponse(
+                response: try c.decode([UInt8].self, forKey: .response))
+        case "emitDcApiResponse":
+            self = .emitDcApiResponse(
                 response: try c.decode([UInt8].self, forKey: .response))
         case "close": self = .close
         default:
@@ -567,6 +583,14 @@ public enum WalletEventJSON {
     /// The reader ended the transaction (SessionData status 20 / transport close).
     public static func proximityReaderTermination() -> String {
         #"{"type":"proximityReaderTermination"}"#
+    }
+
+    // --- Digital Credentials API (browser-mediated OpenID4VP) ---
+    /// A verifier's DC-API request arrived via the browser. `request` is the OpenID4VP request JSON;
+    /// `origin` is the OS-authenticated Web Origin (the anti-phishing anchor — pass the verified
+    /// Origin, never one from the request body).
+    public static func dcApiRequestReceived(request: Data, origin: String) -> String {
+        #"{"type":"dcApiRequestReceived","request":\#(byteArray(request)),"origin":\#(jsonString(origin))}"#
     }
 
     /// Replace one audit-log entry with a chain-preserving tombstone. This mutation must travel
