@@ -66,6 +66,13 @@ pub enum ScreenDescription {
     ProximityConsent {
         requested_claims: Vec<String>,
     },
+    /// Digital Credentials API presentation consent: the verifier's Web `origin` (the browser-
+    /// authenticated anti-phishing anchor) plus the requested `namespace/element` data elements.
+    /// Both are hashed (WYSIWYS) via the canonical codec.
+    DcApiConsent {
+        origin: String,
+        requested_claims: Vec<String>,
+    },
 }
 
 /// A fully-resolved payment SCA confirmation screen (PSD2 dynamic linking surfaces here). Shows
@@ -462,6 +469,19 @@ fn to_value(screen: &ScreenDescription) -> Value {
         ScreenDescription::TransactionHistory => Value::Array(vec![tag("transactionHistory")]),
         ScreenDescription::ProximityConsent { requested_claims } => Value::Array(vec![
             tag("proximityConsent"),
+            Value::Array(
+                requested_claims
+                    .iter()
+                    .map(|claim| Value::Text(claim.clone()))
+                    .collect(),
+            ),
+        ]),
+        ScreenDescription::DcApiConsent {
+            origin,
+            requested_claims,
+        } => Value::Array(vec![
+            tag("dcApiConsent"),
+            Value::Text(origin.clone()),
             Value::Array(
                 requested_claims
                     .iter()

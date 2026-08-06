@@ -129,6 +129,8 @@ pub struct Outcome {
     pub device_engagement: Option<Vec<u8>>,
     /// The ISO 18013-5 encrypted SessionData (DeviceResponse) the core emitted, if any.
     pub device_response: Option<Vec<u8>>,
+    /// The Digital Credentials API response body (`{ "vp_token": … }`) the core emitted, if any.
+    pub dc_api_response: Option<Vec<u8>>,
     /// Errors from I/O effects (an HTTP failure aborts the cascade for that branch).
     pub errors: Vec<String>,
 }
@@ -257,6 +259,10 @@ impl<S: DeviceSigner, T: TrustFetcher, F: StatusFetcher> ShellRunner<S, T, F> {
             }
             Effect::EmitDeviceResponse { response } => {
                 outcome.device_response = Some(response);
+                None
+            }
+            Effect::EmitDcApiResponse { response } => {
+                outcome.dc_api_response = Some(response);
                 None
             }
             Effect::RequestToken => {

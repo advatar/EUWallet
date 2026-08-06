@@ -36,6 +36,7 @@ pub mod delegation;
 /// behalf, over an attested keystore. The Mandamus/WAUTH runtime twin. See D7 in docs/delegation.
 pub mod agent;
 pub mod agent_demo;
+pub mod dcapi;
 pub mod proximity_session;
 
 /// Which flow the wallet is currently driving, so a device signature is routed to the right
@@ -50,6 +51,8 @@ enum ActiveFlow {
     WalletTransfer,
     /// In-person mdoc presentation over BLE/NFC/QR (ISO 18013-5).
     Proximity,
+    /// OpenID4VP presentation over the W3C Digital Credentials API (browser-mediated).
+    DcApi,
 }
 
 /// In-person (ISO 18013-5) proximity-flow state: the sans-IO `iso18013-5` state machine plus the
@@ -116,6 +119,35 @@ impl core::fmt::Debug for ProximityFlow {
     }
 }
 
+/// OpenID4VP-over-Digital-Credentials-API flow state: a straight-line request → consent → device
+/// signature → `vp_token` response (no sans-IO sub-machine — the browser is the transport). The
+/// binding is to the OS-supplied Origin via the byte-exact `OpenID4VPDCAPIHandover`.
+#[derive(Debug, Default)]
+struct DcApiFlow {
+    /// The selected + minimised credential and the pre-computed DeviceAuth signing input.
+    presentation: Option<DcApiPresentation>,
+    /// WYSIWYS hash of the rendered `DcApiConsent` screen — echoed in `userConsented`.
+    consent_hash: [u8; 32],
+}
+
+/// The concrete mdoc the wallet will present over the DC API, resolved from the verifier's request.
+#[derive(Debug)]
+struct DcApiPresentation {
+    /// The DCQL credential-query id — the key the response `vp_token` object is keyed by.
+    dcql_id: String,
+    doctype: String,
+    /// The issuer-signed credential, already minimised to exactly the requested data elements.
+    issuer_signed: mdoc::IssuerSigned,
+    /// `DeviceNameSpacesBytes` — empty (all disclosed data is issuer-signed).
+    device_namespaces_bytes: Vec<u8>,
+    /// The COSE protected header the device signature uses (must match on sign + assembly).
+    protected_header: Vec<u8>,
+    /// The exact bytes the device key signs, bound to the DC-API SessionTranscript handover.
+    signing_input: Vec<u8>,
+    /// The disclosed `namespace/element` labels, for the consent screen.
+    disclosed: Vec<String>,
+}
+
 /// Failure classes the native shells can report for a correlated operation. Values are deliberately
 /// stable and low-cardinality: implementation details remain in device-local diagnostics rather
 /// than crossing the core boundary or being rendered to the holder.
@@ -159,6 +191,7 @@ enum OperationResultKind {
     QesDecision,
     IssuanceDecision,
     ProximityDecision,
+    DcApiDecision,
 }
 
 impl OperationResultKind {
@@ -182,12 +215,13 @@ impl OperationResultKind {
             Self::QesDecision => "qesDecision",
             Self::IssuanceDecision => "issuanceDecision",
             Self::ProximityDecision => "proximityDecision",
+            Self::DcApiDecision => "dcApiDecision",
         }
     }
 
     fn accepts_event(&self, event_type: &str) -> bool {
         match self {
-            Self::PresentationDecision | Self::ProximityDecision => {
+            Self::PresentationDecision | Self::ProximityDecision | Self::DcApiDecision => {
                 matches!(event_type, "userConsented" | "userDeclined")
             }
             Self::PaymentDecision => {
@@ -1438,6 +1472,14 @@ pub enum Event {
     },
     /// The in-person reader ended the transaction (SessionData status 20 / transport close).
     ProximityReaderTermination,
+    /// A verifier requested a presentation via the W3C Digital Credentials API. `request` is the
+    /// OpenID4VP request JSON the browser passed; `origin` is the OS-authenticated Web Origin (the
+    /// anti-phishing anchor bound into the SessionTranscript — the shell must pass the verified
+    /// Origin, never one taken from the request).
+    DcApiRequestReceived {
+        request: Vec<u8>,
+        origin: String,
+    },
 }
 
 /// Everything the core asks the shell to do (serialised to JSON at the FFI boundary).
@@ -1508,6 +1550,9 @@ pub enum Effect {
     EmitDeviceEngagement { engagement: Vec<u8> },
     /// Send the in-person `SessionData` (the AES-256-GCM-encrypted DeviceResponse) back to the reader.
     EmitDeviceResponse { response: Vec<u8> },
+    /// Return the Digital Credentials API response (`{ "vp_token": { … } }`) to the browser via
+    /// `DigitalCredential.data` — the OpenID4VP response for a `response_mode=dc_api` request.
+    EmitDcApiResponse { response: Vec<u8> },
     /// Tear down the exchange.
     Close,
 }
@@ -1606,6 +1651,8 @@ pub struct Core {
     w2w_credential: Option<Vec<u8>>,
     // In-person proximity presentation (ISO 18013-5): the sans-IO machine + facade-owned session crypto.
     proximity: ProximityFlow,
+    // OpenID4VP over the W3C Digital Credentials API (browser-mediated presentation).
+    dcapi: DcApiFlow,
 }
 
 impl Core {
@@ -1655,6 +1702,7 @@ impl Core {
             w2w: w2w::State::Idle,
             w2w_credential: None,
             proximity: ProximityFlow::idle(),
+            dcapi: DcApiFlow::default(),
         }
     }
 
@@ -2261,6 +2309,9 @@ impl Core {
             ActiveFlow::Proximity => {
                 self.proximity = ProximityFlow::idle();
             }
+            ActiveFlow::DcApi => {
+                self.dcapi = DcApiFlow::default();
+            }
             ActiveFlow::None => {}
         }
         if self.active == flow {
@@ -2312,6 +2363,10 @@ impl Core {
                 self.proximity.pending_request = None;
                 self.proximity.presentation = None;
                 self.proximity.last_signature = None;
+            }
+            ActiveFlow::DcApi => {
+                self.dcapi.presentation = None;
+                self.dcapi.consent_hash = [0u8; 32];
             }
             ActiveFlow::WalletTransfer | ActiveFlow::None => {}
         }
@@ -2569,6 +2624,10 @@ impl Core {
                 if self.active == ActiveFlow::Proximity {
                     return self.drive_proximity(iso18013_5::Input::ConsentGranted);
                 }
+                // Digital Credentials API consent → sign the DeviceAuthentication.
+                if self.active == ActiveFlow::DcApi {
+                    return self.dcapi_consent_granted();
+                }
                 // Preserve an already-terminal state when the shell races a stale UI event after
                 // an earlier fail-closed abort (for example, no complete eligible selection).
                 if self.active != ActiveFlow::Presentation {
@@ -2602,6 +2661,10 @@ impl Core {
                 if self.active == ActiveFlow::Proximity {
                     return self.drive_proximity(iso18013_5::Input::ConsentDeclined);
                 }
+                if self.active == ActiveFlow::DcApi {
+                    self.reset_flow(ActiveFlow::DcApi);
+                    return vec![Effect::Close];
+                }
                 self.pending_status_references.clear();
                 let effects = self.drive(Input::ConsentDeclined);
                 if matches!(self.vp, State::Aborted(AbortReason::UserDeclined)) {
@@ -2630,6 +2693,7 @@ impl Core {
                 ActiveFlow::Proximity => {
                     self.drive_proximity(iso18013_5::Input::DeviceSignatureProduced(signature))
                 }
+                ActiveFlow::DcApi => self.dcapi_signature_produced(&signature),
                 _ => self.drive(Input::DeviceSignatureProduced(signature)),
             },
             Event::HybridSignatureProduced { .. } => Vec::new(),
@@ -2781,6 +2845,32 @@ impl Core {
             },
             Event::ProximityReaderTermination => {
                 self.drive_proximity(iso18013_5::Input::ReaderTermination)
+            }
+            Event::DcApiRequestReceived { request, origin } => {
+                self.begin_flow(ActiveFlow::DcApi);
+                // Parse + select + minimise + bind the DC-API handover; render consent. A request we
+                // can't satisfy tears down without disclosing anything.
+                let Ok(parsed) = dcapi::parse_dcapi_request(&request) else {
+                    self.reset_flow(ActiveFlow::DcApi);
+                    return vec![Effect::Close];
+                };
+                match self.build_dcapi_presentation(&parsed, &origin) {
+                    Some(presentation) => {
+                        let requested_claims = presentation.disclosed.clone();
+                        let screen = ScreenDescription::DcApiConsent {
+                            origin,
+                            requested_claims,
+                        };
+                        // WYSIWYS: bind the holder's approval to this exact screen.
+                        self.dcapi.consent_hash = presenter::consent_hash(&AwsLc, &screen);
+                        self.dcapi.presentation = Some(presentation);
+                        vec![Effect::Render { screen }]
+                    }
+                    None => {
+                        self.reset_flow(ActiveFlow::DcApi);
+                        vec![Effect::Close]
+                    }
+                }
             }
             Event::CredentialOfferReceived {
                 offer,
@@ -3170,6 +3260,10 @@ impl Core {
                         OperationResultKind::ProximityDecision,
                         Some(self.proximity.consent_hash),
                     ),
+                    ScreenDescription::DcApiConsent { .. } => (
+                        OperationResultKind::DcApiDecision,
+                        Some(self.dcapi.consent_hash),
+                    ),
                     _ => return Ok(None),
                 };
                 let computed_hash = presenter::consent_hash(&AwsLc, screen);
@@ -3184,9 +3278,9 @@ impl Core {
             }
             // Proximity engagement/response are fire-and-forget transport broadcasts (like Close),
             // not correlated operations that await a native callback.
-            Effect::EmitDeviceEngagement { .. } | Effect::EmitDeviceResponse { .. } => {
-                return Ok(None)
-            }
+            Effect::EmitDeviceEngagement { .. }
+            | Effect::EmitDeviceResponse { .. }
+            | Effect::EmitDcApiResponse { .. } => return Ok(None),
             Effect::Close => return Ok(None),
         };
         Ok(Some(PendingOperation {
@@ -4264,6 +4358,86 @@ impl Core {
             }
             PO::EmitTermination => vec![Effect::Close],
         }
+    }
+
+    /// Select + minimise a held mdoc for a DC-API request and pre-compute the DeviceAuth signing
+    /// input bound to the byte-exact `OpenID4VPDCAPIHandover` (Origin + nonce). Returns `None` if no
+    /// current holding matches the requested doctype.
+    fn build_dcapi_presentation(
+        &self,
+        req: &dcapi::DcApiRequest,
+        origin: &str,
+    ) -> Option<DcApiPresentation> {
+        let issuer_signed = self
+            .mdoc_holdings
+            .iter()
+            .find(|stored| {
+                stored.holding.doctype == req.doctype
+                    && self.mdoc_credential_is_current(stored).is_ok()
+            })
+            .map(|stored| stored.holding.issuer_signed.clone())?;
+        let issuer_signed = minimise_mdoc(&issuer_signed, &req.claims);
+        let device_namespaces_bytes = mdoc::empty_device_namespaces_bytes();
+        // response_mode=dc_api is unencrypted → the handover's jwkThumbprint is null.
+        let transcript = mdoc::oid4vp_dcapi_session_transcript(&AwsLc, origin, &req.nonce, None);
+        let device_auth =
+            mdoc::device_authentication_bytes(&transcript, &req.doctype, &device_namespaces_bytes)
+                .ok()?;
+        let protected_header = cose::encode_protected_header(Alg::Es256);
+        let signing_input = cose::sig_structure(&protected_header, &[], &device_auth);
+        let disclosed = req
+            .claims
+            .iter()
+            .map(|(namespace, element)| format!("{namespace}/{element}"))
+            .collect();
+        Some(DcApiPresentation {
+            dcql_id: req.dcql_id.clone(),
+            doctype: req.doctype.clone(),
+            issuer_signed,
+            device_namespaces_bytes,
+            protected_header,
+            signing_input,
+            disclosed,
+        })
+    }
+
+    /// DC-API consent granted → ask the device to sign the DeviceAuthentication.
+    fn dcapi_consent_granted(&mut self) -> Vec<Effect> {
+        match &self.dcapi.presentation {
+            Some(p) => vec![Effect::Sign {
+                key_ref: self.config.device_key_ref.clone(),
+                payload: p.signing_input.clone(),
+            }],
+            None => {
+                self.reset_flow(ActiveFlow::DcApi);
+                vec![Effect::Close]
+            }
+        }
+    }
+
+    /// DC-API device signature ready → assemble the DeviceResponse + `vp_token` response body.
+    fn dcapi_signature_produced(&mut self, signature: &[u8]) -> Vec<Effect> {
+        let response = self.dcapi.presentation.as_ref().map(|p| {
+            let device_auth = cose::CoseSign1 {
+                protected: p.protected_header.clone(),
+                unprotected: cose::UnprotectedHeader::default(),
+                payload: None,
+                signature: signature.to_vec(),
+            };
+            let device_response = mdoc::device_response(
+                &p.doctype,
+                &p.issuer_signed,
+                &p.device_namespaces_bytes,
+                &device_auth,
+            );
+            dcapi::vp_token_response(&p.dcql_id, &device_response)
+        });
+        let effects = match response {
+            Some(response) => vec![Effect::EmitDcApiResponse { response }],
+            None => vec![Effect::Close],
+        };
+        self.finish_flow(ActiveFlow::DcApi);
+        effects
     }
 
     fn drive_payment(&mut self, input: payment::Input) -> Vec<Effect> {
