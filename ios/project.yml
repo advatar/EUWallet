@@ -83,7 +83,7 @@ targets:
         # export-compliance question each upload.
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         TARGETED_DEVICE_FAMILY: "1"
         # The xcframework vends the `wallet_coreFFI` clang module via its bundled module.modulemap.
         OTHER_LDFLAGS: "-lc++"
@@ -126,7 +126,7 @@ targets:
         APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
 
   # Shared capture framework for the standalone PID Capture companion (app + App Clip). Contains the
   # VCIssuer capture-session client, the MRZ scanner, and the ChipmunkNFC/iProov provider wrappers.
@@ -146,7 +146,7 @@ targets:
         DEVELOPMENT_TEAM: L2AF8KFX35
         CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         TARGETED_DEVICE_FAMILY: "1"
         SKIP_INSTALL: YES
 
@@ -182,7 +182,7 @@ targets:
         DEVELOPMENT_TEAM: L2AF8KFX35
         CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         TARGETED_DEVICE_FAMILY: "1"
 
   # The App Clip variant of the companion — instant launch from an App Clip Code / QR, no full install.
@@ -213,7 +213,7 @@ targets:
         DEVELOPMENT_TEAM: L2AF8KFX35
         CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         TARGETED_DEVICE_FAMILY: "1"
         SKIP_INSTALL: YES
 
@@ -241,7 +241,7 @@ targets:
         CODE_SIGN_STYLE: Automatic
         SKIP_INSTALL: YES
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         TARGETED_DEVICE_FAMILY: "1"
 
   # watchOS companion (single-target watchOS app, watchOS 10+). A privacy-safe glance: mirrors the
@@ -263,7 +263,7 @@ targets:
         DEVELOPMENT_TEAM: L2AF8KFX35
         CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         TARGETED_DEVICE_FAMILY: "4"
 
   # Runs the REAL Rust core (aws-lc-rs, compiled for the simulator) end to end, on the simulator.
@@ -329,7 +329,7 @@ targets:
         DEVELOPMENT_TEAM: L2AF8KFX35
         CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         TARGETED_DEVICE_FAMILY: "1"
 
   # Headless-agent playground: an on-device model (Apple Foundation Models) proposes an action and
@@ -357,7 +357,7 @@ targets:
         DEVELOPMENT_TEAM: L2AF8KFX35
         CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         TARGETED_DEVICE_FAMILY: "1"
         OTHER_LDFLAGS: "-lc++"
 
