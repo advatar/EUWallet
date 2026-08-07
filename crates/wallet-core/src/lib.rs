@@ -2329,6 +2329,65 @@ impl Core {
         serde_json::Value::Array(mandates).to_string()
     }
 
+    /// Exercise a held mandate for an external agent: does the wallet hold a mandate bound to the
+    /// agent key `agent_jwk_json` that grants every power in `required_powers`? Runs over the REAL
+    /// holdings (not a demo fixture). Returns JSON:
+    /// `{"ok":true,"onBehalfOf":"..","exercisedScope":["urn.."],"mandateJti":".."}` on success, or
+    /// `{"ok":false,"error":".."}` (the closest [`delegation::DelegationError`]). This is the
+    /// "authorise this agent to act for me" decision the shell shows before hand-off — never wider
+    /// than the mandate's grant.
+    #[must_use]
+    pub fn plan_delegation_json(&self, agent_jwk_json: &str, required_powers: &[String]) -> String {
+        let agent_jwk: serde_json::Value = match serde_json::from_str(agent_jwk_json) {
+            Ok(value) => value,
+            Err(_) => return r#"{"ok":false,"error":"agent_jwk_not_json"}"#.to_owned(),
+        };
+        let required: BTreeSet<String> = required_powers.iter().cloned().collect();
+        match delegation::select_delegated_presentation(
+            self.credentials.iter().map(|stored| &stored.holding),
+            &agent_jwk,
+            &required,
+        ) {
+            Ok(chosen) => {
+                let consent = chosen.consent();
+                serde_json::json!({
+                    "ok": true,
+                    "onBehalfOf": consent.on_behalf_of,
+                    "exercisedScope": consent.exercised_scope.iter().collect::<Vec<_>>(),
+                    "mandateJti": chosen.plan.mandate_jti,
+                })
+                .to_string()
+            }
+            Err(error) => {
+                serde_json::json!({"ok": false, "error": format!("{error:?}")}).to_string()
+            }
+        }
+    }
+
+    /// Reassemble a held mandate into its compact SD-JWT (`issuer_jwt~disclosure~..~`) so the app can
+    /// hand it to the agent (QR / share sheet). `mandate_jti` selects which held mandate. Returns the
+    /// compact string, or `""` if no held mandate carries that jti. The trailing `~` (no key-binding
+    /// JWT) is the standard issuance form; the agent presents it with its own KB-JWT later.
+    #[must_use]
+    pub fn export_mandate_compact(&self, mandate_jti: &str) -> String {
+        for stored in &self.credentials {
+            let Ok(mandate) = delegation::parse_mandate(&stored.holding) else {
+                continue;
+            };
+            if mandate.mandate_jti.as_deref() == Some(mandate_jti) {
+                let held = &stored.holding;
+                let mut compact = held.issuer_jwt.clone();
+                for disclosure in held.disclosures_by_claim.values() {
+                    compact.push('~');
+                    compact.push_str(disclosure);
+                }
+                compact.push('~');
+                return compact;
+            }
+        }
+        String::new()
+    }
+
     fn clear_pending_operations(&mut self, flow: ActiveFlow) {
         self.pending_operations
             .retain(|_, pending| pending.flow != flow);
@@ -7251,6 +7310,33 @@ impl WalletEngine {
             .agent_mandates_json()
     }
 
+    /// Exercise a held mandate for an external agent (the "authorise this agent to act for me"
+    /// decision). `agent_jwk_json` is the agent's public JWK; `required_powers` are the scope URNs the
+    /// agent needs. Returns JSON `{"ok":true,"onBehalfOf","exercisedScope","mandateJti"}` when a held
+    /// mandate is bound to the agent and grants them, else `{"ok":false,"error"}`. Runs over the real
+    /// holdings (replaces the old demo `exercise_mandate` fixture).
+    pub fn plan_delegation_json(
+        &self,
+        agent_jwk_json: String,
+        required_powers: Vec<String>,
+    ) -> String {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .core
+            .plan_delegation_json(&agent_jwk_json, &required_powers)
+    }
+
+    /// Reassemble a held mandate into its compact SD-JWT for hand-off to the agent (QR / share).
+    /// `mandate_jti` selects the held mandate; `""` if none carries that jti.
+    pub fn export_mandate_compact(&self, mandate_jti: String) -> String {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .core
+            .export_mandate_compact(&mandate_jti)
+    }
+
     /// Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
     /// event, returns a `{"error": "..."}` object instead of an array.
     pub fn handle_event_json(&self, event_json: String) -> String {
@@ -8415,5 +8501,136 @@ mod hybrid_pq_mdoc_verification_tests {
             .retain(|(label, _)| *label != HYBRID_PQ_MDOC_PUBLIC_KEY_LABEL);
         assert!(verify_hybrid_pq_issuer_auth(&issued, true).is_err());
         assert!(verify_hybrid_pq_issuer_auth(&issued, false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod delegation_ffi_tests {
+    //! FFI-surface tests for the delegate-to-agent methods (plan_delegation_json / export_mandate_compact)
+    //! over REAL held credentials — the seam the iOS "delegate to an agent" flow drives.
+    use super::*;
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    use std::collections::BTreeMap;
+
+    fn b64(bytes: &[u8]) -> String {
+        Base64UrlUnpadded::encode_string(bytes)
+    }
+    fn disclosure(name: &str, value: serde_json::Value) -> String {
+        b64(&serde_json::to_vec(&serde_json::json!(["c2FsdA", name, value])).unwrap())
+    }
+    const AGENT_JWK: &str = r#"{"kty":"EC","crv":"P-256","x":"AGENT_X","y":"AGENT_Y"}"#;
+
+    /// A held travel mandate bound to the agent key, granting present-identity + authorise-payment.
+    fn travel_mandate() -> HeldCredential {
+        let payload = serde_json::json!({
+            "iss": "https://issuer.advatar.systems",
+            "vct": delegation::MANDATE_VCT,
+            "cnf": {"jwk": serde_json::from_str::<serde_json::Value>(AGENT_JWK).unwrap()},
+        });
+        let issuer_jwt = format!(
+            "{}.{}.{}",
+            b64(b"{}"),
+            b64(&serde_json::to_vec(&payload).unwrap()),
+            "sig"
+        );
+        let mut disclosures_by_claim = BTreeMap::new();
+        disclosures_by_claim.insert(
+            "mandator".to_owned(),
+            disclosure(
+                "mandator",
+                serde_json::json!("urn:eudi:subject:erika-mustermann"),
+            ),
+        );
+        disclosures_by_claim.insert(
+            "scope".to_owned(),
+            disclosure(
+                "scope",
+                serde_json::json!([
+                    "urn:eudi:mandate:power:present-identity",
+                    "urn:eudi:mandate:power:authorise-payment"
+                ]),
+            ),
+        );
+        disclosures_by_claim.insert(
+            "mandate_jti".to_owned(),
+            disclosure("mandate_jti", serde_json::json!("mandamus:cap:travel-7f3a")),
+        );
+        HeldCredential {
+            issuer_jwt,
+            disclosures_by_claim,
+            status: None,
+        }
+    }
+
+    fn core_with_travel_mandate() -> Core {
+        let mut core = Core::new("wallet-client", "device-key-ref");
+        core.load_unverified_credential_for_testing(travel_mandate());
+        core
+    }
+
+    #[test]
+    fn plan_delegation_authorises_an_in_scope_agent() {
+        let core = core_with_travel_mandate();
+        let out = core.plan_delegation_json(
+            AGENT_JWK,
+            &["urn:eudi:mandate:power:authorise-payment".to_owned()],
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], serde_json::json!(true));
+        assert_eq!(
+            v["onBehalfOf"],
+            serde_json::json!("urn:eudi:subject:erika-mustermann")
+        );
+        assert_eq!(
+            v["exercisedScope"],
+            serde_json::json!(["urn:eudi:mandate:power:authorise-payment"])
+        );
+        assert_eq!(
+            v["mandateJti"],
+            serde_json::json!("mandamus:cap:travel-7f3a")
+        );
+    }
+
+    #[test]
+    fn plan_delegation_refuses_out_of_scope_and_wrong_key() {
+        let core = core_with_travel_mandate();
+        // administer-account was NOT granted → ScopeInsufficient (never wider than the grant).
+        let oos = core.plan_delegation_json(
+            AGENT_JWK,
+            &["urn:eudi:mandate:power:administer-account".to_owned()],
+        );
+        let v: serde_json::Value = serde_json::from_str(&oos).unwrap();
+        assert_eq!(v["ok"], serde_json::json!(false));
+        assert_eq!(v["error"], serde_json::json!("ScopeInsufficient"));
+        // A different agent key is not bound to this mandate.
+        let other = r#"{"kty":"EC","crv":"P-256","x":"OTHER_X","y":"OTHER_Y"}"#;
+        let wrong = core.plan_delegation_json(
+            other,
+            &["urn:eudi:mandate:power:present-identity".to_owned()],
+        );
+        let w: serde_json::Value = serde_json::from_str(&wrong).unwrap();
+        assert_eq!(w["ok"], serde_json::json!(false));
+        assert_eq!(w["error"], serde_json::json!("AgentKeyMismatch"));
+    }
+
+    #[test]
+    fn export_mandate_compact_reassembles_a_holdable_sdjwt() {
+        let core = core_with_travel_mandate();
+        let compact = core.export_mandate_compact("mandamus:cap:travel-7f3a");
+        assert!(!compact.is_empty(), "the held mandate exports");
+        // issuer_jwt (three dot-separated parts) then ~-joined disclosures then a trailing ~.
+        assert_eq!(compact.matches('.').count(), 2, "carries the issuer JWT");
+        assert!(
+            compact.ends_with('~'),
+            "issuance form (no key-binding JWT yet)"
+        );
+        // 3 disclosures, each introduced by a `~`, plus the trailing `~` separator = 4 tildes.
+        assert_eq!(
+            compact.matches('~').count(),
+            4,
+            "three disclosures (mandator/scope/mandate_jti) + trailing ~"
+        );
+        // An unknown jti exports nothing.
+        assert_eq!(core.export_mandate_compact("nope"), "");
     }
 }
