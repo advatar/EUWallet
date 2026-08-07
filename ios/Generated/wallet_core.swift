@@ -822,6 +822,12 @@ public protocol WalletEngineProtocol : AnyObject {
     func exportJson()  -> String
 
     /**
+     * Reassemble a held mandate into its compact SD-JWT for hand-off to the agent (QR / share).
+     * `mandate_jti` selects the held mandate; `""` if none carries that jti.
+     */
+    func exportMandateCompact(mandateJti: String)  -> String
+
+    /**
      * Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
      * event, returns a `{"error": "..."}` object instead of an array.
      */
@@ -865,6 +871,15 @@ public protocol WalletEngineProtocol : AnyObject {
      * Verify + store the Wallet Unit Attestation. Returns "" on success, else an error string.
      */
     func loadWua(wuaJwt: Data, providerPublicKey: Data)  -> String
+
+    /**
+     * Exercise a held mandate for an external agent (the "authorise this agent to act for me"
+     * decision). `agent_jwk_json` is the agent's public JWK; `required_powers` are the scope URNs the
+     * agent needs. Returns JSON `{"ok":true,"onBehalfOf","exercisedScope","mandateJti"}` when a held
+     * mandate is bound to the agent and grants them, else `{"ok":false,"error"}`. Runs over the real
+     * holdings (replaces the old demo `exercise_mandate` fixture).
+     */
+    func planDelegationJson(agentJwkJson: String, requiredPowers: [String])  -> String
 
     func prepareDurableEnvironment(clockEpoch: Int64, signedTrustList: Data, operatorPublicKey: Data, devicePublicKey: Data, wuaJwt: Data, wuaProviderPublicKey: Data) throws
 
@@ -1011,6 +1026,18 @@ open func exportJson() -> String {
 }
 
     /**
+     * Reassemble a held mandate into its compact SD-JWT for hand-off to the agent (QR / share).
+     * `mandate_jti` selects the held mandate; `""` if none carries that jti.
+     */
+open func exportMandateCompact(mandateJti: String) -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_export_mandate_compact(self.uniffiClonePointer(),
+        FfiConverterString.lower(mandateJti),$0
+    )
+})
+}
+
+    /**
      * Drive one event (JSON) and return the resulting effects as a JSON array. On a malformed
      * event, returns a `{"error": "..."}` object instead of an array.
      */
@@ -1105,6 +1132,22 @@ open func loadWua(wuaJwt: Data, providerPublicKey: Data) -> String {
     uniffi_wallet_core_fn_method_walletengine_load_wua(self.uniffiClonePointer(),
         FfiConverterData.lower(wuaJwt),
         FfiConverterData.lower(providerPublicKey),$0
+    )
+})
+}
+
+    /**
+     * Exercise a held mandate for an external agent (the "authorise this agent to act for me"
+     * decision). `agent_jwk_json` is the agent's public JWK; `required_powers` are the scope URNs the
+     * agent needs. Returns JSON `{"ok":true,"onBehalfOf","exercisedScope","mandateJti"}` when a held
+     * mandate is bound to the agent and grants them, else `{"ok":false,"error"}`. Runs over the real
+     * holdings (replaces the old demo `exercise_mandate` fixture).
+     */
+open func planDelegationJson(agentJwkJson: String, requiredPowers: [String]) -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_wallet_core_fn_method_walletengine_plan_delegation_json(self.uniffiClonePointer(),
+        FfiConverterString.lower(agentJwkJson),
+        FfiConverterSequenceString.lower(requiredPowers),$0
     )
 })
 }
@@ -3159,6 +3202,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallet_core_checksum_method_walletengine_export_json() != 59242) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_wallet_core_checksum_method_walletengine_export_mandate_compact() != 32772) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_wallet_core_checksum_method_walletengine_handle_event_json() != 35687) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3181,6 +3227,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_load_wua() != 52241) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallet_core_checksum_method_walletengine_plan_delegation_json() != 14415) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallet_core_checksum_method_walletengine_prepare_durable_environment() != 4585) {
